@@ -568,11 +568,12 @@ async function loadStudioView() {
   if (!studioId) return
   document.getElementById('studio-split-container').innerHTML = '<div class="loading">Loading...</div>'
 
-  // All sessions for this studio in range
-  const { data: sessions } = await sb.from('sessions').select('*').eq('studio_id', studioId).gte('session_date', from).lte('session_date', to).order('session_date').order('session_time')
-
-  // All possible workshops (templates) — unique titles across all time for this studio
-  const { data: allTitles } = await sb.from('sessions').select('title, session_type').eq('studio_id', studioId)
+  // All sessions in range regardless of show/publish
+  const { data: sessions } = await sb.from('sessions').select('*')
+    .eq('studio_id', studioId)
+    .gte('session_date', from)
+    .lte('session_date', to)
+    .order('session_date').order('session_time')
 
   const ids = (sessions || []).map(s => s.id)
   const counts = {}
@@ -581,34 +582,35 @@ async function loadStudioView() {
     if (bookings) bookings.forEach(b => { counts[b.session_id] = (counts[b.session_id] || 0) + (b.qty || 0) })
   }
 
-  const active = (sessions || []).map(s => ({ ...s, reg: counts[s.id] || 0 }))
-
-  // Unique catalogue
-  const seen = new Set()
-  const catalogue = []
-  ;(allTitles || []).forEach(s => {
-    if (!seen.has(s.title)) { seen.add(s.title); catalogue.push(s) }
-  })
-  catalogue.sort((a,b) => a.title.localeCompare(b.title))
-
-  const activeTitles = new Set(active.map(s => s.title))
+  const allSessions = (sessions || []).map(s => ({ ...s, reg: counts[s.id] || 0 }))
+  const activeSessions = allSessions.filter(s => s.show)
   const studioName = getStudioName(studioId)
 
-  let leftHtml = catalogue.map(s => {
-    const isActive = activeTitles.has(s.title)
+  // LEFT — full schedule (all sessions)
+  let leftHtml = ''
+  let lastDate = null
+  allSessions.forEach(s => {
+    if (s.session_date !== lastDate) {
+      leftHtml += `<div style="padding:8px 16px;background:#f5f5f0;font-size:11px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.4px">${fmtDate(s.session_date)}</div>`
+      lastDate = s.session_date
+    }
+    const time = s.session_time ? s.session_time.substring(0,5) : ''
     const badge = getBadge(s.session_type)
-    return `<div class="split-item${isActive ? '' : ' inactive'}">
+    const isHidden = !s.show
+    leftHtml += `<div class="split-item${isHidden ? ' inactive' : ''}">
       <div>
         <div class="split-item-title">${s.title}</div>
-        <div class="split-item-sub"><span class="badge ${badge}">${s.session_type}</span></div>
+        <div class="split-item-sub">${time} · <span class="badge ${badge}">${s.session_type}</span>${isHidden ? ' <span style="color:#bbb;font-size:10px">· hidden</span>' : ''}</div>
       </div>
-      ${isActive ? '<span style="color:#2e7d32;font-size:11px">● Active</span>' : ''}
+      ${s.show ? '<span style="color:#2e7d32;font-size:11px">● Showing</span>' : '<span style="color:#bbb;font-size:11px">○ Hidden</span>'}
     </div>`
-  }).join('') || '<div class="empty">No catalogue data.</div>'
+  })
+  if (!leftHtml) leftHtml = '<div class="empty">No sessions scheduled in this range.</div>'
 
+  // RIGHT — active (show=true) with reg counts
   let rightHtml = ''
-  let lastDate = null
-  active.forEach(s => {
+  lastDate = null
+  activeSessions.forEach(s => {
     if (s.session_date !== lastDate) {
       rightHtml += `<div style="padding:8px 16px;background:#f5f5f0;font-size:11px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.4px">${fmtDate(s.session_date)}</div>`
       lastDate = s.session_date
@@ -624,17 +626,16 @@ async function loadStudioView() {
       <div class="split-item-reg" style="color:${regColor}">${s.reg}</div>
     </div>`
   })
-
-  if (!rightHtml) rightHtml = '<div class="empty">No sessions in this date range.</div>'
+  if (!rightHtml) rightHtml = '<div class="empty">No visible sessions in this date range.</div>'
 
   document.getElementById('studio-split-container').innerHTML = `
     <div class="studio-split">
       <div class="split-panel">
-        <div class="split-panel-header">Full Catalogue — ${studioName} <span style="font-weight:400;color:#888;font-size:11px">(dimmed = not scheduled in range)</span></div>
+        <div class="split-panel-header">Full Schedule — ${studioName} <span style="font-weight:400;color:#888;font-size:11px">(includes hidden sessions)</span></div>
         <div class="split-list">${leftHtml}</div>
       </div>
       <div class="split-panel">
-        <div class="split-panel-header">Active Schedule — ${studioName}</div>
+        <div class="split-panel-header">Visible to Public — ${studioName}</div>
         <div class="split-list">${rightHtml}</div>
       </div>
     </div>`
