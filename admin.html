@@ -570,49 +570,64 @@ async function loadStudioView() {
   if (!studioId) return
   document.getElementById('studio-split-container').innerHTML = '<div class="loading">Loading...</div>'
 
-  // All sessions in range regardless of show/publish
-  const { data: sessions } = await sb.from('sessions').select('*')
-    .eq('studio_id', studioId)
+  // All sessions across ALL studios in range
+  const { data: allNetworkSessions } = await sb.from('sessions').select('*')
     .gte('session_date', from)
     .lte('session_date', to)
     .order('session_date').order('session_time')
 
-  const ids = (sessions || []).map(s => s.id)
+  // This studio's sessions in range
+  const studioSessions = (allNetworkSessions || []).filter(s => s.studio_id === studioId)
+  const studioTitles = new Set(studioSessions.map(s => s.title))
+
+  // Booking counts for this studio's sessions
+  const ids = studioSessions.map(s => s.id)
   const counts = {}
   if (ids.length) {
     const { data: bookings } = await sb.from('bookings').select('session_id, qty').in('session_id', ids)
     if (bookings) bookings.forEach(b => { counts[b.session_id] = (counts[b.session_id] || 0) + (b.qty || 0) })
   }
 
-  const allSessions = (sessions || []).map(s => ({ ...s, reg: counts[s.id] || 0 }))
-  const activeSessions = allSessions.filter(s => s.show)
+  const studioSessionsWithReg = studioSessions.map(s => ({ ...s, reg: counts[s.id] || 0 }))
+  const activeStudioSessions = studioSessionsWithReg.filter(s => s.show)
   const studioName = getStudioName(studioId)
 
-  // LEFT — full schedule (all sessions)
-  let leftHtml = ''
-  let lastDate = null
-  allSessions.forEach(s => {
-    if (s.session_date !== lastDate) {
-      leftHtml += `<div style="padding:8px 16px;background:#f5f5f0;font-size:11px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.4px">${fmtDate(s.session_date)}</div>`
-      lastDate = s.session_date
+  // Build network catalogue — unique titles across all studios, grouped by date
+  const byDate = {}
+  ;(allNetworkSessions || []).forEach(s => {
+    if (!byDate[s.session_date]) byDate[s.session_date] = {}
+    if (!byDate[s.session_date][s.title]) {
+      byDate[s.session_date][s.title] = { type: s.session_type, time: s.session_time, studios: [] }
     }
-    const time = s.session_time ? s.session_time.substring(0,5) : ''
-    const badge = getBadge(s.session_type)
-    const isHidden = !s.show
-    leftHtml += `<div class="split-item${isHidden ? ' inactive' : ''}">
-      <div>
-        <div class="split-item-title">${s.title}</div>
-        <div class="split-item-sub">${time} · <span class="badge ${badge}">${s.session_type}</span>${isHidden ? ' <span style="color:#bbb;font-size:10px">· hidden</span>' : ''}</div>
-      </div>
-      ${s.show ? '<span style="color:#2e7d32;font-size:11px">● Showing</span>' : '<span style="color:#bbb;font-size:11px">○ Hidden</span>'}
-    </div>`
+    byDate[s.session_date][s.title].studios.push(s.studio_id)
   })
-  if (!leftHtml) leftHtml = '<div class="empty">No sessions scheduled in this range.</div>'
 
-  // RIGHT — active (show=true) with reg counts
+  // LEFT — network catalogue
+  let leftHtml = ''
+  Object.keys(byDate).sort().forEach(date => {
+    leftHtml += `<div style="padding:8px 16px;background:#f5f5f0;font-size:11px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.4px">${fmtDate(date)}</div>`
+    Object.entries(byDate[date]).sort((a,b) => a[1].time.localeCompare(b[1].time)).forEach(([title, info]) => {
+      const isOffered = studioTitles.has(title)
+      const badge = getBadge(info.type)
+      const time = info.time ? info.time.substring(0,5) : ''
+      const studioCount = info.studios.length
+      leftHtml += `<div class="split-item${isOffered ? '' : ' inactive'}">
+        <div>
+          <div class="split-item-title">${title}</div>
+          <div class="split-item-sub">${time} · <span class="badge ${badge}">${info.type}</span> · ${studioCount} studio${studioCount !== 1 ? 's' : ''}</div>
+        </div>
+        ${isOffered
+          ? '<span style="color:#2e7d32;font-size:11px;white-space:nowrap">● Offered</span>'
+          : '<span style="color:#bbb;font-size:11px;white-space:nowrap">○ Not offered</span>'}
+      </div>`
+    })
+  })
+  if (!leftHtml) leftHtml = '<div class="empty">No sessions found in this date range.</div>'
+
+  // RIGHT — this studio's visible sessions with reg counts
   let rightHtml = ''
-  lastDate = null
-  activeSessions.forEach(s => {
+  let lastDate = null
+  activeStudioSessions.forEach(s => {
     if (s.session_date !== lastDate) {
       rightHtml += `<div style="padding:8px 16px;background:#f5f5f0;font-size:11px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.4px">${fmtDate(s.session_date)}</div>`
       lastDate = s.session_date
@@ -633,11 +648,11 @@ async function loadStudioView() {
   document.getElementById('studio-split-container').innerHTML = `
     <div class="studio-split">
       <div class="split-panel">
-        <div class="split-panel-header">Full Schedule — ${studioName} <span style="font-weight:400;color:#888;font-size:11px">(includes hidden sessions)</span></div>
+        <div class="split-panel-header">Network Catalogue — All Studios <span style="font-weight:400;color:#888;font-size:11px">(dimmed = not offered by ${studioName})</span></div>
         <div class="split-list">${leftHtml}</div>
       </div>
       <div class="split-panel">
-        <div class="split-panel-header">Visible to Public — ${studioName}</div>
+        <div class="split-panel-header">Active Schedule — ${studioName}</div>
         <div class="split-list">${rightHtml}</div>
       </div>
     </div>`
