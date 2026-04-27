@@ -176,6 +176,7 @@ select:focus, input:focus { border-color: #888; }
         <button class="btn btn-warn" id="btn-zero" onclick="toggleHighlight('zero')">0 Reg</button>
         <button class="btn btn-full" id="btn-full-btn" onclick="toggleHighlight('full')">Full</button>
         <button class="btn btn-low" id="btn-low" onclick="toggleHighlight('low')">Low Inventory</button>
+        <button class="btn" id="btn-sync-week" onclick="syncWeekInventory()">Sync Shopify</button>
       </div>
       <div class="toolbar-group">
         <label>0 Reg before</label>
@@ -815,7 +816,52 @@ function shiftWeek(n) {
     weekSelected()
   }
 }
-  
+async function syncWeekInventory() {
+  const btn = document.getElementById('btn-sync-week')
+  btn.disabled = true
+
+  const seen = new Set()
+  const toSync = []
+  scheduleData.forEach(s => {
+    const shopifyTitle = buildShopifyTitle(s.session_date, s.session_time || '00:00:00', s.title)
+    if (!shopifyTitle || shopifyTitle === 'OVERRIDE' || seen.has(shopifyTitle)) return
+    seen.add(shopifyTitle)
+    toSync.push({ shopifyTitle, session_date: s.session_date, session_time: s.session_time })
+  })
+
+  let done = 0
+  for (const item of toSync) {
+    btn.textContent = `Syncing ${++done}/${toSync.length}...`
+    try {
+      const res = await fetch(EDGE_URL, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'get_all', product_title: item.shopifyTitle })
+      })
+      const data = await res.json()
+      if (data.error) continue
+      for (const v of data.variants) {
+        const studioId = Object.keys(STUDIO_VARIANT_MAP).find(k => STUDIO_VARIANT_MAP[k] === v.variant_title)
+        if (!studioId) continue
+        const session = scheduleData.find(s =>
+          s.studio_id === studioId &&
+          s.session_date === item.session_date &&
+          s.session_time === item.session_time
+        )
+        if (!session) continue
+        const capacity = v.inventory_quantity + session.reg
+        if (session.capacity !== capacity) {
+          await sb.from('sessions').update({ capacity }).eq('id', session.id)
+          session.capacity = capacity
+        }
+      }
+    } catch(e) { continue }
+  }
+
+  btn.textContent = 'Sync Shopify'
+  btn.disabled = false
+  renderSchedule()
+}  
 </script>
 </body>
 </html>
