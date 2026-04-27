@@ -80,6 +80,19 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .save-btn.saved { background: #2e7d32; }
 .party-info { background: #fce8f0; border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; font-size: 13px; color: #99354e; }
 
+  /* PRINT */
+@media print {
+  body * { visibility: hidden; }
+  #print-area, #print-area * { visibility: visible; }
+  #print-area { position: fixed; top: 0; left: 0; width: 100%; padding: 1.5rem; }
+  .no-print { display: none !important; }
+}
+.print-btn { padding: 6px 16px; background: #f5f5f0; border: 0.5px solid #d0d0c8; border-radius: 6px; font-size: 13px; cursor: pointer; }
+.print-btn:hover { background: #e8e8e0; }
+.participant-row { background: #fafaf8; }
+.participant-row td { font-size: 13px; color: #555; padding: 6px 12px 6px 28px !important; border-bottom: 0.5px solid #f5f5f0; }
+.participant-name { font-weight: 500; color: #1a1a1a; }
+
 /* PARTY FORM */
 .party-form { background: #fff5f8; border-radius: 10px; border: 0.5px solid #f0b8cc; padding: 1rem; margin-bottom: 1rem; }
 .party-form-title { font-size: 11px; color: #99354e; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; margin-bottom: 12px; }
@@ -417,7 +430,7 @@ async function loadDayView() {
       </div>
       ${partyInfoHtml}
       <div class="session-stats">
-        <div class="stat stat-clickable" onclick="showBookings('${s.id}', '${s.title.replace(/'/g, "\\'")}', '${dateStr(currentDate)}')">
+        <div class="stat stat-clickable" onclick="showBookings('${s.id}', '${s.title.replace(/'/g, "\\'")}', '${dateStr(currentDate)}', '${s.session_type}')">
           <div class="stat-value">${reg}</div>
           <div class="stat-label">registered ↗</div>
         </div>
@@ -492,7 +505,7 @@ async function loadTableView() {
       const title = s.title.replace(/'/g, "\\'")
       const regColor = reg === 0 ? '#bbb' : isFull ? '#99354e' : '#1a4fa0'
       const regBg = reg === 0 ? 'transparent' : isFull ? '#fce8f0' : '#e8f0fe'
-      html += `<tr style="cursor:pointer" onclick="showBookings('${s.id}','${title}','${date}')" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
+      html += `<tr style="cursor:pointer" onclick="showBookings('${s.id}','${title}','${date}','${s.session_type}')" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
         <td style="color:#888;white-space:nowrap;width:60px">${time}</td>
         <td>${s.title} <span class="type-pill ${badge}">${s.session_type}</span></td>
         <td style="text-align:center"><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:500;background:${regBg};color:${regColor}">${reg}</span></td>
@@ -504,23 +517,198 @@ async function loadTableView() {
   container.innerHTML = html
 }
 
-async function showBookings(sessionId, title, dateLabel) {
-  const { data: bookings } = await sb.from('bookings').select('customer_name, customer_email, qty, estimated_attendance, shopify_order_name, booked_at').eq('session_id', sessionId).order('booked_at')
+function parseLineItemProperties(rawPayload, sessionDate, sessionTime) {
+  // Extract properties from the line item matching this session's date/time
+  try {
+    const payload = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload
+    if (!payload?.line_items) return []
+    // Find the line item whose title contains the session date/time
+    // Try to match by date in title (e.g. "Jul 24th") or fall back to first item
+    const items = payload.line_items
+    let match = items.find(li => {
+      const t = (li.title || li.name || '').toLowerCase()
+      // Match by session_date formatted as month+day
+      if (sessionDate) {
+        const d = new Date(sessionDate + 'T12:00:00')
+        const monthDay = d.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })
+          .replace('.', '').toLowerCase() // "jul 24"
+        if (t.includes(monthDay)) return true
+        // Also try "jul 24th" style
+        const day = d.getDate()
+        const suffix = day === 1||day===21||day===31 ? 'st' : day===2||day===22 ? 'nd' : day===3||day===23 ? 'rd' : 'th'
+        if (t.includes(`${monthDay}${suffix}`)) return true
+      }
+      return false
+    })
+    if (!match) match = items[0]
+    return match?.properties || []
+  } catch (e) {
+    return []
+  }
+}
+
+function formatDOB(dobStr) {
+  // "2013-11-18" → age + DOB display
+  try {
+    const dob = new Date(dobStr + 'T12:00:00')
+    const today = new Date()
+    let age = today.getFullYear() - dob.getFullYear()
+    const m = today.getMonth() - dob.getMonth()
+    if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--
+    const formatted = dob.toLocaleDateString('en-CA', { year: 'numeric', month: 'short', day: 'numeric' })
+    return `Age ${age} &nbsp;·&nbsp; b. ${formatted}`
+  } catch (e) {
+    return dobStr
+  }
+}
+
+async function showBookings(sessionId, title, dateLabel, sessionType) {
+  const { data: bookings } = await sb.from('bookings')
+    .select('customer_name, customer_email, qty, estimated_attendance, shopify_order_name, booked_at, raw_payload, event_date')
+    .eq('session_id', sessionId)
+    .order('booked_at')
+
+  const isGlazing = sessionType === 'glazing'
+  const isCampOrWorkshop = sessionType === 'camp' || sessionType === 'workshop'
+
   const overlay = document.createElement('div')
   overlay.className = 'overlay'
+
   if (!bookings || !bookings.length) {
-    overlay.innerHTML = `<div class="overlay-card"><div class="overlay-header"><div><div class="overlay-title">${title}</div><div class="overlay-sub">${dateLabel}</div></div><button class="close-btn" onclick="this.closest('.overlay').remove()">&#215;</button></div><p style="color:#888;padding:2rem 0;text-align:center">No bookings yet for this session.</p></div>`
+    overlay.innerHTML = `
+      <div class="overlay-card">
+        <div class="overlay-header">
+          <div><div class="overlay-title">${title}</div><div class="overlay-sub">${dateLabel}</div></div>
+          <button class="close-btn no-print" onclick="this.closest('.overlay').remove()">&#215;</button>
+        </div>
+        <p style="color:#888;padding:2rem 0;text-align:center">No bookings yet for this session.</p>
+      </div>`
   } else {
     const total = bookings.reduce((sum, b) => sum + (b.qty || 0), 0)
-    const rows = bookings.map(b => {
-      const time = new Date(b.booked_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-      const extra = b.estimated_attendance ? ` (${b.estimated_attendance} expected)` : ''
-      return `<tr><td>${b.customer_name || '&mdash;'}</td><td style="color:#888">${b.customer_email || '&mdash;'}</td><td style="text-align:center">${b.qty}</td><td style="color:#888">${b.shopify_order_name || '&mdash;'}${extra}</td><td style="color:#888;font-size:12px">${time}</td></tr>`
-    }).join('')
-    overlay.innerHTML = `<div class="overlay-card"><div class="overlay-header"><div><div class="overlay-title">${title}</div><div class="overlay-sub">${dateLabel} &mdash; ${total} registered</div></div><button class="close-btn" onclick="this.closest('.overlay').remove()">&#215;</button></div><table class="booking-table"><thead><tr><th>Name</th><th>Email</th><th>Qty</th><th>Order</th><th>Booked</th></tr></thead><tbody>${rows}</tbody></table></div>`
+
+    // Parse line item properties per booking
+    const enriched = bookings.map(b => {
+      const props = parseLineItemProperties(b.raw_payload, b.event_date, null)
+      // Glazing: find "What are you glazing?"
+      const glazingPiece = props.find(p => p.name?.toLowerCase().includes('glazing'))?.value || null
+      // Participants: find "Participant 1", "Participant 2", etc.
+      const participants = props
+        .filter(p => p.name?.toLowerCase().startsWith('participant'))
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(p => {
+          // "Aurora Graham | DOB: 2013-11-18"
+          const parts = p.value.split('|')
+          const name = parts[0]?.trim() || p.value
+          const dobMatch = p.value.match(/DOB:\s*(\d{4}-\d{2}-\d{2})/)
+          const dob = dobMatch ? dobMatch[1] : null
+          return { name, dob }
+        })
+      return { ...b, glazingPiece, participants }
+    })
+
+    let tableHtml = ''
+
+    if (isGlazing) {
+      tableHtml = `
+        <table class="booking-table">
+          <thead><tr>
+            <th>Customer</th>
+            <th>What they're glazing</th>
+            <th>Order</th>
+            <th>Booked</th>
+          </tr></thead>
+          <tbody>
+            ${enriched.map(b => {
+              const time = new Date(b.booked_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+              return `<tr>
+                <td>${b.customer_name || '&mdash;'}</td>
+                <td style="color:#444">${b.glazingPiece || '<span style="color:#bbb">Not specified</span>'}</td>
+                <td style="color:#888">${b.shopify_order_name || '&mdash;'}</td>
+                <td style="color:#888;font-size:12px">${time}</td>
+              </tr>`
+            }).join('')}
+          </tbody>
+        </table>`
+
+    } else if (isCampOrWorkshop) {
+      // Check if any booking actually has participant data
+      const hasParticipants = enriched.some(b => b.participants.length > 0)
+
+      if (hasParticipants) {
+        tableHtml = `
+          <table class="booking-table">
+            <thead><tr>
+              <th>Participant</th>
+              <th>Age / DOB</th>
+              <th>Registered by</th>
+              <th>Order</th>
+            </tr></thead>
+            <tbody>
+              ${enriched.map(b => {
+                if (b.participants.length > 0) {
+                  return b.participants.map((p, i) => `
+                    <tr>
+                      <td class="participant-name">${p.name}</td>
+                      <td style="color:#666;font-size:13px">${p.dob ? formatDOB(p.dob) : '&mdash;'}</td>
+                      <td style="color:#888">${i === 0 ? b.customer_name || '&mdash;' : ''}</td>
+                      <td style="color:#888">${i === 0 ? b.shopify_order_name || '&mdash;' : ''}</td>
+                    </tr>`).join('')
+                } else {
+                  // Fallback for bookings without participant names
+                  const time = new Date(b.booked_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })
+                  return `<tr>
+                    <td colspan="2" style="color:#888;font-style:italic">${b.customer_name} &mdash; ${b.qty} participant${b.qty > 1 ? 's' : ''} (no names provided)</td>
+                    <td style="color:#888">${b.customer_name}</td>
+                    <td style="color:#888">${b.shopify_order_name || '&mdash;'}</td>
+                  </tr>`
+                }
+              }).join('')}
+            </tbody>
+          </table>`
+      } else {
+        // No participant data — fall back to standard table
+        tableHtml = buildStandardTable(enriched)
+      }
+    } else {
+      tableHtml = buildStandardTable(enriched)
+    }
+
+    overlay.innerHTML = `
+      <div class="overlay-card" id="print-area">
+        <div class="overlay-header">
+          <div>
+            <div class="overlay-title">${title}</div>
+            <div class="overlay-sub">${dateLabel} &mdash; ${total} registered</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="print-btn no-print" onclick="window.print()">🖨 Print</button>
+            <button class="close-btn no-print" onclick="this.closest('.overlay').remove()">&#215;</button>
+          </div>
+        </div>
+        ${tableHtml}
+      </div>`
   }
+
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove() })
   document.body.appendChild(overlay)
+}
+
+function buildStandardTable(bookings) {
+  const rows = bookings.map(b => {
+    const time = new Date(b.booked_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    const extra = b.estimated_attendance ? ` (${b.estimated_attendance} expected)` : ''
+    return `<tr>
+      <td>${b.customer_name || '&mdash;'}</td>
+      <td style="color:#888">${b.customer_email || '&mdash;'}</td>
+      <td style="text-align:center">${b.qty}</td>
+      <td style="color:#888">${b.shopify_order_name || '&mdash;'}${extra}</td>
+      <td style="color:#888;font-size:12px">${time}</td>
+    </tr>`
+  }).join('')
+  return `<table class="booking-table">
+    <thead><tr><th>Name</th><th>Email</th><th>Qty</th><th>Order</th><th>Booked</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`
 }
 
 async function togglePrep(sessionId, checked) {
