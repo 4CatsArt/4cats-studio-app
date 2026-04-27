@@ -568,6 +568,20 @@ async function showBookings(sessionId, title, dateLabel, sessionType) {
     .eq('session_id', sessionId)
     .order('booked_at')
 
+  // Fetch Tally registration data for these orders
+  const orderNames = (bookings || []).map(b => b.shopify_order_name).filter(Boolean)
+  let tallyData = {}
+  if (orderNames.length) {
+    const { data: tally } = await sb.from('tally_registrations')
+      .select('*')
+      .in('shopify_order_name', orderNames)
+    if (tally) tally.forEach(t => {
+      const key = t.shopify_order_name
+      if (!tallyData[key]) tallyData[key] = []
+      tallyData[key].push(t)
+    })
+  }
+
   const isGlazing = sessionType === 'glazing'
   const isCampOrWorkshop = sessionType === 'camp' || sessionType === 'workshop'
 
@@ -589,20 +603,30 @@ async function showBookings(sessionId, title, dateLabel, sessionType) {
     // Parse line item properties per booking
     const enriched = bookings.map(b => {
       const props = parseLineItemProperties(b.raw_payload, b.event_date, null)
-      // Glazing: find "What are you glazing?"
       const glazingPiece = props.find(p => p.name?.toLowerCase().includes('glazing'))?.value || null
-      // Participants: find "Participant 1", "Participant 2", etc.
       const participants = props
         .filter(p => p.name?.toLowerCase().startsWith('participant'))
         .sort((a, b) => a.name.localeCompare(b.name))
         .map(p => {
-          // "Aurora Graham | DOB: 2013-11-18"
           const parts = p.value.split('|')
           const name = parts[0]?.trim() || p.value
           const dobMatch = p.value.match(/DOB:\s*(\d{4}-\d{2}-\d{2})/)
           const dob = dobMatch ? dobMatch[1] : null
-          return { name, dob }
+          // Try to match Tally record by camper name
+          const tally = (tallyData[b.shopify_order_name] || [])
+            .find(t => t.camper_name?.toLowerCase().trim() === name.toLowerCase().trim())
+          return { name, dob, tally }
         })
+      // If no Shopify participants but we have Tally data, use Tally as source
+      const tallyRows = tallyData[b.shopify_order_name] || []
+      if (participants.length === 0 && tallyRows.length > 0) {
+        participants.push(...tallyRows.map(t => ({
+          name: t.camper_name,
+          dob: null,
+          age: t.camper_age,
+          tally: t
+        })))
+      }
       return { ...b, glazingPiece, participants }
     })
 
@@ -650,14 +674,24 @@ async function showBookings(sessionId, title, dateLabel, sessionType) {
             <tbody>
               ${enriched.map(b => {
                 if (b.participants.length > 0) {
-                  return b.participants.map((p, i) => `
-                    <tr>
-                      <td class="participant-name">${p.name}</td>
-                      <td style="color:#666;font-size:13px">${p.dob ? formatDOB(p.dob) : '&mdash;'}</td>
+                  return b.participants.map((p, i) => {
+                    const t = p.tally
+                    const ageDisplay = p.dob ? formatDOB(p.dob) : (p.age ? `Age ${p.age}` : '&mdash;')
+                    const tallyExtras = t ? `
+                      ${t.medical_notes ? `<div style="color:#c0392b;font-size:12px;margin-top:3px">⚕️ ${t.medical_notes}</div>` : ''}
+                      ${t.aftercare ? `<div style="color:#6a1b9a;font-size:12px;margin-top:3px">🕓 Aftercare</div>` : ''}
+                      ${t.walk_home ? `<div style="color:#2e7d32;font-size:12px;margin-top:3px">🚶 Walks home</div>` : ''}
+                      ${t.emergency_contact_name ? `<div style="color:#888;font-size:12px;margin-top:3px">🆘 ${t.emergency_contact_name} ${t.emergency_contact_phone}</div>` : ''}
+                    ` : ''
+                    const note = i === b.participants.length - 1 ? (() => { const raw = b.raw_payload ? (typeof b.raw_payload === 'string' ? JSON.parse(b.raw_payload) : b.raw_payload)?.note : null; return raw ? `<tr><td colspan="5" style="padding:4px 12px 10px 12px;font-size:12px;color:#666;font-style:italic;border-bottom:0.5px solid #f5f5f0">📝 ${raw}</td></tr>` : '' })() : ''
+                    return `<tr>
+                      <td class="participant-name">${p.name}${tallyExtras}</td>
+                      <td style="color:#666;font-size:13px">${ageDisplay}</td>
                       <td style="color:#888">${i === 0 ? b.customer_name || '&mdash;' : ''}</td>
                       <td style="text-align:center">${i === 0 ? b.qty : ''}</td>
                       <td style="color:#888">${i === 0 ? b.shopify_order_name || '&mdash;' : ''}</td>
-                    </tr>${i === b.participants.length - 1 && (() => { const note = b.raw_payload ? (typeof b.raw_payload === 'string' ? JSON.parse(b.raw_payload) : b.raw_payload)?.note : null; return note ? `<tr><td colspan="5" style="padding:4px 12px 10px 12px;font-size:12px;color:#666;font-style:italic;border-bottom:0.5px solid #f5f5f0">📝 ${note}</td></tr>` : '' })() : ''}`).join('')
+                    </tr>${note}`
+                  }).join('')
                 } else {
                   // Fallback for bookings without participant names
                   const time = new Date(b.booked_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })
