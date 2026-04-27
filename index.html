@@ -567,8 +567,18 @@ async function showBookings(sessionId, title, dateLabel, sessionType) {
     .eq('session_id', sessionId)
     .order('booked_at')
 
+  // Deduplicate bookings by order name (Appointly imports can create multiple rows per session)
+  const seenOrders = new Set()
+  const dedupedBookings = (bookings || []).filter(b => {
+    if (!b.shopify_order_name) return true
+    if (seenOrders.has(b.shopify_order_name)) return false
+    seenOrders.add(b.shopify_order_name)
+    return true
+  })
+  const bookingsToUse = dedupedBookings
+
   // Fetch Tally registration data for these orders
-  const orderNames = (bookings || []).map(b => b.shopify_order_name).filter(Boolean)
+  const orderNames = bookingsToUse.map(b => b.shopify_order_name).filter(Boolean)
   let tallyData = {}
   if (orderNames.length) {
     const { data: tally } = await sb.from('tally_registrations')
@@ -597,10 +607,10 @@ async function showBookings(sessionId, title, dateLabel, sessionType) {
         <p style="color:#888;padding:2rem 0;text-align:center">No bookings yet for this session.</p>
       </div>`
   } else {
-    const total = bookings.reduce((sum, b) => sum + (b.qty || 0), 0)
+    const total = bookingsToUse.reduce((sum, b) => sum + (b.qty || 0), 0)
 
     // Parse line item properties per booking
-    const enriched = bookings.map(b => {
+    const enriched = bookingsToUse.map(b => {
       const props = parseLineItemProperties(b.raw_payload, b.event_date, null)
       const glazingPiece = props.find(p => p.name?.toLowerCase().includes('glazing'))?.value || null
       const participants = props
@@ -714,6 +724,7 @@ async function showBookings(sessionId, title, dateLabel, sessionType) {
           <table class="booking-table">
             <thead><tr>
               <th>Participant</th>
+              <th>Age / DOB</th>
               <th>Walk home?</th>
               <th>Registered by</th>
               <th>Email</th>
@@ -734,6 +745,7 @@ async function showBookings(sessionId, title, dateLabel, sessionType) {
                     const noteRow = i === tallyRows.length - 1 && note ? `<tr><td colspan="6" style="padding:4px 12px 10px 12px;font-size:12px;color:#666;font-style:italic;border-bottom:0.5px solid #f5f5f0">📝 ${note}</td></tr>` : ''
                     return `<tr>
                       <td class="participant-name">${t.camper_name}${tallyExtras}</td>
+                      <td style="color:#666;font-size:13px">${t.camper_age ? `Age ${t.camper_age}` : '&mdash;'}</td>
                       <td style="font-size:13px">${t.walk_home ? '<span style="color:#2e7d32">Yes</span>' : '<span style="color:#888">No</span>'}</td>
                       <td style="color:#888">${i === 0 ? b.customer_name || '&mdash;' : ''}</td>
                       <td style="color:#888;font-size:12px">${i === 0 ? b.customer_email || '&mdash;' : ''}</td>
@@ -744,6 +756,7 @@ async function showBookings(sessionId, title, dateLabel, sessionType) {
                 } else {
                  return `<tr>
                     <td style="color:#bbb;font-style:italic">&mdash;</td>
+                    <td></td>
                     <td></td>
                     <td style="color:#888">${b.customer_name || '&mdash;'}</td>
                     <td style="color:#888;font-size:12px">${b.customer_email || '&mdash;'}</td>
