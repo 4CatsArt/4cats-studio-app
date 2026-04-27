@@ -449,7 +449,7 @@ if (shopifyTitle === 'OVERRIDE') {
   shopifyBtn = `<button class="btn-override" onclick="promptShopifyOverride(this)">Set title ✎</button>`
 } else if (shopifyTitle) {
   const safeTitle = shopifyTitle.replace(/'/g, "\\'")
-  shopifyBtn = `<button class="btn-shopify" onclick="checkShopifyRow('${safeTitle}', this)">Check Shopify ↗</button>`
+  shopifyBtn = `<button class="btn-shopify" onclick="checkShopifyRow('${safeTitle}', this, '${date}', '${row.time||'00:00:00'}')">Check Shopify ↗</button>`
 } else {
   shopifyBtn = `<span style="color:#ddd;font-size:10px">class series</span>`
 }
@@ -481,29 +481,40 @@ if (shopifyTitle === 'OVERRIDE') {
   document.getElementById('grid-body').innerHTML = bodyHtml || `<tr><td colspan="${gridStudios.length+2}" class="empty">No sessions match filters.</td></tr>`
 }
 
-async function checkShopifyRow(shopifyTitle, btn) {
+async function checkShopifyRow(shopifyTitle, btn, sessionDate, sessionTime) {
   btn.textContent = '...'; btn.disabled = true
   try {
-    const res = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({action:'get_all',product_title:shopifyTitle}) })
+    const res = await fetch(EDGE_URL, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'get_all', product_title: shopifyTitle })
+    })
     const data = await res.json()
     if (data.error) { btn.textContent = 'Not found'; btn.disabled = false; return }
+
     showInventoryOverlay(shopifyTitle, data.variants)
-btn.textContent = 'Check Shopify ↗'
-btn.disabled = false
+    btn.textContent = 'Check Shopify ↗'
+    btn.disabled = false
 
-// Silently update capacity in Supabase for each studio in this row
-data.variants.forEach(async (v) => {
-  const studioId = Object.keys(STUDIO_VARIANT_MAP).find(k => STUDIO_VARIANT_MAP[k] === v.variant_title)
-  if (!studioId) return
-  const { data: sessions } = await sb.from('sessions').select('id').eq('studio_id', studioId).eq('session_date', data.variants[0] ? shopifyTitle.match(/\d+/) : null)
-})
+    // Silently write capacity back to Supabase for each variant
+    data.variants.forEach(async (v) => {
+      const studioId = Object.keys(STUDIO_VARIANT_MAP).find(k => STUDIO_VARIANT_MAP[k] === v.variant_title)
+      if (!studioId) return
+      const capacity = v.inventory_quantity + (v.registered ?? 0)
+      // Find the matching session by studio + date + time
+      const { data: sessions } = await sb.from('sessions')
+        .select('id, capacity')
+        .eq('studio_id', studioId)
+        .eq('session_date', sessionDate)
+        .eq('session_time', sessionTime)
+        .limit(1)
+      if (!sessions || !sessions.length) return
+      const session = sessions[0]
+      // Only update if capacity has actually changed
+      if (session.capacity === capacity) return
+      await sb.from('sessions').update({ capacity }).eq('id', session.id)
+    })
 
-// Silently sync capacity back to Supabase
-fetch('https://snxibhbhhchjthfmjtaj.supabase.co/functions/v1/sync-capacity', {
-  method: 'POST',
-  headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
-  body: JSON.stringify({ mode: 'single', shopify_title: shopifyTitle })
-})
   } catch(e) { btn.textContent = 'Error'; btn.disabled = false }
 }
 
