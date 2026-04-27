@@ -10,7 +10,7 @@
 body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #f5f5f0; color: #1a1a1a; min-height: 100vh; font-size: 13px; }
 #login-screen { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 2rem; }
 .login-card { background: white; border-radius: 12px; border: 0.5px solid #e0e0d8; padding: 2rem; width: 100%; max-width: 380px; }
-.login-card h1 { font-size: 20px; font-weight: 600; margin-bottom: 0.25rem; }
+.login-card h1 { font-size: 20px; font-weight: 600; margin-bottom: 0.25rem; }x
 .login-card p { font-size: 13px; color: #888; margin-bottom: 1.5rem; }
 .login-card input { width: 100%; padding: 10px 12px; border: 0.5px solid #d0d0c8; border-radius: 8px; font-size: 14px; margin-bottom: 10px; outline: none; display: block; }
 .login-card input:focus { border-color: #888; }
@@ -219,9 +219,11 @@ select:focus, input:focus { border-color: #888; }
       <div class="toolbar-group">
         <label>Date</label><input type="date" id="bs-date">
 <button class="btn btn-primary" onclick="loadStudioView()">Load</button>
+<button class="btn" id="btn-sync-inventory" onclick="syncStudioInventory()" style="display:none">Sync Shopify Inventory</button>
       </div>
     </div>
     <div id="studio-split-container"><div class="empty">Select a studio and date range.</div></div>
+    document.getElementById('btn-sync-inventory').style.display = 'inline-block'
   </div>
 
   <div class="tab-content" id="tab-inventory">
@@ -728,6 +730,59 @@ rightHtml += `<div class="split-item"><div><div class="split-item-title">${s.tit
   d.setDate(d.getDate() + (dir * 7))
   document.getElementById('sch-week').value = dateStr(d)
   loadSchedule()
+}
+  async function syncStudioInventory() {
+  const btn = document.getElementById('btn-sync-inventory')
+  btn.textContent = 'Syncing...'
+  btn.disabled = true
+
+  const activeSessions = scheduleData.length ? 
+    scheduleData.filter(s => s.studio_id === document.getElementById('bs-studio').value) :
+    []
+
+  // Get unique shopify titles for this day
+  const toSync = []
+  const seen = new Set()
+  activeSessions.forEach(s => {
+    const shopifyTitle = buildShopifyTitle(s.session_date, s.session_time || '00:00:00', s.title)
+    if (!shopifyTitle || shopifyTitle === 'OVERRIDE' || seen.has(shopifyTitle)) return
+    seen.add(shopifyTitle)
+    toSync.push({ shopifyTitle, session_date: s.session_date, session_time: s.session_time })
+  })
+
+  let done = 0
+  for (const item of toSync) {
+    btn.textContent = `Syncing ${++done}/${toSync.length}...`
+    try {
+      const res = await fetch(EDGE_URL, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'get_all', product_title: item.shopifyTitle })
+      })
+      const data = await res.json()
+      if (data.error) continue
+      for (const v of data.variants) {
+        const studioId = Object.keys(STUDIO_VARIANT_MAP).find(k => STUDIO_VARIANT_MAP[k] === v.variant_title)
+        if (!studioId) continue
+        const matchingSessions = scheduleData.filter(s =>
+          s.studio_id === studioId &&
+          s.session_date === item.session_date &&
+          s.session_time === item.session_time
+        )
+        for (const session of matchingSessions) {
+          const capacity = v.inventory_quantity + session.reg
+          if (session.capacity !== capacity) {
+            await sb.from('sessions').update({ capacity }).eq('id', session.id)
+          }
+          session.capacity = capacity
+        }
+      }
+    } catch(e) { continue }
+  }
+
+  btn.textContent = 'Sync Shopify Inventory'
+  btn.disabled = false
+  loadStudioView()
 }
 </script>
 </body>
