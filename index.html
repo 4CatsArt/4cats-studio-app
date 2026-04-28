@@ -211,6 +211,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
         <option value="28">28 days</option>
       </select>
       <span class="range-label">starting from selected date</span>
+      <button class="today-btn" id="sync-shopify-btn" onclick="syncShopifyInventory()" style="margin-left:auto">🔄 Sync Shopify</button>
     </div>
     <div id="table-container"><div class="loading">Loading...</div></div>
   </div>
@@ -504,7 +505,7 @@ async function loadTableView() {
   const byDate = {}
   filtered.forEach(s => { if (!byDate[s.session_date]) byDate[s.session_date] = []; byDate[s.session_date].push(s) })
   const todayStr = dateStr(new Date())
-  let html = '<table class="week-table"><thead><tr><th>Time</th><th>Session</th><th style="text-align:center">Reg</th><th style="text-align:center">Cap</th></tr></thead><tbody>'
+  let html = '<table class="week-table"><thead><tr><th>Time</th><th>Session</th><th style="text-align:center">Reg</th><th style="text-align:center">Spaces Left</th></tr></thead><tbody>'
   Object.keys(byDate).sort().forEach(date => {
     const d = new Date(date + 'T12:00:00')
     const isT = date === todayStr
@@ -517,11 +518,13 @@ async function loadTableView() {
       const titleSafe = s.title.replace(/'/g, "\\'")
       const regColor = reg === 0 ? '#bbb' : isFull ? '#99354e' : '#1a4fa0'
       const regBg = reg === 0 ? 'transparent' : isFull ? '#fce8f0' : '#e8f0fe'
+      const spacesLeft = Math.max(0, s.capacity - reg)
+      const spacesColor = spacesLeft === 0 ? '#99354e' : spacesLeft <= 2 ? '#e65100' : '#2e7d32'
       html += `<tr style="cursor:pointer" onclick="showBookings('${s.id}','${titleSafe}','${date}','${s.session_type}')" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
         <td style="color:#888;white-space:nowrap;width:60px">${time}</td>
         <td>${s.title} <span class="type-pill ${badge}">${s.session_type}</span></td>
         <td style="text-align:center"><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:500;background:${regBg};color:${regColor}">${reg}</span></td>
-        <td style="text-align:center;color:#888;font-size:13px">${s.capacity}</td>
+        <td style="text-align:center;font-weight:500;color:${spacesColor}" id="spaces-${s.id}">${spacesLeft}</td>
       </tr>`
     })
   })
@@ -948,6 +951,59 @@ async function saveSession(sessionId, isParty) {
   btn.textContent = 'Saved'
   btn.classList.add('saved')
   setTimeout(() => { btn.textContent = 'Save'; btn.classList.remove('saved') }, 2000)
+}
+  async function syncShopifyInventory() {
+  const btn = document.getElementById('sync-shopify-btn')
+  if (!btn) return
+  btn.textContent = '⏳ Syncing...'
+  btn.disabled = true
+
+  // Build studio variant title
+  const { data: studio } = await sb.from('studios').select('name, province').eq('id', currentStudioId).single()
+  if (!studio) { btn.textContent = '🔄 Sync Shopify'; btn.disabled = false; return }
+  const variantTitle = `${studio.province} / ${studio.name.toUpperCase()}`
+
+  // Get all sessions currently visible in the table
+  const days = parseInt(document.getElementById('range-select').value) || 7
+  const startDate = new Date(currentDate)
+  const endDate = addDays(startDate, days - 1)
+  const { data: sessions } = await sb.from('sessions')
+    .select('id, title, capacity')
+    .eq('studio_id', currentStudioId)
+    .eq('show', true)
+    .gte('session_date', dateStr(startDate))
+    .lte('session_date', dateStr(endDate))
+
+  if (!sessions?.length) { btn.textContent = '🔄 Sync Shopify'; btn.disabled = false; return }
+
+  let updated = 0
+  for (const session of sessions) {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/shopify-inventory`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_KEY}` },
+        body: JSON.stringify({ action: 'get', product_title: session.title, variant_title: variantTitle })
+      })
+      const data = await res.json()
+      if (data.inventory_quantity !== undefined) {
+        const shopifySpaces = data.inventory_quantity
+        // Update capacity in Supabase
+        await sb.from('sessions').update({ capacity: shopifySpaces }).eq('id', session.id)
+        // Update the cell live
+        const cell = document.getElementById(`spaces-${session.id}`)
+        if (cell) {
+          cell.textContent = shopifySpaces
+          cell.style.color = shopifySpaces === 0 ? '#99354e' : shopifySpaces <= 2 ? '#e65100' : '#2e7d32'
+        }
+        updated++
+      }
+    } catch (e) {
+      console.warn('Could not sync session:', session.title, e)
+    }
+  }
+
+  btn.textContent = `✓ Synced ${updated} sessions`
+  setTimeout(() => { btn.textContent = '🔄 Sync Shopify'; btn.disabled = false }, 3000)
 }
 </script>
 </body>
