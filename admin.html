@@ -297,6 +297,26 @@ const STUDIO_VARIANT_MAP = {
   'ON-WTR-WTR':'ON / WATERLOO - UPTOWN'
 }
 
+// ── Cache variant IDs into shopify_variants after every successful Shopify fetch ──
+async function cacheVariants(shopifyTitle, data) {
+  if (!data.variants || !data.handle) return
+  const variantRows = data.variants
+    .map(v => {
+      const sid = Object.keys(STUDIO_VARIANT_MAP).find(k => STUDIO_VARIANT_MAP[k] === v.variant_title)
+      return sid ? { studio_id: sid, variant_id: v.variant_id } : null
+    })
+    .filter(Boolean)
+  if (!variantRows.length) return
+  try {
+    await sb.rpc('upsert_shopify_variants', {
+      p_shopify_title:  shopifyTitle,
+      p_product_handle: data.handle,
+      p_product_id:     data.product_id,
+      p_variants:       variantRows
+    })
+  } catch(e) { /* non-blocking */ }
+}
+
 sb.auth.getSession().then(({ data: { session } }) => { if (session) { currentUser = session.user; initApp() } })
 
 async function signIn() {
@@ -414,7 +434,6 @@ function toggleHighlight(mode) {
   renderSchedule()
 }
 
-  
 function shiftDay(dir) {
   const current = document.getElementById('bs-date').value
   if (!current) return
@@ -423,11 +442,11 @@ function shiftDay(dir) {
   document.getElementById('bs-date').value = dateStr(d)
   loadStudioView()
 }
-  
+
 async function loadSchedule() {
   const from = document.getElementById('sch-from').value
-const to = document.getElementById('sch-to').value
-if (!from || !to) return
+  const to = document.getElementById('sch-to').value
+  if (!from || !to) return
   document.getElementById('grid-body').innerHTML = '<tr><td colspan="2" class="loading">Loading...</td></tr>'
   document.getElementById('grid-head').innerHTML = ''
   document.getElementById('stats-row').innerHTML = ''
@@ -538,6 +557,10 @@ async function checkShopifyRow(shopifyTitle, btn, sessionDate, sessionTime, stud
     showInventoryOverlay(shopifyTitle, data.variants, studioRegs)
     btn.textContent = 'Check Shopify ↗'
     btn.disabled = false
+
+    // Cache variant IDs
+    await cacheVariants(shopifyTitle, data)
+
     data.variants.forEach(async (v) => {
       const studioId = Object.keys(STUDIO_VARIANT_MAP).find(k => STUDIO_VARIANT_MAP[k] === v.variant_title)
       if (!studioId) return
@@ -621,6 +644,10 @@ async function loadInventory() {
   const res = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({action:'get_all',product_title:title}) })
   const data = await res.json()
   if (data.error) { document.getElementById('inventory-container').innerHTML = `<div class="empty">Product not found: "${title}"<br><br>Use the exact Shopify title e.g. <em>2pm Sat Apr 26th | Hedgehog Mug</em></div>`; return }
+
+  // Cache variants from manual inventory lookup too
+  await cacheVariants(title, data)
+
   const variantMap = {}; data.variants.forEach(v => { variantMap[v.variant_title] = v })
   const total = data.variants.reduce((sum,v) => sum+Math.max(0,v.inventory_quantity), 0)
   const oversold = data.variants.filter(v => v.inventory_quantity<0).length
@@ -781,6 +808,10 @@ async function syncStudioInventory() {
       })
       const data = await res.json()
       if (data.error) continue
+
+      // Cache variant IDs
+      await cacheVariants(item.shopifyTitle, data)
+
       for (const v of data.variants) {
         const sid = Object.keys(STUDIO_VARIANT_MAP).find(k => STUDIO_VARIANT_MAP[k] === v.variant_title)
         if (!sid) continue
@@ -843,6 +874,7 @@ function shiftWeek(n) {
     weekSelected()
   }
 }
+
 async function syncWeekInventory() {
   const btn = document.getElementById('btn-sync-week')
   btn.disabled = true
@@ -867,6 +899,10 @@ async function syncWeekInventory() {
       })
       const data = await res.json()
       if (data.error) continue
+
+      // Cache variant IDs
+      await cacheVariants(item.shopifyTitle, data)
+
       for (const v of data.variants) {
         const studioId = Object.keys(STUDIO_VARIANT_MAP).find(k => STUDIO_VARIANT_MAP[k] === v.variant_title)
         if (!studioId) continue
@@ -889,8 +925,9 @@ async function syncWeekInventory() {
   btn.textContent = 'Sync Shopify'
   btn.disabled = false
   renderSchedule()
-}  
-  async function loadReports() {
+}
+
+async function loadReports() {
   const dateVal = document.getElementById('rpt-date').value
   const days = parseInt(document.getElementById('rpt-days').value) || 7
   const studioFilter = document.getElementById('rpt-studio').value
@@ -913,14 +950,12 @@ async function syncWeekInventory() {
   if (studioFilter) query = query.eq('studio_id', studioFilter)
 
   const { data: reports } = await query
-  // ... rest stays the same
 
   if (!reports?.length) {
     document.getElementById('reports-container').innerHTML = '<div class="empty">No reports found for this date range. Reports are generated nightly at 4am UTC.</div>'
     return
   }
 
-  // Summary stats
   const totalReg = reports.reduce((sum, r) => sum + r.registered, 0)
   const totalWalkins = reports.reduce((sum, r) => sum + r.walkins, 0)
   const totalAll = reports.reduce((sum, r) => sum + r.total, 0)
