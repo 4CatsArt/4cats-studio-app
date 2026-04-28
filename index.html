@@ -952,23 +952,89 @@ async function saveSession(sessionId, isParty) {
   btn.classList.add('saved')
   setTimeout(() => { btn.textContent = 'Save'; btn.classList.remove('saved') }, 2000)
 }
-  async function syncShopifyInventory() {
+  function buildShopifyTitle(sessionDate, sessionTime, sessionTitle) {
+  const d = new Date(sessionDate + 'T12:00:00')
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  const day = days[d.getDay()], month = months[d.getMonth()], date = d.getDate()
+  const suffix = [,'st','nd','rd'][date] || 'th'
+  const [h, m] = sessionTime.split(':').map(Number)
+  const hour = h === 0 ? 12 : h > 12 ? h - 12 : h
+  const ampm = h < 12 ? 'am' : 'pm'
+  const timeStr = m === 0 ? `${hour}${ampm}` : `${hour}:${String(m).padStart(2,'0')}${ampm}`
+  const starPrefix = (h === 9 && m === 0) ? '*' : ''
+  const titleLower = sessionTitle.toLowerCase().trim()
+
+  const TITLE_MAP = {
+    'party time slot': 'Kids Party',
+    'splatter party time slot': 'Splatter Party',
+    'field trip time slot': 'Field Trip',
+    'adult get-together time slot': 'Adult Get Togethers, Parties & Group Booking',
+    'wheel workshop (adult & teen)': 'Wheel Workshop',
+    'friday night mixer (ages 16+)': 'Friday Night Mixer',
+    'sunday morning family time mixer': 'Sunday Morning Family Time Mixer',
+    'mixed media class for kids ($10 for members)': 'Mixed Media Class',
+    'thursdays: clay night': 'Thursday Clay Night',
+    'natureware mugs': 'Natureware Mug',
+    'summer camp half day morning': 'Summer Camp Half Day',
+    'summer camp half day afternoon': 'Summer Camp Half Day',
+    'no school day camp (ages 6-12)': 'PA/PD Day',
+    'pd day': 'PA/PD Day',
+    'pa day': 'PA/PD Day',
+    'pa/pd day': 'PA/PD Day',
+    'afternoon art meetup': 'Afternoon Art Meetup',
+    'saturday early bird workshop': 'Saturday Early Bird Workshop',
+    'dragons session (ages 5-12) class 1 of 5': 'Dragons 5 Week Kids Session',
+    'early drop off (mixed media class)': null,
+  }
+
+  if (/\b(class|week|session|part)\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(sessionTitle)) return null
+  if (titleLower in TITLE_MAP && TITLE_MAP[titleLower] === null) return null
+  if (titleLower === 'weekend workshop') return null
+  if (/^weekend workshop:\s*/i.test(sessionTitle)) {
+    const specific = sessionTitle.replace(/^weekend workshop:\s*/i, '').trim()
+    return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${specific}`
+  }
+  if (titleLower.includes('wednesday paint night')) {
+    return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | Wednesday Paint Night`
+  }
+  if (TITLE_MAP[titleLower]) {
+    return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${TITLE_MAP[titleLower]}`
+  }
+  let cleanTitle = sessionTitle.replace(/ Workshop$/i,'').replace(/ Session$/i,'').replace(/\s*\|.*$/,'').trim()
+  return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${cleanTitle}`
+}
+
+const STUDIO_VARIANT_MAP = {
+  'AB-YYC-ING':'AB / CALGARY - INGLEWOOD','AB-STA-STA':'AB / ST ALBERT',
+  'BC-RICH-GC':'BC / RICHMOND - GARDEN CITY','BC-RICH-STV':'BC / RICHMOND - STEVESTON',
+  'BC-SUR-SSR':'BC / SURREY - SOUTH','BC-YVR-KIT':'BC / VANCOUVER - KITSILANO',
+  'BC-YVR-MS':'BC / VANCOUVER - MAIN STREET','BC-YVR-UBC':'BC / VANCOUVER - UBC',
+  'BC-YYJ-CSV':'BC / VICTORIA - COOK STREET VILLAGE','BC-YYJ-ESQ':'BC / VICTORIA - ESQUIMALT',
+  'BC-YYJ-OB':'BC / VICTORIA - OAK BAY','BC-YYJ-VIC':'BC / VICTORIA - UPTOWN',
+  'ON-BRL-BRL':'ON / BURLINGTON - SOUTH','ON-CMB-GLT':'ON / CAMBRIDGE - GALT',
+  'ON-ERN-ERN':'ON / ERIN','ON-HAM-OS':'ON / HAMILTON - OTTAWA STREET',
+  'ON-HAM-WD':'ON / HAMILTON - WATERDOWN','ON-HAM-WH':'ON / HAMILTON - WEST HARBOUR',
+  'ON-KGN-AP':'ON / KINGSTON - ARLINGTON PARK','ON-LDN-BYR':'ON / LONDON - BYRON',
+  'ON-LDN-WVG':'ON / LONDON - WORTLEY VILLAGE','ON-MIS-PC':'ON / MISSISSAUGA - PORT CREDIT',
+  'ON-OAK-OAK':'ON / OAKVILLE - NORTH','ON-OAK-WST':'ON / OAKVILLE - WEST',
+  'ON-YOW-GLB':'ON / OTTAWA - THE GLEBE','ON-STC-STC':'ON / ST CATHARINES',
+  'ON-YYZ-AVE':'ON / TORONTO - AVENUE ROAD','ON-YYZ-BP':'ON / TORONTO - BABY POINT',
+  'ON-YYZ-LEA':'ON / TORONTO - LEASIDE','ON-YYZ-BEA':'ON / TORONTO - THE BEACHES',
+  'ON-WTR-WTR':'ON / WATERLOO - UPTOWN'
+}
+
+async function syncShopifyInventory() {
   const btn = document.getElementById('sync-shopify-btn')
   if (!btn) return
   btn.textContent = '⏳ Syncing...'
   btn.disabled = true
 
-  // Build studio variant title
-  const { data: studio } = await sb.from('studios').select('name, province').eq('id', currentStudioId).single()
-  if (!studio) { btn.textContent = '🔄 Sync Shopify'; btn.disabled = false; return }
-  const variantTitle = `${studio.province} / ${studio.name.toUpperCase()}`
-
-  // Get all sessions currently visible in the table
   const days = parseInt(document.getElementById('range-select').value) || 7
   const startDate = new Date(currentDate)
   const endDate = addDays(startDate, days - 1)
   const { data: sessions } = await sb.from('sessions')
-    .select('id, title, capacity')
+    .select('id, title, capacity, session_date, session_time')
     .eq('studio_id', currentStudioId)
     .eq('show', true)
     .gte('session_date', dateStr(startDate))
@@ -976,33 +1042,63 @@ async function saveSession(sessionId, isParty) {
 
   if (!sessions?.length) { btn.textContent = '🔄 Sync Shopify'; btn.disabled = false; return }
 
+  // Get booking counts for these sessions
+  const ids = sessions.map(s => s.id)
+  const counts = {}
+  const { data: bookings } = await sb.from('bookings').select('session_id, qty').in('session_id', ids)
+  if (bookings) bookings.forEach(b => { counts[b.session_id] = (counts[b.session_id] || 0) + (b.qty || 0) })
+  const sessionsWithReg = sessions.map(s => ({ ...s, reg: counts[s.id] || 0 }))
+
+  // Build unique Shopify titles to fetch
+  const seen = new Set()
+  const toSync = []
+  sessionsWithReg.forEach(s => {
+    const shopifyTitle = buildShopifyTitle(s.session_date, s.session_time || '00:00:00', s.title)
+    if (!shopifyTitle || seen.has(shopifyTitle)) return
+    seen.add(shopifyTitle)
+    toSync.push({ shopifyTitle, session_date: s.session_date, session_time: s.session_time })
+  })
+
+  const variantTitle = STUDIO_VARIANT_MAP[currentStudioId]
+  if (!variantTitle) { btn.textContent = '🔄 Sync Shopify'; btn.disabled = false; return }
+
   let updated = 0
-  for (const session of sessions) {
+  for (const item of toSync) {
+    btn.textContent = `⏳ ${updated}/${toSync.length}`
     try {
       const res = await fetch(`${SUPABASE_URL}/functions/v1/shopify-inventory`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_KEY}` },
-        body: JSON.stringify({ action: 'get', product_title: session.title, variant_title: variantTitle })
+        body: JSON.stringify({ action: 'get_all', product_title: item.shopifyTitle })
       })
       const data = await res.json()
-      if (data.inventory_quantity !== undefined) {
-        const shopifySpaces = data.inventory_quantity
-        // Update capacity in Supabase
-        await sb.from('sessions').update({ capacity: shopifySpaces }).eq('id', session.id)
-        // Update the cell live
+      if (data.error) continue
+
+      const variant = data.variants?.find(v => v.variant_title === variantTitle)
+      if (!variant) continue
+
+      // capacity = spaces_left + registered
+      const matchingSessions = sessionsWithReg.filter(s =>
+        s.session_date === item.session_date &&
+        s.session_time === item.session_time
+      )
+      for (const session of matchingSessions) {
+        const newCapacity = variant.inventory_quantity + session.reg
+        await sb.from('sessions').update({ capacity: newCapacity }).eq('id', session.id)
         const cell = document.getElementById(`spaces-${session.id}`)
         if (cell) {
-          cell.textContent = shopifySpaces
-          cell.style.color = shopifySpaces === 0 ? '#99354e' : shopifySpaces <= 2 ? '#e65100' : '#2e7d32'
+          const spacesLeft = variant.inventory_quantity
+          cell.textContent = spacesLeft
+          cell.style.color = spacesLeft === 0 ? '#99354e' : spacesLeft <= 2 ? '#e65100' : '#2e7d32'
         }
         updated++
       }
     } catch (e) {
-      console.warn('Could not sync session:', session.title, e)
+      console.warn('Could not sync:', item.shopifyTitle, e)
     }
   }
 
-  btn.textContent = `✓ Synced ${updated} sessions`
+  btn.textContent = `✓ ${updated} synced`
   setTimeout(() => { btn.textContent = '🔄 Sync Shopify'; btn.disabled = false }, 3000)
 }
 </script>
