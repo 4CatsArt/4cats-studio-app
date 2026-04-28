@@ -141,6 +141,7 @@ select:focus, input:focus { border-color: #888; }
     <button class="tab-btn" onclick="switchTab('workshop')">By Workshop</button>
     <button class="tab-btn" onclick="switchTab('studio')">By Studio</button>
     <button class="tab-btn" onclick="switchTab('inventory')">Inventory</button>
+    <button class="tab-btn" onclick="switchTab('reports')">Daily Reports</button>
     <div class="top-bar-right"><button class="signout-btn" onclick="signOut()">Sign out</button></div>
   </div>
 
@@ -243,6 +244,23 @@ select:focus, input:focus { border-color: #888; }
     </div>
     <div id="inventory-container"><div class="empty">Enter a Shopify product title and click Load Inventory.</div></div>
   </div>
+  <div class="tab-content" id="tab-reports">
+    <div class="toolbar">
+      <div class="toolbar-group">
+        <label>From</label><input type="date" id="rpt-from">
+        <label>To</label><input type="date" id="rpt-to">
+        <button class="btn btn-primary" onclick="loadReports()">Load</button>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group">
+        <label>Studio</label>
+        <select id="rpt-studio">
+          <option value="">All studios</option>
+        </select>
+      </div>
+    </div>
+    <div id="reports-container"><div class="empty">Select a date range and click Load.</div></div>
+  </div>
 </div>
 
 <script>
@@ -304,15 +322,19 @@ async function initApp() {
   allStudios = studios || []
   const opts = allStudios.map(s => `<option value="${s.id}">${getStudioName(s.id)}</option>`).join('')
   document.getElementById('bs-studio').innerHTML = '<option value="">Select a studio...</option>' + opts
+  document.getElementById('rpt-studio').innerHTML = '<option value="">All studios</option>' + opts
   const today = dateStr(new Date()), in7 = dateStr(addDays(new Date(), 7))
   document.getElementById('wk-from').value = today
   document.getElementById('wk-to').value = in7
   document.getElementById('bs-date').value = today
+  const rptFrom = dateStr(addDays(new Date(), -7))
+  document.getElementById('rpt-from').value = rptFrom
+  document.getElementById('rpt-to').value = today
   buildWeekOptions()
 }
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory'][i] === tab))
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports'][i] === tab))
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'))
   document.getElementById(`tab-${tab}`).classList.add('active')
 }
@@ -862,6 +884,79 @@ async function syncWeekInventory() {
   btn.disabled = false
   renderSchedule()
 }  
+  async function loadReports() {
+  const from = document.getElementById('rpt-from').value
+  const to = document.getElementById('rpt-to').value
+  const studioFilter = document.getElementById('rpt-studio').value
+  if (!from || !to) return
+
+  document.getElementById('reports-container').innerHTML = '<div class="loading">Loading...</div>'
+
+  let query = sb.from('daily_reports')
+    .select('*')
+    .gte('report_date', from)
+    .lte('report_date', to)
+    .order('report_date', { ascending: false })
+    .order('total', { ascending: false })
+
+  if (studioFilter) query = query.eq('studio_id', studioFilter)
+
+  const { data: reports } = await query
+
+  if (!reports?.length) {
+    document.getElementById('reports-container').innerHTML = '<div class="empty">No reports found for this date range. Reports are generated nightly at 4am UTC.</div>'
+    return
+  }
+
+  // Summary stats
+  const totalReg = reports.reduce((sum, r) => sum + r.registered, 0)
+  const totalWalkins = reports.reduce((sum, r) => sum + r.walkins, 0)
+  const totalAll = reports.reduce((sum, r) => sum + r.total, 0)
+  const uniqueDates = [...new Set(reports.map(r => r.report_date))].length
+
+  let html = `
+    <div style="display:flex;gap:12px;margin-bottom:1rem">
+      <div class="stat-card"><div class="val">${uniqueDates}</div><div class="lbl">Days</div></div>
+      <div class="stat-card"><div class="val">${totalReg}</div><div class="lbl">Total Registered</div></div>
+      <div class="stat-card"><div class="val">${totalWalkins}</div><div class="lbl">Total Walk-ins</div></div>
+      <div class="stat-card good"><div class="val">${totalAll}</div><div class="lbl">Grand Total</div></div>
+    </div>
+    <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
+            <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.4px">Date</th>
+            <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.4px">Studio</th>
+            <th style="padding:10px 14px;text-align:center;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.4px">Sessions</th>
+            <th style="padding:10px 14px;text-align:center;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.4px">Registered</th>
+            <th style="padding:10px 14px;text-align:center;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.4px">Walk-ins</th>
+            <th style="padding:10px 14px;text-align:center;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.4px">Total</th>
+          </tr>
+        </thead>
+        <tbody>`
+
+  let lastDate = null
+  reports.forEach(r => {
+    const isNewDate = r.report_date !== lastDate
+    if (isNewDate) lastDate = r.report_date
+    const d = new Date(r.report_date + 'T12:00:00')
+    const dateLabel = d.toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })
+    const totalColor = r.total === 0 ? '#bbb' : r.total >= 30 ? '#2e7d32' : '#1a1a1a'
+    const walkinColor = r.walkins > 0 ? '#1a4fa0' : '#bbb'
+
+    html += `<tr style="border-bottom:0.5px solid #f5f5f0" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
+      <td style="padding:10px 14px;font-weight:${isNewDate?'600':'400'};color:${isNewDate?'#1a1a1a':'#888'}">${isNewDate ? dateLabel : ''}</td>
+      <td style="padding:10px 14px;font-weight:500">${getStudioName(r.studio_id)}</td>
+      <td style="padding:10px 14px;text-align:center;color:#888">${r.session_count}</td>
+      <td style="padding:10px 14px;text-align:center;font-weight:500">${r.registered}</td>
+      <td style="padding:10px 14px;text-align:center;font-weight:500;color:${walkinColor}">${r.walkins || 0}</td>
+      <td style="padding:10px 14px;text-align:center;font-weight:700;color:${totalColor}">${r.total}</td>
+    </tr>`
+  })
+
+  html += '</tbody></table></div>'
+  document.getElementById('reports-container').innerHTML = html
+}
 </script>
 </body>
 </html>
