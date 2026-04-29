@@ -4,366 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>4CATS Home Office</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2">
-
-// ═══════════════════════════════════════════════
-// EDIT TITLE MODAL
-// ═══════════════════════════════════════════════
-let etmContext = { title: '', date: '', time: '', type: '', scope: 'all' }
-
-function openEditTitleModalFromBtn(btn) {
-  const ctx = JSON.parse(decodeURIComponent(btn.dataset.ctx))
-  openEditTitleModal(ctx.title, ctx.date, ctx.time, ctx.type)
-}
-
-function openEditTitleModal(title, date, time, type) {
-  const affected = scheduleData.filter(s =>
-    s.session_date === date &&
-    s.session_time === time &&
-    s.title === title
-  )
-  etmContext = { title, date, time, type, scope: 'all', sessions: affected }
-  document.getElementById('etm-current-title').textContent = title
-  const newTitleInput = document.getElementById('etm-new-title')
-  newTitleInput.value = title
-  const typeSelect = document.getElementById('etm-type')
-  typeSelect.value = type || 'workshop'
-  document.getElementById('etm-sub').textContent = `${fmtDate(date)} · ${(time||'').substring(0,5)} · ${affected.length} studio${affected.length!==1?'s':''}`
-  setEtmScope('all')
-  updateEtmPreview()
-
-  // Populate studio selector for "one studio" mode + show/delete
-  const studioSel = document.getElementById('etm-studio')
-  studioSel.innerHTML = affected.map(s =>
-    `<option value="${s.id}" data-reg="${s.reg}" data-show="${s.show}">${getStudioName(s.studio_id)}${s.reg > 0 ? ' (' + s.reg + ' reg)' : ''}</option>`
-  ).join('')
-  updateEtmStudioActions()
-
-  // When scope is 'one' and user changes studio, update action buttons
-  document.getElementById('etm-studio').onchange = updateEtmStudioActions
-
-  document.getElementById('edit-title-modal').style.display = 'flex'
-  setTimeout(() => newTitleInput.focus(), 50)
-}
-
-function closeEditTitleModal() {
-  document.getElementById('edit-title-modal').style.display = 'none'
-}
-
-function setEtmScope(scope) {
-  etmContext.scope = scope
-  document.getElementById('etm-scope-all').classList.toggle('active', scope === 'all')
-  document.getElementById('etm-scope-one').classList.toggle('active', scope === 'one')
-  document.getElementById('etm-studio-selector').style.display = scope === 'one' ? 'block' : 'none'
-  updateEtmStudioActions()
-}
-
-function updateEtmPreview() {
-  const newTitle = document.getElementById('etm-new-title').value.trim()
-  const shopifyTitle = newTitle
-    ? buildShopifyTitle(etmContext.date, etmContext.time || '00:00:00', newTitle)
-    : null
-  const previewEl = document.getElementById('etm-shopify-preview')
-  if (!shopifyTitle) {
-    previewEl.innerHTML = '<span style="color:#bbb">—</span>'
-  } else if (shopifyTitle === 'OVERRIDE') {
-    previewEl.innerHTML = '<span style="color:#e65100">Requires manual Shopify title</span>'
-  } else {
-    previewEl.innerHTML = `<span>${shopifyTitle}</span>`
-  }
-}
-
-function updateEtmStudioActions() {
-  const scope = etmContext.scope
-  const hideBtn = document.getElementById('etm-hide-btn')
-  const deleteBtn = document.getElementById('etm-delete-btn')
-  const deleteLine = document.getElementById('etm-delete-line')
-
-  if (scope === 'all') {
-    const totalReg = etmContext.sessions.reduce((sum, s) => sum + (s.reg || 0), 0)
-    const allHidden = etmContext.sessions.every(s => !s.show)
-    const allShown = etmContext.sessions.every(s => s.show)
-    hideBtn.textContent = allHidden ? 'Show all studios' : 'Hide all studios'
-    hideBtn.style.background = allHidden ? '#e8f5e9'  : '#fff3e0'
-    hideBtn.style.color      = allHidden ? '#2e7d32'  : '#e65100'
-    hideBtn.style.borderColor= allHidden ? '#a5d6a7'  : '#ffcc80'
-    if (totalReg > 0) {
-      deleteBtn.disabled = true
-      deleteBtn.title = `Cannot delete — ${totalReg} registration${totalReg!==1?'s':''} across studios`
-    } else {
-      deleteBtn.disabled = false
-      deleteBtn.title = 'Delete all instances of this session'
-    }
-  } else {
-    const sel = document.getElementById('etm-studio')
-    const opt = sel.options[sel.selectedIndex]
-    if (!opt) return
-    const reg = parseInt(opt.dataset.reg || '0')
-    const isShown = opt.dataset.show === 'true'
-    hideBtn.textContent = isShown ? 'Hide from calendar' : 'Show on calendar'
-    hideBtn.style.background = isShown ? '#fff3e0' : '#e8f5e9'
-    hideBtn.style.color      = isShown ? '#e65100' : '#2e7d32'
-    hideBtn.style.borderColor= isShown ? '#ffcc80' : '#a5d6a7'
-    if (reg > 0) {
-      deleteBtn.disabled = true
-      deleteBtn.title = `Cannot delete — ${reg} registration${reg!==1?'s':''}`
-    } else {
-      deleteBtn.disabled = false
-      deleteBtn.title = 'Delete this studio session'
-    }
-  }
-  deleteLine.style.display = 'flex'
-}
-
-async function toggleEtmHide() {
-  const hideBtn = document.getElementById('etm-hide-btn')
-  hideBtn.disabled = true
-
-  try {
-    if (etmContext.scope === 'all') {
-      const allHidden = etmContext.sessions.every(s => !s.show)
-      const newShow = allHidden // if all hidden, show them; otherwise hide all
-      const ids = etmContext.sessions.map(s => s.id)
-      const { error } = await sb.from('sessions').update({ show: newShow }).in('id', ids)
-      if (error) throw error
-      etmContext.sessions.forEach(s => s.show = newShow)
-      scheduleData.forEach(s => { if (ids.includes(s.id)) s.show = newShow })
-    } else {
-      const sel = document.getElementById('etm-studio')
-      const sessionId = sel.value
-      const opt = sel.options[sel.selectedIndex]
-      const isShown = opt.dataset.show === 'true'
-      const newShow = !isShown
-      const { error } = await sb.from('sessions').update({ show: newShow }).eq('id', sessionId)
-      if (error) throw error
-      opt.dataset.show = String(newShow)
-      const memSession = scheduleData.find(s => s.id === sessionId)
-      if (memSession) memSession.show = newShow
-      etmContext.sessions = etmContext.sessions.map(s => s.id === sessionId ? { ...s, show: newShow } : s)
-    }
-    updateEtmStudioActions()
-    renderSchedule()
-  } catch(e) {
-    alert('Error: ' + e.message)
-  } finally {
-    hideBtn.disabled = false
-  }
-}
-
-async function deleteEtmSession() {
-  const scope = etmContext.scope
-  let confirmMsg, ids
-
-  if (scope === 'all') {
-    ids = etmContext.sessions.map(s => s.id)
-    confirmMsg = `Delete "${etmContext.title}" on ${fmtDate(etmContext.date)} from all ${ids.length} studio${ids.length!==1?'s':''}? This cannot be undone.`
-  } else {
-    const sel = document.getElementById('etm-studio')
-    ids = [sel.value]
-    const studioName = sel.options[sel.selectedIndex].text.replace(/ (d+ reg)$/, '')
-    confirmMsg = `Delete "${etmContext.title}" on ${fmtDate(etmContext.date)} for ${studioName} only? This cannot be undone.`
-  }
-
-  if (!confirm(confirmMsg)) return
-
-  const btn = document.getElementById('etm-delete-btn')
-  btn.textContent = 'Deleting...'; btn.disabled = true
-
-  try {
-    const { error } = await sb.from('sessions').delete().in('id', ids)
-    if (error) throw error
-
-    // Remove from in-memory scheduleData
-    ids.forEach(id => {
-      const idx = scheduleData.findIndex(s => s.id === id)
-      if (idx !== -1) scheduleData.splice(idx, 1)
-    })
-
-    closeEditTitleModal()
-    renderSchedule()
-  } catch(e) {
-    alert('Error deleting: ' + e.message)
-    btn.textContent = 'Delete'; btn.disabled = false
-  }
-}
-
-async function saveEditTitle() {
-  const newTitle = document.getElementById('etm-new-title').value.trim()
-  const newType = document.getElementById('etm-type').value
-  if (!newTitle) { alert('Please enter a title.'); return }
-  if (newTitle === etmContext.title && newType === etmContext.type) {
-    closeEditTitleModal(); return
-  }
-
-  const btn = document.getElementById('etm-save-btn')
-  btn.textContent = 'Saving...'; btn.disabled = true
-
-  try {
-    let query = sb.from('sessions')
-      .update({ title: newTitle, session_type: newType })
-      .eq('session_date', etmContext.date)
-      .eq('session_time', etmContext.time)
-      .eq('title', etmContext.title)
-
-    if (etmContext.scope === 'one') {
-      const studioSel = document.getElementById('etm-studio')
-      const sessionId = studioSel.value
-      query = sb.from('sessions')
-        .update({ title: newTitle, session_type: newType })
-        .eq('id', sessionId)
-    }
-
-    const { error } = await query
-    if (error) throw error
-
-    // Update in-memory scheduleData
-    scheduleData.forEach(s => {
-      if (s.session_date === etmContext.date && s.session_time === etmContext.time && s.title === etmContext.title) {
-        if (etmContext.scope === 'all') {
-          s.title = newTitle
-          s.session_type = newType
-        } else {
-          const selectedId = document.getElementById('etm-studio').value
-          if (s.id === selectedId) {
-            s.title = newTitle
-            s.session_type = newType
-          }
-        }
-      }
-    })
-
-    closeEditTitleModal()
-    renderSchedule()
-  } catch(e) {
-    alert('Error saving: ' + e.message)
-  } finally {
-    btn.textContent = 'Save Changes'; btn.disabled = false
-  }
-}
-
-// ═══════════════════════════════════════════════
-// ADD SESSION MODAL
-// ═══════════════════════════════════════════════
-function openAddSessionModal() {
-  // Pre-fill date from current schedule week
-  const from = document.getElementById('sch-from').value
-  if (from) document.getElementById('asm-date').value = from
-
-  // Build studio checkbox grid
-  const grid = document.getElementById('asm-studio-grid')
-  grid.innerHTML = allStudios.map(s =>
-    `<label class="studio-cb-item">
-      <input type="checkbox" value="${s.id}" name="asm-studio">
-      ${getStudioName(s.id)}
-    </label>`
-  ).join('')
-
-  document.getElementById('asm-status').textContent = ''
-  document.getElementById('asm-save-btn').textContent = 'Add Sessions'
-  document.getElementById('asm-save-btn').disabled = false
-  updateAsmPreview()
-  document.getElementById('add-session-modal').style.display = 'flex'
-  setTimeout(() => document.getElementById('asm-title').focus(), 50)
-}
-
-function closeAddSessionModal() {
-  document.getElementById('add-session-modal').style.display = 'none'
-}
-
-function asmSelectAll(checked) {
-  document.querySelectorAll('#asm-studio-grid input[type=checkbox]').forEach(cb => cb.checked = checked)
-}
-
-function updateAsmPreview() {
-  const date = document.getElementById('asm-date').value
-  const time = document.getElementById('asm-time').value
-  const title = document.getElementById('asm-title').value.trim()
-  const previewEl = document.getElementById('asm-shopify-preview')
-  if (!date || !time || !title) { previewEl.innerHTML = '<span style="color:#bbb">Fill in date, time and title to preview</span>'; return }
-  const shopifyTitle = buildShopifyTitle(date, time + ':00', title)
-  if (!shopifyTitle) {
-    previewEl.innerHTML = '<span style="color:#bbb">No Shopify product (class series / excluded type)</span>'
-  } else if (shopifyTitle === 'OVERRIDE') {
-    previewEl.innerHTML = '<span style="color:#e65100">Weekend Workshop — Shopify title set manually</span>'
-  } else {
-    previewEl.innerHTML = `<span>${shopifyTitle}</span>`
-  }
-}
-
-async function saveAddSessions() {
-  const date = document.getElementById('asm-date').value
-  const time = document.getElementById('asm-time').value
-  const title = document.getElementById('asm-title').value.trim()
-  const type = document.getElementById('asm-type').value
-  const capacity = parseInt(document.getElementById('asm-capacity').value) || 0
-  const show = document.getElementById('asm-show').value === 'true'
-
-  if (!date) { alert('Please select a date.'); return }
-  if (!time) { alert('Please enter a time.'); return }
-  if (!title) { alert('Please enter a session title.'); return }
-
-  const selected = [...document.querySelectorAll('#asm-studio-grid input[type=checkbox]:checked')].map(cb => cb.value)
-  if (!selected.length) { alert('Please select at least one studio.'); return }
-
-  const btn = document.getElementById('asm-save-btn')
-  const statusEl = document.getElementById('asm-status')
-  btn.textContent = 'Adding...'; btn.disabled = true
-  statusEl.textContent = ''
-
-  const sessionTime = time.length === 5 ? time + ':00' : time
-
-  const rows = selected.map(studioId => ({
-    studio_id: studioId,
-    session_date: date,
-    session_time: sessionTime,
-    title,
-    session_type: type,
-    capacity: capacity || null,
-    show,
-    spaces_left_cache: null
-  }))
-
-  try {
-    const { data: inserted, error } = await sb.from('sessions').insert(rows).select()
-    if (error) throw error
-
-    statusEl.style.color = '#2e7d32'
-    statusEl.textContent = `✓ Added ${inserted.length} session${inserted.length !== 1 ? 's' : ''} successfully.`
-
-    // Merge into scheduleData if date is in current view
-    const from = document.getElementById('sch-from').value
-    const to = document.getElementById('sch-to').value
-    if (date >= from && date <= to) {
-      inserted.forEach(s => {
-        scheduleData.push({ ...s, reg: 0 })
-        const studio = allStudios.find(st => st.id === s.studio_id)
-        if (studio && !gridStudios.find(gs => gs.id === studio.id)) {
-          gridStudios.push(studio)
-        }
-      })
-      renderSchedule()
-    }
-
-    btn.textContent = 'Add More'
-    btn.disabled = false
-    setTimeout(() => {
-      // Reset for another entry — keep date/time/type
-      document.getElementById('asm-title').value = ''
-      document.getElementById('asm-capacity').value = '0'
-      asmSelectAll(false)
-      statusEl.textContent = ''
-      btn.textContent = 'Add Sessions'
-      updateAsmPreview()
-    }, 2500)
-
-  } catch(e) {
-    statusEl.style.color = '#c0392b'
-    statusEl.textContent = 'Error: ' + e.message
-    btn.textContent = 'Add Sessions'; btn.disabled = false
-  }
-}
-
-</script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #f5f5f0; color: #1a1a1a; min-height: 100vh; font-size: 13px; }
@@ -1437,6 +1078,365 @@ async function loadReports() {
   html += '</tbody></table></div>'
   document.getElementById('reports-container').innerHTML = html
 }
+
+
+// ═══════════════════════════════════════════════
+// EDIT TITLE MODAL
+// ═══════════════════════════════════════════════
+let etmContext = { title: '', date: '', time: '', type: '', scope: 'all' }
+
+function openEditTitleModalFromBtn(btn) {
+  const ctx = JSON.parse(decodeURIComponent(btn.dataset.ctx))
+  openEditTitleModal(ctx.title, ctx.date, ctx.time, ctx.type)
+}
+
+function openEditTitleModal(title, date, time, type) {
+  const affected = scheduleData.filter(s =>
+    s.session_date === date &&
+    s.session_time === time &&
+    s.title === title
+  )
+  etmContext = { title, date, time, type, scope: 'all', sessions: affected }
+  document.getElementById('etm-current-title').textContent = title
+  const newTitleInput = document.getElementById('etm-new-title')
+  newTitleInput.value = title
+  const typeSelect = document.getElementById('etm-type')
+  typeSelect.value = type || 'workshop'
+  document.getElementById('etm-sub').textContent = `${fmtDate(date)} · ${(time||'').substring(0,5)} · ${affected.length} studio${affected.length!==1?'s':''}`
+  setEtmScope('all')
+  updateEtmPreview()
+
+  // Populate studio selector for "one studio" mode + show/delete
+  const studioSel = document.getElementById('etm-studio')
+  studioSel.innerHTML = affected.map(s =>
+    `<option value="${s.id}" data-reg="${s.reg}" data-show="${s.show}">${getStudioName(s.studio_id)}${s.reg > 0 ? ' (' + s.reg + ' reg)' : ''}</option>`
+  ).join('')
+  updateEtmStudioActions()
+
+  // When scope is 'one' and user changes studio, update action buttons
+  document.getElementById('etm-studio').onchange = updateEtmStudioActions
+
+  document.getElementById('edit-title-modal').style.display = 'flex'
+  setTimeout(() => newTitleInput.focus(), 50)
+}
+
+function closeEditTitleModal() {
+  document.getElementById('edit-title-modal').style.display = 'none'
+}
+
+function setEtmScope(scope) {
+  etmContext.scope = scope
+  document.getElementById('etm-scope-all').classList.toggle('active', scope === 'all')
+  document.getElementById('etm-scope-one').classList.toggle('active', scope === 'one')
+  document.getElementById('etm-studio-selector').style.display = scope === 'one' ? 'block' : 'none'
+  updateEtmStudioActions()
+}
+
+function updateEtmPreview() {
+  const newTitle = document.getElementById('etm-new-title').value.trim()
+  const shopifyTitle = newTitle
+    ? buildShopifyTitle(etmContext.date, etmContext.time || '00:00:00', newTitle)
+    : null
+  const previewEl = document.getElementById('etm-shopify-preview')
+  if (!shopifyTitle) {
+    previewEl.innerHTML = '<span style="color:#bbb">—</span>'
+  } else if (shopifyTitle === 'OVERRIDE') {
+    previewEl.innerHTML = '<span style="color:#e65100">Requires manual Shopify title</span>'
+  } else {
+    previewEl.innerHTML = `<span>${shopifyTitle}</span>`
+  }
+}
+
+function updateEtmStudioActions() {
+  const scope = etmContext.scope
+  const hideBtn = document.getElementById('etm-hide-btn')
+  const deleteBtn = document.getElementById('etm-delete-btn')
+  const deleteLine = document.getElementById('etm-delete-line')
+
+  if (scope === 'all') {
+    const totalReg = etmContext.sessions.reduce((sum, s) => sum + (s.reg || 0), 0)
+    const allHidden = etmContext.sessions.every(s => !s.show)
+    const allShown = etmContext.sessions.every(s => s.show)
+    hideBtn.textContent = allHidden ? 'Show all studios' : 'Hide all studios'
+    hideBtn.style.background = allHidden ? '#e8f5e9'  : '#fff3e0'
+    hideBtn.style.color      = allHidden ? '#2e7d32'  : '#e65100'
+    hideBtn.style.borderColor= allHidden ? '#a5d6a7'  : '#ffcc80'
+    if (totalReg > 0) {
+      deleteBtn.disabled = true
+      deleteBtn.title = `Cannot delete — ${totalReg} registration${totalReg!==1?'s':''} across studios`
+    } else {
+      deleteBtn.disabled = false
+      deleteBtn.title = 'Delete all instances of this session'
+    }
+  } else {
+    const sel = document.getElementById('etm-studio')
+    const opt = sel.options[sel.selectedIndex]
+    if (!opt) return
+    const reg = parseInt(opt.dataset.reg || '0')
+    const isShown = opt.dataset.show === 'true'
+    hideBtn.textContent = isShown ? 'Hide from calendar' : 'Show on calendar'
+    hideBtn.style.background = isShown ? '#fff3e0' : '#e8f5e9'
+    hideBtn.style.color      = isShown ? '#e65100' : '#2e7d32'
+    hideBtn.style.borderColor= isShown ? '#ffcc80' : '#a5d6a7'
+    if (reg > 0) {
+      deleteBtn.disabled = true
+      deleteBtn.title = `Cannot delete — ${reg} registration${reg!==1?'s':''}`
+    } else {
+      deleteBtn.disabled = false
+      deleteBtn.title = 'Delete this studio session'
+    }
+  }
+  deleteLine.style.display = 'flex'
+}
+
+async function toggleEtmHide() {
+  const hideBtn = document.getElementById('etm-hide-btn')
+  hideBtn.disabled = true
+
+  try {
+    if (etmContext.scope === 'all') {
+      const allHidden = etmContext.sessions.every(s => !s.show)
+      const newShow = allHidden // if all hidden, show them; otherwise hide all
+      const ids = etmContext.sessions.map(s => s.id)
+      const { error } = await sb.from('sessions').update({ show: newShow }).in('id', ids)
+      if (error) throw error
+      etmContext.sessions.forEach(s => s.show = newShow)
+      scheduleData.forEach(s => { if (ids.includes(s.id)) s.show = newShow })
+    } else {
+      const sel = document.getElementById('etm-studio')
+      const sessionId = sel.value
+      const opt = sel.options[sel.selectedIndex]
+      const isShown = opt.dataset.show === 'true'
+      const newShow = !isShown
+      const { error } = await sb.from('sessions').update({ show: newShow }).eq('id', sessionId)
+      if (error) throw error
+      opt.dataset.show = String(newShow)
+      const memSession = scheduleData.find(s => s.id === sessionId)
+      if (memSession) memSession.show = newShow
+      etmContext.sessions = etmContext.sessions.map(s => s.id === sessionId ? { ...s, show: newShow } : s)
+    }
+    updateEtmStudioActions()
+    renderSchedule()
+  } catch(e) {
+    alert('Error: ' + e.message)
+  } finally {
+    hideBtn.disabled = false
+  }
+}
+
+async function deleteEtmSession() {
+  const scope = etmContext.scope
+  let confirmMsg, ids
+
+  if (scope === 'all') {
+    ids = etmContext.sessions.map(s => s.id)
+    confirmMsg = `Delete "${etmContext.title}" on ${fmtDate(etmContext.date)} from all ${ids.length} studio${ids.length!==1?'s':''}? This cannot be undone.`
+  } else {
+    const sel = document.getElementById('etm-studio')
+    ids = [sel.value]
+    const studioName = sel.options[sel.selectedIndex].text.replace(/ (d+ reg)$/, '')
+    confirmMsg = `Delete "${etmContext.title}" on ${fmtDate(etmContext.date)} for ${studioName} only? This cannot be undone.`
+  }
+
+  if (!confirm(confirmMsg)) return
+
+  const btn = document.getElementById('etm-delete-btn')
+  btn.textContent = 'Deleting...'; btn.disabled = true
+
+  try {
+    const { error } = await sb.from('sessions').delete().in('id', ids)
+    if (error) throw error
+
+    // Remove from in-memory scheduleData
+    ids.forEach(id => {
+      const idx = scheduleData.findIndex(s => s.id === id)
+      if (idx !== -1) scheduleData.splice(idx, 1)
+    })
+
+    closeEditTitleModal()
+    renderSchedule()
+  } catch(e) {
+    alert('Error deleting: ' + e.message)
+    btn.textContent = 'Delete'; btn.disabled = false
+  }
+}
+
+async function saveEditTitle() {
+  const newTitle = document.getElementById('etm-new-title').value.trim()
+  const newType = document.getElementById('etm-type').value
+  if (!newTitle) { alert('Please enter a title.'); return }
+  if (newTitle === etmContext.title && newType === etmContext.type) {
+    closeEditTitleModal(); return
+  }
+
+  const btn = document.getElementById('etm-save-btn')
+  btn.textContent = 'Saving...'; btn.disabled = true
+
+  try {
+    let query = sb.from('sessions')
+      .update({ title: newTitle, session_type: newType })
+      .eq('session_date', etmContext.date)
+      .eq('session_time', etmContext.time)
+      .eq('title', etmContext.title)
+
+    if (etmContext.scope === 'one') {
+      const studioSel = document.getElementById('etm-studio')
+      const sessionId = studioSel.value
+      query = sb.from('sessions')
+        .update({ title: newTitle, session_type: newType })
+        .eq('id', sessionId)
+    }
+
+    const { error } = await query
+    if (error) throw error
+
+    // Update in-memory scheduleData
+    scheduleData.forEach(s => {
+      if (s.session_date === etmContext.date && s.session_time === etmContext.time && s.title === etmContext.title) {
+        if (etmContext.scope === 'all') {
+          s.title = newTitle
+          s.session_type = newType
+        } else {
+          const selectedId = document.getElementById('etm-studio').value
+          if (s.id === selectedId) {
+            s.title = newTitle
+            s.session_type = newType
+          }
+        }
+      }
+    })
+
+    closeEditTitleModal()
+    renderSchedule()
+  } catch(e) {
+    alert('Error saving: ' + e.message)
+  } finally {
+    btn.textContent = 'Save Changes'; btn.disabled = false
+  }
+}
+
+// ═══════════════════════════════════════════════
+// ADD SESSION MODAL
+// ═══════════════════════════════════════════════
+function openAddSessionModal() {
+  // Pre-fill date from current schedule week
+  const from = document.getElementById('sch-from').value
+  if (from) document.getElementById('asm-date').value = from
+
+  // Build studio checkbox grid
+  const grid = document.getElementById('asm-studio-grid')
+  grid.innerHTML = allStudios.map(s =>
+    `<label class="studio-cb-item">
+      <input type="checkbox" value="${s.id}" name="asm-studio">
+      ${getStudioName(s.id)}
+    </label>`
+  ).join('')
+
+  document.getElementById('asm-status').textContent = ''
+  document.getElementById('asm-save-btn').textContent = 'Add Sessions'
+  document.getElementById('asm-save-btn').disabled = false
+  updateAsmPreview()
+  document.getElementById('add-session-modal').style.display = 'flex'
+  setTimeout(() => document.getElementById('asm-title').focus(), 50)
+}
+
+function closeAddSessionModal() {
+  document.getElementById('add-session-modal').style.display = 'none'
+}
+
+function asmSelectAll(checked) {
+  document.querySelectorAll('#asm-studio-grid input[type=checkbox]').forEach(cb => cb.checked = checked)
+}
+
+function updateAsmPreview() {
+  const date = document.getElementById('asm-date').value
+  const time = document.getElementById('asm-time').value
+  const title = document.getElementById('asm-title').value.trim()
+  const previewEl = document.getElementById('asm-shopify-preview')
+  if (!date || !time || !title) { previewEl.innerHTML = '<span style="color:#bbb">Fill in date, time and title to preview</span>'; return }
+  const shopifyTitle = buildShopifyTitle(date, time + ':00', title)
+  if (!shopifyTitle) {
+    previewEl.innerHTML = '<span style="color:#bbb">No Shopify product (class series / excluded type)</span>'
+  } else if (shopifyTitle === 'OVERRIDE') {
+    previewEl.innerHTML = '<span style="color:#e65100">Weekend Workshop — Shopify title set manually</span>'
+  } else {
+    previewEl.innerHTML = `<span>${shopifyTitle}</span>`
+  }
+}
+
+async function saveAddSessions() {
+  const date = document.getElementById('asm-date').value
+  const time = document.getElementById('asm-time').value
+  const title = document.getElementById('asm-title').value.trim()
+  const type = document.getElementById('asm-type').value
+  const capacity = parseInt(document.getElementById('asm-capacity').value) || 0
+  const show = document.getElementById('asm-show').value === 'true'
+
+  if (!date) { alert('Please select a date.'); return }
+  if (!time) { alert('Please enter a time.'); return }
+  if (!title) { alert('Please enter a session title.'); return }
+
+  const selected = [...document.querySelectorAll('#asm-studio-grid input[type=checkbox]:checked')].map(cb => cb.value)
+  if (!selected.length) { alert('Please select at least one studio.'); return }
+
+  const btn = document.getElementById('asm-save-btn')
+  const statusEl = document.getElementById('asm-status')
+  btn.textContent = 'Adding...'; btn.disabled = true
+  statusEl.textContent = ''
+
+  const sessionTime = time.length === 5 ? time + ':00' : time
+
+  const rows = selected.map(studioId => ({
+    studio_id: studioId,
+    session_date: date,
+    session_time: sessionTime,
+    title,
+    session_type: type,
+    capacity: capacity || null,
+    show,
+    spaces_left_cache: null
+  }))
+
+  try {
+    const { data: inserted, error } = await sb.from('sessions').insert(rows).select()
+    if (error) throw error
+
+    statusEl.style.color = '#2e7d32'
+    statusEl.textContent = `✓ Added ${inserted.length} session${inserted.length !== 1 ? 's' : ''} successfully.`
+
+    // Merge into scheduleData if date is in current view
+    const from = document.getElementById('sch-from').value
+    const to = document.getElementById('sch-to').value
+    if (date >= from && date <= to) {
+      inserted.forEach(s => {
+        scheduleData.push({ ...s, reg: 0 })
+        const studio = allStudios.find(st => st.id === s.studio_id)
+        if (studio && !gridStudios.find(gs => gs.id === studio.id)) {
+          gridStudios.push(studio)
+        }
+      })
+      renderSchedule()
+    }
+
+    btn.textContent = 'Add More'
+    btn.disabled = false
+    setTimeout(() => {
+      // Reset for another entry — keep date/time/type
+      document.getElementById('asm-title').value = ''
+      document.getElementById('asm-capacity').value = '0'
+      asmSelectAll(false)
+      statusEl.textContent = ''
+      btn.textContent = 'Add Sessions'
+      updateAsmPreview()
+    }, 2500)
+
+  } catch(e) {
+    statusEl.style.color = '#c0392b'
+    statusEl.textContent = 'Error: ' + e.message
+    btn.textContent = 'Add Sessions'; btn.disabled = false
+  }
+}
+
 </script>
 
 <!-- ══════════════════════════════════════════════
