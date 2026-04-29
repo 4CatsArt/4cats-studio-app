@@ -11,27 +11,36 @@
 // ═══════════════════════════════════════════════
 let etmContext = { title: '', date: '', time: '', type: '', scope: 'all' }
 
-function openEditTitleModal(title, date, time, type) {
-  etmContext = { title, date, time, type, scope: 'all' }
-  document.getElementById('etm-current-title').textContent = title
-  const newTitleInput = document.getElementById('etm-new-title')
-  newTitleInput.value = title
-  const typeSelect = document.getElementById('etm-type')
-  typeSelect.value = type || 'workshop'
-  document.getElementById('etm-sub').textContent = `${fmtDate(date)} · ${(time||'').substring(0,5)}`
-  setEtmScope('all')
-  updateEtmPreview()
+function openEditTitleModalFromBtn(btn) {
+  const ctx = JSON.parse(decodeURIComponent(btn.dataset.ctx))
+  openEditTitleModal(ctx.title, ctx.date, ctx.time, ctx.type)
+}
 
-  // Populate studio selector for "one studio" mode
+function openEditTitleModal(title, date, time, type) {
   const affected = scheduleData.filter(s =>
     s.session_date === date &&
     s.session_time === time &&
     s.title === title
   )
+  etmContext = { title, date, time, type, scope: 'all', sessions: affected }
+  document.getElementById('etm-current-title').textContent = title
+  const newTitleInput = document.getElementById('etm-new-title')
+  newTitleInput.value = title
+  const typeSelect = document.getElementById('etm-type')
+  typeSelect.value = type || 'workshop'
+  document.getElementById('etm-sub').textContent = `${fmtDate(date)} · ${(time||'').substring(0,5)} · ${affected.length} studio${affected.length!==1?'s':''}`
+  setEtmScope('all')
+  updateEtmPreview()
+
+  // Populate studio selector for "one studio" mode + show/delete
   const studioSel = document.getElementById('etm-studio')
   studioSel.innerHTML = affected.map(s =>
-    `<option value="${s.id}">${getStudioName(s.studio_id)}</option>`
+    `<option value="${s.id}" data-reg="${s.reg}" data-show="${s.show}">${getStudioName(s.studio_id)}${s.reg > 0 ? ' (' + s.reg + ' reg)' : ''}</option>`
   ).join('')
+  updateEtmStudioActions()
+
+  // When scope is 'one' and user changes studio, update action buttons
+  document.getElementById('etm-studio').onchange = updateEtmStudioActions
 
   document.getElementById('edit-title-modal').style.display = 'flex'
   setTimeout(() => newTitleInput.focus(), 50)
@@ -46,6 +55,7 @@ function setEtmScope(scope) {
   document.getElementById('etm-scope-all').classList.toggle('active', scope === 'all')
   document.getElementById('etm-scope-one').classList.toggle('active', scope === 'one')
   document.getElementById('etm-studio-selector').style.display = scope === 'one' ? 'block' : 'none'
+  updateEtmStudioActions()
 }
 
 function updateEtmPreview() {
@@ -60,6 +70,120 @@ function updateEtmPreview() {
     previewEl.innerHTML = '<span style="color:#e65100">Requires manual Shopify title</span>'
   } else {
     previewEl.innerHTML = `<span>${shopifyTitle}</span>`
+  }
+}
+
+function updateEtmStudioActions() {
+  const scope = etmContext.scope
+  const hideBtn = document.getElementById('etm-hide-btn')
+  const deleteBtn = document.getElementById('etm-delete-btn')
+  const deleteLine = document.getElementById('etm-delete-line')
+
+  if (scope === 'all') {
+    const totalReg = etmContext.sessions.reduce((sum, s) => sum + (s.reg || 0), 0)
+    const allHidden = etmContext.sessions.every(s => !s.show)
+    const allShown = etmContext.sessions.every(s => s.show)
+    hideBtn.textContent = allHidden ? 'Show all studios' : 'Hide all studios'
+    hideBtn.style.background = allHidden ? '#e8f5e9'  : '#fff3e0'
+    hideBtn.style.color      = allHidden ? '#2e7d32'  : '#e65100'
+    hideBtn.style.borderColor= allHidden ? '#a5d6a7'  : '#ffcc80'
+    if (totalReg > 0) {
+      deleteBtn.disabled = true
+      deleteBtn.title = `Cannot delete — ${totalReg} registration${totalReg!==1?'s':''} across studios`
+    } else {
+      deleteBtn.disabled = false
+      deleteBtn.title = 'Delete all instances of this session'
+    }
+  } else {
+    const sel = document.getElementById('etm-studio')
+    const opt = sel.options[sel.selectedIndex]
+    if (!opt) return
+    const reg = parseInt(opt.dataset.reg || '0')
+    const isShown = opt.dataset.show === 'true'
+    hideBtn.textContent = isShown ? 'Hide from calendar' : 'Show on calendar'
+    hideBtn.style.background = isShown ? '#fff3e0' : '#e8f5e9'
+    hideBtn.style.color      = isShown ? '#e65100' : '#2e7d32'
+    hideBtn.style.borderColor= isShown ? '#ffcc80' : '#a5d6a7'
+    if (reg > 0) {
+      deleteBtn.disabled = true
+      deleteBtn.title = `Cannot delete — ${reg} registration${reg!==1?'s':''}`
+    } else {
+      deleteBtn.disabled = false
+      deleteBtn.title = 'Delete this studio session'
+    }
+  }
+  deleteLine.style.display = 'flex'
+}
+
+async function toggleEtmHide() {
+  const hideBtn = document.getElementById('etm-hide-btn')
+  hideBtn.disabled = true
+
+  try {
+    if (etmContext.scope === 'all') {
+      const allHidden = etmContext.sessions.every(s => !s.show)
+      const newShow = allHidden // if all hidden, show them; otherwise hide all
+      const ids = etmContext.sessions.map(s => s.id)
+      const { error } = await sb.from('sessions').update({ show: newShow }).in('id', ids)
+      if (error) throw error
+      etmContext.sessions.forEach(s => s.show = newShow)
+      scheduleData.forEach(s => { if (ids.includes(s.id)) s.show = newShow })
+    } else {
+      const sel = document.getElementById('etm-studio')
+      const sessionId = sel.value
+      const opt = sel.options[sel.selectedIndex]
+      const isShown = opt.dataset.show === 'true'
+      const newShow = !isShown
+      const { error } = await sb.from('sessions').update({ show: newShow }).eq('id', sessionId)
+      if (error) throw error
+      opt.dataset.show = String(newShow)
+      const memSession = scheduleData.find(s => s.id === sessionId)
+      if (memSession) memSession.show = newShow
+      etmContext.sessions = etmContext.sessions.map(s => s.id === sessionId ? { ...s, show: newShow } : s)
+    }
+    updateEtmStudioActions()
+    renderSchedule()
+  } catch(e) {
+    alert('Error: ' + e.message)
+  } finally {
+    hideBtn.disabled = false
+  }
+}
+
+async function deleteEtmSession() {
+  const scope = etmContext.scope
+  let confirmMsg, ids
+
+  if (scope === 'all') {
+    ids = etmContext.sessions.map(s => s.id)
+    confirmMsg = `Delete "${etmContext.title}" on ${fmtDate(etmContext.date)} from all ${ids.length} studio${ids.length!==1?'s':''}? This cannot be undone.`
+  } else {
+    const sel = document.getElementById('etm-studio')
+    ids = [sel.value]
+    const studioName = sel.options[sel.selectedIndex].text.replace(/ (d+ reg)$/, '')
+    confirmMsg = `Delete "${etmContext.title}" on ${fmtDate(etmContext.date)} for ${studioName} only? This cannot be undone.`
+  }
+
+  if (!confirm(confirmMsg)) return
+
+  const btn = document.getElementById('etm-delete-btn')
+  btn.textContent = 'Deleting...'; btn.disabled = true
+
+  try {
+    const { error } = await sb.from('sessions').delete().in('id', ids)
+    if (error) throw error
+
+    // Remove from in-memory scheduleData
+    ids.forEach(id => {
+      const idx = scheduleData.findIndex(s => s.id === id)
+      if (idx !== -1) scheduleData.splice(idx, 1)
+    })
+
+    closeEditTitleModal()
+    renderSchedule()
+  } catch(e) {
+    alert('Error deleting: ' + e.message)
+    btn.textContent = 'Delete'; btn.disabled = false
   }
 }
 
@@ -793,13 +917,11 @@ function renderSchedule() {
       } else {
         shopifyBtn = `<span style="color:#ddd;font-size:10px">class series</span>`
       }
-      const safeTitleAttr = row.title.replace(/"/g, '&quot;').replace(/'/g, '&#39;')
-      const safeDate = date
-      const safeTime = row.time || '00:00:00'
+      const editDataKey = encodeURIComponent(JSON.stringify({ title: row.title, date, time: row.time || '00:00:00', type: row.type }))
       bodyHtml += `<tr><td class="session-info">
         <div class="session-title-wrap">
           <span class="session-title-cell">${row.title} <span class="badge ${badge}">${row.type}</span></span>
-          <button class="btn-edit-title" onclick="openEditTitleModal('${safeTitleAttr}', '${safeDate}', '${safeTime}', '${row.type}')" title="Edit title">✎</button>
+          <button class="btn-edit-title" data-ctx="${editDataKey}" onclick="openEditTitleModalFromBtn(this)" title="Edit / Delete session">✎</button>
         </div>
         <div class="session-time-cell">${time} &nbsp;${shopifyBtn}</div>
       </td>`
@@ -1368,9 +1490,15 @@ async function loadReports() {
       </div>
     </div>
 
-    <div class="modal-actions">
-      <button class="btn" onclick="closeEditTitleModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="saveEditTitle()" id="etm-save-btn">Save Changes</button>
+    <div id="etm-delete-line" style="display:none;align-items:center;justify-content:space-between;margin-top:1rem;padding-top:1rem;border-top:0.5px solid #f0f0e8;gap:8px">
+      <div style="display:flex;gap:8px">
+        <button id="etm-hide-btn" class="btn" onclick="toggleEtmHide()" style="font-size:12px">Hide</button>
+        <button id="etm-delete-btn" class="btn" onclick="deleteEtmSession()" style="background:#fff0f0;color:#c0392b;border-color:#f5c6cb;font-size:12px">Delete</button>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn" onclick="closeEditTitleModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveEditTitle()" id="etm-save-btn">Save Changes</button>
+      </div>
     </div>
   </div>
 </div>
