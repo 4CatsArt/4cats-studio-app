@@ -4,7 +4,242 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>4CATS Home Office</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2">
+
+// ═══════════════════════════════════════════════
+// EDIT TITLE MODAL
+// ═══════════════════════════════════════════════
+let etmContext = { title: '', date: '', time: '', type: '', scope: 'all' }
+
+function openEditTitleModal(title, date, time, type) {
+  etmContext = { title, date, time, type, scope: 'all' }
+  document.getElementById('etm-current-title').textContent = title
+  const newTitleInput = document.getElementById('etm-new-title')
+  newTitleInput.value = title
+  const typeSelect = document.getElementById('etm-type')
+  typeSelect.value = type || 'workshop'
+  document.getElementById('etm-sub').textContent = `${fmtDate(date)} · ${(time||'').substring(0,5)}`
+  setEtmScope('all')
+  updateEtmPreview()
+
+  // Populate studio selector for "one studio" mode
+  const affected = scheduleData.filter(s =>
+    s.session_date === date &&
+    s.session_time === time &&
+    s.title === title
+  )
+  const studioSel = document.getElementById('etm-studio')
+  studioSel.innerHTML = affected.map(s =>
+    `<option value="${s.id}">${getStudioName(s.studio_id)}</option>`
+  ).join('')
+
+  document.getElementById('edit-title-modal').style.display = 'flex'
+  setTimeout(() => newTitleInput.focus(), 50)
+}
+
+function closeEditTitleModal() {
+  document.getElementById('edit-title-modal').style.display = 'none'
+}
+
+function setEtmScope(scope) {
+  etmContext.scope = scope
+  document.getElementById('etm-scope-all').classList.toggle('active', scope === 'all')
+  document.getElementById('etm-scope-one').classList.toggle('active', scope === 'one')
+  document.getElementById('etm-studio-selector').style.display = scope === 'one' ? 'block' : 'none'
+}
+
+function updateEtmPreview() {
+  const newTitle = document.getElementById('etm-new-title').value.trim()
+  const shopifyTitle = newTitle
+    ? buildShopifyTitle(etmContext.date, etmContext.time || '00:00:00', newTitle)
+    : null
+  const previewEl = document.getElementById('etm-shopify-preview')
+  if (!shopifyTitle) {
+    previewEl.innerHTML = '<span style="color:#bbb">—</span>'
+  } else if (shopifyTitle === 'OVERRIDE') {
+    previewEl.innerHTML = '<span style="color:#e65100">Requires manual Shopify title</span>'
+  } else {
+    previewEl.innerHTML = `<span>${shopifyTitle}</span>`
+  }
+}
+
+async function saveEditTitle() {
+  const newTitle = document.getElementById('etm-new-title').value.trim()
+  const newType = document.getElementById('etm-type').value
+  if (!newTitle) { alert('Please enter a title.'); return }
+  if (newTitle === etmContext.title && newType === etmContext.type) {
+    closeEditTitleModal(); return
+  }
+
+  const btn = document.getElementById('etm-save-btn')
+  btn.textContent = 'Saving...'; btn.disabled = true
+
+  try {
+    let query = sb.from('sessions')
+      .update({ title: newTitle, session_type: newType })
+      .eq('session_date', etmContext.date)
+      .eq('session_time', etmContext.time)
+      .eq('title', etmContext.title)
+
+    if (etmContext.scope === 'one') {
+      const studioSel = document.getElementById('etm-studio')
+      const sessionId = studioSel.value
+      query = sb.from('sessions')
+        .update({ title: newTitle, session_type: newType })
+        .eq('id', sessionId)
+    }
+
+    const { error } = await query
+    if (error) throw error
+
+    // Update in-memory scheduleData
+    scheduleData.forEach(s => {
+      if (s.session_date === etmContext.date && s.session_time === etmContext.time && s.title === etmContext.title) {
+        if (etmContext.scope === 'all') {
+          s.title = newTitle
+          s.session_type = newType
+        } else {
+          const selectedId = document.getElementById('etm-studio').value
+          if (s.id === selectedId) {
+            s.title = newTitle
+            s.session_type = newType
+          }
+        }
+      }
+    })
+
+    closeEditTitleModal()
+    renderSchedule()
+  } catch(e) {
+    alert('Error saving: ' + e.message)
+  } finally {
+    btn.textContent = 'Save Changes'; btn.disabled = false
+  }
+}
+
+// ═══════════════════════════════════════════════
+// ADD SESSION MODAL
+// ═══════════════════════════════════════════════
+function openAddSessionModal() {
+  // Pre-fill date from current schedule week
+  const from = document.getElementById('sch-from').value
+  if (from) document.getElementById('asm-date').value = from
+
+  // Build studio checkbox grid
+  const grid = document.getElementById('asm-studio-grid')
+  grid.innerHTML = allStudios.map(s =>
+    `<label class="studio-cb-item">
+      <input type="checkbox" value="${s.id}" name="asm-studio">
+      ${getStudioName(s.id)}
+    </label>`
+  ).join('')
+
+  document.getElementById('asm-status').textContent = ''
+  document.getElementById('asm-save-btn').textContent = 'Add Sessions'
+  document.getElementById('asm-save-btn').disabled = false
+  updateAsmPreview()
+  document.getElementById('add-session-modal').style.display = 'flex'
+  setTimeout(() => document.getElementById('asm-title').focus(), 50)
+}
+
+function closeAddSessionModal() {
+  document.getElementById('add-session-modal').style.display = 'none'
+}
+
+function asmSelectAll(checked) {
+  document.querySelectorAll('#asm-studio-grid input[type=checkbox]').forEach(cb => cb.checked = checked)
+}
+
+function updateAsmPreview() {
+  const date = document.getElementById('asm-date').value
+  const time = document.getElementById('asm-time').value
+  const title = document.getElementById('asm-title').value.trim()
+  const previewEl = document.getElementById('asm-shopify-preview')
+  if (!date || !time || !title) { previewEl.innerHTML = '<span style="color:#bbb">Fill in date, time and title to preview</span>'; return }
+  const shopifyTitle = buildShopifyTitle(date, time + ':00', title)
+  if (!shopifyTitle) {
+    previewEl.innerHTML = '<span style="color:#bbb">No Shopify product (class series / excluded type)</span>'
+  } else if (shopifyTitle === 'OVERRIDE') {
+    previewEl.innerHTML = '<span style="color:#e65100">Weekend Workshop — Shopify title set manually</span>'
+  } else {
+    previewEl.innerHTML = `<span>${shopifyTitle}</span>`
+  }
+}
+
+async function saveAddSessions() {
+  const date = document.getElementById('asm-date').value
+  const time = document.getElementById('asm-time').value
+  const title = document.getElementById('asm-title').value.trim()
+  const type = document.getElementById('asm-type').value
+  const capacity = parseInt(document.getElementById('asm-capacity').value) || 0
+  const show = document.getElementById('asm-show').value === 'true'
+
+  if (!date) { alert('Please select a date.'); return }
+  if (!time) { alert('Please enter a time.'); return }
+  if (!title) { alert('Please enter a session title.'); return }
+
+  const selected = [...document.querySelectorAll('#asm-studio-grid input[type=checkbox]:checked')].map(cb => cb.value)
+  if (!selected.length) { alert('Please select at least one studio.'); return }
+
+  const btn = document.getElementById('asm-save-btn')
+  const statusEl = document.getElementById('asm-status')
+  btn.textContent = 'Adding...'; btn.disabled = true
+  statusEl.textContent = ''
+
+  const sessionTime = time.length === 5 ? time + ':00' : time
+
+  const rows = selected.map(studioId => ({
+    studio_id: studioId,
+    session_date: date,
+    session_time: sessionTime,
+    title,
+    session_type: type,
+    capacity: capacity || null,
+    show,
+    spaces_left_cache: null
+  }))
+
+  try {
+    const { data: inserted, error } = await sb.from('sessions').insert(rows).select()
+    if (error) throw error
+
+    statusEl.style.color = '#2e7d32'
+    statusEl.textContent = `✓ Added ${inserted.length} session${inserted.length !== 1 ? 's' : ''} successfully.`
+
+    // Merge into scheduleData if date is in current view
+    const from = document.getElementById('sch-from').value
+    const to = document.getElementById('sch-to').value
+    if (date >= from && date <= to) {
+      inserted.forEach(s => {
+        scheduleData.push({ ...s, reg: 0 })
+        const studio = allStudios.find(st => st.id === s.studio_id)
+        if (studio && !gridStudios.find(gs => gs.id === studio.id)) {
+          gridStudios.push(studio)
+        }
+      })
+      renderSchedule()
+    }
+
+    btn.textContent = 'Add More'
+    btn.disabled = false
+    setTimeout(() => {
+      // Reset for another entry — keep date/time/type
+      document.getElementById('asm-title').value = ''
+      document.getElementById('asm-capacity').value = '0'
+      asmSelectAll(false)
+      statusEl.textContent = ''
+      btn.textContent = 'Add Sessions'
+      updateAsmPreview()
+    }, 2500)
+
+  } catch(e) {
+    statusEl.style.color = '#c0392b'
+    statusEl.textContent = 'Error: ' + e.message
+    btn.textContent = 'Add Sessions'; btn.disabled = false
+  }
+}
+
+</script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #f5f5f0; color: #1a1a1a; min-height: 100vh; font-size: 13px; }
@@ -119,6 +354,42 @@ select:focus, input:focus { border-color: #888; }
 .split-item.inactive { opacity: 0.4; }
 .loading { text-align: center; padding: 3rem; color: #888; }
 .empty { text-align: center; padding: 3rem; color: #888; font-size: 13px; }
+
+.btn-edit-title { background: none; border: none; color: #ccc; font-size: 10px; cursor: pointer; padding: 1px 5px; border-radius: 3px; margin-left: 4px; opacity: 0; transition: opacity 0.15s; vertical-align: middle; }
+.session-title-wrap:hover .btn-edit-title { opacity: 1; }
+.btn-edit-title:hover { color: #555; background: #ebebeb; }
+
+/* ── Modal shared ── */
+.modal-overlay { position: fixed; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.45); z-index: 2000; display: flex; align-items: center; justify-content: center; padding: 2rem; }
+.modal-box { background: white; border-radius: 12px; width: 100%; max-width: 560px; max-height: 88vh; overflow-y: auto; padding: 1.5rem; }
+.modal-box.wide { max-width: 680px; }
+.modal-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1.25rem; }
+.modal-title { font-size: 15px; font-weight: 600; }
+.modal-sub { font-size: 12px; color: #888; margin-top: 3px; }
+.modal-close { background: none; border: none; font-size: 22px; cursor: pointer; color: #888; padding: 0; line-height: 1; margin-left: 1rem; flex-shrink: 0; }
+.modal-close:hover { color: #333; }
+.modal-field { margin-bottom: 1rem; }
+.modal-field label { display: block; font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 5px; font-weight: 500; }
+.modal-field input, .modal-field select, .modal-field textarea { width: 100%; padding: 8px 10px; border: 0.5px solid #d0d0c8; border-radius: 7px; font-size: 13px; outline: none; background: white; color: #1a1a1a; font-family: inherit; }
+.modal-field input:focus, .modal-field select:focus, .modal-field textarea:focus { border-color: #888; }
+.modal-field textarea { resize: vertical; min-height: 60px; }
+.modal-hint { font-size: 11px; color: #aaa; margin-top: 4px; }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 1.25rem; padding-top: 1.25rem; border-top: 0.5px solid #f0f0e8; }
+.modal-scope-row { display: flex; gap: 8px; margin-bottom: 1rem; }
+.scope-btn { flex: 1; padding: 8px; border: 0.5px solid #d0d0c8; border-radius: 7px; background: white; font-size: 12px; cursor: pointer; text-align: center; color: #555; }
+.scope-btn.active { border-color: #1a1a1a; background: #1a1a1a; color: white; }
+.scope-btn:hover:not(.active) { background: #f5f5f0; }
+
+/* studio checkbox grid */
+.studio-checkbox-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(175px, 1fr)); gap: 6px; max-height: 260px; overflow-y: auto; border: 0.5px solid #e0e0d8; border-radius: 7px; padding: 10px; }
+.studio-cb-item { display: flex; align-items: center; gap: 7px; font-size: 12px; cursor: pointer; padding: 4px 6px; border-radius: 5px; }
+.studio-cb-item:hover { background: #f5f5f0; }
+.studio-cb-item input[type=checkbox] { width: 14px; height: 14px; cursor: pointer; accent-color: #1a1a1a; flex-shrink: 0; }
+.studio-select-all { font-size: 11px; color: #888; cursor: pointer; text-decoration: underline; margin-bottom: 6px; display: inline-block; }
+.studio-select-all:hover { color: #333; }
+.shopify-preview { background: #f5f5f0; border-radius: 6px; padding: 8px 10px; font-size: 11px; color: #666; margin-top: 4px; }
+.shopify-preview span { font-family: monospace; color: #1a1a1a; font-size: 11px; }
+
 </style>
 </head>
 <body>
@@ -182,6 +453,10 @@ select:focus, input:focus { border-color: #888; }
       <div class="toolbar-group">
         <label>0 Reg before</label>
         <input type="date" id="sch-zero-date" oninput="renderSchedule()">
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group">
+        <button class="btn btn-primary" onclick="openAddSessionModal()">+ Add Session</button>
       </div>
     </div>
     <div class="stats-row" id="stats-row"></div>
@@ -518,8 +793,14 @@ function renderSchedule() {
       } else {
         shopifyBtn = `<span style="color:#ddd;font-size:10px">class series</span>`
       }
+      const safeTitleAttr = row.title.replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+      const safeDate = date
+      const safeTime = row.time || '00:00:00'
       bodyHtml += `<tr><td class="session-info">
-        <div class="session-title-cell">${row.title} <span class="badge ${badge}">${row.type}</span></div>
+        <div class="session-title-wrap">
+          <span class="session-title-cell">${row.title} <span class="badge ${badge}">${row.type}</span></span>
+          <button class="btn-edit-title" onclick="openEditTitleModal('${safeTitleAttr}', '${safeDate}', '${safeTime}', '${row.type}')" title="Edit title">✎</button>
+        </div>
         <div class="session-time-cell">${time} &nbsp;${shopifyBtn}</div>
       </td>`
       let rowTotal = 0
@@ -1035,5 +1316,139 @@ async function loadReports() {
   document.getElementById('reports-container').innerHTML = html
 }
 </script>
+
+<!-- ══════════════════════════════════════════════
+     EDIT TITLE MODAL
+══════════════════════════════════════════════ -->
+<div id="edit-title-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeEditTitleModal()">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title">Edit Session Title</div>
+        <div class="modal-sub" id="etm-sub">Updating across all studios</div>
+      </div>
+      <button class="modal-close" onclick="closeEditTitleModal()">×</button>
+    </div>
+
+    <div class="modal-field">
+      <label>Current title</label>
+      <div style="padding:8px 10px;background:#f5f5f0;border-radius:7px;font-size:13px;color:#666" id="etm-current-title"></div>
+    </div>
+
+    <div class="modal-field">
+      <label>New title</label>
+      <input type="text" id="etm-new-title" oninput="updateEtmPreview()">
+    </div>
+
+    <div class="modal-field">
+      <label>Session type</label>
+      <select id="etm-type">
+        <option value="workshop">Workshop</option>
+        <option value="party">Party</option>
+        <option value="glazing">Glazing</option>
+        <option value="class">Class</option>
+        <option value="camp">Camp</option>
+      </select>
+    </div>
+
+    <div class="modal-field">
+      <label>Shopify title preview</label>
+      <div class="shopify-preview" id="etm-shopify-preview">—</div>
+      <div class="modal-hint">This is the Shopify title that would be generated from the new session title. The sessions table title is updated; Shopify must be updated separately if needed.</div>
+    </div>
+
+    <div class="modal-field">
+      <label>Apply to</label>
+      <div class="modal-scope-row">
+        <button class="scope-btn active" id="etm-scope-all" onclick="setEtmScope('all')">All studios on this date &amp; time</button>
+        <button class="scope-btn" id="etm-scope-one" onclick="setEtmScope('one')">One studio only</button>
+      </div>
+      <div id="etm-studio-selector" style="display:none">
+        <select id="etm-studio" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none"></select>
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn" onclick="closeEditTitleModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveEditTitle()" id="etm-save-btn">Save Changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     ADD SESSION MODAL
+══════════════════════════════════════════════ -->
+<div id="add-session-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeAddSessionModal()">
+  <div class="modal-box wide">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title">Add New Sessions</div>
+        <div class="modal-sub">Create sessions across one or more studios</div>
+      </div>
+      <button class="modal-close" onclick="closeAddSessionModal()">×</button>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="modal-field">
+        <label>Date</label>
+        <input type="date" id="asm-date" oninput="updateAsmPreview()">
+      </div>
+      <div class="modal-field">
+        <label>Time</label>
+        <input type="time" id="asm-time" value="14:00" oninput="updateAsmPreview()">
+      </div>
+    </div>
+
+    <div class="modal-field">
+      <label>Session title</label>
+      <input type="text" id="asm-title" placeholder="e.g. Hedgehog Mug" oninput="updateAsmPreview()">
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+      <div class="modal-field">
+        <label>Session type</label>
+        <select id="asm-type">
+          <option value="workshop">Workshop</option>
+          <option value="party">Party</option>
+          <option value="glazing">Glazing</option>
+          <option value="class">Class</option>
+          <option value="camp">Camp</option>
+        </select>
+      </div>
+      <div class="modal-field">
+        <label>Capacity (0 = unlimited)</label>
+        <input type="number" id="asm-capacity" value="0" min="0" style="width:100%">
+      </div>
+      <div class="modal-field">
+        <label>Show to staff?</label>
+        <select id="asm-show">
+          <option value="true">Yes — show</option>
+          <option value="false">No — hide</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="modal-field">
+      <label>Shopify title preview</label>
+      <div class="shopify-preview" id="asm-shopify-preview">—</div>
+    </div>
+
+    <div class="modal-field">
+      <label>Studios
+        <span class="studio-select-all" onclick="asmSelectAll(true)" style="margin-left:8px">Select all</span>
+        <span class="studio-select-all" onclick="asmSelectAll(false)" style="margin-left:6px">Deselect all</span>
+      </label>
+      <div class="studio-checkbox-grid" id="asm-studio-grid"></div>
+    </div>
+
+    <div id="asm-status" style="font-size:12px;color:#888;min-height:18px;margin-top:4px"></div>
+
+    <div class="modal-actions">
+      <button class="btn" onclick="closeAddSessionModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveAddSessions()" id="asm-save-btn">Add Sessions</button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
