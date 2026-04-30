@@ -1224,7 +1224,34 @@ async function loadQualityReport() {
     if (s.capacity>0 && total>s.capacity) issues.push({ type:'over', label:'Oversold — bookings exceed capacity', detail:`${s.title} · ${getStudioName(s.studio_id)} · ${total} booked / ${s.capacity} capacity`, date:s.session_date, action:null })
   })
 
-  // ── Check 2: Party bookings with no add-on but possible orphan add-on order ──
+  // ── Check 2: Bookings with no session_id (no matching session in Supabase) ──
+  const { data: nullSessionBookings } = await sb.from('bookings')
+    .select('id, customer_name, customer_email, shopify_order_name, studio_id, raw_payload, booked_at, qty')
+    .is('session_id', null)
+    .gt('qty', 0)
+    .gte('booked_at', new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()) // last 90 days
+
+  if (nullSessionBookings?.length) {
+    nullSessionBookings.forEach(b => {
+      // Extract the session title from the line item
+      let sessionTitle = '—'
+      try {
+        const p = typeof b.raw_payload === 'string' ? JSON.parse(b.raw_payload) : b.raw_payload
+        const li = (p?.line_items || []).find(li => /^\d+(am|pm|:\d)/i.test(li.title || ''))
+        if (li) sessionTitle = li.title || li.name || '—'
+      } catch {}
+      const bookedDate = new Date(b.booked_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })
+      issues.push({
+        type: 'no-session',
+        label: 'No matching session',
+        detail: `${b.customer_name || '—'} · ${getStudioName(b.studio_id)} · ${b.shopify_order_name || '—'} · "${sessionTitle}" · booked ${bookedDate}`,
+        date: today,
+        action: null
+      })
+    })
+  }
+
+  // ── Check 3: Party bookings with no add-on but possible orphan add-on order ──
   const partySessionIds = sessions.filter(s=>s.session_type==='party').map(s=>s.id)
   const partyBookings = bookings.filter(b=>partySessionIds.includes(b.session_id))
 
@@ -1303,11 +1330,13 @@ async function loadQualityReport() {
   issues.sort((a,b)=>a.date.localeCompare(b.date))
   const oversoldCount = issues.filter(i=>i.type==='over').length
   const addonCount = issues.filter(i=>i.type==='addon'||i.type==='addon-ambiguous').length
+  const noSessionCount = issues.filter(i=>i.type==='no-session').length
 
   if (!issues.length) { container.innerHTML = `<div class="empty" style="color:#2e7d32">✓ No issues found in upcoming bookings.</div>`; return }
 
   let html = `<div style="display:flex;gap:12px;margin-bottom:1rem">
     ${oversoldCount ? `<div class="stat-card warn"><div class="val">${oversoldCount}</div><div class="lbl">Oversold Sessions</div></div>` : ''}
+    ${noSessionCount ? `<div class="stat-card warn"><div class="val">${noSessionCount}</div><div class="lbl">No Matching Session</div></div>` : ''}
     ${addonCount ? `<div class="stat-card warn"><div class="val">${addonCount}</div><div class="lbl">Unmatched Add-ons</div></div>` : ''}
   </div>
   <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden">
@@ -1321,8 +1350,8 @@ async function loadQualityReport() {
 
   issues.forEach(issue => {
     const d = new Date(issue.date+'T12:00:00').toLocaleDateString('en-CA',{weekday:'short',month:'short',day:'numeric'})
-    const bgColor = issue.type === 'over' ? '#fff3e0' : '#fff0f8'
-    const textColor = issue.type === 'over' ? '#e65100' : '#99354e'
+    const bgColor = issue.type === 'over' ? '#fff3e0' : issue.type === 'no-session' ? '#f0f0ff' : '#fff0f8'
+    const textColor = issue.type === 'over' ? '#e65100' : issue.type === 'no-session' ? '#3730a3' : '#99354e'
     let actionHtml = '—'
     if (issue.type === 'addon' && issue.action) {
       const safeAction = encodeURIComponent(JSON.stringify(issue.action))
