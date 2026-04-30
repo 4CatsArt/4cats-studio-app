@@ -1705,17 +1705,32 @@ async function loadQualityReport() {
   const issues = []
 
   // Issue 1: booking references session_id that doesn't exist
-  bookings.forEach(b => {
-    if (!sessionMap[b.session_id]) {
+  const orphanBookings = bookings.filter(b => !sessionMap[b.session_id])
+
+  if (orphanBookings.length) {
+    const orphanIds = orphanBookings.map(b => b.id)
+    const { data: orphanDetails } = await sb.from('bookings')
+      .select('id, raw_payload')
+      .in('id', orphanIds)
+    const payloadMap = {}
+    if (orphanDetails) orphanDetails.forEach(b => { payloadMap[b.id] = b.raw_payload })
+
+    orphanBookings.forEach(b => {
+      let productTitle = '—'
+      try {
+        const p = typeof payloadMap[b.id] === 'string' ? JSON.parse(payloadMap[b.id]) : payloadMap[b.id]
+        const li = p?.line_items?.[0]
+        productTitle = li?.title || li?.name || '—'
+      } catch(e) {}
       issues.push({
         type: 'orphan',
         severity: 'high',
-        label: 'Orphaned booking — session not found',
-        detail: `Order ${b.shopify_order_name || '—'} · ${b.customer_name || '—'} · qty ${b.qty} · session_id: ${b.session_id}`,
+        label: 'Orphaned booking',
+        detail: `${b.customer_name || '—'} · ${b.shopify_order_name || '—'} · qty ${b.qty} · <em style="color:#888">${productTitle}</em>`,
         date: b.event_date || '—'
       })
-    }
-  })
+    })
+  }
 
   // Issue 2: total bookings exceed capacity
   Object.entries(sessionTotals).forEach(([sessionId, total]) => {
