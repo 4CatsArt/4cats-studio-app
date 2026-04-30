@@ -1676,24 +1676,30 @@ async function loadQualityReport() {
 
   const today = dateStr(new Date())
 
-  // Fetch all upcoming bookings with qty > 0
+  // Get all upcoming sessions first
+  const { data: sessions } = await sb.from('sessions')
+    .select('id, title, session_date, session_time, capacity, studio_id, show')
+    .gte('session_date', today)
+
+  if (!sessions?.length) {
+    container.innerHTML = '<div class="empty">No upcoming sessions found.</div>'
+    return
+  }
+
+  const sessionMap = {}
+  sessions.forEach(s => { sessionMap[s.id] = s })
+  const sessionIds = sessions.map(s => s.id)
+
+  // Fetch bookings only for those sessions
   const { data: bookings } = await sb.from('bookings')
-    .select('id, session_id, shopify_order_name, customer_name, qty, event_date, booked_at')
-    .gte('event_date', today)
+    .select('id, session_id, shopify_order_name, customer_name, qty, booked_at')
+    .in('session_id', sessionIds)
     .gt('qty', 0)
 
   if (!bookings?.length) {
     container.innerHTML = '<div class="empty">No upcoming bookings found.</div>'
     return
   }
-
-  // Get all upcoming sessions
-  const { data: sessions } = await sb.from('sessions')
-    .select('id, title, session_date, session_time, capacity, studio_id, show')
-    .gte('session_date', today)
-
-  const sessionMap = {}
-  if (sessions) sessions.forEach(s => { sessionMap[s.id] = s })
 
   // Tally booking counts per session
   const sessionTotals = {}
@@ -1704,38 +1710,10 @@ async function loadQualityReport() {
 
   const issues = []
 
-  // Issue 1: booking references session_id that doesn't exist
-  const orphanBookings = bookings.filter(b => !sessionMap[b.session_id])
-
-  if (orphanBookings.length) {
-    const orphanIds = orphanBookings.map(b => b.id)
-    const { data: orphanDetails } = await sb.from('bookings')
-      .select('id, raw_payload')
-      .in('id', orphanIds)
-    const payloadMap = {}
-    if (orphanDetails) orphanDetails.forEach(b => { payloadMap[b.id] = b.raw_payload })
-
-    orphanBookings.forEach(b => {
-      let productTitle = '—'
-      try {
-        const p = typeof payloadMap[b.id] === 'string' ? JSON.parse(payloadMap[b.id]) : payloadMap[b.id]
-        const li = p?.line_items?.[0]
-        productTitle = li?.title || li?.name || '—'
-      } catch(e) {}
-      issues.push({
-        type: 'orphan',
-        severity: 'high',
-        label: 'Orphaned booking',
-        detail: `${b.customer_name || '—'} · ${b.shopify_order_name || '—'} · qty ${b.qty} · <em style="color:#888">${productTitle}</em>`,
-        date: b.event_date || '—'
-      })
-    })
-  }
-
-  // Issue 2: total bookings exceed capacity
+  // Oversold sessions
   Object.entries(sessionTotals).forEach(([sessionId, total]) => {
     const s = sessionMap[sessionId]
-    if (!s) return // already caught above
+    if (!s) return
     if (s.capacity > 0 && total > s.capacity) {
       issues.push({
         type: 'over',
@@ -1758,8 +1736,7 @@ async function loadQualityReport() {
   let html = `
     <div style="display:flex;gap:12px;margin-bottom:1rem">
       <div class="stat-card warn"><div class="val">${issues.length}</div><div class="lbl">Issues Found</div></div>
-      <div class="stat-card"><div class="val">${issues.filter(i=>i.type==='orphan').length}</div><div class="lbl">Orphaned Bookings</div></div>
-      <div class="stat-card"><div class="val">${issues.filter(i=>i.type==='over').length}</div><div class="lbl">Oversold Sessions</div></div>
+      <div class="stat-card"><div class="val">${issues.length}</div><div class="lbl">Oversold Sessions</div></div>
     </div>
     <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden">
       <table style="width:100%;border-collapse:collapse;font-size:12px">
