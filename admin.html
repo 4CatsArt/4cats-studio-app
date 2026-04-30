@@ -179,6 +179,7 @@ select:focus, input:focus { border-color: #888; }
     <button class="tab-btn" onclick="switchTab('inventory')">Inventory</button>
     <button class="tab-btn" onclick="switchTab('reports')">Daily Reports</button>
     <button class="tab-btn" onclick="switchTab('curriculum')">Curriculum</button>
+    <button class="tab-btn" onclick="switchTab('quality')">Data Quality</button>
     <div class="top-bar-right"><button class="signout-btn" onclick="signOut()">Sign out</button></div>
   </div>
 
@@ -324,6 +325,18 @@ select:focus, input:focus { border-color: #888; }
   <div id="curriculum-container"><div class="loading">Loading...</div></div>
 </div>
   </div>
+  <div class="tab-content" id="tab-quality">
+  <div class="toolbar">
+    <div class="toolbar-group">
+      <button class="btn btn-primary" onclick="loadQualityReport()">Run Check</button>
+    </div>
+    <div class="toolbar-sep"></div>
+    <div class="toolbar-group" style="font-size:11px;color:#888">
+      Checks upcoming bookings (today forward) for data issues
+    </div>
+  </div>
+  <div id="quality-container"><div class="empty">Click Run Check to scan for issues.</div></div>
+</div>
 
 <script>
 const SUPABASE_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co'
@@ -414,10 +427,11 @@ async function initApp() {
 }
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum'][i] === tab))
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality'][i] === tab))
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'))
   document.getElementById(`tab-${tab}`).classList.add('active')
   if (tab === 'curriculum') loadCurriculum()
+  if (tab === 'quality') loadQualityReport()
 }
 
 function dateStr(d) { return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}` }
@@ -1652,6 +1666,114 @@ async function saveAddCurriculum() {
   renderCurriculum()
   btn.textContent = 'Save'; btn.disabled = false
 }
+
+  // ═══════════════════════════════════════════════
+// DATA QUALITY TAB
+// ═══════════════════════════════════════════════
+async function loadQualityReport() {
+  const container = document.getElementById('quality-container')
+  container.innerHTML = '<div class="loading">Scanning...</div>'
+
+  const today = dateStr(new Date())
+
+  // Fetch all upcoming bookings with qty > 0
+  const { data: bookings } = await sb.from('bookings')
+    .select('id, session_id, shopify_order_name, customer_name, qty, event_date, booked_at')
+    .gte('event_date', today)
+    .gt('qty', 0)
+
+  if (!bookings?.length) {
+    container.innerHTML = '<div class="empty">No upcoming bookings found.</div>'
+    return
+  }
+
+  // Get all upcoming sessions
+  const { data: sessions } = await sb.from('sessions')
+    .select('id, title, session_date, session_time, capacity, studio_id, show')
+    .gte('session_date', today)
+
+  const sessionMap = {}
+  if (sessions) sessions.forEach(s => { sessionMap[s.id] = s })
+
+  // Tally booking counts per session
+  const sessionTotals = {}
+  bookings.forEach(b => {
+    if (!sessionTotals[b.session_id]) sessionTotals[b.session_id] = 0
+    sessionTotals[b.session_id] += (b.qty || 0)
+  })
+
+  const issues = []
+
+  // Issue 1: booking references session_id that doesn't exist
+  bookings.forEach(b => {
+    if (!sessionMap[b.session_id]) {
+      issues.push({
+        type: 'orphan',
+        severity: 'high',
+        label: 'Orphaned booking — session not found',
+        detail: `Order ${b.shopify_order_name || '—'} · ${b.customer_name || '—'} · qty ${b.qty} · session_id: ${b.session_id}`,
+        date: b.event_date || '—'
+      })
+    }
+  })
+
+  // Issue 2: total bookings exceed capacity
+  Object.entries(sessionTotals).forEach(([sessionId, total]) => {
+    const s = sessionMap[sessionId]
+    if (!s) return // already caught above
+    if (s.capacity > 0 && total > s.capacity) {
+      issues.push({
+        type: 'over',
+        severity: 'high',
+        label: 'Oversold — bookings exceed capacity',
+        detail: `${s.title} · ${getStudioName(s.studio_id)} · ${total} booked / ${s.capacity} capacity`,
+        date: s.session_date
+      })
+    }
+  })
+
+  // Sort by date
+  issues.sort((a, b) => a.date.localeCompare(b.date))
+
+  if (!issues.length) {
+    container.innerHTML = `<div class="empty" style="color:#2e7d32">✓ No issues found in upcoming bookings.</div>`
+    return
+  }
+
+  let html = `
+    <div style="display:flex;gap:12px;margin-bottom:1rem">
+      <div class="stat-card warn"><div class="val">${issues.length}</div><div class="lbl">Issues Found</div></div>
+      <div class="stat-card"><div class="val">${issues.filter(i=>i.type==='orphan').length}</div><div class="lbl">Orphaned Bookings</div></div>
+      <div class="stat-card"><div class="val">${issues.filter(i=>i.type==='over').length}</div><div class="lbl">Oversold Sessions</div></div>
+    </div>
+    <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
+            <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Date</th>
+            <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Issue</th>
+            <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Detail</th>
+          </tr>
+        </thead>
+        <tbody>`
+
+  issues.forEach(issue => {
+    const d = issue.date !== '—' ? new Date(issue.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }) : '—'
+    const badgeColor = issue.type === 'orphan' ? '#c0392b' : '#e65100'
+    const badgeBg = issue.type === 'orphan' ? '#fff0f0' : '#fff3e0'
+    html += `<tr style="border-bottom:0.5px solid #f5f5f0">
+      <td style="padding:10px 14px;white-space:nowrap;color:#888">${d}</td>
+      <td style="padding:10px 14px;white-space:nowrap">
+        <span style="display:inline-block;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:500;background:${badgeBg};color:${badgeColor}">${issue.label}</span>
+      </td>
+      <td style="padding:10px 14px;color:#444">${issue.detail}</td>
+    </tr>`
+  })
+
+  html += '</tbody></table></div>'
+  container.innerHTML = html
+}
+  
 </script>
 
 <!-- ══════════════════════════════════════════════
