@@ -491,6 +491,33 @@ function buildShopifyTitle(sessionDate, sessionTime, sessionTitle) {
   return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${cleanTitle}`
 }
 
+  // ── Series class helpers ──
+function isSeriesClass2Plus(title) {
+  return /\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(title)
+}
+
+function getSeriesClass1Title(title) {
+  return title.replace(/\s*-?\s*class\s+\d+\s+of\s+\d+/i, '').trim()
+}
+
+async function findClass1SessionId(studioId, sessionTime, seriesTitle) {
+  const { data: exact } = await sb.from('sessions')
+    .select('id').eq('studio_id', studioId).eq('session_time', sessionTime).eq('title', seriesTitle).single()
+  if (exact) return exact.id
+  const { data: sessions } = await sb.from('sessions')
+    .select('id, title').eq('studio_id', studioId).eq('session_time', sessionTime)
+  if (!sessions) return null
+  const candidates = sessions.filter(s =>
+    !isSeriesClass2Plus(s.title) &&
+    s.title.toLowerCase().includes(seriesTitle.toLowerCase().split('|')[0].trim().substring(0, 10))
+  )
+  if (!candidates.length) return null
+  if (candidates.length === 1) return candidates[0].id
+  const { data: bookings } = await sb.from('bookings')
+    .select('session_id').in('session_id', candidates.map(s => s.id)).gt('qty', 0).limit(1)
+  return bookings?.length ? bookings[0].session_id : candidates[0].id
+}
+
 function toggleHighlight(mode) {
   highlightMode = highlightMode === mode ? null : mode
   document.getElementById('btn-zero').classList.toggle('active', highlightMode === 'zero')
@@ -522,6 +549,22 @@ async function loadSchedule() {
   for (let i = 0; i < ids.length; i += 500) {
     const { data: bookings } = await sb.from('bookings').select('session_id, qty').in('session_id', ids.slice(i, i+500))
     if (bookings) bookings.forEach(b => { counts[b.session_id] = (counts[b.session_id]||0) + (b.qty||0) })
+  }
+ // For series classes 2+, copy booking count from class 1
+  for (const s of sessions) {
+    if (isSeriesClass2Plus(s.title) && !counts[s.id]) {
+      const class1Title = getSeriesClass1Title(s.title)
+      const class1Id = await findClass1SessionId(s.studio_id, s.session_time, class1Title)
+      if (class1Id) {
+        const c1count = counts[class1Id]
+        if (c1count !== undefined) {
+          counts[s.id] = c1count
+        } else {
+          const { data: c1b } = await sb.from('bookings').select('qty').eq('session_id', class1Id).gt('qty', 0)
+          if (c1b) counts[s.id] = c1b.reduce((sum, b) => sum + (b.qty || 0), 0)
+        }
+      }
+    }
   }
   scheduleData = sessions.map(s => ({ ...s, reg: counts[s.id] || 0 }))
   gridStudios = allStudios.filter(s => [...new Set(sessions.map(x => x.studio_id))].includes(s.id))
