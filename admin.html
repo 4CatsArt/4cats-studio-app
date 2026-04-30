@@ -1210,25 +1210,186 @@ async function saveAddCurriculum() {
 async function loadQualityReport() {
   const container = document.getElementById('quality-container'); container.innerHTML = '<div class="loading">Scanning...</div>'
   const today = dateStr(new Date())
-  const { data: sessions } = await sb.from('sessions').select('id, title, session_date, session_time, capacity, studio_id, show').gte('session_date', today)
+  const { data: sessions } = await sb.from('sessions').select('id, title, session_date, session_time, capacity, studio_id, show, session_type').gte('session_date', today)
   if (!sessions?.length) { container.innerHTML = '<div class="empty">No upcoming sessions found.</div>'; return }
   const sessionMap = {}; sessions.forEach(s=>{ sessionMap[s.id]=s }); const sessionIds = sessions.map(s=>s.id)
-  const { data: bookings } = await sb.from('bookings').select('id, session_id, qty').in('session_id', sessionIds).gt('qty', 0)
+  const { data: bookings } = await sb.from('bookings').select('id, session_id, qty, customer_email, customer_name, shopify_order_name, raw_payload, studio_id').in('session_id', sessionIds).gt('qty', 0)
   if (!bookings?.length) { container.innerHTML = '<div class="empty">No upcoming bookings found.</div>'; return }
   const sessionTotals = {}; bookings.forEach(b=>{ if (!sessionTotals[b.session_id]) sessionTotals[b.session_id]=0; sessionTotals[b.session_id]+=(b.qty||0) })
   const issues = []
+
+  // ── Check 1: Oversold ─────────────────────────────────────────
   Object.entries(sessionTotals).forEach(([sessionId, total]) => {
     const s = sessionMap[sessionId]; if (!s) return
-    if (s.capacity>0 && total>s.capacity) issues.push({ type:'over', label:'Oversold — bookings exceed capacity', detail:`${s.title} · ${getStudioName(s.studio_id)} · ${total} booked / ${s.capacity} capacity`, date:s.session_date })
+    if (s.capacity>0 && total>s.capacity) issues.push({ type:'over', label:'Oversold — bookings exceed capacity', detail:`${s.title} · ${getStudioName(s.studio_id)} · ${total} booked / ${s.capacity} capacity`, date:s.session_date, action:null })
   })
+
+  // ── Check 2: Party bookings with no add-on but possible orphan add-on order ──
+  const partySessionIds = sessions.filter(s=>s.session_type==='party').map(s=>s.id)
+  const partyBookings = bookings.filter(b=>partySessionIds.includes(b.session_id))
+
+  // Find party bookings with no add-on in raw_payload
+  const ADDON_TITLES = ['kids party extra guests', 'splatter party extra guests', 'adult get-togethers extra guests', 'adult get togethers extra guests', 'party extra guests']
+  const partyBookingsNoAddon = partyBookings.filter(b => {
+    if (!b.raw_payload) return false  // no payload = appointly, skip
+    try {
+      const p = typeof b.raw_payload === 'string' ? JSON.parse(b.raw_payload) : b.raw_payload
+      const lineItems = p?.line_items || []
+      return !lineItems.some(li => ADDON_TITLES.some(t => (li.title||'').toLowerCase().includes(t)))
+    } catch { return false }
+  })
+
+  if (partyBookingsNoAddon.length > 0) {
+    // Look for bookings from same emails that ARE add-on orders (no session match = separate order)
+    const emailsToCheck = [...new Set(partyBookingsNoAddon.map(b => b.customer_email).filter(Boolean))]
+    
+    if (emailsToCheck.length > 0) {
+      // Fetch ALL bookings for these emails to find orphan add-on orders
+      const { data: emailBookings } = await sb.from('bookings')
+        .select('id, session_id, customer_email, customer_name, shopify_order_name, raw_payload, studio_id, booked_at')
+        .in('customer_email', emailsToCheck)
+        .gt('qty', 0)
+
+      if (emailBookings?.length) {
+        // Find bookings where raw_payload contains an add-on line item but no party session line
+        const orphanAddons = emailBookings.filter(b => {
+          if (!b.raw_payload) return false
+          try {
+            const p = typeof b.raw_payload === 'string' ? JSON.parse(b.raw_payload) : b.raw_payload
+            const lineItems = p?.line_items || []
+            const hasAddon = lineItems.some(li => ADDON_TITLES.some(t => (li.title||'').toLowerCase().includes(t)))
+            // A party session line item has a date prefix like "11am Sat Apr 25th"
+            const hasPartySession = lineItems.some(li => /^\d+(am|pm|:\d)/i.test(li.title||''))
+            return hasAddon && !hasPartySession
+          } catch { return false }
+        })
+
+        // Match orphan add-ons to party bookings by email + studio_id
+        orphanAddons.forEach(addon => {
+          const matchingPartyBookings = partyBookingsNoAddon.filter(pb =>
+            pb.customer_email === addon.customer_email &&
+            pb.studio_id === addon.studio_id
+          )
+          if (matchingPartyBookings.length === 1) {
+            const pb = matchingPartyBookings[0]
+            const s = sessionMap[pb.session_id]
+            try {
+              const p = typeof addon.raw_payload === 'string' ? JSON.parse(addon.raw_payload) : addon.raw_payload
+              const addonLine = (p?.line_items||[]).find(li => ADDON_TITLES.some(t => (li.title||'').toLowerCase().includes(t)))
+              const addonDesc = addonLine?.variant_title || addonLine?.title || 'add-on'
+              issues.push({
+                type: 'addon',
+                label: 'Unmatched party add-on',
+                detail: `${pb.customer_name} · ${getStudioName(pb.studio_id)} · Party: ${pb.shopify_order_name||'—'} · Add-on: ${addon.shopify_order_name||'—'} (${addonDesc})`,
+                date: s?.session_date || today,
+                action: { partyBookingId: pb.id, addonBookingId: addon.id, addonOrderName: addon.shopify_order_name, addonPayload: addon.raw_payload }
+              })
+            } catch {}
+          } else if (matchingPartyBookings.length > 1) {
+            // Ambiguous — flag but can't auto-match
+            issues.push({
+              type: 'addon-ambiguous',
+              label: 'Unmatched add-on (ambiguous)',
+              detail: `${addon.customer_name} · ${getStudioName(addon.studio_id)} · Add-on order ${addon.shopify_order_name||'—'} — ${matchingPartyBookings.length} possible party bookings, link manually`,
+              date: today,
+              action: null
+            })
+          }
+        })
+      }
+    }
+  }
+
   issues.sort((a,b)=>a.date.localeCompare(b.date))
+  const oversoldCount = issues.filter(i=>i.type==='over').length
+  const addonCount = issues.filter(i=>i.type==='addon'||i.type==='addon-ambiguous').length
+
   if (!issues.length) { container.innerHTML = `<div class="empty" style="color:#2e7d32">✓ No issues found in upcoming bookings.</div>`; return }
-  let html = `<div style="display:flex;gap:12px;margin-bottom:1rem"><div class="stat-card warn"><div class="val">${issues.length}</div><div class="lbl">Issues Found</div></div></div><div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#fafaf8;border-bottom:0.5px solid #e0e0d8"><th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Date</th><th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Issue</th><th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Detail</th></tr></thead><tbody>`
+
+  let html = `<div style="display:flex;gap:12px;margin-bottom:1rem">
+    ${oversoldCount ? `<div class="stat-card warn"><div class="val">${oversoldCount}</div><div class="lbl">Oversold Sessions</div></div>` : ''}
+    ${addonCount ? `<div class="stat-card warn"><div class="val">${addonCount}</div><div class="lbl">Unmatched Add-ons</div></div>` : ''}
+  </div>
+  <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden">
+  <table style="width:100%;border-collapse:collapse;font-size:12px">
+  <thead><tr style="background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
+    <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Date</th>
+    <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Issue</th>
+    <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Detail</th>
+    <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Action</th>
+  </tr></thead><tbody>`
+
   issues.forEach(issue => {
     const d = new Date(issue.date+'T12:00:00').toLocaleDateString('en-CA',{weekday:'short',month:'short',day:'numeric'})
-    html += `<tr><td style="padding:10px 14px;color:#888">${d}</td><td style="padding:10px 14px"><span style="display:inline-block;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:500;background:#fff3e0;color:#e65100">${issue.label}</span></td><td style="padding:10px 14px;color:#444">${issue.detail}</td></tr>`
+    const bgColor = issue.type === 'over' ? '#fff3e0' : '#fff0f8'
+    const textColor = issue.type === 'over' ? '#e65100' : '#99354e'
+    let actionHtml = '—'
+    if (issue.type === 'addon' && issue.action) {
+      const safeAction = encodeURIComponent(JSON.stringify(issue.action))
+      actionHtml = `<button class="btn" style="font-size:11px;background:#fff0f8;color:#99354e;border-color:#f0b8cc" onclick="linkAddon('${safeAction}', this)">🔗 Link add-on</button>`
+    }
+    html += `<tr>
+      <td style="padding:10px 14px;color:#888;white-space:nowrap">${d}</td>
+      <td style="padding:10px 14px"><span style="display:inline-block;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:500;background:${bgColor};color:${textColor}">${issue.label}</span></td>
+      <td style="padding:10px 14px;color:#444">${issue.detail}</td>
+      <td style="padding:10px 14px">${actionHtml}</td>
+    </tr>`
   })
   container.innerHTML = html + '</tbody></table></div>'
+}
+
+async function linkAddon(encodedAction, btn) {
+  const action = JSON.parse(decodeURIComponent(encodedAction))
+  if (!confirm('Link this add-on order to the party booking? This will merge the add-on line items into the party booking payload.')) return
+  btn.textContent = 'Linking...'; btn.disabled = true
+
+  try {
+    // Fetch current party booking payload
+    const { data: partyBooking } = await sb.from('bookings')
+      .select('raw_payload')
+      .eq('id', action.partyBookingId)
+      .single()
+
+    const existingPayload = partyBooking?.raw_payload
+      ? (typeof partyBooking.raw_payload === 'string' ? JSON.parse(partyBooking.raw_payload) : partyBooking.raw_payload)
+      : { line_items: [] }
+
+    const addonPayload = action.addonPayload
+      ? (typeof action.addonPayload === 'string' ? JSON.parse(action.addonPayload) : action.addonPayload)
+      : { line_items: [] }
+
+    // Merge add-on line items into party booking payload
+    const ADDON_TITLES = ['kids party extra guests', 'splatter party extra guests', 'adult get-togethers extra guests', 'adult get togethers extra guests', 'party extra guests']
+    const addonLines = (addonPayload.line_items || []).filter(li =>
+      ADDON_TITLES.some(t => (li.title||'').toLowerCase().includes(t))
+    )
+
+    const mergedPayload = {
+      ...existingPayload,
+      line_items: [...(existingPayload.line_items || []), ...addonLines],
+      _addon_order: action.addonOrderName,  // track which order the addon came from
+    }
+
+    const { error } = await sb.from('bookings')
+      .update({ raw_payload: mergedPayload })
+      .eq('id', action.partyBookingId)
+
+    if (error) throw error
+
+    btn.textContent = '✓ Linked!'
+    btn.style.background = '#e8f5e9'
+    btn.style.color = '#2e7d32'
+    btn.style.borderColor = '#a5d6a7'
+    btn.disabled = true
+
+    // Refresh after short delay
+    setTimeout(() => loadQualityReport(), 1500)
+
+  } catch(e) {
+    alert('Error linking: ' + e.message)
+    btn.textContent = 'Link add-on'
+    btn.disabled = false
+  }
 }
 
 // ═══════════════════════════════════════════════
