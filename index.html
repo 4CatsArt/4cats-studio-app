@@ -255,7 +255,24 @@ function getCurriculumLinks(sessionTitle, sessionDate) {
   )
   return weekly || null
 }
+function isSeriesClass2Plus(title) {
+  return /\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(title)
+}
 
+function getSeriesClass1Title(title) {
+  // Strip " - class N of N" or " class N of N" suffix
+  return title.replace(/\s*-?\s*class\s+\d+\s+of\s+\d+/i, '').trim()
+}
+
+async function findClass1SessionId(studioId, sessionTime, seriesTitle) {
+  const { data } = await sb.from('sessions')
+    .select('id')
+    .eq('studio_id', studioId)
+    .eq('session_time', sessionTime)
+    .eq('title', seriesTitle)
+    .single()
+  return data?.id || null
+}
 function buildCurriculumLinks(sessionTitle, sessionDate, sessionTime) {
   const links = getCurriculumLinks(sessionTitle, sessionDate)
   const handle = buildShopifyHandle(sessionDate, sessionTime, sessionTitle)
@@ -401,6 +418,21 @@ async function loadDayView() {
       bookingCounts[b.session_id] = (bookingCounts[b.session_id] || 0) + (b.qty || 0)
       if (b.estimated_attendance) estimatedAtt[b.session_id] = (estimatedAtt[b.session_id] || 0) + b.estimated_attendance
     })
+    // For series classes 2+, copy booking count from class 1
+    for (const s of filtered) {
+      if (isSeriesClass2Plus(s.title) && !bookingCounts[s.id]) {
+        const class1Title = getSeriesClass1Title(s.title)
+        const { data: class1 } = await sb.from('sessions')
+          .select('id')
+          .eq('studio_id', currentStudioId)
+          .eq('session_time', s.session_time)
+          .eq('title', class1Title)
+          .single()
+        if (class1 && bookingCounts[class1.id]) {
+          bookingCounts[s.id] = bookingCounts[class1.id]
+        }
+      }
+    }
   }
   // Day total banner
   const totalReg = Object.values(bookingCounts).reduce((sum, v) => sum + v, 0)
@@ -525,7 +557,7 @@ async function loadDayView() {
       </div>
       ${partyInfoHtml}
       <div class="session-stats">
-        <div class="stat stat-clickable" onclick="showBookings('${s.id}', '${s.title.replace(/'/g, "\\'")}', '${dateStr(currentDate)}', '${s.session_type}')">
+        <div class="stat stat-clickable" onclick="showBookings('${s.id}', '${s.title.replace(/'/g, "\\'")}', '${dateStr(currentDate)}', '${s.session_type}', '${s.session_time || '00:00:00'}')">
           <div class="stat-value">${reg}</div>
           <div class="stat-label">registered ↗</div>
         </div>
@@ -688,10 +720,17 @@ function editCheck(id, checked) {
   return `<input type="checkbox" id="${id}" ${checked ? 'checked' : ''}>`
 }
 
-async function showBookings(sessionId, title, dateLabel, sessionType) {
+async function showBookings(sessionId, title, dateLabel, sessionType, sessionTime) {
+  // For series classes 2+, show bookings from class 1 instead
+  let bookingSessionId = sessionId
+  if (isSeriesClass2Plus(title)) {
+    const class1Title = getSeriesClass1Title(title)
+    const class1Id = await findClass1SessionId(currentStudioId, sessionTime, class1Title)
+    if (class1Id) bookingSessionId = class1Id
+  }
   const { data: bookings } = await sb.from('bookings')
     .select('customer_name, customer_email, customer_phone, qty, estimated_attendance, shopify_order_name, booked_at, raw_payload, event_date, order_note')
-    .eq('session_id', sessionId)
+    .eq('session_id', bookingSessionId)
     .order('booked_at')
 
   const seenOrders = new Set()
@@ -715,7 +754,7 @@ async function showBookings(sessionId, title, dateLabel, sessionType) {
   // Fetch attendance for this session
   let attendanceData = {}
   if (orderNames.length) {
-    const { data: att } = await sb.from('attendance').select('*').eq('session_id', sessionId).in('shopify_order_name', orderNames)
+    const { data: att } = await sb.from('attendance').select('*').eq('session_id', bookingSessionId).in('shopify_order_name', orderNames)
     if (att) att.forEach(a => {
       const key = `${a.shopify_order_name}|${(a.camper_name || '').toLowerCase().trim()}`
       attendanceData[key] = a
