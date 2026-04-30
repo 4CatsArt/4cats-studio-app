@@ -814,10 +814,10 @@ async function showBookings(sessionId, title, dateLabel, sessionType, sessionTim
     if (class1Id) bookingSessionId = class1Id
   }
   const { data: bookings } = await sb.from('bookings')
-    .select('customer_name, customer_email, customer_phone, qty, estimated_attendance, shopify_order_name, booked_at, raw_payload, event_date, order_note')
+    .select('id, customer_name, customer_email, customer_phone, qty, estimated_attendance, shopify_order_name, booked_at, raw_payload, event_date, order_note')
     .eq('session_id', bookingSessionId)
     .order('booked_at')
-
+  
   const seenOrders = new Set()
   const bookingsToUse = (bookings || []).filter(b => {
     if (!b.shopify_order_name) return true
@@ -836,6 +836,19 @@ async function showBookings(sessionId, title, dateLabel, sessionType, sessionTim
     })
   }
 
+  // Fetch existing extra child rows
+  const bookingIds = bookingsToUse.map(b => b.id).filter(Boolean)
+  let childrenData = {}
+  if (bookingIds.length) {
+    const { data: children } = await sb.from('booking_children')
+      .select('*')
+      .in('booking_id', bookingIds)
+      .order('child_index')
+    if (children) children.forEach(c => {
+      if (!childrenData[c.booking_id]) childrenData[c.booking_id] = []
+      childrenData[c.booking_id].push(c)
+    })
+  }
  const listType = getListType(sessionType, title)
 
   // Fetch attendance for this session (use actual sessionId for series, bookingSessionId for others)
@@ -874,9 +887,9 @@ async function showBookings(sessionId, title, dateLabel, sessionType, sessionTim
   } else if (listType === 'workshop') {
     tableHtml = buildWorkshopTable(bookingsToUse)
   } else if (listType === 'camp') {
-    tableHtml = buildCampTable(bookingsToUse, tallyData, attendanceData, sessionId, dateLabel)
+    tableHtml = buildCampTable(bookingsToUse, tallyData, attendanceData, sessionId, dateLabel, childrenData)
   } else if (listType === 'series') {
-    tableHtml = buildSeriesTable(bookingsToUse, tallyData, attendanceData, sessionId, dateLabel, currentStudioId, sessionTime)
+    tableHtml = buildSeriesTable(bookingsToUse, tallyData, attendanceData, sessionId, dateLabel, currentStudioId, sessionTime, childrenData)
   } else {
     tableHtml = buildWorkshopTable(bookingsToUse)
   }
@@ -956,7 +969,7 @@ function buildWorkshopTable(bookings) {
 }
 
 // ── CAMP TABLE ─────────────────────────────────────────────────
-function buildCampTable(bookings, tallyData, attendanceData, sessionId, dateLabel) {
+function buildCampTable(bookings, tallyData, attendanceData, sessionId, dateLabel, childrenData = {}) {
   const rows = bookings.map(b => {
     const note = getOrderNote(b)
     const orderUid = (b.shopify_order_name || '').replace('#','') || Math.random().toString(36).slice(2)
@@ -1006,7 +1019,7 @@ function buildCampTable(bookings, tallyData, attendanceData, sessionId, dateLabe
       </tr>`
     }
 
-    return participants.map((p, i) => {
+   const participantRows = participants.map((p, i) => {
       const t = p.tally
       const uid = `${orderUid}-${i}`
       const camperName = p.name || ''
@@ -1014,7 +1027,6 @@ function buildCampTable(bookings, tallyData, attendanceData, sessionId, dateLabe
       const att = attendanceData[attKey]
       const attChecked = att?.attended || false
       const ageDisplay = p.dob ? formatDOB(p.dob, dateLabel) : (p.age ? `Age ${p.age}` : '')
-
       return `<tr>
         <td style="text-align:center"><input type="checkbox" class="attended-check" ${attChecked ? 'checked' : ''} onchange="saveAttendance('${sessionId}','${b.shopify_order_name}','${camperName.replace(/'/g,"\\'")}',this.checked,'att-${uid}')"></td>
         <td>${editInput('cn-'+uid, camperName, 'Child name')}</td>
@@ -1031,6 +1043,29 @@ function buildCampTable(bookings, tallyData, attendanceData, sessionId, dateLabe
         <td class="no-print"><button class="row-save-btn" onclick="saveCampRow('${t?.id || null}','${b.shopify_order_name}','${uid}','${sessionId}')">Save</button></td>
       </tr>`
     }).join('')
+
+    const existingChildren = childrenData[b.id] || []
+    const extraCount = Math.max(0, (b.qty || 1) - participants.length)
+    let extraRows = ''
+    for (let i = 0; i < extraCount; i++) {
+      const childIndex = participants.length + i + 1
+      const existing = existingChildren.find(c => c.child_index === childIndex)
+      const cid = `${b.id}-child-${childIndex}`
+      extraRows += `<tr style="background:#fafaf8">
+        <td></td>
+        <td>${editInput('cn-'+cid, existing?.child_name || '', 'Child name')}</td>
+        <td>${editInput('ca-'+cid, existing?.child_age || '', 'Age', 'short')}</td>
+        <td>${editCheck('wh-'+cid, existing?.walk_home || false)}</td>
+        <td>${editInput('mn-'+cid, existing?.medical || '', 'Medical notes')}</td>
+        <td>${editCheck('ac-'+cid, false)}</td>
+        <td>${editInput('pp-'+cid, existing?.parent_phone || '', 'Phone')}</td>
+        <td>${editInput('ec-'+cid, existing?.emergency_contact || '', 'Emergency contact')}</td>
+        <td style="color:#bbb;font-size:11px" colspan="3">Additional child</td>
+        <td></td>
+        <td class="no-print"><button class="row-save-btn" onclick="saveChildRow('${existing?.id || null}','${b.id}',${childIndex},'${cid}')">Save</button></td>
+      </tr>`
+    }
+    return participantRows + extraRows
   }).join('')
 
   return `<table class="booking-table">
@@ -1054,7 +1089,7 @@ function buildCampTable(bookings, tallyData, attendanceData, sessionId, dateLabe
 }
 
 // ── SERIES TABLE (kids multi-week sessions) ────────────────────
-function buildSeriesTable(bookings, tallyData, attendanceData, sessionId, dateLabel, studioId, sessionTime) {
+function buildSeriesTable(bookings, tallyData, attendanceData, sessionId, dateLabel, studioId, sessionTime, childrenData = {}) {
   const rows = bookings.map(b => {
     const note = getOrderNote(b)
     const orderUid = (b.shopify_order_name || '').replace('#','') || Math.random().toString(36).slice(2)
@@ -1100,7 +1135,9 @@ function buildSeriesTable(bookings, tallyData, attendanceData, sessionId, dateLa
       </tr>`
     }
 
-    return participants.map((p, i) => {
+    
+
+    const participantRows = participants.map((p, i) => {
       const t = p.tally
       const uid = `${orderUid}-${i}`
       const camperName = p.name || ''
@@ -1124,6 +1161,28 @@ function buildSeriesTable(bookings, tallyData, attendanceData, sessionId, dateLa
         <td class="no-print"><button class="row-save-btn" onclick="saveSeriesRow('${t?.id || null}','${b.shopify_order_name}','${uid}','${sessionId}','${studioId}','${sessionTime}')">Save</button></td>
       </tr>`
     }).join('')
+
+    const existingChildren = childrenData[b.id] || []
+    const extraCount = Math.max(0, (b.qty || 1) - participants.length)
+    let extraRows = ''
+    for (let i = 0; i < extraCount; i++) {
+      const childIndex = participants.length + i + 1
+      const existing = existingChildren.find(c => c.child_index === childIndex)
+      const cid = `${b.id}-child-${childIndex}`
+      extraRows += `<tr style="background:#fafaf8">
+        <td></td>
+        <td>${editInput('scn-'+cid, existing?.child_name || '', 'Child name')}</td>
+        <td>${editInput('sca-'+cid, existing?.child_age || '', 'Age', 'short')}</td>
+        <td>${editCheck('swh-'+cid, existing?.walk_home || false)}</td>
+        <td>${editInput('smn-'+cid, existing?.medical || '', 'Medical notes')}</td>
+        <td>${editInput('spp-'+cid, existing?.parent_phone || '', 'Phone')}</td>
+        <td>${editInput('sec-'+cid, existing?.emergency_contact || '', 'Emergency contact')}</td>
+        <td style="color:#bbb;font-size:11px" colspan="3">Additional child</td>
+        <td></td>
+        <td class="no-print"><button class="row-save-btn" onclick="saveChildRow('${existing?.id || null}','${b.id}',${childIndex},'${cid}')">Save</button></td>
+      </tr>`
+    }
+    return participantRows + extraRows
   }).join('')
 
   return `<table class="booking-table">
@@ -1302,6 +1361,40 @@ async function saveSession(sessionId, isParty) {
   btn.textContent = 'Saved'
   btn.classList.add('saved')
   setTimeout(() => { btn.textContent = 'Save'; btn.classList.remove('saved') }, 2000)
+}
+
+  async function saveChildRow(existingId, bookingId, childIndex, cid) {
+  const btn = document.querySelector(`button[onclick="saveChildRow('${existingId}','${bookingId}',${childIndex},'${cid}')"]`)
+  
+  const payload = {
+    booking_id: bookingId,
+    child_index: childIndex,
+    child_name: document.getElementById(`cn-${cid}`)?.value?.trim() || null,
+    child_age: document.getElementById(`ca-${cid}`)?.value?.trim() || null,
+    walk_home: document.getElementById(`wh-${cid}`)?.checked || false,
+    medical: document.getElementById(`mn-${cid}`)?.value?.trim() || null,
+    parent_phone: document.getElementById(`pp-${cid}`)?.value?.trim() || null,
+    emergency_contact: document.getElementById(`ec-${cid}`)?.value?.trim() || null,
+    notes: null
+  }
+
+  let error
+  if (existingId && existingId !== 'null') {
+    ;({ error } = await sb.from('booking_children').update(payload).eq('id', existingId))
+  } else {
+    const { data: inserted, error: insertError } = await sb.from('booking_children').insert(payload).select().single()
+    error = insertError
+    if (inserted && btn) {
+      btn.setAttribute('onclick', `saveChildRow('${inserted.id}','${bookingId}',${childIndex},'${cid}')`)
+    }
+  }
+
+  if (error) { alert('Error saving: ' + error.message); return }
+  if (btn) {
+    btn.textContent = 'Saved ✓'
+    btn.classList.add('saved')
+    setTimeout(() => { btn.textContent = 'Save'; btn.classList.remove('saved') }, 2000)
+  }
 }
   function buildShopifyTitle(sessionDate, sessionTime, sessionTitle) {
   const d = new Date(sessionDate + 'T12:00:00')
