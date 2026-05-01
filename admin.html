@@ -456,6 +456,7 @@ async function initApp() {
   document.getElementById('bs-studio').innerHTML = '<option value="">Select a studio...</option>' + opts
   document.getElementById('rpt-studio').innerHTML = '<option value="">All studios</option>' + opts
   document.getElementById('inv-studio').innerHTML = '<option value="">Select a studio...</option>' + opts
+  document.getElementById('ase-studio').innerHTML = '<option value="">Select a studio...</option>' + opts
   const today = dateStr(new Date()), in7 = dateStr(addDays(new Date(), 7))
   document.getElementById('wk-from').value = today
   document.getElementById('wk-to').value = in7
@@ -1245,12 +1246,16 @@ async function loadQualityReport() {
       const sessionLabel = b.product_title || b.event_time || '—'
       const bookedDate = b.booked_at ? new Date(b.booked_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '—'
       const eventDate = b.event_date ? new Date(b.event_date + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '—'
+      const titleMatch = b.product_title ? b.product_title.match(/\|\s*(.+?)(?:\s*-\s*(?:AB|BC|ON)\s*\/.*)?$/) : null
+      const extractedTitle = titleMatch ? titleMatch[1].trim() : ''
+      const timeMatch = b.product_title ? b.product_title.match(/^[\*]?(\d{1,2}(?::\d{2})?(?:am|pm))/i) : null
+      const extractedTime = timeMatch ? timeMatch[1].toLowerCase() : (b.event_time || '')
       issues.push({
         type: 'no-session',
         label: 'No matching session',
         detail: `${b.customer_name || '—'} · ${getStudioName(b.studio_id)} · ${b.shopify_order_name || '—'} · "${sessionLabel}" · event ${eventDate} · booked ${bookedDate}`,
         date: b.event_date || today,
-        action: null
+        action: { bookingId: b.id, studioId: b.studio_id, eventDate: b.event_date, eventTime: extractedTime, sessionTitle: extractedTitle, productTitle: b.product_title }
       })
     })
   }
@@ -1365,6 +1370,10 @@ async function loadQualityReport() {
     const bgColor = issue.type==='over' ? '#fff3e0' : issue.type==='no-session' ? '#f0f0ff' : '#fff0f8'
     const textColor = issue.type==='over' ? '#e65100' : issue.type==='no-session' ? '#3730a3' : '#99354e'
     let actionHtml = '—'
+    if (issue.type === 'no-session' && issue.action) {
+      const safeAction = encodeURIComponent(JSON.stringify(issue.action))
+      actionHtml = `<button class="btn" style="font-size:11px;background:#f0f0ff;color:#3730a3;border-color:#c7d2fe" onclick="openAddSessionFromError('${safeAction}')">+ Add Session</button>`
+    }
     if (issue.type === 'addon' && issue.action) {
       const safeAction = encodeURIComponent(JSON.stringify(issue.action))
       actionHtml = `<button class="btn" style="font-size:11px;background:#fff0f8;color:#99354e;border-color:#f0b8cc" onclick="linkAddon('${safeAction}', this)">🔗 Link add-on</button>`
@@ -1399,6 +1408,100 @@ async function linkAddon(encodedAction, btn) {
     btn.textContent = '✓ Linked!'; btn.style.background = '#e8f5e9'; btn.style.color = '#2e7d32'; btn.style.borderColor = '#a5d6a7'; btn.disabled = true
     setTimeout(() => loadQualityReport(), 1500)
   } catch(e) { alert('Error linking: ' + e.message); btn.textContent = 'Link add-on'; btn.disabled = false }
+}
+
+// ═══════════════════════════════════════════════
+// ADD SESSION FROM ERROR
+// ═══════════════════════════════════════════════
+
+function convertEventTimeTo24(t) {
+  if (!t) return ''
+  const wm = t.match(/^(\d{1,2}):(\d{2})(am|pm)$/i)
+  if (wm) {
+    let h = parseInt(wm[1]), m = wm[2], ap = wm[3].toLowerCase()
+    if (ap==='pm'&&h<12) h+=12; if (ap==='am'&&h===12) h=0
+    return `${String(h).padStart(2,'0')}:${m}`
+  }
+  const wom = t.match(/^(\d{1,2})(am|pm)$/i)
+  if (wom) {
+    let h = parseInt(wom[1]), ap = wom[2].toLowerCase()
+    if (ap==='pm'&&h<12) h+=12; if (ap==='am'&&h===12) h=0
+    return `${String(h).padStart(2,'0')}:00`
+  }
+  return ''
+}
+
+let aseContext = {}
+
+function openAddSessionFromError(encodedAction) {
+  const action = JSON.parse(decodeURIComponent(encodedAction))
+  aseContext = action
+  const time24 = convertEventTimeTo24(action.eventTime)
+  document.getElementById('ase-studio').value = action.studioId || ''
+  document.getElementById('ase-date').value = action.eventDate || ''
+  document.getElementById('ase-time').value = time24 || ''
+  document.getElementById('ase-title').value = action.sessionTitle || ''
+  document.getElementById('ase-type').value = 'workshop'
+  document.getElementById('ase-capacity').value = '0'
+  document.getElementById('ase-status').textContent = ''
+  document.getElementById('ase-save-btn').textContent = 'Create Session & Link Booking'
+  document.getElementById('ase-save-btn').disabled = false
+  updateAsePreview()
+  document.getElementById('add-session-error-modal').style.display = 'flex'
+  setTimeout(() => document.getElementById('ase-title').focus(), 50)
+}
+
+function closeAddSessionFromError() {
+  document.getElementById('add-session-error-modal').style.display = 'none'
+}
+
+function updateAsePreview() {
+  const date = document.getElementById('ase-date').value
+  const time = document.getElementById('ase-time').value
+  const title = document.getElementById('ase-title').value.trim()
+  const previewEl = document.getElementById('ase-shopify-preview')
+  if (!date||!time||!title) { previewEl.innerHTML = '<span style="color:#bbb">Fill in fields to preview</span>'; return }
+  const t = buildShopifyTitle(date, time+':00', title)
+  if (!t) previewEl.innerHTML = '<span style="color:#bbb">No Shopify product</span>'
+  else if (t==='OVERRIDE') previewEl.innerHTML = '<span style="color:#e65100">Weekend Workshop — set manually</span>'
+  else previewEl.innerHTML = `<span>${t}</span>`
+}
+
+async function saveAddSessionFromError() {
+  const studioId = document.getElementById('ase-studio').value
+  const date = document.getElementById('ase-date').value
+  const time = document.getElementById('ase-time').value
+  const title = document.getElementById('ase-title').value.trim()
+  const type = document.getElementById('ase-type').value
+  const capacity = parseInt(document.getElementById('ase-capacity').value)||0
+  const statusEl = document.getElementById('ase-status')
+  if (!studioId||!date||!time||!title) { alert('Please fill in all fields.'); return }
+  const btn = document.getElementById('ase-save-btn')
+  btn.textContent = 'Creating...'; btn.disabled = true; statusEl.textContent = ''
+  const sessionTime = time.length===5 ? time+':00' : time
+  try {
+    // Check if session already exists
+    const { data: existing } = await sb.from('sessions').select('id').eq('studio_id', studioId).eq('session_date', date).eq('session_time', sessionTime).eq('title', title).single()
+    let sessionId = existing?.id
+    if (!sessionId) {
+      const { data: inserted, error } = await sb.from('sessions').insert({
+        studio_id: studioId, session_date: date, session_time: sessionTime,
+        title, session_type: type, capacity: capacity||null, show: true, spaces_left_cache: null
+      }).select().single()
+      if (error) throw error
+      sessionId = inserted.id
+    }
+    // Link the booking
+    const { error: bookingError } = await sb.from('bookings').update({ session_id: sessionId }).eq('id', aseContext.bookingId)
+    if (bookingError) throw bookingError
+    statusEl.style.color = '#2e7d32'
+    statusEl.textContent = '✓ Session created and booking linked!'
+    btn.textContent = 'Done'
+    setTimeout(() => { closeAddSessionFromError(); loadQualityReport(); loadQualityBadge() }, 1200)
+  } catch(e) {
+    statusEl.style.color = '#c0392b'; statusEl.textContent = 'Error: '+e.message
+    btn.textContent = 'Create Session & Link Booking'; btn.disabled = false
+  }
 }
 
 // ═══════════════════════════════════════════════
@@ -1566,6 +1669,34 @@ async function removeUser(userId, email) {
     <div class="modal-field"><label>Website URL</label><input type="text" id="acm-website-url" placeholder="https://..."></div>
     <div class="modal-field"><label>Curriculum URL</label><input type="text" id="acm-curriculum-url" placeholder="https://..."></div>
     <div class="modal-actions"><button class="btn" onclick="closeAddCurriculumModal()">Cancel</button><button class="btn btn-primary" onclick="saveAddCurriculum()" id="acm-save-btn">Save</button></div>
+  </div>
+</div>
+<!-- ADD SESSION FROM ERROR MODAL -->
+<div id="add-session-error-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeAddSessionFromError()">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div><div class="modal-title">Create Session &amp; Link Booking</div><div class="modal-sub">Creates the missing session and links the booking in one step</div></div>
+      <button class="modal-close" onclick="closeAddSessionFromError()">×</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="modal-field">
+        <label>Studio</label>
+        <select id="ase-studio" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none" onchange="updateAsePreview()"></select>
+      </div>
+      <div class="modal-field"><label>Session type</label><select id="ase-type" onchange="updateAsePreview()"><option value="workshop">Workshop</option><option value="party">Party</option><option value="glazing">Glazing</option><option value="class">Class</option><option value="camp">Camp</option></select></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="modal-field"><label>Date</label><input type="date" id="ase-date" oninput="updateAsePreview()"></div>
+      <div class="modal-field"><label>Time</label><input type="time" id="ase-time" oninput="updateAsePreview()"></div>
+    </div>
+    <div class="modal-field"><label>Session title</label><input type="text" id="ase-title" oninput="updateAsePreview()"></div>
+    <div class="modal-field"><label>Capacity (0 = unlimited)</label><input type="number" id="ase-capacity" value="0" min="0" style="width:120px"></div>
+    <div class="modal-field"><label>Shopify title preview</label><div class="shopify-preview" id="ase-shopify-preview">—</div></div>
+    <div id="ase-status" style="font-size:12px;min-height:18px;margin-bottom:8px"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeAddSessionFromError()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveAddSessionFromError()" id="ase-save-btn">Create Session &amp; Link Booking</button>
+    </div>
   </div>
 </div>
 </body>
