@@ -69,6 +69,7 @@ select:focus, input:focus { border-color: #888; }
 .session-time-cell { font-size: 10px; color: #888; margin-top: 3px; }
 .cell-offered { display: inline-block; padding: 2px 6px; border-radius: 8px; font-weight: 600; font-size: 11px; min-width: 24px; }
 .cell-zero { color: #bbb; }
+.cell-dead { color: #ccc; background: #f5f5f5; border-radius: 8px; }
 .cell-some { background: #e8f0fe; color: #1a4fa0; }
 .cell-full { background: #e8f5e9; color: #2e7d32; font-weight: 700; }
 .cell-not { color: #e0e0d8; font-size: 12px; }
@@ -661,10 +662,12 @@ function renderSchedule() {
         if (!s) { bodyHtml += `<td><span class="cell-not">—</span></td>`; return }
         const hasBookings = s.reg > 0
         const hasInventory = s.spaces_left_cache === null || s.spaces_left_cache > 0
+        const isDeadZero = !hasBookings && s.spaces_left_cache === 0
         if (!hasBookings && !hasInventory) { bodyHtml += `<td><span class="cell-not">—</span></td>`; return }
         const isFull = s.capacity>0 && s.reg>=s.capacity
         const isZeroWarn = s.reg===0 && (!zeroDate || date<=zeroDate)
         let cellClass = 'cell-zero'
+        if (isDeadZero) cellClass = 'cell-dead'
         if (s.reg>0 && !isFull) cellClass = 'cell-some'
         if (isFull) cellClass = 'cell-full'
         const isLow = s.capacity>0 && !isFull && s.session_type !== 'party' && s.title.toLowerCase() !== 'wheel workshop' && s.title.toLowerCase() !== 'wheel workshop (adult & teen)' && (s.capacity - s.reg) >= 1 && (s.capacity - s.reg) <= 3
@@ -883,6 +886,40 @@ async function loadStudioView() {
   document.getElementById('btn-sync-inventory').style.display = 'inline-block'
 }
 
+// Derive session title and type from a Shopify product title
+// e.g. "1:30pm Fri May 1st | Wheel Workshop" -> { title: "Wheel Workshop", type: "workshop" }
+function sessionInfoFromShopifyTitle(shopifyTitle) {
+  const match = shopifyTitle.match(/\|\s*(.+?)(?:\s*-\s*(?:AB|BC|ON)\s*\/.*)?$/)
+  if (!match) return null
+  const raw = match[1].trim()
+  const lower = raw.toLowerCase()
+  const TYPE_MAP = {
+    'wheel workshop': { title: 'Wheel Workshop', type: 'workshop' },
+    'glazing': { title: 'Glazing', type: 'glazing' },
+    'thursday clay night': { title: 'Thursdays: Clay Night', type: 'workshop' },
+    'friday night mixer': { title: 'Friday Night Mixer', type: 'workshop' },
+    'friday night mixer (ages 16+)': { title: 'Friday Night Mixer (ages 16+)', type: 'workshop' },
+    'adult get togethers, parties & group booking': { title: 'Adult Get-Together Time Slot', type: 'party' },
+    'kids party': { title: 'Party Time Slot', type: 'party' },
+    'splatter party': { title: 'Splatter Party Time Slot', type: 'party' },
+    'field trip': { title: 'Field Trip Time Slot', type: 'party' },
+    'pa/pd day': { title: 'PA/PD Day', type: 'workshop' },
+    'afternoon art meetup': { title: 'Afternoon Art Meetup', type: 'workshop' },
+    'saturday early bird workshop': { title: 'Saturday Early Bird Workshop', type: 'workshop' },
+    'sunday morning family time mixer': { title: 'Sunday Morning Family Time Mixer', type: 'workshop' },
+    'wednesday paint night': { title: 'Wednesday Paint Night', type: 'workshop' },
+    'mixed media class': { title: 'Mixed Media Class for kids ($10 for members)', type: 'class' },
+    'summer camp full day': { title: 'Full Day Camp (ages 6-12)', type: 'camp' },
+    'summer camp half day': { title: 'Summer Camp Half Day MORNING', type: 'camp' },
+    'mini make drop in': { title: 'Mini Make Drop In', type: 'workshop' },
+    'natureware mug': { title: 'Natureware Mug', type: 'workshop' },
+    'natureware': { title: 'Natureware', type: 'workshop' },
+  }
+  if (TYPE_MAP[lower]) return TYPE_MAP[lower]
+  // Default: use raw title as-is, workshop type
+  return { title: raw, type: 'workshop' }
+}
+
 async function syncStudioInventory() {
   const btn = document.getElementById('btn-sync-inventory'); btn.textContent = 'Syncing...'; btn.disabled = true
   const studioId = document.getElementById('bs-studio').value, date = document.getElementById('bs-date').value
@@ -903,7 +940,20 @@ async function syncStudioInventory() {
       for (const v of data.variants) {
         const sid = Object.keys(STUDIO_VARIANT_MAP).find(k => STUDIO_VARIANT_MAP[k] === v.variant_title); if (!sid) continue
         const matchingSessions = activeSessions.filter(s => s.studio_id===sid && s.session_date===item.session_date && s.session_time===item.session_time && buildShopifyTitle(s.session_date, s.session_time||'00:00:00', s.title)===item.shopifyTitle)
-        for (const session of matchingSessions) { const capacity = v.inventory_quantity + session.reg; await sb.from('sessions').update({ capacity, spaces_left_cache: v.inventory_quantity }).eq('id', session.id); session.capacity = capacity }
+        if (matchingSessions.length > 0) {
+          for (const session of matchingSessions) { const capacity = v.inventory_quantity + session.reg; await sb.from('sessions').update({ capacity, spaces_left_cache: v.inventory_quantity }).eq('id', session.id); session.capacity = capacity }
+        } else if (v.inventory_quantity > 0) {
+          // No session exists for this studio — auto-create it
+          const info = sessionInfoFromShopifyTitle(item.shopifyTitle)
+          if (info && sid === studioId) {
+            const sessionTime = item.session_time || '00:00:00'
+            const { error } = await sb.from('sessions').insert({
+              studio_id: sid, session_date: item.session_date, session_time: sessionTime,
+              title: info.title, session_type: info.type, capacity: v.inventory_quantity, show: true, spaces_left_cache: v.inventory_quantity
+            })
+            if (!error) { activeSessions.push({ studio_id: sid, session_date: item.session_date, session_time: sessionTime, title: info.title, session_type: info.type, capacity: v.inventory_quantity, spaces_left_cache: v.inventory_quantity, reg: 0 }) }
+          }
+        }
       }
     } catch(e) { notFound.push(item.shopifyTitle + ' (network error)') }
   }
@@ -955,9 +1005,24 @@ async function syncWeekInventory() {
       for (const v of data.variants) {
         const studioId = Object.keys(STUDIO_VARIANT_MAP).find(k => STUDIO_VARIANT_MAP[k] === v.variant_title); if (!studioId) continue
         const session = scheduleData.find(s => s.studio_id===studioId && s.session_date===item.session_date && s.session_time===item.session_time && buildShopifyTitle(s.session_date, s.session_time||'00:00:00', s.title)===item.shopifyTitle)
-        if (!session) continue
-        const capacity = v.inventory_quantity + session.reg
-        await sb.from('sessions').update({ capacity, spaces_left_cache: v.inventory_quantity }).eq('id', session.id); session.capacity = capacity
+        if (session) {
+          const capacity = v.inventory_quantity + session.reg
+          await sb.from('sessions').update({ capacity, spaces_left_cache: v.inventory_quantity }).eq('id', session.id); session.capacity = capacity
+        } else if (v.inventory_quantity > 0) {
+          // No session exists for this studio — auto-create it
+          const info = sessionInfoFromShopifyTitle(item.shopifyTitle)
+          if (info) {
+            const sessionTime = item.session_time || '00:00:00'
+            const { error: insErr } = await sb.from('sessions').insert({
+              studio_id: studioId, session_date: item.session_date, session_time: sessionTime,
+              title: info.title, session_type: info.type, capacity: v.inventory_quantity, show: true, spaces_left_cache: v.inventory_quantity
+            })
+            if (!insErr) {
+              const { data: inserted } = await sb.from('sessions').select('*').eq('studio_id', studioId).eq('session_date', item.session_date).eq('session_time', sessionTime).eq('title', info.title).maybeSingle()
+              if (inserted) scheduleData.push({ ...inserted, reg: 0 })
+            }
+          }
+        }
       }
     } catch(e) { notFound.push(item.shopifyTitle + ' (network error)') }
   }
