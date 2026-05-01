@@ -1002,25 +1002,25 @@ async function syncWeekInventory() {
       const data = await res.json()
       if (data.error) { notFound.push(item.shopifyTitle); continue }
       await cacheVariants(item.shopifyTitle, data)
+      const info = sessionInfoFromShopifyTitle(item.shopifyTitle)
       for (const v of data.variants) {
         const studioId = Object.keys(STUDIO_VARIANT_MAP).find(k => STUDIO_VARIANT_MAP[k] === v.variant_title); if (!studioId) continue
         const session = scheduleData.find(s => s.studio_id===studioId && s.session_date===item.session_date && s.session_time===item.session_time && buildShopifyTitle(s.session_date, s.session_time||'00:00:00', s.title)===item.shopifyTitle)
         if (session) {
+          // Session exists — update capacity and spaces_left_cache
           const capacity = v.inventory_quantity + session.reg
-          await sb.from('sessions').update({ capacity, spaces_left_cache: v.inventory_quantity }).eq('id', session.id); session.capacity = capacity
-        } else if (v.inventory_quantity > 0) {
-          // No session exists for this studio — auto-create it
-          const info = sessionInfoFromShopifyTitle(item.shopifyTitle)
-          if (info) {
-            const sessionTime = item.session_time || '00:00:00'
-            const { error: insErr } = await sb.from('sessions').insert({
-              studio_id: studioId, session_date: item.session_date, session_time: sessionTime,
-              title: info.title, session_type: info.type, capacity: v.inventory_quantity, show: true, spaces_left_cache: v.inventory_quantity
-            })
-            if (!insErr) {
-              const { data: inserted } = await sb.from('sessions').select('*').eq('studio_id', studioId).eq('session_date', item.session_date).eq('session_time', sessionTime).eq('title', info.title).maybeSingle()
-              if (inserted) scheduleData.push({ ...inserted, reg: 0 })
-            }
+          await sb.from('sessions').update({ capacity, spaces_left_cache: v.inventory_quantity }).eq('id', session.id)
+          session.capacity = capacity; session.spaces_left_cache = v.inventory_quantity
+        } else if (info) {
+          // No session exists — create it regardless of inventory (0 inventory = closed, still needs a row)
+          const sessionTime = item.session_time || '00:00:00'
+          const { error: insErr } = await sb.from('sessions').insert({
+            studio_id: studioId, session_date: item.session_date, session_time: sessionTime,
+            title: info.title, session_type: info.type, capacity: v.inventory_quantity, show: true, spaces_left_cache: v.inventory_quantity
+          })
+          if (!insErr) {
+            const { data: inserted } = await sb.from('sessions').select('*').eq('studio_id', studioId).eq('session_date', item.session_date).eq('session_time', sessionTime).eq('title', info.title).maybeSingle()
+            if (inserted) scheduleData.push({ ...inserted, reg: 0 })
           }
         }
       }
