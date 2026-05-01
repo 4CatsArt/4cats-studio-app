@@ -1437,11 +1437,33 @@ function openAddSessionFromError(encodedAction) {
   const action = JSON.parse(decodeURIComponent(encodedAction))
   aseContext = action
   const time24 = convertEventTimeTo24(action.eventTime)
+
+  // Map Shopify titles to Supabase session titles
+  const TITLE_MAP = {
+    'splatter party': { title: 'Splatter Party Time Slot', type: 'party' },
+    'kids party': { title: 'Party Time Slot', type: 'party' },
+    'adult get togethers, parties & group booking': { title: 'Adult Get-Together Time Slot', type: 'party' },
+    'adult get-togethers, parties & group booking': { title: 'Adult Get-Together Time Slot', type: 'party' },
+    'field trip': { title: 'Field Trip Time Slot', type: 'party' },
+    'wheel workshop': { title: 'Wheel Workshop', type: 'workshop' },
+    'thursday clay night': { title: 'Thursdays: Clay Night', type: 'workshop' },
+    'pa/pd day': { title: 'PA/PD Day', type: 'workshop' },
+    'pa day': { title: 'PA/PD Day', type: 'workshop' },
+    'pd day': { title: 'PA/PD Day', type: 'workshop' },
+    'glazing': { title: 'Glazing', type: 'glazing' },
+    'afternoon art meetup': { title: 'Afternoon Art Meetup', type: 'workshop' },
+    'sunday early bird workshop': { title: 'Saturday Early Bird Workshop', type: 'workshop' },
+  }
+  const rawTitle = action.sessionTitle || ''
+  const mapped = TITLE_MAP[rawTitle.toLowerCase()]
+  const resolvedTitle = mapped ? mapped.title : rawTitle
+  const resolvedType = mapped ? mapped.type : 'workshop'
+
   document.getElementById('ase-studio').value = action.studioId || ''
   document.getElementById('ase-date').value = action.eventDate || ''
   document.getElementById('ase-time').value = time24 || ''
-  document.getElementById('ase-title').value = action.sessionTitle || ''
-  document.getElementById('ase-type').value = 'workshop'
+  document.getElementById('ase-title').value = resolvedTitle
+  document.getElementById('ase-type').value = resolvedType
   document.getElementById('ase-capacity').value = '0'
   document.getElementById('ase-status').textContent = ''
   document.getElementById('ase-save-btn').textContent = 'Create Session & Link Booking'
@@ -1490,12 +1512,22 @@ async function saveAddSessionFromError() {
       .maybeSingle()
     let sessionId = existing?.id
     if (!sessionId) {
-      const { data: inserted, error } = await sb.from('sessions').insert({
+      const { error: insertError } = await sb.from('sessions').insert({
         studio_id: studioId, session_date: date, session_time: sessionTime,
         title, session_type: type, capacity: capacity, show: true, spaces_left_cache: null
-      }).select().single()
-      if (error) throw error
-      sessionId = inserted.id
+      })
+      if (insertError) throw insertError
+      // Fetch the newly created session id
+      const { data: newSession, error: fetchError } = await sb.from('sessions')
+        .select('id')
+        .eq('studio_id', studioId)
+        .eq('session_date', date)
+        .eq('session_time', sessionTime)
+        .eq('title', title)
+        .maybeSingle()
+      if (fetchError) throw fetchError
+      if (!newSession) throw new Error('Session was inserted but could not be retrieved')
+      sessionId = newSession.id
     }
     // Link the booking — use service role via RPC to bypass RLS
     console.log('Linking booking:', aseContext.bookingId, 'to session:', sessionId)
