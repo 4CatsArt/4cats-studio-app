@@ -1300,6 +1300,8 @@ async function loadDayView() {
     <span><strong>${grandTotal} participants today</strong>${prepaidNote}</span>
     <span style="font-weight:500">${t.msg}</span>
     <div style="display:flex;align-items:center;gap:8px;margin-left:auto" class="no-print">
+      <button id="print-full-day-btn" onclick="printFullDay()" style="padding:4px 12px;background:white;color:#444;border:0.5px solid #d0d0c8;border-radius:6px;font-size:12px;cursor:pointer;white-space:nowrap">🖨 Print Full Day</button>
+      <span style="color:#ddd">|</span>
       <span style="font-size:12px;white-space:nowrap">Walk-ins:</span>
       <input type="number" id="walkins-input" value="${currentWalkins}" min="0" style="width:60px;padding:4px 8px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;text-align:center">
       <button onclick="saveWalkins()" style="padding:4px 12px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:12px;cursor:pointer" id="walkins-save-btn">Save</button>
@@ -1404,6 +1406,105 @@ async function loadDayView() {
       </div>
     </div>`
   }).join('')
+}
+
+// ── PRINT FULL DAY ────────────────────────────────────────────
+async function printFullDay() {
+  const btn = document.getElementById('print-full-day-btn')
+  if (btn) { btn.textContent = 'Loading…'; btn.disabled = true }
+
+  const today = dateStr(currentDate)
+  const { data: sessions } = await sb.from('sessions')
+    .select('*').eq('studio_id', currentStudioId).eq('session_date', today).order('session_time')
+
+  const regularSessions = (sessions || []).filter(s => s.session_type !== 'party')
+
+  if (!regularSessions.length) {
+    alert('No regular sessions found for today.')
+    if (btn) { btn.textContent = '🖨 Print Full Day'; btn.disabled = false }
+    return
+  }
+
+  const ids = regularSessions.map(s => s.id)
+  const { data: bookings } = await sb.from('bookings')
+    .select('id, session_id, customer_name, qty, shopify_order_name, raw_payload, order_note, booked_at')
+    .in('session_id', ids).gt('qty', 0).order('booked_at')
+
+  const bookingsBySession = {}
+  ;(bookings || []).forEach(b => {
+    if (!bookingsBySession[b.session_id]) bookingsBySession[b.session_id] = []
+    bookingsBySession[b.session_id].push(b)
+  })
+
+  // Deduplicate by order name within each session
+  Object.keys(bookingsBySession).forEach(sid => {
+    const seen = new Set()
+    bookingsBySession[sid] = bookingsBySession[sid].filter(b => {
+      if (!b.shopify_order_name) return true
+      if (seen.has(b.shopify_order_name)) return false
+      seen.add(b.shopify_order_name); return true
+    })
+  })
+
+  const dateLabel = formatDate(currentDate)
+  const totalAll = Object.values(bookingsBySession).flat().reduce((sum, b) => sum + (b.qty || 0), 0)
+
+  const sections = regularSessions.map(s => {
+    const sb2 = bookingsBySession[s.id] || []
+    const total = sb2.reduce((sum, b) => sum + (b.qty || 0), 0)
+    if (!total && !sb2.length) return ''
+    const rows = sb2.map(b => {
+      const note = getOrderNote(b)
+      return `<tr>
+        <td class="name">${b.customer_name || '—'}</td>
+        <td class="center">${b.qty}</td>
+        <td class="muted">${b.shopify_order_name || '—'}</td>
+        <td class="note">${note || ''}</td>
+      </tr>`
+    }).join('')
+    return `<div class="section">
+      <div class="section-header">
+        <span class="section-title">${s.title}</span>
+        <span class="section-meta">${fmtTime(s.session_time)} &mdash; ${total} registered</span>
+      </div>
+      ${sb2.length ? `<table><thead><tr><th>Customer</th><th>Qty</th><th>Order</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="empty">No bookings for this session.</p>'}
+    </div>`
+  }).filter(Boolean).join('')
+
+  const printHtml = `<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Full Day — ${dateLabel}</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 12px; color: #1a1a1a; padding: 24px; }
+  h1 { font-size: 17px; font-weight: 600; margin-bottom: 3px; }
+  .subtitle { font-size: 12px; color: #888; margin-bottom: 24px; }
+  .section { margin-bottom: 22px; page-break-inside: avoid; }
+  .section-header { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1.5px solid #1a1a1a; padding-bottom: 5px; margin-bottom: 8px; }
+  .section-title { font-size: 13px; font-weight: 600; }
+  .section-meta { font-size: 11px; color: #888; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; padding: 4px 8px; font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 0.4px; border-bottom: 0.5px solid #ddd; font-weight: 500; }
+  td { padding: 5px 8px; border-bottom: 0.5px solid #f0f0e8; vertical-align: top; }
+  td.name { font-weight: 500; }
+  td.center { text-align: center; }
+  td.muted { color: #888; }
+  td.note { color: #666; font-style: italic; }
+  .empty { font-size: 11px; color: #aaa; font-style: italic; padding: 4px 0; }
+  @media print { body { padding: 12px; } }
+</style></head><body>
+  <h1>Full Day — ${dateLabel}</h1>
+  <div class="subtitle">${regularSessions.length} sessions &middot; ${totalAll} registered</div>
+  ${sections}
+</body></html>`
+
+  const win = window.open('', '_blank', 'width=800,height=900')
+  win.document.write(printHtml)
+  win.document.close()
+  win.focus()
+  setTimeout(() => win.print(), 400)
+
+  if (btn) { btn.textContent = '🖨 Print Full Day'; btn.disabled = false }
 }
 
 // ── TABLE VIEW ────────────────────────────────────────────────
