@@ -240,6 +240,7 @@ select:focus, input:focus { border-color: #888; }
       <div class="toolbar-group">
         <button class="btn btn-primary" onclick="openAddSessionModal()">+ Add Session</button>
         <button class="btn" id="btn-discover" onclick="discoverFromShopify()" style="background:#f0fdf4;color:#166534;border-color:#bbf7d0">🔍 Discover from Shopify</button>
+        <button class="btn" onclick="openCloseStudioModal()" style="background:#fff0f0;color:#c0392b;border-color:#f5c6cb">🔒 Close Studio Day</button>
       </div>
     </div>
     <div class="stats-row" id="stats-row"></div>
@@ -459,6 +460,7 @@ async function initApp() {
   document.getElementById('rpt-studio').innerHTML = '<option value="">All studios</option>' + opts
   document.getElementById('inv-studio').innerHTML = '<option value="">Select a studio...</option>' + opts
   document.getElementById('ase-studio').innerHTML = '<option value="">Select a studio...</option>' + opts
+  document.getElementById('csd-studio').innerHTML = '<option value="">Select a studio...</option>' + opts
   const today = dateStr(new Date()), in7 = dateStr(addDays(new Date(), 7))
   document.getElementById('wk-from').value = today
   document.getElementById('wk-to').value = in7
@@ -1481,6 +1483,124 @@ async function linkAddon(encodedAction, btn) {
 }
 
 // ═══════════════════════════════════════════════
+// CLOSE STUDIO DAY
+// ═══════════════════════════════════════════════
+
+function openCloseStudioModal() {
+  const from = document.getElementById('sch-from').value
+  document.getElementById('csd-date').value = from || ''
+  document.getElementById('csd-studio').value = ''
+  document.getElementById('csd-status').textContent = ''
+  document.getElementById('csd-save-btn').textContent = '🔒 Close Studio Day'
+  document.getElementById('csd-save-btn').disabled = false
+  document.getElementById('csd-preview').innerHTML = ''
+  document.getElementById('close-studio-modal').style.display = 'flex'
+}
+
+function closeCloseStudioModal() {
+  document.getElementById('close-studio-modal').style.display = 'none'
+}
+
+async function previewCloseStudio() {
+  const studioId = document.getElementById('csd-studio').value
+  const date = document.getElementById('csd-date').value
+  if (!studioId || !date) { document.getElementById('csd-preview').innerHTML = ''; return }
+
+  document.getElementById('csd-preview').innerHTML = '<div style="color:#888;font-size:12px">Loading sessions...</div>'
+
+  const { data: sessions } = await sb.from('sessions').select('id, title, session_time, spaces_left_cache').eq('studio_id', studioId).eq('session_date', date).order('session_time')
+  if (!sessions?.length) { document.getElementById('csd-preview').innerHTML = '<div style="color:#888;font-size:12px">No sessions found for this studio and date.</div>'; return }
+
+  const sessionIds = sessions.map(s => s.id)
+  const bookingCounts = {}
+  const { data: bookings } = await sb.from('bookings').select('session_id, qty').in('session_id', sessionIds).gt('qty', 0)
+  if (bookings) bookings.forEach(b => { bookingCounts[b.session_id] = (bookingCounts[b.session_id]||0) + (b.qty||0) })
+
+  let rows = sessions.map(s => {
+    const reg = bookingCounts[s.id] || 0
+    const newInv = reg > 0 ? -reg : 0
+    const [h, m] = (s.session_time||'00:00:00').split(':').map(Number)
+    const hour = h===0?12:h>12?h-12:h
+    const ampm = h<12?'am':'pm'
+    const timeLabel = m===0?`${hour}${ampm}`:`${hour}:${String(m).padStart(2,'0')}${ampm}`
+    return `<tr>
+      <td style="padding:6px 10px;font-size:12px">${timeLabel}</td>
+      <td style="padding:6px 10px;font-size:12px;font-weight:500">${s.title}</td>
+      <td style="padding:6px 10px;font-size:12px;text-align:center;color:${reg>0?'#1a4fa0':'#bbb'}">${reg}</td>
+      <td style="padding:6px 10px;font-size:12px;text-align:center;font-weight:600;color:${newInv<0?'#c0392b':'#888'}">${newInv}</td>
+    </tr>`
+  }).join('')
+
+  document.getElementById('csd-preview').innerHTML = `
+    <div style="margin-top:12px;border:0.5px solid #e0e0d8;border-radius:8px;overflow:hidden">
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr style="background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
+          <th style="padding:6px 10px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Time</th>
+          <th style="padding:6px 10px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Session</th>
+          <th style="padding:6px 10px;text-align:center;font-size:11px;color:#888;text-transform:uppercase">Sold</th>
+          <th style="padding:6px 10px;text-align:center;font-size:11px;color:#888;text-transform:uppercase">New Inv</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div style="font-size:11px;color:#888;margin-top:8px">This will set Shopify inventory to 0 or negative to match bookings, and update spaces_left_cache to 0 for all sessions.</div>`
+}
+
+async function executeCloseStudio() {
+  const studioId = document.getElementById('csd-studio').value
+  const date = document.getElementById('csd-date').value
+  if (!studioId || !date) { alert('Please select a studio and date.'); return }
+  if (!confirm(`Close ${getStudioName(studioId)} on ${date}? This will set all Shopify inventory to 0 or negative and hide all sessions from the calendar.`)) return
+
+  const btn = document.getElementById('csd-save-btn')
+  const statusEl = document.getElementById('csd-status')
+  btn.textContent = 'Closing...'; btn.disabled = true; statusEl.textContent = ''
+
+  const { data: sessions } = await sb.from('sessions').select('id, title, session_time, spaces_left_cache').eq('studio_id', studioId).eq('session_date', date).order('session_time')
+  if (!sessions?.length) { statusEl.style.color='#888'; statusEl.textContent = 'No sessions found.'; btn.textContent='🔒 Close Studio Day'; btn.disabled=false; return }
+
+  const sessionIds = sessions.map(s => s.id)
+  const bookingCounts = {}
+  const { data: bookings } = await sb.from('bookings').select('session_id, qty').in('session_id', sessionIds).gt('qty', 0)
+  if (bookings) bookings.forEach(b => { bookingCounts[b.session_id] = (bookingCounts[b.session_id]||0) + (b.qty||0) })
+
+  let done = 0, errors = 0
+  for (const s of sessions) {
+    const reg = bookingCounts[s.id] || 0
+    const newInv = reg > 0 ? -reg : 0
+    const shopifyTitle = buildShopifyTitle(date, s.session_time||'00:00:00', s.title)
+
+    // Update spaces_left_cache in Supabase
+    await sb.from('sessions').update({ spaces_left_cache: 0 }).eq('id', s.id)
+
+    // Update Shopify inventory if we have a title
+    if (shopifyTitle && shopifyTitle !== 'OVERRIDE') {
+      try {
+        const res = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({action:'get_all',product_title:shopifyTitle}) })
+        const data = await res.json()
+        if (!data.error) {
+          const variantTitle = STUDIO_VARIANT_MAP[studioId]
+          const variant = data.variants?.find(v => v.variant_title === variantTitle)
+          if (variant) {
+            await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({action:'set',inventory_item_id:variant.inventory_item_id,quantity:newInv}) })
+          }
+        }
+        done++
+      } catch(e) { errors++ }
+    } else { done++ }
+
+    statusEl.textContent = `Closing ${done+errors}/${sessions.length}...`
+  }
+
+  statusEl.style.color = errors ? '#c0392b' : '#2e7d32'
+  statusEl.textContent = errors
+    ? `Done with ${errors} error${errors!==1?'s':''} — check console`
+    : `✓ ${getStudioName(studioId)} closed for ${date}. All sessions hidden from calendar.`
+  btn.textContent = 'Done'; btn.disabled = true
+  setTimeout(() => { closeCloseStudioModal(); loadSchedule() }, 2000)
+}
+
+// ═══════════════════════════════════════════════
 // DISCOVER FROM SHOPIFY
 // ═══════════════════════════════════════════════
 
@@ -1927,6 +2047,32 @@ async function removeUser(userId, email) {
     <div class="modal-actions"><button class="btn" onclick="closeAddCurriculumModal()">Cancel</button><button class="btn btn-primary" onclick="saveAddCurriculum()" id="acm-save-btn">Save</button></div>
   </div>
 </div>
+<!-- CLOSE STUDIO DAY MODAL -->
+<div id="close-studio-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeCloseStudioModal()">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div><div class="modal-title">🔒 Close Studio Day</div><div class="modal-sub">Sets all Shopify inventory to 0 or negative and hides sessions from calendar</div></div>
+      <button class="modal-close" onclick="closeCloseStudioModal()">×</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="modal-field">
+        <label>Studio</label>
+        <select id="csd-studio" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none" onchange="previewCloseStudio()"></select>
+      </div>
+      <div class="modal-field">
+        <label>Date</label>
+        <input type="date" id="csd-date" oninput="previewCloseStudio()" style="width:100%">
+      </div>
+    </div>
+    <div id="csd-preview"></div>
+    <div id="csd-status" style="font-size:12px;min-height:18px;margin-top:8px"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeCloseStudioModal()">Cancel</button>
+      <button class="btn" onclick="executeCloseStudio()" id="csd-save-btn" style="background:#fff0f0;color:#c0392b;border-color:#f5c6cb">🔒 Close Studio Day</button>
+    </div>
+  </div>
+</div>
+
 <!-- ADD SESSION FROM ERROR MODAL -->
 <div id="add-session-error-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeAddSessionFromError()">
   <div class="modal-box">
