@@ -1240,7 +1240,6 @@ function buildTaskRowInner(task) {
   const today = new Date().toISOString().slice(0, 10)
   const isOverdue = task.due_date < today && !done
   const isFuture = task.due_date > today
-  const hasDetail = task.notes || task.url
   const sourceTag = task.source === 'home_office'
     ? '<span style="font-size:10px;background:#e8e8f0;color:#5b4fcf;padding:1px 5px;border-radius:4px;flex-shrink:0">HO</span>'
     : ''
@@ -1251,33 +1250,18 @@ function buildTaskRowInner(task) {
       : ''
   const assigneeTag = task.assignee_name
     ? `<span style="font-size:10px;color:#2e7d32;flex-shrink:0">→ ${task.assignee_name}</span>`
-    : task.notes?.startsWith('Assigned to:')
-      ? `<span style="font-size:10px;color:#2e7d32;flex-shrink:0">${task.notes}</span>`
-      : ''
-  const expandBtn = hasDetail
-    ? `<button onclick="toggleTaskDetail('${task.id}')" style="background:none;border:none;color:#bbb;cursor:pointer;font-size:13px;padding:0 2px;flex-shrink:0" title="Details">ℹ︎</button>`
-    : ''
-  const detailHtml = hasDetail
-    ? `<div id="task-detail-${task.id}" style="display:none;padding:5px 0 2px 25px;font-size:12px;color:#666;width:100%">
-        ${task.notes && !task.notes.startsWith('Assigned to:') ? `<div style="margin-bottom:4px">${task.notes}</div>` : ''}
-        ${task.url ? `<a href="${task.url}" target="_blank" style="color:#5b4fcf;text-decoration:none">📎 Reference doc</a>` : ''}
-      </div>`
     : ''
   return `
     <input type="checkbox" ${done ? 'checked' : ''} onchange="toggleTask('${task.id}', this.checked)"
       style="width:15px;height:15px;cursor:pointer;flex-shrink:0">
-    <span class="task-title" style="flex:1;font-size:13px;${done ? 'text-decoration:line-through;color:#aaa' : ''};${hasDetail ? 'cursor:pointer' : ''}"
-      onclick="${hasDetail ? `toggleTaskDetail('${task.id}')` : ''}">
+    <span class="task-title" style="flex:1;font-size:13px;cursor:pointer;${done ? 'text-decoration:line-through;color:#aaa' : ''}"
+      onclick="openTaskPopup('${task.id}')">
       ${task.title}
     </span>
-    ${assigneeTag}${dueDateTag}${expandBtn}${sourceTag}
-    ${detailHtml}`
+    ${assigneeTag}${dueDateTag}${sourceTag}`
 }
 
-function toggleTaskDetail(id) {
-  const el = document.getElementById('task-detail-' + id)
-  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none'
-}
+
 
 
 async function deleteTask(id) {
@@ -1993,6 +1977,36 @@ async function printFullDay() {
   <h1>Full Day — ${dateLabel}</h1>
   <div class="subtitle">${regularSessions.length} sessions &middot; ${totalAll} registered</div>
   ${sections}
+
+<!-- Task Detail Popup -->
+<div id="task-popup" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:white;border-radius:12px;width:100%;max-width:420px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:1rem;gap:12px">
+      <div>
+        <div id="task-popup-source" style="margin-bottom:4px"></div>
+        <strong id="task-popup-title" style="font-size:15px;line-height:1.4"></strong>
+      </div>
+      <button onclick="closeTaskPopup()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1;flex-shrink:0">×</button>
+    </div>
+    <div id="task-popup-notes" style="font-size:13px;color:#555;margin-bottom:0.75rem;line-height:1.5;display:none"></div>
+    <div id="task-popup-url" style="margin-bottom:0.75rem;display:none">
+      <a id="task-popup-link" href="#" target="_blank" style="font-size:13px;color:#5b4fcf;text-decoration:none">📎 Reference doc</a>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;padding:10px 0;border-top:0.5px solid #f0f0e8;border-bottom:0.5px solid #f0f0e8;margin-bottom:1rem">
+      <span style="font-size:12px;color:#888;flex-shrink:0">Assign to:</span>
+      <input id="task-popup-assignee" type="text" list="staff-list-popup" autocomplete="off"
+        placeholder="Start typing a name..."
+        style="flex:1;padding:6px 10px;border:0.5px solid #e0e0d8;border-radius:6px;font-size:13px;outline:none">
+      <datalist id="staff-list-popup"></datalist>
+      <button onclick="saveTaskAssignee()" style="padding:6px 12px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">Save</button>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div id="task-popup-due" style="font-size:12px;color:#888"></div>
+      <div id="task-popup-status" style="font-size:12px"></div>
+    </div>
+  </div>
+</div>
+
 </body></html>`
 
   const win = window.open('', '_blank', 'width=800,height=900')
@@ -2699,6 +2713,135 @@ async function saveWalkins() {
   btn.textContent = 'Saved ✓'; btn.style.background = '#2e7d32'; btn.disabled = false
   setTimeout(() => { btn.textContent = 'Save'; btn.style.background = '#1a1a1a' }, 2000)
 }
+
+// ── Task Popup ───────────────────────────────────────────────
+let activeTaskId = null
+
+function openTaskPopup(taskId) {
+  activeTaskId = taskId
+  const row = document.getElementById('task-row-' + taskId)
+  if (!row) return
+
+  // Read data from the DOM row + find in tasks array
+  const titleEl = row.querySelector('.task-title')
+  const title = titleEl?.textContent?.trim() || ''
+
+  // Rebuild staff datalist for popup
+  const dl = document.getElementById('staff-list-popup')
+  if (dl) dl.innerHTML = studioStaffList.map(s => `<option value="${s.nickname || s.display_name}">`).join('')
+
+  // We need the full task — fetch it
+  sb.from('studio_tasks').select('*').eq('id', taskId).single().then(({ data: task }) => {
+    if (!task) return
+    document.getElementById('task-popup-title').textContent = task.title
+    // Source badge
+    const sourceEl = document.getElementById('task-popup-source')
+    sourceEl.innerHTML = task.source === 'home_office'
+      ? '<span style="font-size:10px;background:#e8e8f0;color:#5b4fcf;padding:2px 6px;border-radius:4px">From Home Office</span>'
+      : ''
+
+    // Notes
+    const notesEl = document.getElementById('task-popup-notes')
+    const notesText = task.notes && !task.notes.startsWith('Assigned to:') ? task.notes : ''
+    notesEl.textContent = notesText
+    notesEl.style.display = notesText ? 'block' : 'none'
+
+    // URL
+    const urlEl = document.getElementById('task-popup-url')
+    const linkEl = document.getElementById('task-popup-link')
+    if (task.url) { linkEl.href = task.url; urlEl.style.display = 'block' }
+    else urlEl.style.display = 'none'
+
+    // Assignee
+    document.getElementById('task-popup-assignee').value = task.assignee_name || ''
+
+    // Due date
+    const today = new Date().toISOString().slice(0,10)
+    const dueEl = document.getElementById('task-popup-due')
+    if (task.due_date === today) dueEl.textContent = 'Due today'
+    else if (task.due_date < today) dueEl.innerHTML = '<span style="color:#c0392b">Overdue: ' + task.due_date + '</span>'
+    else dueEl.textContent = 'Due ' + task.due_date
+
+    // Status
+    const statusEl = document.getElementById('task-popup-status')
+    statusEl.innerHTML = task.status === 'complete'
+      ? '<span style="color:#2e7d32">✓ Complete</span>'
+      : '<span style="color:#888">Pending</span>'
+
+    document.getElementById('task-popup').style.display = 'flex'
+  })
+}
+
+function closeTaskPopup() {
+  document.getElementById('task-popup').style.display = 'none'
+  activeTaskId = null
+}
+
+async function saveTaskAssignee() {
+  if (!activeTaskId) return
+  const assigneeName = document.getElementById('task-popup-assignee').value.trim() || null
+  const assigneeProfile = assigneeName
+    ? studioStaffList.find(s => (s.nickname || s.display_name) === assigneeName)
+    : null
+
+  await sb.from('studio_tasks').update({
+    assignee_name: assigneeName,
+    assignee_id: assigneeProfile?.id || null
+  }).eq('id', activeTaskId)
+
+  // Update the row tag in the DOM
+  const row = document.getElementById('task-row-' + activeTaskId)
+  if (row) {
+    const existing = row.querySelector('.assignee-tag')
+    if (existing) existing.remove()
+    if (assigneeName) {
+      const span = document.createElement('span')
+      span.className = 'assignee-tag'
+      span.style.cssText = 'font-size:10px;color:#2e7d32;flex-shrink:0'
+      span.textContent = '→ ' + assigneeName
+      const title = row.querySelector('.task-title')
+      if (title) title.insertAdjacentElement('afterend', span)
+    }
+  }
+  closeTaskPopup()
+}
+
+// Close popup on backdrop click
+document.addEventListener('click', e => {
+  const popup = document.getElementById('task-popup')
+  if (popup && e.target === popup) closeTaskPopup()
+})
+
 </script>
+
+<!-- Task Detail Popup -->
+<div id="task-popup" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:white;border-radius:12px;width:100%;max-width:420px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:1rem;gap:12px">
+      <div>
+        <div id="task-popup-source" style="margin-bottom:4px"></div>
+        <strong id="task-popup-title" style="font-size:15px;line-height:1.4"></strong>
+      </div>
+      <button onclick="closeTaskPopup()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1;flex-shrink:0">×</button>
+    </div>
+    <div id="task-popup-notes" style="font-size:13px;color:#555;margin-bottom:0.75rem;line-height:1.5;display:none"></div>
+    <div id="task-popup-url" style="margin-bottom:0.75rem;display:none">
+      <a id="task-popup-link" href="#" target="_blank" style="font-size:13px;color:#5b4fcf;text-decoration:none">📎 Reference doc</a>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;padding:10px 0;border-top:0.5px solid #f0f0e8;border-bottom:0.5px solid #f0f0e8;margin-bottom:1rem">
+      <span style="font-size:12px;color:#888;flex-shrink:0">Assign to:</span>
+      <input id="task-popup-assignee" type="text" list="staff-list-popup" autocomplete="off"
+        placeholder="Start typing a name..."
+        style="flex:1;padding:6px 10px;border:0.5px solid #e0e0d8;border-radius:6px;font-size:13px;outline:none">
+      <datalist id="staff-list-popup"></datalist>
+      <button onclick="saveTaskAssignee()" style="padding:6px 12px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">Save</button>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div id="task-popup-due" style="font-size:12px;color:#888"></div>
+      <div id="task-popup-status" style="font-size:12px"></div>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
