@@ -1051,6 +1051,48 @@ function getCurriculumLinks(sessionTitle, sessionDate) {
 }
 
 
+
+// ── Task Templates ───────────────────────────────────────────
+let taskTemplates = []
+
+async function loadTaskTemplates(studioId) {
+  const { data } = await sb.from('task_templates')
+    .select('*')
+    .or(`studio_id.is.null,studio_id.eq.${studioId}`)
+    .order('title')
+  taskTemplates = data || []
+}
+
+async function autoGenerateRepeatingTasks(studioId, date) {
+  const dayName = ['sun','mon','tue','wed','thu','fri','sat'][new Date(date + 'T12:00:00').getDay()]
+  const repeating = taskTemplates.filter(t =>
+    t.repeat === 'daily' || (t.repeat === 'weekly' && (t.repeat_days || []).includes(dayName))
+  )
+  if (!repeating.length) return
+
+  // Check which ones already exist for today
+  const { data: existing } = await sb.from('studio_tasks')
+    .select('template_id')
+    .eq('studio_id', studioId)
+    .eq('due_date', date)
+    .not('template_id', 'is', null)
+
+  const existingIds = new Set((existing || []).map(t => t.template_id))
+  const toCreate = repeating.filter(t => !existingIds.has(t.id))
+  if (!toCreate.length) return
+
+  await sb.from('studio_tasks').insert(toCreate.map(t => ({
+    studio_id: studioId,
+    title: t.title,
+    notes: t.notes || null,
+    url: t.url || null,
+    template_id: t.id,
+    due_date: date,
+    source: 'studio',
+    status: 'pending'
+  })))
+}
+
 // ── Staff for dropdowns ──────────────────────────────────────
 let studioStaffList = []
 
@@ -1130,21 +1172,56 @@ async function toggleTask(id, done) {
   }
 }
 
+function applyTaskTemplate() {
+  const sel = document.getElementById('new-task-template')
+  const opt = sel.options[sel.selectedIndex]
+  if (!opt.value) return
+  const titleInput = document.getElementById('new-task-input')
+  titleInput.value = opt.dataset.title || ''
+  // Store url + notes on the input for use in addTask
+  titleInput.dataset.templateId = opt.value
+  titleInput.dataset.templateUrl = opt.dataset.url || ''
+  titleInput.dataset.templateNotes = opt.dataset.notes || ''
+}
+
 async function addTask(studioId, date) {
   const input = document.getElementById('new-task-input')
   const title = input?.value.trim()
-  if (!title) return
+  if (!title) { alert('Please enter or select a task.'); return }
+
   const assigneeInput = document.getElementById('new-task-assignee')
   const assigneeName = assigneeInput?.value.trim() || null
+  // Match assignee name to staff profile
+  const assigneeProfile = assigneeName
+    ? studioStaffList.find(s => (s.nickname || s.display_name) === assigneeName)
+    : null
+
   const dueDateInput = document.getElementById('new-task-due')
   const dueDate = dueDateInput?.value || date
+  const templateId = input.dataset.templateId || null
+  const url = input.dataset.templateUrl || null
+  const notes = input.dataset.templateNotes || null
+
   const { data } = await sb.from('studio_tasks').insert({
-    studio_id: studioId, title, notes: assigneeName ? `Assigned to: ${assigneeName}` : null,
-    due_date: dueDate, source: 'studio', status: 'pending', created_by: currentUser?.id
+    studio_id: studioId,
+    title,
+    notes,
+    url,
+    template_id: templateId || null,
+    assignee_name: assigneeName,
+    assignee_id: assigneeProfile?.id || null,
+    due_date: dueDate,
+    source: 'studio',
+    status: 'pending',
+    created_by: currentUser?.id
   }).select().single()
-  input.value = ''
+
+  // Reset inputs
+  input.value = ''; input.dataset.templateId = ''; input.dataset.templateUrl = ''; input.dataset.templateNotes = ''
   if (assigneeInput) assigneeInput.value = ''
   if (dueDateInput) dueDateInput.value = date
+  const sel = document.getElementById('new-task-template')
+  if (sel) sel.value = ''
   if (data) appendTaskRow(data)
 }
 
@@ -1163,6 +1240,7 @@ function buildTaskRowInner(task) {
   const today = new Date().toISOString().slice(0, 10)
   const isOverdue = task.due_date < today && !done
   const isFuture = task.due_date > today
+  const hasDetail = task.notes || task.url
   const sourceTag = task.source === 'home_office'
     ? '<span style="font-size:10px;background:#e8e8f0;color:#5b4fcf;padding:1px 5px;border-radius:4px;flex-shrink:0">HO</span>'
     : ''
@@ -1171,18 +1249,36 @@ function buildTaskRowInner(task) {
     : isOverdue
       ? `<span style="font-size:10px;color:#c0392b;flex-shrink:0">overdue</span>`
       : ''
-  const assigneeTag = task.notes?.startsWith('Assigned to:')
-    ? `<span style="font-size:10px;color:#2e7d32;flex-shrink:0">${task.notes}</span>`
+  const assigneeTag = task.assignee_name
+    ? `<span style="font-size:10px;color:#2e7d32;flex-shrink:0">→ ${task.assignee_name}</span>`
+    : task.notes?.startsWith('Assigned to:')
+      ? `<span style="font-size:10px;color:#2e7d32;flex-shrink:0">${task.notes}</span>`
+      : ''
+  const expandBtn = hasDetail
+    ? `<button onclick="toggleTaskDetail('${task.id}')" style="background:none;border:none;color:#bbb;cursor:pointer;font-size:13px;padding:0 2px;flex-shrink:0" title="Details">ℹ︎</button>`
+    : ''
+  const detailHtml = hasDetail
+    ? `<div id="task-detail-${task.id}" style="display:none;padding:5px 0 2px 25px;font-size:12px;color:#666;width:100%">
+        ${task.notes && !task.notes.startsWith('Assigned to:') ? `<div style="margin-bottom:4px">${task.notes}</div>` : ''}
+        ${task.url ? `<a href="${task.url}" target="_blank" style="color:#5b4fcf;text-decoration:none">📎 Reference doc</a>` : ''}
+      </div>`
     : ''
   return `
     <input type="checkbox" ${done ? 'checked' : ''} onchange="toggleTask('${task.id}', this.checked)"
       style="width:15px;height:15px;cursor:pointer;flex-shrink:0">
-    <span class="task-title" style="flex:1;font-size:13px;${done ? 'text-decoration:line-through;color:#aaa' : ''}">${task.title}</span>
-    ${assigneeTag}
-    ${dueDateTag}
-    ${sourceTag}
-    <button onclick="deleteTask('${task.id}')" style="background:none;border:none;color:#ccc;cursor:pointer;font-size:16px;padding:0;line-height:1;flex-shrink:0" title="Delete">×</button>`
+    <span class="task-title" style="flex:1;font-size:13px;${done ? 'text-decoration:line-through;color:#aaa' : ''};${hasDetail ? 'cursor:pointer' : ''}"
+      onclick="${hasDetail ? `toggleTaskDetail('${task.id}')` : ''}">
+      ${task.title}
+    </span>
+    ${assigneeTag}${dueDateTag}${expandBtn}${sourceTag}
+    ${detailHtml}`
 }
+
+function toggleTaskDetail(id) {
+  const el = document.getElementById('task-detail-' + id)
+  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none'
+}
+
 
 async function deleteTask(id) {
   await sb.from('studio_tasks').delete().eq('id', id)
@@ -1227,17 +1323,29 @@ function buildDaySummaryHtml(notes, tasks, studioId, date) {
       <div style="padding:14px 16px">
         <div style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">✅ Today's Tasks</div>
         <div id="task-list">${taskRows}${emptyTasks}</div>
-        <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
-          <input id="new-task-input" type="text" placeholder="Add a task..."
-            style="flex:2;min-width:120px;padding:6px 10px;border:0.5px solid #e0e0d8;border-radius:6px;font-size:13px;outline:none"
-            onkeydown="if(event.key==='Enter') addTask('${studioId}','${date}')">
-          <input id="new-task-assignee" type="text" placeholder="Assign to..." list="staff-list-task" autocomplete="off"
-            style="flex:1;min-width:100px;padding:6px 10px;border:0.5px solid #e0e0d8;border-radius:6px;font-size:13px;outline:none">
-          ${staffDatalistHtml("staff-list-task")}
-          <input id="new-task-due" type="date" value="${date}"
-            style="padding:6px 10px;border:0.5px solid #e0e0d8;border-radius:6px;font-size:13px;outline:none">
-          <button onclick="addTask('${studioId}','${date}')"
-            style="padding:6px 12px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">+</button>
+        <div style="margin-top:8px">
+          <!-- Library picker row -->
+          <div style="display:flex;gap:6px;margin-bottom:6px">
+            <select id="new-task-template" onchange="applyTaskTemplate()"
+              style="flex:2;padding:6px 10px;border:0.5px solid #e0e0d8;border-radius:6px;font-size:13px;outline:none;background:white;color:#888">
+              <option value="">📋 Pick from library...</option>
+              ${taskTemplates.map(t => `<option value="${t.id}" data-title="${t.title}" data-notes="${t.notes||''}" data-url="${t.url||''}">${t.title}</option>`).join('')}
+            </select>
+            <span style="line-height:32px;font-size:12px;color:#bbb">or</span>
+            <input id="new-task-input" type="text" placeholder="Type a custom task..."
+              style="flex:2;padding:6px 10px;border:0.5px solid #e0e0d8;border-radius:6px;font-size:13px;outline:none"
+              onkeydown="if(event.key==='Enter') addTask('${studioId}','${date}')">
+          </div>
+          <!-- Assignee + due date row -->
+          <div style="display:flex;gap:6px">
+            <input id="new-task-assignee" type="text" placeholder="Assign to..." list="staff-list-task" autocomplete="off"
+              style="flex:1;padding:6px 10px;border:0.5px solid #e0e0d8;border-radius:6px;font-size:13px;outline:none">
+            ${staffDatalistHtml("staff-list-task")}
+            <input id="new-task-due" type="date" value="${date}"
+              style="padding:6px 10px;border:0.5px solid #e0e0d8;border-radius:6px;font-size:13px;outline:none">
+            <button onclick="addTask('${studioId}','${date}')"
+              style="padding:6px 14px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">+</button>
+          </div>
         </div>
       </div>
 
@@ -1678,11 +1786,15 @@ async function loadDayView() {
     </div>
   </div>`
 
+  await Promise.all([
+    loadTaskTemplates(currentStudioId),
+    loadStudioStaff(currentStudioId)
+  ])
+  await autoGenerateRepeatingTasks(currentStudioId, today)
   const [announcements, dailyNotes, tasks] = await Promise.all([
     loadAnnouncements(currentStudioId, today),
     loadDailyNotes(currentStudioId, today),
-    loadTasks(currentStudioId, today),
-    loadStudioStaff(currentStudioId)
+    loadTasks(currentStudioId, today)
   ])
   const { urgent: urgentHtml, normal: normalHtml } = buildAnnouncementBanners(announcements)
   const themeBannerHtml = buildThemeBanner(today)
