@@ -246,8 +246,23 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
       <div class="view-toggle">
         <button class="view-btn active" id="btn-day" onclick="setView('day')">Day</button>
         <button class="view-btn" id="btn-table" onclick="setView('table')">Week</button>
+        <button class="view-btn" id="btn-training" onclick="setView('training')">Training</button>
       </div>
     </div>
+  </div>
+
+  <div id="training-view" style="display:none;padding:1.5rem">
+    <div style="display:flex;gap:8px;margin-bottom:1rem;flex-wrap:wrap;align-items:center">
+      <select id="training-view-unit" onchange="loadStudioTraining()" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none;background:white">
+        <option value="">All units</option>
+      </select>
+      <select id="training-view-type" onchange="loadStudioTraining()" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none;background:white">
+        <option value="">All staff types</option>
+        <option value="regular">Regular</option>
+        <option value="summer">Summer</option>
+      </select>
+    </div>
+    <div id="studio-training-container"><div class="loading">Loading...</div></div>
   </div>
 
   <div id="day-view">
@@ -1343,6 +1358,110 @@ function buildDaySummaryHtml(notes, tasks, studioId, date) {
   </div>`
 }
 
+
+// ── Studio Training View ─────────────────────────────────────
+
+async function loadStudioTraining() {
+  const container = document.getElementById('studio-training-container')
+  container.innerHTML = '<div class="loading">Loading...</div>'
+
+  const unitFilter = document.getElementById('training-view-unit')?.value
+  const typeFilter = document.getElementById('training-view-type')?.value
+
+  // Load units + items
+  const { data: units } = await sb.from('training_units').select('*').order('sort_order')
+  const { data: items } = await sb.from('training_items').select('*').order('sort_order')
+
+  // Populate unit filter
+  const unitSel = document.getElementById('training-view-unit')
+  if (unitSel && unitSel.options.length === 1) {
+    ;(units || []).forEach(u => {
+      const o = document.createElement('option'); o.value = u.id; o.textContent = u.name; unitSel.appendChild(o)
+    })
+  }
+
+  // Load active staff at this studio
+  const { data: allStaff } = await sb.from('staff_profiles')
+    .select('*').eq('is_active', true).order('display_name')
+  let staff = (allStaff || []).filter(s => !s.studio_ids?.length || s.studio_ids.includes(currentStudioId))
+  if (typeFilter) staff = staff.filter(s => s.employment_type === typeFilter)
+
+  if (!staff.length) {
+    container.innerHTML = '<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No active staff found for this studio.</div>'
+    return
+  }
+
+  // Load progress
+  const staffUserIds = staff.filter(s => s.user_id).map(s => s.user_id)
+  let progress = []
+  if (staffUserIds.length) {
+    const { data: prog } = await sb.from('staff_training_progress').select('*').in('user_id', staffUserIds)
+    progress = prog || []
+  }
+  const progressMap = {}
+  progress.forEach(p => { progressMap[p.user_id + '_' + p.item_id] = p })
+
+  let visibleUnits = units || []
+  if (unitFilter) visibleUnits = visibleUnits.filter(u => u.id === unitFilter)
+
+  let html = ''
+  for (const unit of visibleUnits) {
+    const unitItems = (items || []).filter(i => i.unit_id === unit.id)
+    if (!unitItems.length) continue
+
+    const staffHeaders = staff.map(s =>
+      `<th style="padding:6px 4px;font-size:11px;font-weight:500;color:#555;text-align:center;min-width:70px;max-width:90px;word-break:break-word;line-height:1.3;border-left:0.5px solid #f0f0e8">
+        ${s.nickname || s.display_name}
+      </th>`
+    ).join('')
+
+    const itemRows = unitItems.map(item => {
+      const cells = staff.map(s => {
+        if (!s.user_id) return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px"><span style="color:#ddd">–</span></td>`
+        const done = progressMap[s.user_id + '_' + item.id]
+        return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px;background:${done ? '#f0faf0' : ''}">
+          <span style="font-size:15px">${done ? '✅' : '⬜'}</span>
+        </td>`
+      }).join('')
+      return `<tr style="border-bottom:0.5px solid #f5f5f0">
+        <td style="padding:8px 14px;font-size:12px">${item.title}${item.description ? `<div style="font-size:11px;color:#888;margin-top:1px">${item.description}</div>` : ''}</td>
+        ${cells}
+      </tr>`
+    }).join('')
+
+    // Per-staff completion %
+    const completionRow = `<tr style="background:#fafaf8;border-top:0.5px solid #e0e0d8">
+      <td style="padding:6px 14px;font-size:11px;color:#888;font-style:italic">Completion</td>
+      ${staff.map(s => {
+        if (!s.user_id) return '<td style="border-left:0.5px solid #f0f0e8"></td>'
+        const done = unitItems.filter(i => progressMap[s.user_id + '_' + i.id]).length
+        const pct = Math.round(done / unitItems.length * 100)
+        const color = pct === 100 ? '#2e7d32' : pct >= 50 ? '#e65100' : '#c0392b'
+        return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px;font-size:11px;font-weight:600;color:${color}">${pct}%</td>`
+      }).join('')}
+    </tr>`
+
+    html += `
+      <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden;margin-bottom:1.25rem">
+        <div style="padding:12px 16px;background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
+          <strong style="font-size:13px">${unit.name}</strong>
+          <span style="font-size:11px;color:#888;margin-left:8px">${unitItems.length} items · ${staff.length} staff</span>
+        </div>
+        <div style="overflow-x:auto">
+          <table style="border-collapse:collapse;font-size:12px;width:100%">
+            <thead><tr style="border-bottom:0.5px solid #e0e0d8">
+              <th style="padding:8px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase;min-width:200px">Item</th>
+              ${staffHeaders}
+            </tr></thead>
+            <tbody>${itemRows}${completionRow}</tbody>
+          </table>
+        </div>
+      </div>`
+  }
+
+  container.innerHTML = html || '<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No training units found.</div>'
+}
+
 async function loadAnnouncements(studioId, date) {
   // Fetch all active announcements then filter client-side:
   // show if studio_ids is empty (all studios) or contains this studio
@@ -1542,6 +1661,18 @@ function shiftDate(n) { currentDate = addDays(currentDate, n); syncDatePicker();
 function pickDate(val) { currentDate = new Date(val + 'T12:00:00'); syncDatePicker(); loadCurrentView() }
 function goToday() { currentDate = new Date(); syncDatePicker(); loadCurrentView() }
 function setView(v) {
+  if (v === 'training') {
+    document.getElementById('day-view').style.display = 'none'
+    document.getElementById('table-view')?.style && (document.getElementById('table-view').style.display = 'none')
+    document.getElementById('training-view').style.display = 'block'
+    document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'))
+    document.getElementById('btn-training').classList.add('active')
+    loadStudioTraining()
+    return
+  }
+  document.getElementById('training-view').style.display = 'none'
+  // Original setView continues below
+
   currentView = v
   document.getElementById('day-view').style.display = v === 'day' ? 'block' : 'none'
   document.getElementById('table-view').style.display = v === 'table' ? 'block' : 'none'
