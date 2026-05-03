@@ -210,6 +210,7 @@ select:focus, input:focus { border-color: #888; }
     <button class="tab-btn" onclick="switchTab('quality')">Data Quality<span id="quality-badge" class="tab-badge" style="display:none"></span></button>
     <button class="tab-btn" onclick="switchTab('tasks')">Tasks</button>
     <button class="tab-btn" onclick="switchTab('announcements')">Announcements</button>
+    <button class="tab-btn" onclick="switchTab('staff')">Staff</button>
     <button class="tab-btn" onclick="switchTab('users')">Users</button>
     <div class="top-bar-right"><button class="signout-btn" onclick="signOut()">Sign out</button></div>
   </div>
@@ -387,6 +388,31 @@ select:focus, input:focus { border-color: #888; }
     </div>
     <div id="announcements-container"><div class="loading">Loading...</div></div>
   </div>
+  <div class="tab-content" id="tab-staff">
+    <div class="toolbar">
+      <div class="toolbar-group">
+        <button class="btn btn-primary" onclick="openStaffModal()">+ Add Staff</button>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group" style="gap:8px">
+        <select id="staff-filter-studio" onchange="loadStaffTab()" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none;background:white">
+          <option value="">All studios</option>
+        </select>
+        <select id="staff-filter-status" onchange="loadStaffTab()" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none;background:white">
+          <option value="">Active + Inactive</option>
+          <option value="active" selected>Active only</option>
+          <option value="inactive">Inactive only</option>
+        </select>
+        <select id="staff-filter-role" onchange="loadStaffTab()" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none;background:white">
+          <option value="">All roles</option>
+          <option value="staff">Staff</option>
+          <option value="manager">Manager</option>
+          <option value="admin">Admin</option>
+        </select>
+      </div>
+    </div>
+    <div id="staff-container"><div class="loading">Loading...</div></div>
+  </div>
   <div class="tab-content" id="tab-users">
     <div class="users-layout">
       <div class="invite-card">
@@ -457,6 +483,7 @@ const SUPABASE_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co'
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA'
 const EDGE_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co/functions/v1/shopify-inventory'
 const ADMIN_USERS_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co/functions/v1/admin-users'
+const STAFF_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co/functions/v1/create-staff'
 const { createClient } = supabase
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY)
 
@@ -598,7 +625,7 @@ async function initApp() {
 }
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','users'][i] === tab))
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','staff','users'][i] === tab))
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'))
   document.getElementById(`tab-${tab}`).classList.add('active')
   if (tab === 'curriculum') loadCurriculum()
@@ -606,6 +633,7 @@ function switchTab(tab) {
   if (tab === 'users') loadUsers()
   if (tab === 'tasks') loadTasksTab()
   if (tab === 'announcements') loadAnnouncementsTab()
+  if (tab === 'staff') loadStaffTab()
 }
 
 async function loadQualityBadge() {
@@ -2493,6 +2521,227 @@ async function adminDeleteTask(id) {
   loadTasksTab()
 }
 
+
+// ── Staff ────────────────────────────────────────────────────
+let editingStaffId = null   // staff_profiles.id
+let editingUserId = null    // auth user id
+let editingIsActive = true
+
+function toggleAllStaffStudios(allChecked) {
+  const list = document.getElementById('staff-studio-list')
+  list.style.display = allChecked ? 'none' : 'block'
+  if (allChecked) list.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = false)
+}
+
+function getSelectedStaffStudios() {
+  if (document.getElementById('staff-studio-all').checked) return []
+  return Array.from(document.getElementById('staff-studio-list').querySelectorAll('input:checked')).map(cb => cb.value)
+}
+
+function buildStaffStudioList(selectedIds = []) {
+  const list = document.getElementById('staff-studio-list')
+  list.innerHTML = Object.entries(STUDIO_VARIANT_MAP).map(([k, v]) =>
+    `<label style="display:flex;align-items:center;gap:6px;padding:4px 10px;cursor:pointer;font-size:12px;break-inside:avoid">
+      <input type="checkbox" value="${k}" ${selectedIds.includes(k) ? 'checked' : ''}> ${v}
+    </label>`).join('')
+  const allCb = document.getElementById('staff-studio-all')
+  if (selectedIds.length > 0) { allCb.checked = false; list.style.display = 'block' }
+  else { allCb.checked = true; list.style.display = 'none' }
+}
+
+async function loadStaffTab() {
+  const container = document.getElementById('staff-container')
+  container.innerHTML = '<div class="loading">Loading...</div>'
+
+  // Populate studio filter
+  const sel = document.getElementById('staff-filter-studio')
+  if (sel.options.length === 1) {
+    Object.entries(STUDIO_VARIANT_MAP).forEach(([k, v]) => {
+      const o = document.createElement('option'); o.value = k; o.textContent = v; sel.appendChild(o)
+    })
+  }
+
+  const studioFilter = sel.value
+  const statusFilter = document.getElementById('staff-filter-status').value
+  const roleFilter = document.getElementById('staff-filter-role').value
+
+  let query = sb.from('staff_profiles').select('*').order('display_name')
+  if (statusFilter === 'active') query = query.eq('is_active', true)
+  if (statusFilter === 'inactive') query = query.eq('is_active', false)
+  if (roleFilter) query = query.eq('role', roleFilter)
+
+  const { data } = await query
+  if (!data?.length) {
+    container.innerHTML = '<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No staff found.</div>'
+    return
+  }
+
+  let filtered = data
+  if (studioFilter) filtered = data.filter(s => !s.studio_ids?.length || s.studio_ids.includes(studioFilter))
+
+  const rows = filtered.map(s => {
+    const studios = s.studio_ids?.length
+      ? s.studio_ids.length <= 2 ? s.studio_ids.map(id => STUDIO_VARIANT_MAP[id] || id).join(', ')
+        : `${s.studio_ids.slice(0,2).map(id => STUDIO_VARIANT_MAP[id]||id).join(', ')} +${s.studio_ids.length-2} more`
+      : '<em style="color:#888">All / floater</em>'
+    const roleBadge = s.role === 'admin'
+      ? '<span style="background:#fdecea;color:#c0392b;font-size:10px;padding:2px 6px;border-radius:4px">admin</span>'
+      : s.role === 'manager'
+        ? '<span style="background:#e8e8f0;color:#5b4fcf;font-size:10px;padding:2px 6px;border-radius:4px">manager</span>'
+        : '<span style="background:#f5f5f0;color:#888;font-size:10px;padding:2px 6px;border-radius:4px">staff</span>'
+    const statusDot = s.is_active
+      ? '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#2e7d32;margin-right:6px"></span>'
+      : '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#ccc;margin-right:6px"></span>'
+    const empBadge = s.employment_type === 'summer'
+      ? '<span style="background:#fff3e0;color:#e65100;font-size:10px;padding:2px 6px;border-radius:4px">summer</span>'
+      : ''
+    return `<tr style="border-bottom:0.5px solid #f5f5f0;${!s.is_active ? 'opacity:0.5' : ''}" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
+      <td style="padding:10px 14px">${statusDot}<strong style="font-size:13px">${s.display_name}</strong><div style="font-size:11px;color:#888;margin-top:1px">${s.email||''}</div></td>
+      <td style="padding:10px 14px;font-size:12px">${studios}</td>
+      <td style="padding:10px 14px">${roleBadge} ${empBadge}</td>
+      <td style="padding:10px 14px;font-size:12px;color:#888">${s.province_code||'—'}</td>
+      <td style="padding:10px 14px">
+        <button class="btn" onclick="openStaffModal('${s.id}')" style="font-size:11px;padding:4px 10px">Edit</button>
+      </td>
+    </tr>`
+  }).join('')
+
+  container.innerHTML = `
+    <div style="font-size:12px;color:#888;margin-bottom:0.75rem">${filtered.length} staff member${filtered.length!==1?'s':''}</div>
+    <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
+          <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Name</th>
+          <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Studios</th>
+          <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Role</th>
+          <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Province</th>
+          <th style="padding:10px 14px"></th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`
+}
+
+async function openStaffModal(id = null) {
+  editingStaffId = id
+  editingUserId = null
+  const modal = document.getElementById('staff-modal')
+
+  buildStaffStudioList([])
+  document.getElementById('staff-reset-pw-row').style.display = 'none'
+  document.getElementById('staff-deactivate-btn-wrap').style.display = 'none'
+  document.getElementById('staff-password-row').style.display = 'grid'
+
+  if (id) {
+    document.getElementById('staff-modal-title').textContent = 'Edit Staff Member'
+    document.getElementById('staff-password-row').style.display = 'none'
+    document.getElementById('staff-reset-pw-row').style.display = 'block'
+    document.getElementById('staff-deactivate-btn-wrap').style.display = 'block'
+
+    const { data } = await sb.from('staff_profiles').select('*').eq('id', id).single()
+    if (data) {
+      editingUserId = data.user_id
+      editingIsActive = data.is_active
+      document.getElementById('staff-name').value = data.display_name || ''
+      document.getElementById('staff-email').value = data.email || ''
+      document.getElementById('staff-role').value = data.role || 'staff'
+      document.getElementById('staff-employment').value = data.employment_type || 'regular'
+      document.getElementById('staff-province').value = data.province_code || ''
+      buildStaffStudioList(data.studio_ids || [])
+      const deactivateBtn = document.getElementById('staff-deactivate-btn')
+      deactivateBtn.textContent = data.is_active ? 'Deactivate' : 'Reactivate'
+      deactivateBtn.style.color = data.is_active ? '#c0392b' : '#2e7d32'
+      deactivateBtn.style.borderColor = data.is_active ? '#f5c6cb' : '#c8e6c9'
+    }
+  } else {
+    document.getElementById('staff-modal-title').textContent = 'Add Staff Member'
+    document.getElementById('staff-name').value = ''
+    document.getElementById('staff-email').value = ''
+    document.getElementById('staff-password').value = ''
+    document.getElementById('staff-role').value = 'staff'
+    document.getElementById('staff-employment').value = 'regular'
+    document.getElementById('staff-province').value = ''
+  }
+
+  modal.style.display = 'flex'
+}
+
+function closeStaffModal() {
+  document.getElementById('staff-modal').style.display = 'none'
+  editingStaffId = null; editingUserId = null
+}
+
+async function saveStaff() {
+  const btn = document.getElementById('staff-save-btn')
+  const name = document.getElementById('staff-name').value.trim()
+  const email = document.getElementById('staff-email').value.trim()
+  if (!name || !email) { alert('Name and email are required.'); return }
+
+  const studioIds = getSelectedStaffStudios()
+  const profilePayload = {
+    display_name: name,
+    email,
+    studio_ids: studioIds,
+    role: document.getElementById('staff-role').value,
+    employment_type: document.getElementById('staff-employment').value,
+    province_code: document.getElementById('staff-province').value || null,
+  }
+
+  btn.textContent = 'Saving...'; btn.disabled = true
+
+  if (editingStaffId) {
+    // Update existing profile
+    const { error } = await sb.from('staff_profiles').update(profilePayload).eq('id', editingStaffId)
+    btn.textContent = 'Save'; btn.disabled = false
+    if (error) { alert('Error: ' + error.message); return }
+  } else {
+    // Create new via edge function
+    const password = document.getElementById('staff-password').value
+    if (!password) { alert('Password is required for new staff.'); btn.textContent = 'Save'; btn.disabled = false; return }
+    const res = await fetch(STAFF_URL, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'create', email, password, displayName: name, ...profilePayload })
+    })
+    const result = await res.json()
+    btn.textContent = 'Save'; btn.disabled = false
+    if (result.error) { alert('Error: ' + result.error); return }
+  }
+
+  closeStaffModal()
+  loadStaffTab()
+}
+
+async function resetStaffPassword() {
+  const pw = document.getElementById('staff-new-password').value
+  if (!pw) { alert('Enter a new password.'); return }
+  if (!editingUserId) { alert('No auth user linked to this profile yet.'); return }
+  const res = await fetch(STAFF_URL, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'set_password', userId: editingUserId, password: pw })
+  })
+  const result = await res.json()
+  if (result.error) { alert('Error: ' + result.error); return }
+  document.getElementById('staff-new-password').value = ''
+  alert('Password updated.')
+}
+
+async function toggleStaffActive() {
+  if (!editingUserId) { alert('No auth user linked to this profile.'); return }
+  const action = editingIsActive ? 'deactivate' : 'reactivate'
+  if (!confirm(editingIsActive ? 'Deactivate this staff member? They will no longer be able to log in.' : 'Reactivate this staff member?')) return
+  const res = await fetch(STAFF_URL, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, userId: editingUserId })
+  })
+  const result = await res.json()
+  if (result.error) { alert('Error: ' + result.error); return }
+  closeStaffModal()
+  loadStaffTab()
+}
+
 </script>
 
 <!-- EDIT TITLE MODAL -->
@@ -2711,6 +2960,93 @@ async function adminDeleteTask(id) {
     <div style="display:flex;gap:8px;margin-top:1.25rem;justify-content:flex-end">
       <button onclick="closeTaskModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
       <button onclick="saveTaskFromAdmin()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer" id="task-modal-save-btn">Send to Studio</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- Staff Modal -->
+<div id="staff-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:white;border-radius:12px;width:100%;max-width:560px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2);max-height:90vh;overflow-y:auto">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
+      <h3 style="font-size:15px;font-weight:600;margin:0" id="staff-modal-title">Add Staff Member</h3>
+      <button onclick="closeStaffModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">×</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div>
+          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Full name *</label>
+          <input id="staff-name" type="text" placeholder="e.g. Sarah Jones"
+            style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
+        </div>
+        <div>
+          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Email *</label>
+          <input id="staff-email" type="email" placeholder="sarah@email.com"
+            style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
+        </div>
+      </div>
+      <div id="staff-password-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div>
+          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Password *</label>
+          <input id="staff-password" type="password" placeholder="Set initial password"
+            style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
+        </div>
+        <div>
+          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Role</label>
+          <select id="staff-role" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
+            <option value="staff">Staff</option>
+            <option value="manager">Manager</option>
+            <option value="admin">Admin</option>
+          </select>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div>
+          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Employment type</label>
+          <select id="staff-employment" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
+            <option value="regular">Regular</option>
+            <option value="summer">Summer</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Province</label>
+          <select id="staff-province" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
+            <option value="">— select —</option>
+            <option value="BC">BC</option>
+            <option value="AB">AB</option>
+            <option value="ON">ON</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Studios</label>
+        <div style="border:0.5px solid #d0d0c8;border-radius:6px;overflow:hidden">
+          <div style="padding:6px 10px;background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
+            <label style="font-size:12px;display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:500">
+              <input type="checkbox" id="staff-studio-all" onchange="toggleAllStaffStudios(this.checked)" checked> All studios / floater
+            </label>
+          </div>
+          <div id="staff-studio-list" style="max-height:180px;overflow-y:auto;padding:6px 0;display:none;columns:2"></div>
+        </div>
+      </div>
+      <!-- Edit-only: reset password -->
+      <div id="staff-reset-pw-row" style="display:none;padding:10px;background:#fafaf8;border-radius:6px;border:0.5px solid #e0e0d8">
+        <div style="font-size:12px;color:#888;margin-bottom:6px">Reset password</div>
+        <div style="display:flex;gap:8px">
+          <input id="staff-new-password" type="password" placeholder="New password"
+            style="flex:1;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none">
+          <button onclick="resetStaffPassword()" style="padding:8px 14px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">Set</button>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:1.25rem;justify-content:space-between;align-items:center">
+      <div id="staff-deactivate-btn-wrap" style="display:none">
+        <button id="staff-deactivate-btn" onclick="toggleStaffActive()" style="padding:8px 14px;border:0.5px solid #f5c6cb;border-radius:6px;background:white;font-size:13px;cursor:pointer;color:#c0392b">Deactivate</button>
+      </div>
+      <div style="display:flex;gap:8px;margin-left:auto">
+        <button onclick="closeStaffModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
+        <button onclick="saveStaff()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer" id="staff-save-btn">Save</button>
+      </div>
     </div>
   </div>
 </div>
