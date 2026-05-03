@@ -1070,7 +1070,7 @@ async function autoGenerateRepeatingTasks(studioId, date) {
   )
   if (!repeating.length) return
 
-  // Check which ones already exist for today
+  // Only generate if no row exists for this template + studio + date
   const { data: existing } = await sb.from('studio_tasks')
     .select('template_id')
     .eq('studio_id', studioId)
@@ -1139,24 +1139,30 @@ function showSaveConfirm(id) {
 }
 
 async function loadTasks(studioId, date) {
-  // Carry-forward: bump overdue pending tasks to today
-  const { data: overdue } = await sb.from('studio_tasks')
-    .select('id').eq('status', 'pending')
-    .or(`studio_id.eq.${studioId},studio_id.is.null`)
-    .lt('due_date', date)
-  if (overdue?.length) {
-    await Promise.all(overdue.map(t =>
-      sb.from('studio_tasks').update({ due_date: date }).eq('id', t.id)
-    ))
-  }
-  // Load all pending tasks + recently completed (last 7 days)
+  // Load all tasks for this studio
   const { data } = await sb.from('studio_tasks')
     .select('*')
     .or(`studio_id.eq.${studioId},studio_id.is.null`)
-    .or('status.eq.pending,and(status.eq.complete,completed_at.gte.' + new Date(Date.now()-7*86400000).toISOString().slice(0,10) + ')')
     .order('due_date')
     .order('created_at')
-  return data || []
+
+  const all = data || []
+
+  // For repeating tasks (has template_id): only show today's instance
+  // For one-off tasks: show all pending + recently completed
+  const sevenDaysAgo = new Date(Date.now() - 7*86400000).toISOString().slice(0,10)
+
+  return all.filter(t => {
+    if (t.template_id) {
+      // Repeating: only show today's occurrence
+      return t.due_date === date
+    } else {
+      // One-off: show if pending or completed in last 7 days
+      if (t.status === 'pending') return true
+      if (t.status === 'complete' && t.completed_at >= sevenDaysAgo) return true
+      return false
+    }
+  })
 }
 
 async function toggleTask(id, done) {
@@ -1305,7 +1311,7 @@ function buildDaySummaryHtml(notes, tasks, studioId, date) {
 
       <!-- To-Do List -->
       <div style="padding:14px 16px">
-        <div style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">✅ Tasks</div>
+        <div style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">✅ Today's Tasks</div>
         <div id="task-list">${taskRows}${emptyTasks}</div>
         <div style="margin-top:8px">
           <!-- Library picker row -->
