@@ -3262,127 +3262,144 @@ async function loadTrainingOverview() {
   const unitFilter = document.getElementById('training-filter-unit')?.value
   const typeFilter = document.getElementById('training-filter-type')?.value
 
-  // Load units + items
   const { data: units } = await sb.from('training_units').select('*').order('sort_order')
   const { data: items } = await sb.from('training_items').select('*').order('sort_order')
   trainingUnitsCache = units || []
   trainingItemsCache = items || []
 
+  // Populate unit filter dropdown
+  const unitSel = document.getElementById('training-filter-unit')
+  if (unitSel) {
+    unitSel.innerHTML = '<option value="">All units</option>' +
+      trainingUnitsCache.map(u => `<option value="${u.id}">${u.name}</option>`).join('')
+  }
+
   // Load staff
   let staffQuery = sb.from('staff_profiles').select('*').eq('is_active', true).order('display_name')
   if (typeFilter) staffQuery = staffQuery.eq('employment_type', typeFilter)
   const { data: allStaff } = await staffQuery
-
   let staff = allStaff || []
   if (studioFilter) staff = staff.filter(s => !s.studio_ids?.length || s.studio_ids.includes(studioFilter))
+
   if (!staff.length) {
     container.innerHTML = '<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No staff found for these filters.</div>'
     return
   }
 
-  // Load progress for these staff
+  // Load progress
   const staffUserIds = staff.filter(s => s.user_id).map(s => s.user_id)
   let progress = []
   if (staffUserIds.length) {
-    const { data: prog } = await sb.from('staff_training_progress')
-      .select('*').in('user_id', staffUserIds)
+    const { data: prog } = await sb.from('staff_training_progress').select('*').in('user_id', staffUserIds)
     progress = prog || []
   }
-  // progress map: userId_itemId -> record
   const progressMap = {}
   progress.forEach(p => { progressMap[p.user_id + '_' + p.item_id] = p })
 
-  // Filter units
+  // Filter units/items
   let visibleUnits = trainingUnitsCache
   if (unitFilter) visibleUnits = visibleUnits.filter(u => u.id === unitFilter)
+  const visibleItems = trainingItemsCache.filter(i => visibleUnits.find(u => u.id === i.unit_id))
 
-  let html = ''
-  for (const unit of visibleUnits) {
-    const unitItems = trainingItemsCache.filter(i => i.unit_id === unit.id)
-    if (!unitItems.length) continue
-
-    const appliesBadge = unit.applies_to !== 'all'
-      ? `<span style="font-size:10px;background:#e8e8f0;color:#5b4fcf;padding:2px 6px;border-radius:4px;margin-left:6px">${unit.applies_to}</span>`
-      : ''
-
-    // Staff columns header
-    const staffHeaders = staff.map(s =>
-      `<th style="padding:6px 4px;font-size:10px;color:#888;text-align:center;min-width:60px;max-width:80px;word-break:break-word;line-height:1.3;border-left:0.5px solid #f0f0e8">
-        ${s.nickname || s.display_name}
-      </th>`
-    ).join('')
-
-    // Item rows
-    const itemRows = unitItems.map(item => {
-      const cells = staff.map(s => {
-        if (!s.user_id) return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px"><span style="color:#ddd;font-size:12px">–</span></td>`
-        const done = progressMap[s.user_id + '_' + item.id]
-        const date = done ? done.completed_at?.slice(0,10) : ''
-        return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px;background:${done ? '#f0faf0' : ''}">
-          <span style="font-size:15px;cursor:pointer" onclick="toggleTrainingItem('${s.user_id}','${item.id}',${done ? 'true' : 'false'})" title="${done ? 'Completed '+date : 'Not done'}">${done ? '✅' : '⬜'}</span>
-        </td>`
-      }).join('')
-
-      return `<tr style="border-bottom:0.5px solid #f5f5f0" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
-        <td style="padding:8px 14px;font-size:12px">${item.title}${item.description ? `<div style="font-size:11px;color:#888;margin-top:1px">${item.description}</div>` : ''}</td>
-        ${cells}
-      </tr>`
-    }).join('')
-
-    // Completion summary row
-    const summaryRow = `<tr style="background:#fafaf8;border-top:0.5px solid #e0e0d8">
-      <td style="padding:6px 14px;font-size:11px;color:#888;font-style:italic">Completion</td>
-      ${staff.map(s => {
-        if (!s.user_id) return '<td style="border-left:0.5px solid #f0f0e8"></td>'
-        const done = unitItems.filter(i => progressMap[s.user_id + '_' + i.id]).length
-        const pct = Math.round(done / unitItems.length * 100)
-        const color = pct === 100 ? '#2e7d32' : pct >= 50 ? '#e65100' : '#c0392b'
-        return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px;font-size:11px;font-weight:600;color:${color}">${pct}%</td>`
-      }).join('')}
-    </tr>`
-
-    html += `
-      <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden;margin-bottom:1.25rem">
-        <div style="padding:12px 16px;background:#fafaf8;border-bottom:0.5px solid #e0e0d8;display:flex;align-items:center;justify-content:space-between">
-          <strong style="font-size:13px">${unit.name}${appliesBadge}</strong>
-          <span style="font-size:11px;color:#888">${unitItems.length} item${unitItems.length !== 1 ? 's' : ''}</span>
-        </div>
-        <div style="overflow-x:auto">
-          <table style="border-collapse:collapse;font-size:12px;width:100%">
-            <thead><tr style="border-bottom:0.5px solid #e0e0d8">
-              <th style="padding:8px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase;min-width:200px">Item</th>
-              ${staffHeaders}
-            </tr></thead>
-            <tbody>${itemRows}${summaryRow}</tbody>
-          </table>
-        </div>
-      </div>`
-  }
-
-  if (!html) {
-    container.innerHTML = '<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No training units found. Add some in Manage Checklist.</div>'
+  if (!visibleItems.length) {
+    container.innerHTML = '<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No training items found.</div>'
     return
   }
 
-  // Overall summary
-  const totalItems = trainingItemsCache.length
+  // ── Build header rows ────────────────────────────────────
+  // Row 1: unit band headers (colspan = number of items in unit)
+  const unitBandCells = visibleUnits.map(unit => {
+    const count = visibleItems.filter(i => i.unit_id === unit.id).length
+    if (!count) return ''
+    const appliesBadge = unit.applies_to !== 'all'
+      ? ` <span style="font-size:9px;background:#e8e8f0;color:#5b4fcf;padding:1px 4px;border-radius:3px">${unit.applies_to}</span>`
+      : ''
+    return `<th colspan="${count}" style="padding:6px 8px;text-align:center;font-size:11px;font-weight:600;background:#f0f0f8;border-left:2px solid #d0d0e8;border-bottom:0.5px solid #e0e0d8;white-space:nowrap">
+      ${unit.name}${appliesBadge}
+    </th>`
+  }).join('')
+
+  // Row 2: individual item headers (rotated for space)
+  const itemHeaderCells = visibleItems.map((item, idx) => {
+    const isFirstInUnit = idx === 0 || visibleItems[idx-1].unit_id !== item.unit_id
+    return `<th style="padding:4px 2px;text-align:center;min-width:36px;max-width:42px;border-left:${isFirstInUnit ? '2px solid #d0d0e8' : '0.5px solid #f0f0e8'};border-bottom:0.5px solid #e0e0d8;vertical-align:bottom">
+      <div style="writing-mode:vertical-rl;transform:rotate(180deg);font-size:10px;color:#666;font-weight:400;line-height:1.2;height:80px;overflow:hidden;text-overflow:ellipsis;cursor:default" title="${item.title}">
+        ${item.title}
+      </div>
+    </th>`
+  }).join('')
+
+  // ── Build staff rows ─────────────────────────────────────
+  const totalItems = visibleItems.length
+
+  const staffRows = staff.map(s => {
+    const hasLogin = !!s.user_id
+    const studioLabel = s.studio_ids?.length
+      ? s.studio_ids.slice(0,2).map(id => (STUDIO_VARIANT_MAP[id]||id).split(' - ').pop()).join(', ') + (s.studio_ids.length > 2 ? ` +${s.studio_ids.length-2}` : '')
+      : 'All / floater'
+
+    const cells = visibleItems.map((item, idx) => {
+      const isFirstInUnit = idx === 0 || visibleItems[idx-1].unit_id !== item.unit_id
+      if (!hasLogin) return `<td style="text-align:center;border-left:${isFirstInUnit ? '2px solid #d0d0e8' : '0.5px solid #f0f0e8'};padding:4px 2px"><span style="color:#ddd;font-size:11px">–</span></td>`
+      const done = progressMap[s.user_id + '_' + item.id]
+      return `<td style="text-align:center;border-left:${isFirstInUnit ? '2px solid #d0d0e8' : '0.5px solid #f0f0e8'};padding:4px 2px;background:${done ? '#f0faf0' : ''}">
+        <span style="font-size:14px;cursor:pointer" onclick="toggleTrainingItem('${s.user_id}','${item.id}',${!!done})" title="${item.title}">${done ? '✅' : '⬜'}</span>
+      </td>`
+    }).join('')
+
+    const doneCt = hasLogin ? visibleItems.filter(i => progressMap[s.user_id + '_' + i.id]).length : 0
+    const pct = hasLogin ? Math.round(doneCt / totalItems * 100) : null
+    const pctColor = pct === null ? '#ccc' : pct === 100 ? '#2e7d32' : pct >= 50 ? '#e65100' : '#c0392b'
+    const pctCell = `<td style="padding:6px 10px;text-align:center;font-size:12px;font-weight:700;color:${pctColor};white-space:nowrap;border-left:2px solid #e0e0d8">
+      ${pct !== null ? pct + '%' : '–'}
+    </td>`
+
+    const noLoginTag = !hasLogin ? '<span style="font-size:9px;color:#bbb;margin-left:4px">no login</span>' : ''
+
+    return `<tr style="border-bottom:0.5px solid #f5f5f0" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
+      <td style="padding:8px 14px;white-space:nowrap;position:sticky;left:0;background:white;z-index:1;border-right:0.5px solid #e0e0d8">
+        <strong style="font-size:12px">${s.nickname || s.display_name}</strong>${noLoginTag}
+        <div style="font-size:10px;color:#aaa">${studioLabel}</div>
+      </td>
+      ${cells}
+      ${pctCell}
+    </tr>`
+  }).join('')
+
+  // Overall stats
   const totalCells = staff.filter(s => s.user_id).length * totalItems
-  const totalDone = progress.length
-  const pct = totalCells ? Math.round(totalDone / totalCells * 100) : 0
+  const totalDone = progress.filter(p => visibleItems.find(i => i.id === p.item_id)).length
+  const networkPct = totalCells ? Math.round(totalDone / totalCells * 100) : 0
+
   container.innerHTML = `
     <div style="display:flex;gap:10px;margin-bottom:1rem;flex-wrap:wrap">
       <div style="background:white;border:0.5px solid #e0e0d8;border-radius:8px;padding:10px 18px;font-size:13px">
         <span style="color:#888;font-size:11px;display:block">Staff shown</span><strong>${staff.length}</strong>
       </div>
       <div style="background:white;border:0.5px solid #e0e0d8;border-radius:8px;padding:10px 18px;font-size:13px">
-        <span style="color:#888;font-size:11px;display:block">Checklist items</span><strong>${totalItems}</strong>
+        <span style="color:#888;font-size:11px;display:block">Items</span><strong>${totalItems}</strong>
       </div>
       <div style="background:white;border:0.5px solid #c8e6c9;border-radius:8px;padding:10px 18px;font-size:13px">
-        <span style="color:#2e7d32;font-size:11px;display:block">Network completion</span><strong style="color:#2e7d32">${pct}%</strong>
+        <span style="color:#2e7d32;font-size:11px;display:block">Network completion</span><strong style="color:#2e7d32">${networkPct}%</strong>
       </div>
     </div>
-    ${html}`
+    <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:auto;max-height:70vh">
+      <table style="border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr>
+            <th style="padding:8px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase;position:sticky;left:0;background:#fafaf8;z-index:2;border-right:0.5px solid #e0e0d8;border-bottom:0.5px solid #e0e0d8" rowspan="2">Staff</th>
+            ${unitBandCells}
+            <th style="padding:8px 10px;text-align:center;font-size:11px;color:#888;text-transform:uppercase;border-left:2px solid #e0e0d8;border-bottom:0.5px solid #e0e0d8;white-space:nowrap;background:#fafaf8" rowspan="2">Total</th>
+          </tr>
+          <tr>
+            ${itemHeaderCells}
+          </tr>
+        </thead>
+        <tbody>${staffRows}</tbody>
+      </table>
+    </div>`
 }
+
 
 async function toggleTrainingItem(userId, itemId, isDone) {
   if (isDone) {
