@@ -1050,6 +1050,158 @@ function getCurriculumLinks(sessionTitle, sessionDate) {
   return weekly || null
 }
 
+// ── Daily Notes & Tasks ─────────────────────────────────────
+
+async function loadDailyNotes(studioId, date) {
+  const { data } = await sb.from('daily_notes')
+    .select('*').eq('studio_id', studioId).eq('note_date', date).maybeSingle()
+  return data || null
+}
+
+async function saveDailyNotes(studioId, date) {
+  const val = document.getElementById('break-schedule-input')?.value || ''
+  const existing = document.getElementById('break-schedule-input')?.dataset.existingId
+  if (existing) {
+    await sb.from('daily_notes').update({ break_schedule: val, updated_at: new Date().toISOString() }).eq('id', existing)
+  } else {
+    const { data } = await sb.from('daily_notes').insert({ studio_id: studioId, note_date: date, break_schedule: val, updated_by: currentUser?.id }).select().single()
+    if (data && document.getElementById('break-schedule-input')) {
+      document.getElementById('break-schedule-input').dataset.existingId = data.id
+    }
+  }
+  showSaveConfirm('break-save-confirm')
+}
+
+function showSaveConfirm(id) {
+  const el = document.getElementById(id)
+  if (!el) return
+  el.style.opacity = '1'
+  setTimeout(() => { el.style.opacity = '0' }, 1500)
+}
+
+async function loadTasks(studioId, date) {
+  // Carry-forward: bump overdue pending tasks to today
+  const { data: overdue } = await sb.from('studio_tasks')
+    .select('id').eq('status', 'pending')
+    .or(`studio_id.eq.${studioId},studio_id.is.null`)
+    .lt('due_date', date)
+  if (overdue?.length) {
+    await Promise.all(overdue.map(t =>
+      sb.from('studio_tasks').update({ due_date: date }).eq('id', t.id)
+    ))
+  }
+  const { data } = await sb.from('studio_tasks')
+    .select('*')
+    .or(`studio_id.eq.${studioId},studio_id.is.null`)
+    .eq('due_date', date)
+    .order('created_at')
+  return data || []
+}
+
+async function toggleTask(id, done) {
+  await sb.from('studio_tasks').update({
+    status: done ? 'complete' : 'pending',
+    completed_at: done ? new Date().toISOString() : null,
+    completed_by: done ? currentUser?.id : null
+  }).eq('id', id)
+  const row = document.getElementById('task-row-' + id)
+  if (row) {
+    row.style.opacity = done ? '0.45' : '1'
+    row.querySelector('.task-title').style.textDecoration = done ? 'line-through' : 'none'
+  }
+}
+
+async function addTask(studioId, date) {
+  const input = document.getElementById('new-task-input')
+  const title = input?.value.trim()
+  if (!title) return
+  const { data } = await sb.from('studio_tasks').insert({
+    studio_id: studioId, title, due_date: date,
+    source: 'studio', status: 'pending', created_by: currentUser?.id
+  }).select().single()
+  input.value = ''
+  if (data) appendTaskRow(data)
+}
+
+function appendTaskRow(task) {
+  const list = document.getElementById('task-list')
+  if (!list) return
+  const div = document.createElement('div')
+  div.id = 'task-row-' + task.id
+  div.style.cssText = 'display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:0.5px solid #f5f5f0'
+  div.innerHTML = buildTaskRowInner(task)
+  list.appendChild(div)
+}
+
+function buildTaskRowInner(task) {
+  const done = task.status === 'complete'
+  const sourceTag = task.source === 'home_office'
+    ? '<span style="font-size:10px;background:#e8e8f0;color:#5b4fcf;padding:1px 5px;border-radius:4px;flex-shrink:0">HO</span>'
+    : ''
+  return `
+    <input type="checkbox" ${done ? 'checked' : ''} onchange="toggleTask('${task.id}', this.checked)"
+      style="width:15px;height:15px;cursor:pointer;flex-shrink:0">
+    <span class="task-title" style="flex:1;font-size:13px;${done ? 'text-decoration:line-through;color:#aaa' : ''}">${task.title}</span>
+    ${sourceTag}
+    <button onclick="deleteTask('${task.id}')" style="background:none;border:none;color:#ccc;cursor:pointer;font-size:16px;padding:0;line-height:1;flex-shrink:0" title="Delete">×</button>`
+}
+
+async function deleteTask(id) {
+  await sb.from('studio_tasks').delete().eq('id', id)
+  const row = document.getElementById('task-row-' + id)
+  if (row) row.remove()
+}
+
+function buildDaySummaryHtml(notes, tasks, studioId, date) {
+  const breakVal = notes?.break_schedule || ''
+  const existingId = notes?.id || ''
+
+  const taskRows = tasks.map(task => {
+    const done = task.status === 'complete'
+    return `<div id="task-row-${task.id}" style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:0.5px solid #f5f5f0;${done ? 'opacity:0.45' : ''}">
+      ${buildTaskRowInner(task)}
+    </div>`
+  }).join('')
+
+  const emptyTasks = tasks.length === 0
+    ? '<div style="font-size:12px;color:#bbb;padding:8px 0">No tasks for today — add one below</div>'
+    : ''
+
+  return `<div style="background:white;border:0.5px solid #e0e0d8;border-radius:10px;margin-bottom:0.6rem;overflow:hidden">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:0.5px solid #f0f0e8">
+
+      <!-- Break Schedule -->
+      <div style="padding:14px 16px;border-right:0.5px solid #f0f0e8">
+        <div style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">☕ Break Schedule</div>
+        <textarea id="break-schedule-input"
+          data-studio="${studioId}" data-date="${date}" data-existing-id="${existingId}"
+          placeholder="e.g. Sarah 11:30, Mike 12:00, Jenny 1:00pm..."
+          style="width:100%;height:72px;border:0.5px solid #e0e0d8;border-radius:6px;padding:7px 10px;font-size:13px;resize:none;outline:none;box-sizing:border-box;font-family:inherit"
+          onblur="saveDailyNotes('${studioId}','${date}')">${breakVal}</textarea>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+          <button onclick="saveDailyNotes('${studioId}','${date}')"
+            style="font-size:11px;padding:4px 12px;background:#1a1a1a;color:white;border:none;border-radius:6px;cursor:pointer">Save</button>
+          <span id="break-save-confirm" style="font-size:11px;color:#2e7d32;opacity:0;transition:opacity 0.3s">✓ Saved</span>
+        </div>
+      </div>
+
+      <!-- To-Do List -->
+      <div style="padding:14px 16px">
+        <div style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">✅ Today's Tasks</div>
+        <div id="task-list">${taskRows}${emptyTasks}</div>
+        <div style="display:flex;gap:6px;margin-top:8px">
+          <input id="new-task-input" type="text" placeholder="Add a task..."
+            style="flex:1;padding:6px 10px;border:0.5px solid #e0e0d8;border-radius:6px;font-size:13px;outline:none"
+            onkeydown="if(event.key==='Enter') addTask('${studioId}','${date}')">
+          <button onclick="addTask('${studioId}','${date}')"
+            style="padding:6px 12px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">+</button>
+        </div>
+      </div>
+
+    </div>
+  </div>`
+}
+
 async function loadAnnouncements(studioId, date) {
   // Fetch all active announcements then filter client-side:
   // show if studio_ids is empty (all studios) or contains this studio
@@ -1483,14 +1635,17 @@ async function loadDayView() {
     </div>
   </div>`
 
-  const [announcements] = await Promise.all([
-    loadAnnouncements(currentStudioId, today)
+  const [announcements, dailyNotes, tasks] = await Promise.all([
+    loadAnnouncements(currentStudioId, today),
+    loadDailyNotes(currentStudioId, today),
+    loadTasks(currentStudioId, today)
   ])
   const { urgent: urgentHtml, normal: normalHtml } = buildAnnouncementBanners(announcements)
   const themeBannerHtml = buildThemeBanner(today)
+  const daySummaryHtml = buildDaySummaryHtml(dailyNotes, tasks, currentStudioId, today)
 
   if (!filtered.length) {
-    container.innerHTML = urgentHtml + themeBannerHtml + normalHtml + bannerHtml + '<div class="empty-state"><h2>No sessions found</h2><p>Try adjusting your filters or selecting a different date.</p></div>'
+    container.innerHTML = urgentHtml + themeBannerHtml + normalHtml + daySummaryHtml + bannerHtml + '<div class="empty-state"><h2>No sessions found</h2><p>Try adjusting your filters or selecting a different date.</p></div>'
     return
   }
 
@@ -1508,7 +1663,7 @@ async function loadDayView() {
       </div>
     </div>`
 
-  container.innerHTML = urgentHtml + themeBannerHtml + normalHtml + bannerHtml + defaultsBar + filtered.map(s => {
+  container.innerHTML = urgentHtml + themeBannerHtml + normalHtml + daySummaryHtml + bannerHtml + defaultsBar + filtered.map(s => {
     const staff = staffData[s.id] || {}
     const reg = bookingCounts[s.id] || 0
     const est = estimatedAtt[s.id] || null
