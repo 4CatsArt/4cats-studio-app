@@ -1401,15 +1401,22 @@ async function loadStudioTraining() {
     return true
   }
 
-  // Load progress
+  // Load progress + due dates
   const staffUserIds = staff.filter(s => s.user_id).map(s => s.user_id)
-  let progress = []
+  let progress = [], dueDates = []
   if (staffUserIds.length) {
-    const { data: prog } = await sb.from('staff_training_progress').select('*').in('user_id', staffUserIds)
-    progress = prog || []
+    const [progRes, ddRes] = await Promise.all([
+      sb.from('staff_training_progress').select('*').in('user_id', staffUserIds),
+      sb.from('staff_training_due_dates').select('*').in('user_id', staffUserIds)
+    ])
+    progress = progRes.data || []
+    dueDates = ddRes.data || []
   }
   const progressMap = {}
   progress.forEach(p => { progressMap[p.user_id + '_' + p.item_id] = p })
+  const dueDateMap = {}
+  dueDates.forEach(d => { dueDateMap[d.user_id + '_' + d.unit_id] = d.due_date })
+  const today = new Date().toISOString().slice(0,10)
 
   let visibleUnits = units || []
   if (unitFilter) visibleUnits = visibleUnits.filter(u => u.id === unitFilter)
@@ -1419,11 +1426,19 @@ async function loadStudioTraining() {
     const unitItems = (items || []).filter(i => i.unit_id === unit.id)
     if (!unitItems.length) continue
 
-    const staffHeaders = staff.map(s =>
-      `<th style="padding:6px 4px;font-size:11px;font-weight:500;color:#555;text-align:center;min-width:70px;max-width:90px;word-break:break-word;line-height:1.3;border-left:0.5px solid #f0f0e8">
+    const staffHeaders = staff.map(s => {
+      const dueDate = s.user_id ? dueDateMap[s.user_id + '_' + unit.id] : null
+      const unitItems = (items||[]).filter(i => i.unit_id === unit.id)
+      const unitDone = s.user_id && unitItems.every(i => progressMap[s.user_id + '_' + i.id])
+      const isOverdue = dueDate && dueDate < today && !unitDone
+      const dueBadge = dueDate
+        ? `<div style="font-size:9px;color:${isOverdue ? '#c0392b' : '#aaa'};margin-top:1px">${isOverdue ? '⚠ ' : ''}${dueDate}</div>`
+        : ''
+      return `<th style="padding:6px 4px;font-size:11px;font-weight:500;color:#555;text-align:center;min-width:70px;max-width:90px;word-break:break-word;line-height:1.3;border-left:0.5px solid #f0f0e8">
         ${s.nickname || s.display_name}
+        ${dueBadge}
       </th>`
-    ).join('')
+    }).join('')
 
     const itemRows = unitItems.map(item => {
       const cells = staff.map(s => {
@@ -1447,8 +1462,11 @@ async function loadStudioTraining() {
         if (!s.user_id) return '<td style="border-left:0.5px solid #f0f0e8"></td>'
         const done = unitItems.filter(i => progressMap[s.user_id + '_' + i.id]).length
         const pct = Math.round(done / unitItems.length * 100)
-        const color = pct === 100 ? '#2e7d32' : pct >= 50 ? '#e65100' : '#c0392b'
-        return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px;font-size:11px;font-weight:600;color:${color}">${pct}%</td>`
+        const dueDate = dueDateMap[s.user_id + '_' + unit.id]
+        const isOverdue = dueDate && dueDate < today && pct < 100
+        const color = pct === 100 ? '#2e7d32' : isOverdue ? '#c0392b' : pct >= 50 ? '#e65100' : '#888'
+        const bg = isOverdue ? 'background:#fff8f8;' : ''
+        return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px;font-size:11px;font-weight:600;color:${color};${bg}">${pct}%</td>`
       }).join('')}
     </tr>`
 
