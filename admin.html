@@ -427,6 +427,10 @@ select:focus, input:focus { border-color: #888; }
     <div id="training-subtab-overview-content">
       <div class="toolbar" style="margin-bottom:1rem">
         <div class="toolbar-group" style="gap:8px">
+          <button class="btn btn-primary" onclick="openMassDueDateModal()">Set Due Dates</button>
+        </div>
+        <div class="toolbar-sep"></div>
+        <div class="toolbar-group" style="gap:8px">
           <select id="training-filter-studio" onchange="loadTrainingOverview()" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none;background:white">
             <option value="">All studios</option>
           </select>
@@ -3672,6 +3676,104 @@ async function saveDueDateFromPopup() {
   loadTrainingOverview()
 }
 
+
+// ── Mass Due Date Setter ─────────────────────────────────────
+let massTarget = 'all'
+
+function massSetTarget(t) {
+  massTarget = t
+  document.getElementById('mass-target-all').style.background = t === 'all' ? '#1a1a1a' : 'white'
+  document.getElementById('mass-target-all').style.color = t === 'all' ? 'white' : '#555'
+  document.getElementById('mass-target-all').style.borderColor = t === 'all' ? '#1a1a1a' : '#d0d0c8'
+  document.getElementById('mass-target-studio').style.background = t === 'studio' ? '#1a1a1a' : 'white'
+  document.getElementById('mass-target-studio').style.color = t === 'studio' ? 'white' : '#555'
+  document.getElementById('mass-target-studio').style.borderColor = t === 'studio' ? '#1a1a1a' : '#d0d0c8'
+  document.getElementById('mass-studio-picker-wrap').style.display = t === 'studio' ? 'block' : 'none'
+}
+
+async function openMassDueDateModal() {
+  massTarget = 'all'
+  massSetTarget('all')
+
+  // Build studio picker
+  buildStudioPicker('mass-studio-picker', [])
+
+  // Build unit date rows
+  if (!trainingUnitsCache.length) {
+    const { data } = await sb.from('training_units').select('*').order('sort_order')
+    trainingUnitsCache = data || []
+  }
+  document.getElementById('mass-unit-dates').innerHTML = trainingUnitsCache.map(u => `
+    <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:0.5px solid #f5f5f0">
+      <label style="display:flex;align-items:center;gap:6px;flex:1;font-size:12px;cursor:pointer">
+        <input type="checkbox" class="mass-unit-cb" value="${u.id}" checked>
+        ${u.name}
+      </label>
+      <input type="date" class="mass-unit-date" data-unit-id="${u.id}"
+        style="padding:5px 8px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:12px;outline:none">
+    </div>`).join('')
+
+  document.getElementById('mass-due-date-modal').style.display = 'flex'
+}
+
+function closeMassDueDateModal() {
+  document.getElementById('mass-due-date-modal').style.display = 'none'
+}
+
+async function applyMassDueDates() {
+  const btn = document.getElementById('mass-due-save-btn')
+  btn.textContent = 'Applying...'; btn.disabled = true
+
+  // Collect selected units + dates
+  const unitDates = []
+  document.querySelectorAll('.mass-unit-cb:checked').forEach(cb => {
+    const dateInput = document.querySelector(`.mass-unit-date[data-unit-id="${cb.value}"]`)
+    if (dateInput?.value) unitDates.push({ unit_id: cb.value, due_date: dateInput.value })
+  })
+
+  if (!unitDates.length) { alert('Please set at least one date.'); btn.textContent = 'Apply'; btn.disabled = false; return }
+
+  // Get target staff
+  let { data: allStaff } = await sb.from('staff_profiles').select('*').eq('is_active', true)
+  let staff = allStaff || []
+  if (massTarget === 'studio') {
+    const studioIds = getStudioPickerSelection('mass-studio-picker')
+    if (studioIds.length) staff = staff.filter(s => s.studio_ids?.some(id => studioIds.includes(id)))
+  }
+  const staffWithLogin = staff.filter(s => s.user_id)
+  if (!staffWithLogin.length) { alert('No staff with logins found.'); btn.textContent = 'Apply'; btn.disabled = false; return }
+
+  // Load progress to check completion
+  const userIds = staffWithLogin.map(s => s.user_id)
+  const { data: progress } = await sb.from('staff_training_progress').select('*').in('user_id', userIds)
+  const { data: items } = await sb.from('training_items').select('id, unit_id')
+  const progressSet = new Set((progress || []).map(p => p.user_id + '_' + p.item_id))
+
+  // Build upserts — skip if unit is 100% complete for that staff member
+  const upserts = []
+  for (const s of staffWithLogin) {
+    for (const { unit_id, due_date } of unitDates) {
+      const unitItems = (items || []).filter(i => i.unit_id === unit_id)
+      if (!unitItems.length) continue
+      const allDone = unitItems.every(i => progressSet.has(s.user_id + '_' + i.id))
+      if (!allDone) {
+        upserts.push({ user_id: s.user_id, unit_id, due_date })
+      }
+    }
+  }
+
+  if (upserts.length) {
+    await sb.from('staff_training_due_dates').upsert(upserts, { onConflict: 'user_id,unit_id' })
+  }
+
+  btn.textContent = 'Apply'; btn.disabled = false
+  closeMassDueDateModal()
+  loadTrainingOverview()
+
+  const skipped = staffWithLogin.length * unitDates.length - upserts.length
+  alert(`Done! Updated ${upserts.length} due date${upserts.length !== 1 ? 's' : ''}${skipped ? `, skipped ${skipped} already complete` : ''}.`)
+}
+
 </script>
 
 <!-- EDIT TITLE MODAL -->
@@ -4205,6 +4307,43 @@ async function saveDueDateFromPopup() {
     <div style="display:flex;gap:8px;justify-content:flex-end">
       <button onclick="closeDueDatePopup()" style="padding:7px 14px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
       <button onclick="saveDueDateFromPopup()" style="padding:7px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">Save</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- Mass Due Date Modal -->
+<div id="mass-due-date-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:white;border-radius:12px;width:100%;max-width:560px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2);max-height:90vh;overflow-y:auto">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
+      <h3 style="font-size:15px;font-weight:600;margin:0">Set Due Dates</h3>
+      <button onclick="closeMassDueDateModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">×</button>
+    </div>
+    <div style="font-size:12px;color:#888;margin-bottom:1rem">Sets due dates for all selected staff. Skips units already 100% complete.</div>
+
+    <!-- Staff target -->
+    <div style="margin-bottom:1rem">
+      <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">Apply to</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <button onclick="massSetTarget('all')" id="mass-target-all"
+          style="padding:5px 12px;font-size:12px;border-radius:6px;cursor:pointer;border:0.5px solid #1a1a1a;background:#1a1a1a;color:white">All staff</button>
+        <button onclick="massSetTarget('studio')" id="mass-target-studio"
+          style="padding:5px 12px;font-size:12px;border-radius:6px;cursor:pointer;border:0.5px solid #d0d0c8;background:white;color:#555">By studio</button>
+      </div>
+      <div id="mass-studio-picker-wrap" style="display:none">
+        <div id="mass-studio-picker"></div>
+      </div>
+    </div>
+
+    <!-- Units + due dates -->
+    <div>
+      <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">Due dates per unit</label>
+      <div id="mass-unit-dates" style="display:flex;flex-direction:column;gap:6px"></div>
+    </div>
+
+    <div style="display:flex;gap:8px;margin-top:1.25rem;justify-content:flex-end">
+      <button onclick="closeMassDueDateModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
+      <button onclick="applyMassDueDates()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer" id="mass-due-save-btn">Apply</button>
     </div>
   </div>
 </div>
