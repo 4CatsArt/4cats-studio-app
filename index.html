@@ -1254,6 +1254,46 @@ async function loadDayView() {
     if (allPartyBookingIds.length) {
       const { data: pds } = await sb.from('party_details').select('*').in('booking_id', allPartyBookingIds)
       if (pds) pds.forEach(pd => { partyDetails[pd.booking_id] = pd })
+
+      // Auto-create party_details rows for bookings that don't have one yet
+      const allPartyBookings = Object.values(partyBookings).flat()
+      for (const b of allPartyBookings) {
+        if (!partyDetails[b.id]) {
+          // Extract guest count from raw_payload add-on line items
+          const lineItems = b.raw_payload?.line_items || []
+          let guestCount = null
+          for (const li of lineItems) {
+            const m = String(li.variant_title || '').match(/(\d+)\s*people/i)
+            if (m) { guestCount = parseInt(m[1]); break }
+          }
+          // Fallback: check estimated_attendance or use default
+          if (!guestCount && b.estimated_attendance) guestCount = b.estimated_attendance
+          if (!guestCount) {
+            const s = filtered.find(s => s.id === b.session_id)
+            guestCount = (s?.session_type === 'adult' || s?.title?.toLowerCase().includes('adult')) ? 10 : 8
+          }
+          // Insert party_details row with expected_guests
+          const { data: inserted } = await sb.from('party_details').insert({
+            booking_id: b.id,
+            session_id: b.session_id,
+            expected_guests: guestCount
+          }).select().single()
+          if (inserted) partyDetails[b.id] = inserted
+        } else if (!partyDetails[b.id].expected_guests) {
+          // Row exists but expected_guests is null — update it
+          const lineItems = b.raw_payload?.line_items || []
+          let guestCount = null
+          for (const li of lineItems) {
+            const m = String(li.variant_title || '').match(/(\d+)\s*people/i)
+            if (m) { guestCount = parseInt(m[1]); break }
+          }
+          if (!guestCount && b.estimated_attendance) guestCount = b.estimated_attendance
+          if (guestCount) {
+            await sb.from('party_details').update({ expected_guests: guestCount }).eq('booking_id', b.id)
+            partyDetails[b.id].expected_guests = guestCount
+          }
+        }
+      }
     }
 
     // Apply show/hide logic: hide if 0 reg AND capacity is explicitly set to 0 (synced & closed out)
