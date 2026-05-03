@@ -2405,7 +2405,6 @@ async function loadTasksTab() {
   const container = document.getElementById('tasks-container')
   container.innerHTML = '<div class="loading">Loading...</div>'
 
-  // Populate studio filter
   const sel = document.getElementById('task-filter-studio')
   if (sel.options.length === 1) {
     Object.entries(STUDIO_VARIANT_MAP).forEach(([k, v]) => {
@@ -2420,40 +2419,41 @@ async function loadTasksTab() {
   const { data: templates } = await sb.from('task_templates').select('id, repeat, repeat_days')
   const templateRepeatMap = Object.fromEntries((templates||[]).map(t => [t.id, t.repeat]))
 
-  let query = sb.from('studio_tasks').select('*').order('due_date').order('title')
+  let query = sb.from('studio_tasks').select('*').order('due_date', { ascending: false }).order('title')
   if (statusFilter) query = query.eq('status', statusFilter)
   const { data: tasks } = await query
+
   if (!tasks?.length) {
     container.innerHTML = '<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No tasks found.</div>'
     return
   }
 
-  // Get studios to show — either filtered or ALL known studios
   const allStudioIds = Object.keys(STUDIO_VARIANT_MAP)
-  const studioIds = studioFilter ? [studioFilter] : allStudioIds
-  const globalTasks = tasks.filter(t => !t.studio_id) // sent to all studios
+  const visibleStudios = studioFilter ? [studioFilter] : allStudioIds
 
-  // Group tasks by title+due_date for matrix rows
-  // Each unique title becomes a row; columns = studios
+  // Each row = unique title + due_date combination
   const rowMap = {}
   tasks.forEach(t => {
     const key = t.title + '|' + t.due_date
-    if (!rowMap[key]) rowMap[key] = { title: t.title, due_date: t.due_date, source: t.source, byStudio: {}, global: null }
+    if (!rowMap[key]) rowMap[key] = {
+      title: t.title,
+      due_date: t.due_date,
+      source: t.source,
+      repeat: t.template_id ? (templateRepeatMap[t.template_id] || 'none') : 'none',
+      byStudio: {},
+      global: null
+    }
     if (t.studio_id) rowMap[key].byStudio[t.studio_id] = t
     else rowMap[key].global = t
   })
 
-  const rows = Object.values(rowMap)
-  const visibleStudios = studioFilter ? [studioFilter] : studioIds
+  const rows = Object.values(rowMap).sort((a, b) => {
+    if (a.title !== b.title) return a.title.localeCompare(b.title)
+    return b.due_date.localeCompare(a.due_date)
+  })
 
-  // Summary counts
-  const totalCells = rows.length * visibleStudios.length
-  const doneCells = rows.reduce((sum, r) => {
-    return sum + visibleStudios.filter(sid => {
-      const t = r.byStudio[sid] || (r.global ? r.global : null)
-      return t?.status === 'complete'
-    }).length
-  }, 0)
+  // Group rows by title for visual separation
+  let lastTitle = null
 
   const studioHeaders = visibleStudios.map(sid => {
     const name = STUDIO_VARIANT_MAP[sid] || sid
@@ -2462,58 +2462,70 @@ async function loadTasksTab() {
   }).join('')
 
   const tableRows = rows.map(r => {
+    const isNewTitle = r.title !== lastTitle
+    lastTitle = r.title
+    const isMissed = r.due_date < today && r.repeat !== 'none'
     const isOverdue = r.due_date < today
-    const sourceTag = r.source === 'home_office'
-      ? '<span style="font-size:9px;background:#e8e8f0;color:#5b4fcf;padding:1px 4px;border-radius:3px;margin-left:4px">HO</span>'
-      : ''
-    const dueTag = isOverdue
-      ? `<span style="font-size:9px;color:#c0392b;margin-left:4px">${r.due_date}</span>`
-      : r.due_date !== today
-        ? `<span style="font-size:9px;color:#aaa;margin-left:4px">${r.due_date}</span>`
-        : ''
 
     const repeatTag = r.repeat === 'daily'
-      ? '<span style="font-size:10px;background:#e8f5e9;color:#2e7d32;padding:2px 5px;border-radius:3px">daily</span>'
+      ? '<span style="font-size:9px;background:#e8f5e9;color:#2e7d32;padding:2px 5px;border-radius:3px;margin-left:4px">daily</span>'
       : r.repeat === 'weekly'
-        ? `<span style="font-size:10px;background:#e8e8f0;color:#5b4fcf;padding:2px 5px;border-radius:3px">weekly</span>`
-        : '<span style="font-size:10px;color:#ccc">one-off</span>'
+        ? '<span style="font-size:9px;background:#e8e8f0;color:#5b4fcf;padding:2px 5px;border-radius:3px;margin-left:4px">weekly</span>'
+        : ''
+    const sourceTag = r.source === 'home_office'
+      ? '<span style="font-size:9px;background:#e8e8f0;color:#5b4fcf;padding:2px 5px;border-radius:3px;margin-left:4px">HO</span>'
+      : ''
+    const dateTag = `<span style="font-size:10px;color:${isMissed ? '#c0392b' : '#aaa'};margin-left:4px">${r.due_date}${isMissed ? ' ⚠' : ''}</span>`
+
+    const rowBg = isMissed ? '#fff8f8' : isNewTitle ? '#fafaf8' : 'white'
+    const titleCell = isNewTitle
+      ? `<td style="padding:8px 14px;font-size:12px;font-weight:600;background:${rowBg}">${r.title}${repeatTag}${sourceTag}${dateTag}</td>`
+      : `<td style="padding:8px 14px;font-size:12px;color:#888;background:${rowBg};padding-left:22px">↳ ${dateTag}</td>`
 
     const cells = visibleStudios.map(sid => {
       const t = r.byStudio[sid] || r.global || null
-      if (!t) return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px"><span style="color:#e0e0d8;font-size:14px">—</span></td>`
+      if (!t) return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px;background:${rowBg}"><span style="color:#e0e0d8;font-size:14px">—</span></td>`
       const done = t.status === 'complete'
+      const cellBg = done ? '#f0faf0' : isMissed ? '#fff0f0' : rowBg
+      const icon = done ? '✅' : isMissed ? '🔴' : '⬜'
       const assignee = t.assignee_name ? `<div style="font-size:9px;color:#2e7d32;margin-top:1px">${t.assignee_name}</div>` : ''
-      return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px;background:${done ? '#f0faf0' : ''}">
-        <span style="font-size:16px;cursor:pointer;line-height:1" onclick="adminToggleTask('${t.id}','${done ? 'pending' : 'complete'}')" title="${done ? 'Mark pending' : 'Mark complete'}">${done ? '✅' : '⬜'}</span>
+      return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px;background:${cellBg}">
+        <span style="font-size:14px;cursor:pointer;line-height:1" onclick="adminToggleTask('${t.id}','${done ? 'pending' : 'complete'}')" title="${done ? 'Mark pending' : 'Mark complete'}">${icon}</span>
         ${assignee}
       </td>`
     }).join('')
 
-    return `<tr style="border-bottom:0.5px solid #f5f5f0" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
-      <td style="padding:8px 14px;font-size:12px;font-weight:500;min-width:180px;max-width:260px">
-        ${r.title}${sourceTag}${dueTag}
-      </td>
-      <td style="padding:8px 14px;white-space:nowrap">${repeatTag}</td>
+    return `<tr style="border-bottom:0.5px solid #f5f5f0">
+      ${titleCell}
+      <td style="padding:8px 14px;white-space:nowrap;background:${rowBg}">${repeatTag || '<span style="font-size:10px;color:#ccc">one-off</span>'}</td>
       ${cells}
     </tr>`
   }).join('')
 
+  const missed = rows.filter(r => r.due_date < today && r.repeat !== 'none' &&
+    visibleStudios.some(sid => {
+      const t = r.byStudio[sid] || r.global
+      return t && t.status !== 'complete'
+    })).length
+
+  const done = tasks.filter(t => t.status === 'complete').length
+
   container.innerHTML = `
     <div style="display:flex;gap:10px;margin-bottom:1rem;flex-wrap:wrap">
       <div style="background:white;border:0.5px solid #e0e0d8;border-radius:8px;padding:10px 18px;font-size:13px">
-        <span style="color:#888;font-size:11px;display:block">Tasks</span><strong>${rows.length}</strong>
+        <span style="color:#888;font-size:11px;display:block">Occurrences</span><strong>${rows.length}</strong>
       </div>
-      <div style="background:white;border:0.5px solid #e0e0d8;border-radius:8px;padding:10px 18px;font-size:13px">
-        <span style="color:#2e7d32;font-size:11px;display:block">Done</span><strong style="color:#2e7d32">${doneCells} / ${totalCells}</strong>
+      <div style="background:white;border:0.5px solid #c8e6c9;border-radius:8px;padding:10px 18px;font-size:13px">
+        <span style="color:#2e7d32;font-size:11px;display:block">Completed</span><strong style="color:#2e7d32">${done}</strong>
       </div>
       <div style="background:white;border:0.5px solid #fdecea;border-radius:8px;padding:10px 18px;font-size:13px">
-        <span style="color:#c0392b;font-size:11px;display:block">Overdue</span><strong style="color:#c0392b">${rows.filter(r => r.due_date < today).length}</strong>
+        <span style="color:#c0392b;font-size:11px;display:block">Missed</span><strong style="color:#c0392b">${missed}</strong>
       </div>
     </div>
     <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:auto">
       <table style="border-collapse:collapse;font-size:12px;width:100%">
-        <thead><tr style="background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
-          <th style="padding:8px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase;min-width:180px">Task</th>
+        <thead><tr style="background:#fafaf8;border-bottom:0.5px solid #e0e0d8;position:sticky;top:0">
+          <th style="padding:8px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase;min-width:200px">Task</th>
           <th style="padding:8px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase;white-space:nowrap">Type</th>
           ${studioHeaders}
         </tr></thead>
@@ -2521,6 +2533,7 @@ async function loadTasksTab() {
       </table>
     </div>`
 }
+
 
 async function adminToggleTask(id, newStatus) {
   await sb.from('studio_tasks').update({
