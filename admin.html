@@ -2490,7 +2490,7 @@ async function loadTasksTab() {
       const icon = done ? '✅' : isMissed ? '🔴' : '⬜'
       const assignee = t.assignee_name ? `<div style="font-size:9px;color:#2e7d32;margin-top:1px">${t.assignee_name}</div>` : ''
       return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px;background:${cellBg}">
-        <span style="font-size:14px;cursor:pointer;line-height:1" onclick="adminToggleTask('${t.id}','${done ? 'pending' : 'complete'}')" title="${done ? 'Mark pending' : 'Mark complete'}">${icon}</span>
+        <span style="font-size:14px;cursor:pointer;line-height:1" onclick="openTaskEditPopup('${t.id}')" title="${done ? 'Mark pending' : 'Mark complete'}">${icon}</span>
         ${assignee}
       </td>`
     }).join('')
@@ -2544,6 +2544,11 @@ async function adminToggleTask(id, newStatus) {
 }
 
 
+function toggleTaskModalRepeatDays() {
+  const val = document.getElementById('task-modal-repeat').value
+  document.getElementById('task-modal-days-row').style.display = val === 'weekly' ? 'block' : 'none'
+}
+
 function toggleAllTaskStudios(allChecked) {
   const list = document.getElementById('task-studio-list')
   list.style.display = allChecked ? 'none' : 'block'
@@ -2561,7 +2566,13 @@ function applyAdminTaskTemplate() {
   if (!opt.value) return
   document.getElementById('task-modal-title').value = opt.dataset.title || ''
   document.getElementById('task-modal-notes').value = opt.dataset.notes || ''
-  // Store template id for saving
+  const repeat = opt.dataset.repeat || 'none'
+  document.getElementById('task-modal-repeat').value = repeat
+  document.getElementById('task-modal-days-row').style.display = repeat === 'weekly' ? 'block' : 'none'
+  if (repeat === 'weekly' && opt.dataset.days) {
+    const days = opt.dataset.days.split(',')
+    document.querySelectorAll('.task-modal-day-cb').forEach(cb => cb.checked = days.includes(cb.value))
+  }
   sel.dataset.selectedId = opt.value
 }
 
@@ -2570,6 +2581,9 @@ function openTaskModal() {
   document.getElementById('task-modal-title').value = ''
   document.getElementById('task-modal-notes').value = ''
   document.getElementById('task-modal-date').value = today
+  document.getElementById('task-modal-repeat').value = 'none'
+  document.getElementById('task-modal-days-row').style.display = 'none'
+  document.querySelectorAll('.task-modal-day-cb').forEach(cb => cb.checked = false)
 
   // Populate template dropdown
   sb.from('task_templates').select('*').order('title').then(({ data }) => {
@@ -2577,7 +2591,7 @@ function openTaskModal() {
     sel.innerHTML = '<option value="">📋 Pick from template library (optional)...</option>' +
       (data||[]).map(t => {
         const repeatLabel = t.repeat !== 'none' ? ` (${t.repeat})` : ''
-        return `<option value="${t.id}" data-title="${t.title}" data-notes="${t.notes||''}">${t.title}${repeatLabel}</option>`
+        return `<option value="${t.id}" data-title="${t.title}" data-notes="${t.notes||''}" data-repeat="${t.repeat||'none'}" data-days="${(t.repeat_days||[]).join(',')}">${t.title}${repeatLabel}</option>`
       }).join('')
   })
   // Build checkbox list
@@ -2604,7 +2618,21 @@ async function saveTaskFromAdmin() {
   const due_date = document.getElementById('task-modal-date').value
   const notes = document.getElementById('task-modal-notes').value.trim() || null
   const templateId = document.getElementById('task-modal-template')?.dataset.selectedId || null
-  const base = { title, notes, due_date, template_id: templateId || null, source: 'home_office', status: 'pending', created_by: currentUser?.id }
+  const repeat = document.getElementById('task-modal-repeat').value
+  const repeatDays = repeat === 'weekly'
+    ? Array.from(document.querySelectorAll('.task-modal-day-cb:checked')).map(cb => cb.value)
+    : []
+
+  // If repeat is set and no template selected, auto-create a template
+  let finalTemplateId = templateId
+  if (repeat !== 'none' && !templateId) {
+    const { data: newTmpl } = await sb.from('task_templates').insert({
+      title, notes, repeat, repeat_days: repeatDays, source: 'home_office', created_by: currentUser?.id
+    }).select().single()
+    if (newTmpl) finalTemplateId = newTmpl.id
+  }
+
+  const base = { title, notes, due_date, template_id: finalTemplateId || null, source: 'home_office', status: 'pending', created_by: currentUser?.id }
 
   btn.textContent = 'Saving...'
   btn.disabled = true
@@ -3011,6 +3039,63 @@ async function deleteTemplate() {
   loadTemplatesTab()
 }
 
+
+// ── Task Edit Popup (admin matrix) ───────────────────────────
+let editingTaskPopupId = null
+
+async function openTaskEditPopup(taskId) {
+  editingTaskPopupId = taskId
+  const { data: task } = await sb.from('studio_tasks').select('*').eq('id', taskId).single()
+  if (!task) return
+
+  document.getElementById('task-edit-title').textContent = task.title
+  const notesEl = document.getElementById('task-edit-notes')
+  notesEl.textContent = task.notes || ''
+  notesEl.style.display = task.notes ? 'block' : 'none'
+  const urlRow = document.getElementById('task-edit-url-row')
+  if (task.url) { document.getElementById('task-edit-link').href = task.url; urlRow.style.display = 'block' }
+  else urlRow.style.display = 'none'
+  document.getElementById('task-edit-status').value = task.status || 'pending'
+  document.getElementById('task-edit-assignee').value = task.assignee_name || ''
+  document.getElementById('task-edit-date').value = task.due_date || ''
+  document.getElementById('task-edit-popup').style.display = 'flex'
+}
+
+function closeTaskEditPopup() {
+  document.getElementById('task-edit-popup').style.display = 'none'
+  editingTaskPopupId = null
+}
+
+async function saveTaskEdit() {
+  if (!editingTaskPopupId) return
+  const status = document.getElementById('task-edit-status').value
+  const assigneeName = document.getElementById('task-edit-assignee').value.trim() || null
+  const dueDate = document.getElementById('task-edit-date').value
+
+  await sb.from('studio_tasks').update({
+    status,
+    assignee_name: assigneeName,
+    due_date: dueDate,
+    completed_at: status === 'complete' ? new Date().toISOString() : null
+  }).eq('id', editingTaskPopupId)
+
+  closeTaskEditPopup()
+  loadTasksTab()
+}
+
+async function deleteTaskFromEdit() {
+  if (!confirm('Delete this task?')) return
+  await sb.from('studio_tasks').delete().eq('id', editingTaskPopupId)
+  closeTaskEditPopup()
+  loadTasksTab()
+}
+
+// Close on backdrop click
+document.addEventListener('click', e => {
+  const popup = document.getElementById('task-edit-popup')
+  if (popup && e.target === popup) closeTaskEditPopup()
+})
+
 </script>
 
 <!-- EDIT TITLE MODAL -->
@@ -3211,11 +3296,20 @@ async function deleteTemplate() {
         <textarea id="task-modal-notes" rows="2" placeholder="Additional details..."
           style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;resize:vertical;box-sizing:border-box"></textarea>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
         <div>
           <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Due date *</label>
           <input id="task-modal-date" type="date"
             style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
+        </div>
+        <div>
+          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Repeat</label>
+          <select id="task-modal-repeat" onchange="toggleTaskModalRepeatDays()"
+            style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
+            <option value="none">No repeat</option>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+          </select>
         </div>
         <div>
           <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Target studios</label>
@@ -3225,8 +3319,17 @@ async function deleteTemplate() {
                 <input type="checkbox" id="task-studio-all" onchange="toggleAllTaskStudios(this.checked)" checked> All studios
               </label>
             </div>
-            <div id="task-studio-list" style="max-height:150px;overflow-y:auto;padding:6px 0;display:none"></div>
+            <div id="task-studio-list" style="max-height:120px;overflow-y:auto;padding:6px 0;display:none"></div>
           </div>
+        </div>
+      </div>
+      <div id="task-modal-days-row" style="display:none">
+        <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">Repeat on</label>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d =>
+            `<label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;padding:4px 8px;border:0.5px solid #d0d0c8;border-radius:6px">
+              <input type="checkbox" value="${d.toLowerCase()}" class="task-modal-day-cb"> ${d}
+            </label>`).join('')}
         </div>
       </div>
     </div>
@@ -3387,6 +3490,47 @@ async function deleteTemplate() {
       <div style="display:flex;gap:8px;margin-left:auto">
         <button onclick="closeTemplateModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
         <button onclick="saveTemplate()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer" id="tmpl-save-btn">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- Task Edit Popup -->
+<div id="task-edit-popup" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:white;border-radius:12px;width:100%;max-width:400px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+      <strong id="task-edit-title" style="font-size:14px"></strong>
+      <button onclick="closeTaskEditPopup()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">×</button>
+    </div>
+    <div id="task-edit-notes" style="font-size:12px;color:#666;margin-bottom:0.75rem;display:none"></div>
+    <div id="task-edit-url-row" style="margin-bottom:0.75rem;display:none">
+      <a id="task-edit-link" href="#" target="_blank" style="font-size:12px;color:#5b4fcf">📎 Reference doc</a>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div>
+        <label style="font-size:11px;color:#888;display:block;margin-bottom:4px">Status</label>
+        <select id="task-edit-status" style="width:100%;padding:7px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
+          <option value="pending">⬜ Pending</option>
+          <option value="complete">✅ Complete</option>
+        </select>
+      </div>
+      <div>
+        <label style="font-size:11px;color:#888;display:block;margin-bottom:4px">Assigned to</label>
+        <input id="task-edit-assignee" type="text" placeholder="Staff name..."
+          style="width:100%;padding:7px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
+      </div>
+      <div>
+        <label style="font-size:11px;color:#888;display:block;margin-bottom:4px">Due date</label>
+        <input id="task-edit-date" type="date"
+          style="width:100%;padding:7px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:1.25rem;justify-content:space-between">
+      <button onclick="deleteTaskFromEdit()" style="padding:7px 14px;border:0.5px solid #f5c6cb;border-radius:6px;background:white;font-size:12px;cursor:pointer;color:#c0392b">Delete</button>
+      <div style="display:flex;gap:8px">
+        <button onclick="closeTaskEditPopup()" style="padding:7px 14px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
+        <button onclick="saveTaskEdit()" style="padding:7px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">Save</button>
       </div>
     </div>
   </div>
