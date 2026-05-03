@@ -210,6 +210,7 @@ select:focus, input:focus { border-color: #888; }
     <button class="tab-btn" onclick="switchTab('quality')">Data Quality<span id="quality-badge" class="tab-badge" style="display:none"></span></button>
     <button class="tab-btn" onclick="switchTab('tasks')">Tasks</button>
     <button class="tab-btn" onclick="switchTab('announcements')">Announcements</button>
+    <button class="tab-btn" onclick="switchTab('training')">Training</button>
     <button class="tab-btn" onclick="switchTab('staff')">Staff</button>
     <button class="tab-btn" onclick="switchTab('users')">Users</button>
     <div class="top-bar-right"><button class="signout-btn" onclick="signOut()">Sign out</button></div>
@@ -412,6 +413,45 @@ select:focus, input:focus { border-color: #888; }
       <div class="toolbar-group" style="font-size:11px;color:#888">Messages shown at the top of the studio day view. Urgent messages appear as a red banner.</div>
     </div>
     <div id="announcements-container"><div class="loading">Loading...</div></div>
+  </div>
+  <div class="tab-content" id="tab-training">
+    <!-- Subtab bar -->
+    <div style="display:flex;gap:0;border-bottom:0.5px solid #e0e0d8;margin-bottom:1.25rem">
+      <button id="training-subtab-overview" onclick="switchTrainingSubtab('overview')"
+        style="padding:8px 18px;font-size:13px;border:none;background:none;cursor:pointer;border-bottom:2px solid #1a1a1a;font-weight:600;color:#1a1a1a">Birds-eye View</button>
+      <button id="training-subtab-manage" onclick="switchTrainingSubtab('manage')"
+        style="padding:8px 18px;font-size:13px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;color:#888">Manage Checklist</button>
+    </div>
+
+    <!-- Birds-eye View -->
+    <div id="training-subtab-overview-content">
+      <div class="toolbar" style="margin-bottom:1rem">
+        <div class="toolbar-group" style="gap:8px">
+          <select id="training-filter-studio" onchange="loadTrainingOverview()" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none;background:white">
+            <option value="">All studios</option>
+          </select>
+          <select id="training-filter-unit" onchange="loadTrainingOverview()" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none;background:white">
+            <option value="">All units</option>
+          </select>
+          <select id="training-filter-type" onchange="loadTrainingOverview()" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none;background:white">
+            <option value="">All staff types</option>
+            <option value="regular">Regular</option>
+            <option value="summer">Summer</option>
+          </select>
+        </div>
+      </div>
+      <div id="training-overview-container"><div class="loading">Loading...</div></div>
+    </div>
+
+    <!-- Manage Checklist -->
+    <div id="training-subtab-manage-content" style="display:none">
+      <div class="toolbar" style="margin-bottom:1rem">
+        <div class="toolbar-group">
+          <button class="btn btn-primary" onclick="openUnitModal()">+ New Unit</button>
+        </div>
+      </div>
+      <div id="training-manage-container"><div class="loading">Loading...</div></div>
+    </div>
   </div>
   <div class="tab-content" id="tab-staff">
     <div class="toolbar">
@@ -650,7 +690,7 @@ async function initApp() {
 }
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','staff','users'][i] === tab))
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','training','staff','users'][i] === tab))
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'))
   document.getElementById(`tab-${tab}`).classList.add('active')
   if (tab === 'curriculum') loadCurriculum()
@@ -658,6 +698,7 @@ function switchTab(tab) {
   if (tab === 'users') loadUsers()
   if (tab === 'tasks') loadTasksTab()
   if (tab === 'announcements') loadAnnouncementsTab()
+  if (tab === 'training') loadTrainingTab()
   if (tab === 'staff') loadStaffTab()
 }
 
@@ -3170,6 +3211,315 @@ document.addEventListener('click', e => {
   if (popup && e.target === popup) closeTaskEditPopup()
 })
 
+
+// ── Training ─────────────────────────────────────────────────
+let editingUnitId = null
+let editingItemId = null
+let editingItemUnitId = null
+let trainingUnitsCache = []
+let trainingItemsCache = []
+
+function switchTrainingSubtab(name) {
+  const isOverview = name === 'overview'
+  document.getElementById('training-subtab-overview-content').style.display = isOverview ? 'block' : 'none'
+  document.getElementById('training-subtab-manage-content').style.display = isOverview ? 'none' : 'block'
+  const ovBtn = document.getElementById('training-subtab-overview')
+  const mgBtn = document.getElementById('training-subtab-manage')
+  ovBtn.style.borderBottomColor = isOverview ? '#1a1a1a' : 'transparent'
+  ovBtn.style.color = isOverview ? '#1a1a1a' : '#888'
+  ovBtn.style.fontWeight = isOverview ? '600' : '400'
+  mgBtn.style.borderBottomColor = isOverview ? 'transparent' : '#1a1a1a'
+  mgBtn.style.color = isOverview ? '#888' : '#1a1a1a'
+  mgBtn.style.fontWeight = isOverview ? '400' : '600'
+  if (isOverview) loadTrainingOverview()
+  else loadTrainingManage()
+}
+
+async function loadTrainingTab() {
+  // Populate studio filter
+  const sel = document.getElementById('training-filter-studio')
+  if (sel && sel.options.length === 1) {
+    Object.entries(STUDIO_VARIANT_MAP).forEach(([k, v]) => {
+      const o = document.createElement('option'); o.value = k; o.textContent = v; sel.appendChild(o)
+    })
+  }
+  // Load units for filter dropdown
+  const { data: units } = await sb.from('training_units').select('*').order('sort_order')
+  trainingUnitsCache = units || []
+  const unitSel = document.getElementById('training-filter-unit')
+  if (unitSel) {
+    unitSel.innerHTML = '<option value="">All units</option>' +
+      trainingUnitsCache.map(u => `<option value="${u.id}">${u.name}</option>`).join('')
+  }
+  loadTrainingOverview()
+}
+
+async function loadTrainingOverview() {
+  const container = document.getElementById('training-overview-container')
+  container.innerHTML = '<div class="loading">Loading...</div>'
+
+  const studioFilter = document.getElementById('training-filter-studio')?.value
+  const unitFilter = document.getElementById('training-filter-unit')?.value
+  const typeFilter = document.getElementById('training-filter-type')?.value
+
+  // Load units + items
+  const { data: units } = await sb.from('training_units').select('*').order('sort_order')
+  const { data: items } = await sb.from('training_items').select('*').order('sort_order')
+  trainingUnitsCache = units || []
+  trainingItemsCache = items || []
+
+  // Load staff
+  let staffQuery = sb.from('staff_profiles').select('*').eq('is_active', true).order('display_name')
+  if (typeFilter) staffQuery = staffQuery.eq('employment_type', typeFilter)
+  const { data: allStaff } = await staffQuery
+
+  let staff = allStaff || []
+  if (studioFilter) staff = staff.filter(s => !s.studio_ids?.length || s.studio_ids.includes(studioFilter))
+  if (!staff.length) {
+    container.innerHTML = '<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No staff found for these filters.</div>'
+    return
+  }
+
+  // Load progress for these staff
+  const staffUserIds = staff.filter(s => s.user_id).map(s => s.user_id)
+  let progress = []
+  if (staffUserIds.length) {
+    const { data: prog } = await sb.from('staff_training_progress')
+      .select('*').in('user_id', staffUserIds)
+    progress = prog || []
+  }
+  // progress map: userId_itemId -> record
+  const progressMap = {}
+  progress.forEach(p => { progressMap[p.user_id + '_' + p.item_id] = p })
+
+  // Filter units
+  let visibleUnits = trainingUnitsCache
+  if (unitFilter) visibleUnits = visibleUnits.filter(u => u.id === unitFilter)
+
+  let html = ''
+  for (const unit of visibleUnits) {
+    const unitItems = trainingItemsCache.filter(i => i.unit_id === unit.id)
+    if (!unitItems.length) continue
+
+    const appliesBadge = unit.applies_to !== 'all'
+      ? `<span style="font-size:10px;background:#e8e8f0;color:#5b4fcf;padding:2px 6px;border-radius:4px;margin-left:6px">${unit.applies_to}</span>`
+      : ''
+
+    // Staff columns header
+    const staffHeaders = staff.map(s =>
+      `<th style="padding:6px 4px;font-size:10px;color:#888;text-align:center;min-width:60px;max-width:80px;word-break:break-word;line-height:1.3;border-left:0.5px solid #f0f0e8">
+        ${s.nickname || s.display_name}
+      </th>`
+    ).join('')
+
+    // Item rows
+    const itemRows = unitItems.map(item => {
+      const cells = staff.map(s => {
+        if (!s.user_id) return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px"><span style="color:#ddd;font-size:12px">–</span></td>`
+        const done = progressMap[s.user_id + '_' + item.id]
+        const date = done ? done.completed_at?.slice(0,10) : ''
+        return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px;background:${done ? '#f0faf0' : ''}">
+          <span style="font-size:15px;cursor:pointer" onclick="toggleTrainingItem('${s.user_id}','${item.id}',${done ? 'true' : 'false'})" title="${done ? 'Completed '+date : 'Not done'}">${done ? '✅' : '⬜'}</span>
+        </td>`
+      }).join('')
+
+      return `<tr style="border-bottom:0.5px solid #f5f5f0" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
+        <td style="padding:8px 14px;font-size:12px">${item.title}${item.description ? `<div style="font-size:11px;color:#888;margin-top:1px">${item.description}</div>` : ''}</td>
+        ${cells}
+      </tr>`
+    }).join('')
+
+    // Completion summary row
+    const summaryRow = `<tr style="background:#fafaf8;border-top:0.5px solid #e0e0d8">
+      <td style="padding:6px 14px;font-size:11px;color:#888;font-style:italic">Completion</td>
+      ${staff.map(s => {
+        if (!s.user_id) return '<td style="border-left:0.5px solid #f0f0e8"></td>'
+        const done = unitItems.filter(i => progressMap[s.user_id + '_' + i.id]).length
+        const pct = Math.round(done / unitItems.length * 100)
+        const color = pct === 100 ? '#2e7d32' : pct >= 50 ? '#e65100' : '#c0392b'
+        return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px;font-size:11px;font-weight:600;color:${color}">${pct}%</td>`
+      }).join('')}
+    </tr>`
+
+    html += `
+      <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden;margin-bottom:1.25rem">
+        <div style="padding:12px 16px;background:#fafaf8;border-bottom:0.5px solid #e0e0d8;display:flex;align-items:center;justify-content:space-between">
+          <strong style="font-size:13px">${unit.name}${appliesBadge}</strong>
+          <span style="font-size:11px;color:#888">${unitItems.length} item${unitItems.length !== 1 ? 's' : ''}</span>
+        </div>
+        <div style="overflow-x:auto">
+          <table style="border-collapse:collapse;font-size:12px;width:100%">
+            <thead><tr style="border-bottom:0.5px solid #e0e0d8">
+              <th style="padding:8px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase;min-width:200px">Item</th>
+              ${staffHeaders}
+            </tr></thead>
+            <tbody>${itemRows}${summaryRow}</tbody>
+          </table>
+        </div>
+      </div>`
+  }
+
+  if (!html) {
+    container.innerHTML = '<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No training units found. Add some in Manage Checklist.</div>'
+    return
+  }
+
+  // Overall summary
+  const totalItems = trainingItemsCache.length
+  const totalCells = staff.filter(s => s.user_id).length * totalItems
+  const totalDone = progress.length
+  const pct = totalCells ? Math.round(totalDone / totalCells * 100) : 0
+  container.innerHTML = `
+    <div style="display:flex;gap:10px;margin-bottom:1rem;flex-wrap:wrap">
+      <div style="background:white;border:0.5px solid #e0e0d8;border-radius:8px;padding:10px 18px;font-size:13px">
+        <span style="color:#888;font-size:11px;display:block">Staff shown</span><strong>${staff.length}</strong>
+      </div>
+      <div style="background:white;border:0.5px solid #e0e0d8;border-radius:8px;padding:10px 18px;font-size:13px">
+        <span style="color:#888;font-size:11px;display:block">Checklist items</span><strong>${totalItems}</strong>
+      </div>
+      <div style="background:white;border:0.5px solid #c8e6c9;border-radius:8px;padding:10px 18px;font-size:13px">
+        <span style="color:#2e7d32;font-size:11px;display:block">Network completion</span><strong style="color:#2e7d32">${pct}%</strong>
+      </div>
+    </div>
+    ${html}`
+}
+
+async function toggleTrainingItem(userId, itemId, isDone) {
+  if (isDone) {
+    await sb.from('staff_training_progress').delete().eq('user_id', userId).eq('item_id', itemId)
+  } else {
+    await sb.from('staff_training_progress').insert({ user_id: userId, item_id: itemId, completed_at: new Date().toISOString() })
+  }
+  loadTrainingOverview()
+}
+
+// ── Manage Checklist ─────────────────────────────────────────
+
+async function loadTrainingManage() {
+  const container = document.getElementById('training-manage-container')
+  container.innerHTML = '<div class="loading">Loading...</div>'
+  const { data: units } = await sb.from('training_units').select('*').order('sort_order')
+  const { data: items } = await sb.from('training_items').select('*').order('sort_order')
+  trainingUnitsCache = units || []
+  trainingItemsCache = items || []
+
+  if (!trainingUnitsCache.length) {
+    container.innerHTML = '<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No training units yet. Create one to get started.</div>'
+    return
+  }
+
+  const appliesLabel = { all: 'All staff', base: 'Base', manager: 'Managers', summer: 'Summer' }
+
+  container.innerHTML = trainingUnitsCache.map(unit => {
+    const unitItems = trainingItemsCache.filter(i => i.unit_id === unit.id)
+    const itemsHtml = unitItems.map(item => `
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 16px;border-bottom:0.5px solid #f5f5f0">
+        <span style="flex:1;font-size:13px">${item.title}${item.description ? `<span style="font-size:11px;color:#888;margin-left:6px">${item.description}</span>` : ''}</span>
+        <button class="btn" onclick="openItemModal('${unit.id}','${item.id}')" style="font-size:11px;padding:3px 8px">Edit</button>
+      </div>`).join('')
+    const emptyItems = !unitItems.length ? '<div style="padding:10px 16px;font-size:12px;color:#bbb">No items yet</div>' : ''
+
+    return `<div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden;margin-bottom:1rem">
+      <div style="padding:12px 16px;background:#fafaf8;border-bottom:0.5px solid #e0e0d8;display:flex;align-items:center;gap:10px">
+        <strong style="font-size:13px;flex:1">${unit.name}</strong>
+        <span style="font-size:11px;color:#888">${appliesLabel[unit.applies_to] || unit.applies_to}</span>
+        <button class="btn" onclick="openUnitModal('${unit.id}')" style="font-size:11px;padding:3px 8px">Edit unit</button>
+        <button class="btn btn-primary" onclick="openItemModal('${unit.id}')" style="font-size:11px;padding:3px 10px">+ Item</button>
+      </div>
+      ${itemsHtml}${emptyItems}
+    </div>`
+  }).join('')
+}
+
+// ── Unit Modal ───────────────────────────────────────────────
+
+async function openUnitModal(id = null) {
+  editingUnitId = id
+  document.getElementById('unit-delete-wrap').style.display = id ? 'block' : 'none'
+  if (id) {
+    document.getElementById('unit-modal-title').textContent = 'Edit Training Unit'
+    const { data } = await sb.from('training_units').select('*').eq('id', id).single()
+    if (data) {
+      document.getElementById('unit-name').value = data.name || ''
+      document.getElementById('unit-applies').value = data.applies_to || 'all'
+      document.getElementById('unit-order').value = data.sort_order ?? 0
+    }
+  } else {
+    document.getElementById('unit-modal-title').textContent = 'New Training Unit'
+    document.getElementById('unit-name').value = ''
+    document.getElementById('unit-applies').value = 'all'
+    document.getElementById('unit-order').value = trainingUnitsCache.length
+  }
+  document.getElementById('unit-modal').style.display = 'flex'
+}
+
+function closeUnitModal() { document.getElementById('unit-modal').style.display = 'none'; editingUnitId = null }
+
+async function saveUnit() {
+  const btn = document.getElementById('unit-save-btn')
+  const name = document.getElementById('unit-name').value.trim()
+  if (!name) { alert('Please enter a unit name.'); return }
+  btn.textContent = 'Saving...'; btn.disabled = true
+  const payload = { name, applies_to: document.getElementById('unit-applies').value, sort_order: parseInt(document.getElementById('unit-order').value) || 0 }
+  const { error } = editingUnitId
+    ? await sb.from('training_units').update(payload).eq('id', editingUnitId)
+    : await sb.from('training_units').insert(payload)
+  btn.textContent = 'Save'; btn.disabled = false
+  if (error) { alert('Error: ' + error.message); return }
+  closeUnitModal(); loadTrainingManage()
+}
+
+async function deleteUnit() {
+  if (!confirm('Delete this unit and all its items? This cannot be undone.')) return
+  await sb.from('training_units').delete().eq('id', editingUnitId)
+  closeUnitModal(); loadTrainingManage()
+}
+
+// ── Item Modal ───────────────────────────────────────────────
+
+async function openItemModal(unitId, id = null) {
+  editingItemId = id; editingItemUnitId = unitId
+  document.getElementById('item-delete-wrap').style.display = id ? 'block' : 'none'
+  if (id) {
+    document.getElementById('item-modal-title').textContent = 'Edit Item'
+    const { data } = await sb.from('training_items').select('*').eq('id', id).single()
+    if (data) {
+      document.getElementById('item-title').value = data.title || ''
+      document.getElementById('item-desc').value = data.description || ''
+      document.getElementById('item-order').value = data.sort_order ?? 0
+    }
+  } else {
+    document.getElementById('item-modal-title').textContent = 'New Checklist Item'
+    document.getElementById('item-title').value = ''
+    document.getElementById('item-desc').value = ''
+    const unitItems = trainingItemsCache.filter(i => i.unit_id === unitId)
+    document.getElementById('item-order').value = unitItems.length
+  }
+  document.getElementById('item-modal').style.display = 'flex'
+}
+
+function closeItemModal() { document.getElementById('item-modal').style.display = 'none'; editingItemId = null }
+
+async function saveItem() {
+  const btn = document.getElementById('item-save-btn')
+  const title = document.getElementById('item-title').value.trim()
+  if (!title) { alert('Please enter an item title.'); return }
+  btn.textContent = 'Saving...'; btn.disabled = true
+  const payload = { title, description: document.getElementById('item-desc').value.trim() || null, sort_order: parseInt(document.getElementById('item-order').value) || 0, unit_id: editingItemUnitId }
+  const { error } = editingItemId
+    ? await sb.from('training_items').update(payload).eq('id', editingItemId)
+    : await sb.from('training_items').insert(payload)
+  btn.textContent = 'Save'; btn.disabled = false
+  if (error) { alert('Error: ' + error.message); return }
+  closeItemModal(); loadTrainingManage()
+}
+
+async function deleteItem() {
+  if (!confirm('Delete this item? Completion records will also be removed.')) return
+  await sb.from('training_items').delete().eq('id', editingItemId)
+  closeItemModal(); loadTrainingManage()
+}
+
 </script>
 
 <!-- EDIT TITLE MODAL -->
@@ -3595,6 +3945,83 @@ document.addEventListener('click', e => {
       <div style="display:flex;gap:8px">
         <button onclick="closeTaskEditPopup()" style="padding:7px 14px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
         <button onclick="saveTaskEdit()" style="padding:7px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- Training Unit Modal -->
+<div id="unit-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:white;border-radius:12px;width:100%;max-width:440px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
+      <h3 style="font-size:15px;font-weight:600;margin:0" id="unit-modal-title">New Training Unit</h3>
+      <button onclick="closeUnitModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">×</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div>
+        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Unit name *</label>
+        <input id="unit-name" type="text" placeholder="e.g. Studio Safety"
+          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
+      </div>
+      <div>
+        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Applies to</label>
+        <select id="unit-applies" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
+          <option value="all">All staff</option>
+          <option value="base">Base (regular + manager)</option>
+          <option value="manager">Managers only</option>
+          <option value="summer">Summer staff</option>
+        </select>
+      </div>
+      <div>
+        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Sort order</label>
+        <input id="unit-order" type="number" value="0" min="0"
+          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:1.25rem;justify-content:space-between">
+      <div id="unit-delete-wrap" style="display:none">
+        <button onclick="deleteUnit()" style="padding:8px 14px;border:0.5px solid #f5c6cb;border-radius:6px;background:white;font-size:13px;cursor:pointer;color:#c0392b">Delete</button>
+      </div>
+      <div style="display:flex;gap:8px;margin-left:auto">
+        <button onclick="closeUnitModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
+        <button onclick="saveUnit()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer" id="unit-save-btn">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Training Item Modal -->
+<div id="item-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:white;border-radius:12px;width:100%;max-width:480px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
+      <h3 style="font-size:15px;font-weight:600;margin:0" id="item-modal-title">New Checklist Item</h3>
+      <button onclick="closeItemModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">×</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div>
+        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Item title *</label>
+        <input id="item-title" type="text" placeholder="e.g. Can set up a pottery wheel"
+          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
+      </div>
+      <div>
+        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Description (optional)</label>
+        <textarea id="item-desc" rows="2" placeholder="What does completing this item mean?"
+          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;resize:vertical;box-sizing:border-box"></textarea>
+      </div>
+      <div>
+        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Sort order</label>
+        <input id="item-order" type="number" value="0" min="0"
+          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:1.25rem;justify-content:space-between">
+      <div id="item-delete-wrap" style="display:none">
+        <button onclick="deleteItem()" style="padding:8px 14px;border:0.5px solid #f5c6cb;border-radius:6px;background:white;font-size:13px;cursor:pointer;color:#c0392b">Delete</button>
+      </div>
+      <div style="display:flex;gap:8px;margin-left:auto">
+        <button onclick="closeItemModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
+        <button onclick="saveItem()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer" id="item-save-btn">Save</button>
       </div>
     </div>
   </div>
