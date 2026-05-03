@@ -1053,12 +1053,12 @@ function getSeriesClass1Title(title) {
   return title.replace(/\s*-?\s*class\s+\d+\s+of\s+\d+/i, '').trim()
 }
 
-async function findClass1SessionId(studioId, sessionTime, seriesTitle) {
+async function findClass1SessionId(studioId, sessionTime, seriesTitle, sessionDate) {
   const { data: exact } = await sb.from('sessions')
     .select('id').eq('studio_id', studioId).eq('session_time', sessionTime).eq('title', seriesTitle).single()
   if (exact) return exact.id
   const { data: sessions } = await sb.from('sessions')
-    .select('id, title').eq('studio_id', studioId).eq('session_time', sessionTime)
+    .select('id, title, session_date').eq('studio_id', studioId).eq('session_time', sessionTime)
   if (!sessions) return null
   const candidates = sessions.filter(s =>
     !isSeriesClass2Plus(s.title) &&
@@ -1066,6 +1066,21 @@ async function findClass1SessionId(studioId, sessionTime, seriesTitle) {
   )
   if (!candidates.length) return null
   if (candidates.length === 1) return candidates[0].id
+  // Filter by same day-of-week as the current session to avoid mixing parallel Sat/Sun series
+  if (sessionDate) {
+    const dow = new Date(sessionDate + 'T12:00:00').getDay()
+    const sameDow = candidates.filter(s => s.session_date && new Date(s.session_date + 'T12:00:00').getDay() === dow)
+    if (sameDow.length === 1) return sameDow[0].id
+    if (sameDow.length > 1) {
+      // Multiple class 1s on same day — pick the most recent one before or on current date
+      const current = new Date(sessionDate + 'T12:00:00')
+      const earlier = sameDow
+        .filter(s => new Date(s.session_date + 'T12:00:00') <= current)
+        .sort((a, b) => new Date(b.session_date) - new Date(a.session_date))
+      if (earlier.length) return earlier[0].id
+    }
+  }
+  // Fallback: whichever class 1 has bookings
   const { data: bookings } = await sb.from('bookings')
     .select('session_id').in('session_id', candidates.map(s => s.id)).gt('qty', 0).limit(1)
   return bookings?.length ? bookings[0].session_id : candidates[0].id
@@ -1306,7 +1321,7 @@ async function loadDayView() {
     for (const s of filtered) {
       if (isSeriesClass2Plus(s.title) && !bookingCounts[s.id]) {
         const class1Title = getSeriesClass1Title(s.title)
-        const class1Id = await findClass1SessionId(currentStudioId, s.session_time, class1Title)
+        const class1Id = await findClass1SessionId(currentStudioId, s.session_time, class1Title, s.session_date)
         if (class1Id) {
           if (bookingCounts[class1Id] !== undefined) {
             bookingCounts[s.id] = bookingCounts[class1Id]
@@ -1718,7 +1733,7 @@ async function showBookings(sessionId, title, dateLabel, sessionType, sessionTim
   let bookingSessionId = sessionId
   if (isSeriesClass2Plus(title)) {
     const class1Title = getSeriesClass1Title(title)
-    const class1Id = await findClass1SessionId(currentStudioId, sessionTime, class1Title)
+    const class1Id = await findClass1SessionId(currentStudioId, sessionTime, class1Title, dateLabel)
     if (class1Id) bookingSessionId = class1Id
   }
   const { data: bookings } = await sb.from('bookings')
