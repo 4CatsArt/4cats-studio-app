@@ -208,6 +208,7 @@ select:focus, input:focus { border-color: #888; }
     <button class="tab-btn" onclick="switchTab('reports')">Daily Reports</button>
     <button class="tab-btn" onclick="switchTab('curriculum')">Curriculum</button>
     <button class="tab-btn" onclick="switchTab('quality')">Data Quality<span id="quality-badge" class="tab-badge" style="display:none"></span></button>
+    <button class="tab-btn" onclick="switchTab('announcements')">Announcements</button>
     <button class="tab-btn" onclick="switchTab('users')">Users</button>
     <div class="top-bar-right"><button class="signout-btn" onclick="signOut()">Sign out</button></div>
   </div>
@@ -355,6 +356,16 @@ select:focus, input:focus { border-color: #888; }
       <div class="toolbar-group" style="font-size:11px;color:#888">Checks upcoming bookings (today forward) for data issues</div>
     </div>
     <div id="quality-container"><div class="empty">Click Run Check to scan for issues.</div></div>
+  </div>
+  <div class="tab-content" id="tab-announcements">
+    <div class="toolbar">
+      <div class="toolbar-group">
+        <button class="btn btn-primary" onclick="openAnnouncementModal()">+ New Announcement</button>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group" style="font-size:11px;color:#888">Messages shown at the top of the studio day view. Urgent messages appear as a red banner.</div>
+    </div>
+    <div id="announcements-container"><div class="loading">Loading...</div></div>
   </div>
   <div class="tab-content" id="tab-users">
     <div class="users-layout">
@@ -567,12 +578,13 @@ async function initApp() {
 }
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','users'][i] === tab))
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','announcements','users'][i] === tab))
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'))
   document.getElementById(`tab-${tab}`).classList.add('active')
   if (tab === 'curriculum') loadCurriculum()
   if (tab === 'quality') { loadQualityReport(); clearQualityBadge() }
   if (tab === 'users') loadUsers()
+  if (tab === 'announcements') loadAnnouncementsTab()
 }
 
 async function loadQualityBadge() {
@@ -2152,6 +2164,134 @@ async function removeUser(userId, email) {
   alert(`✓ Password updated for ${email}`)
 }
 
+
+// ── Announcements ────────────────────────────────────────────
+let editingAnnouncementId = null
+
+async function loadAnnouncementsTab() {
+  const container = document.getElementById('announcements-container')
+  const today = new Date().toISOString().slice(0, 10)
+  const { data, error } = await sb.from('announcements').select('*').order('created_at', { ascending: false })
+  if (error || !data?.length) {
+    container.innerHTML = '<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No announcements yet. Create one to get started.</div>'
+    return
+  }
+
+  const studioName = id => {
+    for (const [k, v] of Object.entries(STUDIO_VARIANT_MAP)) { if (k === id) return v }
+    return id
+  }
+
+  const rows = data.map(a => {
+    const isActive = a.show_from <= today && (!a.show_until || a.show_until >= today)
+    const statusDot = isActive
+      ? '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#2e7d32;margin-right:6px"></span>'
+      : '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#aaa;margin-right:6px"></span>'
+    const priorityBadge = a.priority === 'urgent'
+      ? '<span style="background:#c0392b;color:white;font-size:10px;padding:2px 6px;border-radius:4px;font-weight:600">URGENT</span>'
+      : '<span style="background:#e8e8f0;color:#5b4fcf;font-size:10px;padding:2px 6px;border-radius:4px">normal</span>'
+    const target = a.studio_id ? studioName(a.studio_id) : '<em style="color:#888">All studios</em>'
+    const dates = `${a.show_from}${a.show_until ? ' → ' + a.show_until : ' → ∞'}`
+    return `<tr style="border-bottom:0.5px solid #f5f5f0" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
+      <td style="padding:10px 14px">${statusDot}<strong style="font-size:13px">${a.title}</strong>${a.body ? `<div style="font-size:11px;color:#888;margin-top:2px">${a.body.slice(0,80)}${a.body.length>80?'…':''}</div>` : ''}</td>
+      <td style="padding:10px 14px;font-size:12px">${target}</td>
+      <td style="padding:10px 14px">${priorityBadge}</td>
+      <td style="padding:10px 14px;font-size:11px;color:#888;white-space:nowrap">${dates}</td>
+      <td style="padding:10px 14px;white-space:nowrap">
+        <button class="btn" onclick="openAnnouncementModal('${a.id}')" style="font-size:11px;padding:4px 10px">Edit</button>
+        <button class="btn" onclick="deleteAnnouncement('${a.id}')" style="font-size:11px;padding:4px 10px;color:#c0392b;border-color:#f5c6cb;margin-left:4px">Delete</button>
+      </td>
+    </tr>`
+  }).join('')
+
+  container.innerHTML = `<div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden">
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
+        <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Message</th>
+        <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Target</th>
+        <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Priority</th>
+        <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Dates</th>
+        <th style="padding:10px 14px"></th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`
+}
+
+async function openAnnouncementModal(id = null) {
+  editingAnnouncementId = id
+  const modal = document.getElementById('announcement-modal')
+  const today = new Date().toISOString().slice(0, 10)
+
+  // Populate studio dropdown
+  const sel = document.getElementById('ann-studio')
+  sel.innerHTML = '<option value="">All studios</option>' +
+    Object.entries(STUDIO_VARIANT_MAP).map(([k,v]) => `<option value="${k}">${v}</option>`).join('')
+
+  if (id) {
+    document.getElementById('ann-modal-title').textContent = 'Edit Announcement'
+    const { data } = await sb.from('announcements').select('*').eq('id', id).single()
+    if (data) {
+      document.getElementById('ann-title').value = data.title || ''
+      document.getElementById('ann-body').value = data.body || ''
+      document.getElementById('ann-priority').value = data.priority || 'normal'
+      document.getElementById('ann-studio').value = data.studio_id || ''
+      document.getElementById('ann-from').value = data.show_from || today
+      document.getElementById('ann-until').value = data.show_until || ''
+    }
+  } else {
+    document.getElementById('ann-modal-title').textContent = 'New Announcement'
+    document.getElementById('ann-title').value = ''
+    document.getElementById('ann-body').value = ''
+    document.getElementById('ann-priority').value = 'normal'
+    document.getElementById('ann-studio').value = ''
+    document.getElementById('ann-from').value = today
+    document.getElementById('ann-until').value = ''
+  }
+
+  modal.style.display = 'flex'
+}
+
+function closeAnnouncementModal() {
+  document.getElementById('announcement-modal').style.display = 'none'
+  editingAnnouncementId = null
+}
+
+async function saveAnnouncement() {
+  const btn = document.getElementById('ann-save-btn')
+  const title = document.getElementById('ann-title').value.trim()
+  if (!title) { alert('Please enter a title.'); return }
+
+  const payload = {
+    title,
+    body: document.getElementById('ann-body').value.trim() || null,
+    priority: document.getElementById('ann-priority').value,
+    studio_id: document.getElementById('ann-studio').value || null,
+    show_from: document.getElementById('ann-from').value,
+    show_until: document.getElementById('ann-until').value || null,
+  }
+
+  btn.textContent = 'Saving...'
+  btn.disabled = true
+
+  const { error } = editingAnnouncementId
+    ? await sb.from('announcements').update(payload).eq('id', editingAnnouncementId)
+    : await sb.from('announcements').insert({ ...payload, created_by: currentUser?.id })
+
+  btn.textContent = 'Save'
+  btn.disabled = false
+
+  if (error) { alert('Error saving: ' + error.message); return }
+  closeAnnouncementModal()
+  loadAnnouncementsTab()
+}
+
+async function deleteAnnouncement(id) {
+  if (!confirm('Delete this announcement?')) return
+  await sb.from('announcements').delete().eq('id', id)
+  loadAnnouncementsTab()
+}
+
 </script>
 
 <!-- EDIT TITLE MODAL -->
@@ -2274,5 +2414,55 @@ async function removeUser(userId, email) {
     </div>
   </div>
 </div>
+
+<!-- Announcement Modal -->
+<div id="announcement-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;display:none;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:white;border-radius:12px;width:100%;max-width:520px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
+      <h3 style="font-size:15px;font-weight:600;margin:0" id="ann-modal-title">New Announcement</h3>
+      <button onclick="closeAnnouncementModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">×</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div>
+        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Title *</label>
+        <input id="ann-title" type="text" placeholder="e.g. Studio deep clean reminder" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
+      </div>
+      <div>
+        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Message (optional)</label>
+        <textarea id="ann-body" rows="3" placeholder="Additional details..." style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;resize:vertical;box-sizing:border-box"></textarea>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div>
+          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Priority</label>
+          <select id="ann-priority" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
+            <option value="normal">📢 Normal</option>
+            <option value="urgent">🚨 Urgent</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Target</label>
+          <select id="ann-studio" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
+            <option value="">All studios</option>
+          </select>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div>
+          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Show from *</label>
+          <input id="ann-from" type="date" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
+        </div>
+        <div>
+          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Show until (leave blank = indefinite)</label>
+          <input id="ann-until" type="date" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:1.25rem;justify-content:flex-end">
+      <button onclick="closeAnnouncementModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
+      <button onclick="saveAnnouncement()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer" id="ann-save-btn">Save</button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
