@@ -267,6 +267,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
   </div>
 
   <div id="day-view">
+    <div id="party-form-banner" style="display:none;background:#c0392b;color:white;padding:12px 1.5rem;margin:0.75rem 0 0;border-radius:10px;font-size:13px"></div>
     <div class="date-bar" id="date-bar"></div>
     <div id="sessions-container"><div class="loading">Loading...</div></div>
   </div>
@@ -1035,6 +1036,22 @@ async function savePartyDetail(bookingId, sessionId, uid, subtype, customerEmail
     btn.classList.add('saved')
     setTimeout(() => { btn.textContent = 'Save'; btn.classList.remove('saved'); btn.disabled = false }, 2000)
   }
+
+  // Auto-resolve any pending party-form task for this booking
+  try {
+    const { data: partyTask } = await sb.from('studio_tasks')
+      .select('id')
+      .eq('booking_id', bookingId)
+      .eq('status', 'pending')
+      .maybeSingle()
+    if (partyTask) {
+      await sb.from('studio_tasks').update({
+        status: 'complete',
+        completed_at: new Date().toISOString()
+      }).eq('id', partyTask.id)
+      loadPartyFormBanner()
+    }
+  } catch(e) { /* non-critical */ }
 }
 
 // ── UTILITY ───────────────────────────────────────────────────
@@ -1045,6 +1062,47 @@ function fmtTime(timeStr) {
   const hour = h === 0 ? 12 : h > 12 ? h - 12 : h
   const ampm = h < 12 ? 'am' : 'pm'
   return m === 0 ? `${hour}${ampm}` : `${hour}:${String(m).padStart(2,'0')}${ampm}`
+}
+
+async function loadPartyFormBanner() {
+  const today = new Date().toISOString().slice(0, 10)
+  const { data: tasks } = await sb.from('studio_tasks')
+    .select('id, title, booking_id, due_date')
+    .eq('studio_id', currentStudioId)
+    .eq('status', 'pending')
+    .like('title', '⚠️ Party form not filled out%')
+
+  const banner = document.getElementById('party-form-banner')
+  if (!banner) return
+
+  if (!tasks?.length) {
+    banner.style.display = 'none'
+    return
+  }
+
+  const names = tasks.map(t => {
+    const name = t.title.replace('⚠️ Party form not filled out — ', '')
+    const isOverdue = t.due_date < today
+    return isOverdue ? `${name} <span style="opacity:0.75;font-size:11px">(${t.due_date})</span>` : name
+  }).join(', ')
+  banner.innerHTML = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <span style="font-size:18px">⚠️</span>
+    <div>
+      <strong>Party form${tasks.length > 1 ? 's' : ''} not filled out</strong>
+      <span style="margin-left:8px;opacity:0.9">${names}</span>
+    </div>
+    <button onclick="scrollToParties()" style="margin-left:auto;background:white;color:#c0392b;border:none;border-radius:6px;padding:5px 14px;font-size:12px;font-weight:600;cursor:pointer">Go to parties ↓</button>
+  </div>`
+  banner.style.display = 'block'
+}
+
+function scrollToParties() {
+  // Switch to day view and scroll to first party block
+  if (currentView !== 'day') switchView('day')
+  setTimeout(() => {
+    const partyBlock = document.querySelector('.party-booking-block')
+    if (partyBlock) partyBlock.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }, 300)
 }
 
 async function loadCurriculumData() {
@@ -1772,6 +1830,7 @@ async function saveAllSessions() {
 // ── DAY VIEW ──────────────────────────────────────────────────
 
 async function loadDayView() {
+  loadPartyFormBanner()
   document.getElementById('date-bar').textContent = formatDate(currentDate)
   const container = document.getElementById('sessions-container')
   container.innerHTML = '<div class="loading">Loading...</div>'
