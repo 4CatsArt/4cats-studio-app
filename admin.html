@@ -488,7 +488,10 @@ select:focus, input:focus { border-color: #888; }
   <div class="tab-content" id="tab-parties">
     <div class="toolbar">
       <div class="toolbar-group" style="gap:8px">
-        <input type="date" id="party-report-date" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none" onchange="loadPartyReport()">
+        <input type="date" id="party-report-from" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none" onchange="loadPartyReport()">
+        <span style="font-size:12px;color:#888">to</span>
+        <input type="date" id="party-report-to" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none" onchange="loadPartyReport()">
+        <button class="btn" onclick="partyReportSetWeek()" style="font-size:11px;padding:0 10px;height:32px">This week</button>
         <select id="party-report-studio" onchange="loadPartyReport()" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none;background:white">
           <option value="">All studios</option>
         </select>
@@ -3817,16 +3820,26 @@ async function applyMassDueDates() {
 
 // ── Party Form Report ────────────────────────────────────────
 
+function partyReportSetWeek() {
+  const today = new Date()
+  const day = today.getDay()
+  const monday = new Date(today); monday.setDate(today.getDate() - (day === 0 ? 6 : day - 1))
+  const sunday = new Date(monday); sunday.setDate(monday.getDate() + 6)
+  document.getElementById('party-report-from').value = monday.toISOString().slice(0,10)
+  document.getElementById('party-report-to').value = sunday.toISOString().slice(0,10)
+}
+
 async function loadPartyReport() {
   const container = document.getElementById('party-report-container')
   container.innerHTML = '<div class="loading">Loading...</div>'
 
-  // Set default date to today
-  const dateEl = document.getElementById('party-report-date')
-  if (!dateEl.value) dateEl.value = new Date().toISOString().slice(0, 10)
-  const date = dateEl.value
+  // Set default date range to this week
+  const fromEl = document.getElementById('party-report-from')
+  const toEl = document.getElementById('party-report-to')
   const today = new Date().toISOString().slice(0, 10)
-  const isPast = date < today
+  if (!fromEl.value || !toEl.value) partyReportSetWeek()
+  const dateFrom = fromEl.value
+  const dateTo = toEl.value
 
   // Populate studio filter
   const studioSel = document.getElementById('party-report-studio')
@@ -3841,7 +3854,8 @@ async function loadPartyReport() {
   // Load all party/splatter/adult/fieldtrip sessions for this date
   let sessionQuery = sb.from('sessions')
     .select('id, title, session_date, studio_id, spaces_left_cache')
-    .eq('session_date', date)
+    .gte('session_date', dateFrom)
+    .lte('session_date', dateTo)
     .eq('session_type', 'party')
     .order('title')
 
@@ -3849,24 +3863,37 @@ async function loadPartyReport() {
   const { data: sessions, error: sessErr } = await sessionQuery
   console.log('Party sessions:', sessions?.length, sessErr)
   if (!sessions?.length) {
-    container.innerHTML = `<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No parties found for ${date}. ${sessErr ? '(Error: ' + sessErr.message + ')' : ''}</div>`
+    container.innerHTML = `<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No parties found for ${dateFrom} – ${dateTo}. ${sessErr ? '(Error: ' + sessErr.message + ')' : ''}</div>`
     return
   }
 
-  // Load bookings for these sessions
+  // Load bookings + party_details via join on sessions
   const sessionIds = sessions.map(s => s.id)
-  const { data: bookings, error: bookErr } = await sb.from('bookings')
-    .select('id, session_id, customer_name, customer_email, shopify_order_name, quantity')
-    .in('session_id', sessionIds)
-    .gt('quantity', 0)
-  console.log('Bookings:', bookings?.length, bookErr)
+  // Chunk into batches of 50 to avoid URL length limits
+  const chunks = []
+  for (let i = 0; i < sessionIds.length; i += 50) chunks.push(sessionIds.slice(i, i + 50))
 
-  // Load party_details for these bookings
-  const bookingIds = (bookings || []).map(b => b.id)
+  let allBookings = []
+  for (const chunk of chunks) {
+    const { data } = await sb.from('bookings')
+      .select('id, session_id, customer_name, customer_email, shopify_order_name, quantity')
+      .in('session_id', chunk)
+      .gt('quantity', 0)
+    if (data) allBookings = allBookings.concat(data)
+  }
+  const bookings = allBookings
+  console.log('Bookings found:', bookings.length)
+
+  // Load party_details
+  const bookingIds = bookings.map(b => b.id)
   let partyDetails = []
   if (bookingIds.length) {
-    const { data: pd } = await sb.from('party_details').select('*').in('booking_id', bookingIds)
-    partyDetails = pd || []
+    const pdChunks = []
+    for (let i = 0; i < bookingIds.length; i += 50) pdChunks.push(bookingIds.slice(i, i + 50))
+    for (const chunk of pdChunks) {
+      const { data } = await sb.from('party_details').select('*').in('booking_id', chunk)
+      if (data) partyDetails = partyDetails.concat(data)
+    }
   }
   const pdMap = {}
   partyDetails.forEach(pd => { pdMap[pd.booking_id] = pd })
@@ -3883,8 +3910,9 @@ async function loadPartyReport() {
 
       let status, statusHtml, rowBg = ''
 
+      const rowIsPast = session.session_date < today
       if (!pd || !pd.actual_guests) {
-        if (isPast) {
+        if (rowIsPast) {
           status = 'not_filled'
           statusHtml = '<span style="background:#fdecea;color:#c0392b;font-size:11px;padding:3px 8px;border-radius:4px;font-weight:600">⚠ Not filled out</span>'
           rowBg = 'background:#fff8f8;'
@@ -3927,6 +3955,7 @@ async function loadPartyReport() {
 
   const tableRows = rows.map(r => `
     <tr style="border-bottom:0.5px solid #f5f5f0;${r.rowBg}" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background='${r.rowBg}'">
+      <td style="padding:10px 14px;font-size:12px;white-space:nowrap">${r.session.session_date}</td>
       <td style="padding:10px 14px;font-size:12px;white-space:nowrap">${r.studioName}</td>
       <td style="padding:10px 14px;font-size:12px">
         <strong>${r.booking.customer_name || '—'}</strong>
@@ -3959,6 +3988,7 @@ async function loadPartyReport() {
     <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden">
       <table style="width:100%;border-collapse:collapse;font-size:12px">
         <thead><tr style="background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
+          <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Date</th>
           <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Studio</th>
           <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Party / Host</th>
           <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Order #</th>
