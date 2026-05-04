@@ -3833,13 +3833,14 @@ async function loadPartyReport() {
   const container = document.getElementById('party-report-container')
   container.innerHTML = '<div class="loading">Loading...</div>'
 
-  // Set default date range to this week
   const fromEl = document.getElementById('party-report-from')
   const toEl = document.getElementById('party-report-to')
   const today = new Date().toISOString().slice(0, 10)
   if (!fromEl.value || !toEl.value) partyReportSetWeek()
   const dateFrom = fromEl.value
   const dateTo = toEl.value
+  const studioFilter = document.getElementById('party-report-studio').value
+  const statusFilter = document.getElementById('party-report-status').value
 
   // Populate studio filter
   const studioSel = document.getElementById('party-report-studio')
@@ -3848,101 +3849,75 @@ async function loadPartyReport() {
       const o = document.createElement('option'); o.value = k; o.textContent = v; studioSel.appendChild(o)
     })
   }
-  const studioFilter = studioSel.value
-  const statusFilter = document.getElementById('party-report-status').value
 
-  // Load all party/splatter/adult/fieldtrip sessions for this date
-  let sessionQuery = sb.from('sessions')
-    .select('id, title, session_date, studio_id, spaces_left_cache')
-    .gte('session_date', dateFrom)
-    .lte('session_date', dateTo)
-    .eq('session_type', 'party')
-    .order('title')
+  // Start from bookings with event_date in range (much faster than sessions)
+  let bookingQuery = sb.from('bookings')
+    .select('id, session_id, studio_id, customer_name, customer_email, shopify_order_name, qty, event_date, event_type')
+    .gte('event_date', dateFrom)
+    .lte('event_date', dateTo)
+    .eq('event_type', 'party')
+    .is('returned_at', null)
+    .gt('qty', 0)
 
-  if (studioFilter) sessionQuery = sessionQuery.eq('studio_id', studioFilter)
-  const { data: sessions, error: sessErr } = await sessionQuery
-  console.log('Party sessions:', sessions?.length, sessErr)
-  if (!sessions?.length) {
-    container.innerHTML = `<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No parties found for ${dateFrom} – ${dateTo}. ${sessErr ? '(Error: ' + sessErr.message + ')' : ''}</div>`
+  if (studioFilter) bookingQuery = bookingQuery.eq('studio_id', studioFilter)
+
+  const { data: bookings, error: bookErr } = await bookingQuery
+  console.log('Party bookings:', bookings?.length, bookErr)
+
+  if (!bookings?.length) {
+    container.innerHTML = `<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No parties found for ${dateFrom} – ${dateTo}. ${bookErr ? '(' + bookErr.message + ')' : ''}</div>`
     return
   }
 
-  // Load bookings + party_details via join on sessions
-  const sessionIds = sessions.map(s => s.id)
-  // Chunk into batches of 50 to avoid URL length limits
-  const chunks = []
-  for (let i = 0; i < sessionIds.length; i += 50) chunks.push(sessionIds.slice(i, i + 50))
-
-  let allBookings = []
-  for (const chunk of chunks) {
-    const { data } = await sb.from('bookings')
-      .select('id, session_id, customer_name, customer_email, shopify_order_name, qty')
-      .in('session_id', chunk)
-      .gt('qty', 0)
-      .is('returned_at', null)
-    if (data) allBookings = allBookings.concat(data)
-  }
-  const bookings = allBookings
-  console.log('Bookings found:', bookings.length)
-
-  // Load party_details
+  // Load party_details for these bookings
   const bookingIds = bookings.map(b => b.id)
   let partyDetails = []
-  if (bookingIds.length) {
-    const pdChunks = []
-    for (let i = 0; i < bookingIds.length; i += 50) pdChunks.push(bookingIds.slice(i, i + 50))
-    for (const chunk of pdChunks) {
-      const { data } = await sb.from('party_details').select('*').in('booking_id', chunk)
-      if (data) partyDetails = partyDetails.concat(data)
-    }
+  for (let i = 0; i < bookingIds.length; i += 50) {
+    const chunk = bookingIds.slice(i, i + 50)
+    const { data } = await sb.from('party_details').select('*').in('booking_id', chunk)
+    if (data) partyDetails = partyDetails.concat(data)
   }
   const pdMap = {}
   partyDetails.forEach(pd => { pdMap[pd.booking_id] = pd })
 
   // Build report rows
   const rows = []
-  for (const session of sessions) {
-    const sessionBookings = (bookings || []).filter(b => b.session_id === session.id)
-    if (!sessionBookings.length) continue
+  for (const booking of bookings) {
+    const pd = pdMap[booking.id]
+    const studioName = (STUDIO_VARIANT_MAP[booking.studio_id] || booking.studio_id || '').split(' - ').pop()
+    const rowIsPast = booking.event_date < today
 
-    for (const booking of sessionBookings) {
-      const pd = pdMap[booking.id]
-      const studioName = (STUDIO_VARIANT_MAP[session.studio_id] || session.studio_id || '').split(' - ').pop()
+    let status, statusHtml, rowBg = ''
 
-      let status, statusHtml, rowBg = ''
-
-      const rowIsPast = session.session_date < today
-      if (!pd || !pd.actual_guests) {
-        if (rowIsPast) {
-          status = 'not_filled'
-          statusHtml = '<span style="background:#fdecea;color:#c0392b;font-size:11px;padding:3px 8px;border-radius:4px;font-weight:600">⚠ Not filled out</span>'
-          rowBg = 'background:#fff8f8;'
-        } else {
-          status = 'not_filled'
-          statusHtml = '<span style="background:#f5f5f0;color:#aaa;font-size:11px;padding:3px 8px;border-radius:4px">Pending</span>'
-        }
-      } else if (pd.outcome === 'All good' || (!pd.outcome_amount && pd.actual_guests)) {
-        status = 'all_good'
-        statusHtml = '<span style="background:#e8f5e9;color:#2e7d32;font-size:11px;padding:3px 8px;border-radius:4px">✅ No balance</span>'
-      } else if (pd.outcome === 'Charge extra') {
-        const posOrder = pd.outcome_notes?.match(/POS order[:\s]+([^\s,)]+)/i)?.[1] || ''
-        status = 'charge'
-        statusHtml = `<span style="background:#e8f0fe;color:#1565c0;font-size:11px;padding:3px 8px;border-radius:4px">💳 Balance paid</span>`
-          + (posOrder ? `<div style="font-size:11px;color:#555;margin-top:3px">Order: <strong>${posOrder}</strong></div>` : '<div style="font-size:11px;color:#c0392b;margin-top:3px">⚠ No order # entered</div>')
-      } else if (pd.outcome === 'Issue credit') {
-        const last4 = pd.outcome_notes?.match(/ends?\s*\.{0,3}([A-Za-z0-9]{4})/i)?.[1] || ''
-        status = 'credit'
-        statusHtml = `<span style="background:#f3e5f5;color:#6a1b9a;font-size:11px;padding:3px 8px;border-radius:4px">🎁 Gift card sent</span>`
-          + (last4 ? `<div style="font-size:11px;color:#555;margin-top:3px">Card ends: <strong>...${last4}</strong></div>` : '')
+    if (!pd || !pd.actual_guests) {
+      if (rowIsPast) {
+        status = 'not_filled'
+        statusHtml = '<span style="background:#fdecea;color:#c0392b;font-size:11px;padding:3px 8px;border-radius:4px;font-weight:600">⚠ Not filled out</span>'
+        rowBg = 'background:#fff8f8;'
       } else {
         status = 'not_filled'
         statusHtml = '<span style="background:#f5f5f0;color:#aaa;font-size:11px;padding:3px 8px;border-radius:4px">Pending</span>'
       }
-
-      if (statusFilter && status !== statusFilter) continue
-
-      rows.push({ session, booking, pd, status, statusHtml, studioName, rowBg })
+    } else if (pd.outcome === 'All good' || (!pd.outcome_amount && pd.actual_guests)) {
+      status = 'all_good'
+      statusHtml = '<span style="background:#e8f5e9;color:#2e7d32;font-size:11px;padding:3px 8px;border-radius:4px">✅ No balance</span>'
+    } else if (pd.outcome === 'Charge extra') {
+      const posOrder = pd.outcome_notes?.match(/POS order[:\s]+([^\s,)]+)/i)?.[1] || ''
+      status = 'charge'
+      statusHtml = `<span style="background:#e8f0fe;color:#1565c0;font-size:11px;padding:3px 8px;border-radius:4px">💳 Balance paid</span>`
+        + (posOrder ? `<div style="font-size:11px;color:#555;margin-top:3px">Order: <strong>${posOrder}</strong></div>` : '<div style="font-size:11px;color:#c0392b;margin-top:3px">⚠ No order # entered</div>')
+    } else if (pd.outcome === 'Issue credit') {
+      const last4 = pd.outcome_notes?.match(/ends?\s*\.{0,3}([A-Za-z0-9]{4})/i)?.[1] || ''
+      status = 'credit'
+      statusHtml = `<span style="background:#f3e5f5;color:#6a1b9a;font-size:11px;padding:3px 8px;border-radius:4px">🎁 Gift card sent</span>`
+        + (last4 ? `<div style="font-size:11px;color:#555;margin-top:3px">Card ends: <strong>...${last4}</strong></div>` : '')
+    } else {
+      status = 'not_filled'
+      statusHtml = '<span style="background:#f5f5f0;color:#aaa;font-size:11px;padding:3px 8px;border-radius:4px">Pending</span>'
     }
+
+    if (statusFilter && status !== statusFilter) continue
+    rows.push({ booking, pd, status, statusHtml, studioName, rowBg })
   }
 
   if (!rows.length) {
@@ -3950,19 +3925,20 @@ async function loadPartyReport() {
     return
   }
 
-  // Summary counts
   const counts = { all_good: 0, charge: 0, credit: 0, not_filled: 0 }
   rows.forEach(r => counts[r.status]++)
 
+  // Sort by date then studio
+  rows.sort((a, b) => a.booking.event_date.localeCompare(b.booking.event_date) || a.studioName.localeCompare(b.studioName))
+
   const tableRows = rows.map(r => `
     <tr style="border-bottom:0.5px solid #f5f5f0;${r.rowBg}" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background='${r.rowBg}'">
-      <td style="padding:10px 14px;font-size:12px;white-space:nowrap">${r.session.session_date}</td>
+      <td style="padding:10px 14px;font-size:12px;white-space:nowrap">${r.booking.event_date}</td>
       <td style="padding:10px 14px;font-size:12px;white-space:nowrap">${r.studioName}</td>
       <td style="padding:10px 14px;font-size:12px">
         <strong>${r.booking.customer_name || '—'}</strong>
-        <div style="font-size:11px;color:#888">${r.session.title?.replace(/^\d+.*?\|/, '').trim() || ''}</div>
+        <div style="font-size:11px;color:#888">${r.booking.shopify_order_name || ''}</div>
       </td>
-      <td style="padding:10px 14px;font-size:12px;color:#888">${r.booking.shopify_order_name || '—'}</td>
       <td style="padding:10px 14px">${r.statusHtml}</td>
       <td style="padding:10px 14px;font-size:11px;color:#888;max-width:200px">${r.pd?.notes || ''}</td>
     </tr>`).join('')
@@ -3981,9 +3957,9 @@ async function loadPartyReport() {
       <div style="background:white;border:0.5px solid #e1bee7;border-radius:8px;padding:10px 18px;font-size:13px">
         <span style="color:#6a1b9a;font-size:11px;display:block">🎁 Gift card sent</span><strong style="color:#6a1b9a">${counts.credit}</strong>
       </div>
-      <div style="background:white;border:0.5px solid ${counts.not_filled && isPast ? '#fdecea' : '#e0e0d8'};border-radius:8px;padding:10px 18px;font-size:13px">
-        <span style="color:${counts.not_filled && isPast ? '#c0392b' : '#888'};font-size:11px;display:block">⚠ Not filled out</span>
-        <strong style="color:${counts.not_filled && isPast ? '#c0392b' : '#555'}">${counts.not_filled}</strong>
+      <div style="background:white;border:0.5px solid ${counts.not_filled ? '#fdecea' : '#e0e0d8'};border-radius:8px;padding:10px 18px;font-size:13px">
+        <span style="color:${counts.not_filled ? '#c0392b' : '#888'};font-size:11px;display:block">⚠ Not filled out</span>
+        <strong style="color:${counts.not_filled ? '#c0392b' : '#555'}">${counts.not_filled}</strong>
       </div>
     </div>
     <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden">
@@ -3992,7 +3968,6 @@ async function loadPartyReport() {
           <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Date</th>
           <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Studio</th>
           <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Party / Host</th>
-          <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Order #</th>
           <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Status</th>
           <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Notes</th>
         </tr></thead>
@@ -4000,587 +3975,3 @@ async function loadPartyReport() {
       </table>
     </div>`
 }
-
-</script>
-
-<!-- EDIT TITLE MODAL -->
-<div id="edit-title-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeEditTitleModal()">
-  <div class="modal-box">
-    <div class="modal-header">
-      <div><div class="modal-title">Edit Session Title</div><div class="modal-sub" id="etm-sub"></div></div>
-      <button class="modal-close" onclick="closeEditTitleModal()">×</button>
-    </div>
-    <div class="modal-field"><label>Current title</label><div style="padding:8px 10px;background:#f5f5f0;border-radius:7px;font-size:13px;color:#666" id="etm-current-title"></div></div>
-    <div class="modal-field"><label>New title</label><input type="text" id="etm-new-title" oninput="updateEtmPreview()"></div>
-    <div class="modal-field"><label>Session type</label><select id="etm-type"><option value="workshop">Workshop</option><option value="party">Party</option><option value="glazing">Glazing</option><option value="class">Class</option><option value="camp">Camp</option></select></div>
-    <div class="modal-field"><label>Shopify title preview</label><div class="shopify-preview" id="etm-shopify-preview">—</div><div class="modal-hint">The sessions table title is updated; Shopify must be updated separately if needed.</div></div>
-    <div class="modal-field">
-      <label>Apply to</label>
-      <div class="modal-scope-row">
-        <button class="scope-btn active" id="etm-scope-all" onclick="setEtmScope('all')">All studios on this date &amp; time</button>
-        <button class="scope-btn" id="etm-scope-one" onclick="setEtmScope('one')">One studio only</button>
-      </div>
-      <div id="etm-studio-selector" style="display:none"><select id="etm-studio" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none"></select></div>
-    </div>
-    <div id="etm-delete-line" style="display:none;align-items:center;justify-content:space-between;margin-top:1rem;padding-top:1rem;border-top:0.5px solid #f0f0e8;gap:8px">
-      <div style="display:flex;gap:8px">
-        <button id="etm-hide-btn" class="btn" onclick="toggleEtmHide()" style="font-size:12px">Hide</button>
-        <button id="etm-delete-btn" class="btn" onclick="deleteEtmSession()" style="background:#fff0f0;color:#c0392b;border-color:#f5c6cb;font-size:12px">Delete</button>
-      </div>
-      <div style="display:flex;gap:8px">
-        <button class="btn" onclick="closeEditTitleModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="saveEditTitle()" id="etm-save-btn">Save Changes</button>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- ADD SESSION MODAL -->
-<div id="add-session-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeAddSessionModal()">
-  <div class="modal-box wide">
-    <div class="modal-header"><div><div class="modal-title">Add New Sessions</div><div class="modal-sub">Create sessions across one or more studios</div></div><button class="modal-close" onclick="closeAddSessionModal()">×</button></div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-      <div class="modal-field"><label>Date</label><input type="date" id="asm-date" oninput="updateAsmPreview()"></div>
-      <div class="modal-field"><label>Time</label><input type="time" id="asm-time" value="14:00" oninput="updateAsmPreview()"></div>
-    </div>
-    <div class="modal-field"><label>Session title</label><input type="text" id="asm-title" placeholder="e.g. Hedgehog Mug" oninput="updateAsmPreview()"></div>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
-      <div class="modal-field"><label>Session type</label><select id="asm-type"><option value="workshop">Workshop</option><option value="party">Party</option><option value="glazing">Glazing</option><option value="class">Class</option><option value="camp">Camp</option></select></div>
-      <div class="modal-field"><label>Capacity (0 = unlimited)</label><input type="number" id="asm-capacity" value="0" min="0" style="width:100%"></div>
-      <div class="modal-field"><label>Show to staff?</label><select id="asm-show"><option value="true">Yes — show</option><option value="false">No — hide</option></select></div>
-    </div>
-    <div class="modal-field"><label>Shopify title preview</label><div class="shopify-preview" id="asm-shopify-preview">—</div></div>
-    <div class="modal-field">
-      <label>Studios <span class="studio-select-all" onclick="asmSelectAll(true)" style="margin-left:8px">Select all</span><span class="studio-select-all" onclick="asmSelectAll(false)" style="margin-left:6px">Deselect all</span></label>
-      <div class="studio-checkbox-grid" id="asm-studio-grid"></div>
-    </div>
-    <div id="asm-status" style="font-size:12px;color:#888;min-height:18px;margin-top:4px"></div>
-    <div class="modal-actions"><button class="btn" onclick="closeAddSessionModal()">Cancel</button><button class="btn btn-primary" onclick="saveAddSessions()" id="asm-save-btn">Add Sessions</button></div>
-  </div>
-</div>
-
-<!-- ADD CURRICULUM MODAL -->
-<div id="add-curriculum-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeAddCurriculumModal()">
-  <div class="modal-box">
-    <div class="modal-header"><div><div class="modal-title" id="acm-modal-title">Add Curriculum Week</div></div><button class="modal-close" onclick="closeAddCurriculumModal()">×</button></div>
-    <input type="hidden" id="acm-is-fixed" value="0">
-    <div id="acm-fixed-fields" style="display:none"><div class="modal-field"><label>Session type key (lowercase)</label><input type="text" id="acm-session-type" placeholder="e.g. wheel workshop"><div class="modal-hint">Must match the session title in the sessions table (case-insensitive).</div></div></div>
-    <div id="acm-week-fields"><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="modal-field"><label>Week start</label><input type="date" id="acm-week-start"></div><div class="modal-field"><label>Week end</label><input type="date" id="acm-week-end"></div></div></div>
-    <div class="modal-field"><label>Theme</label><input type="text" id="acm-theme" placeholder="e.g. Gardening Week"></div>
-    <div class="modal-field"><label>Website URL</label><input type="text" id="acm-website-url" placeholder="https://..."></div>
-    <div class="modal-field"><label>Curriculum URL</label><input type="text" id="acm-curriculum-url" placeholder="https://..."></div>
-    <div class="modal-actions"><button class="btn" onclick="closeAddCurriculumModal()">Cancel</button><button class="btn btn-primary" onclick="saveAddCurriculum()" id="acm-save-btn">Save</button></div>
-  </div>
-</div>
-<!-- CLOSE STUDIO DAY MODAL -->
-<div id="close-studio-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeCloseStudioModal()">
-  <div class="modal-box">
-    <div class="modal-header">
-      <div><div class="modal-title">🔒 Close Studio Day</div><div class="modal-sub">Sets all Shopify inventory to 0 or negative and hides sessions from calendar</div></div>
-      <button class="modal-close" onclick="closeCloseStudioModal()">×</button>
-    </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-      <div class="modal-field">
-        <label>Studio</label>
-        <select id="csd-studio" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none" onchange="previewCloseStudio()"></select>
-      </div>
-      <div class="modal-field">
-        <label>Date</label>
-        <input type="date" id="csd-date" oninput="previewCloseStudio()" style="width:100%">
-      </div>
-    </div>
-    <div id="csd-preview"></div>
-    <div id="csd-status" style="font-size:12px;min-height:18px;margin-top:8px"></div>
-    <div class="modal-actions">
-      <button class="btn" onclick="closeCloseStudioModal()">Cancel</button>
-      <button class="btn" onclick="executeCloseStudio()" id="csd-save-btn" style="background:#fff0f0;color:#c0392b;border-color:#f5c6cb">🔒 Close Studio Day</button>
-    </div>
-  </div>
-</div>
-
-<!-- ADD SESSION FROM ERROR MODAL -->
-<div id="add-session-error-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeAddSessionFromError()">
-  <div class="modal-box">
-    <div class="modal-header">
-      <div><div class="modal-title">Create Session &amp; Link Booking</div><div class="modal-sub">Creates the missing session and links the booking in one step</div></div>
-      <button class="modal-close" onclick="closeAddSessionFromError()">×</button>
-    </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-      <div class="modal-field"><label>Studio</label><select id="ase-studio" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none" onchange="updateAsePreview()"></select></div>
-      <div class="modal-field"><label>Session type</label><select id="ase-type" onchange="updateAsePreview()"><option value="workshop">Workshop</option><option value="party">Party</option><option value="glazing">Glazing</option><option value="class">Class</option><option value="camp">Camp</option></select></div>
-    </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-      <div class="modal-field"><label>Date</label><input type="date" id="ase-date" oninput="updateAsePreview()"></div>
-      <div class="modal-field"><label>Time</label><input type="time" id="ase-time" oninput="updateAsePreview()"></div>
-    </div>
-    <div class="modal-field"><label>Session title</label><input type="text" id="ase-title" oninput="updateAsePreview()"></div>
-    <div class="modal-field"><label>Capacity (0 = unlimited)</label><input type="number" id="ase-capacity" value="0" min="0" style="width:120px"></div>
-    <div class="modal-field"><label>Shopify title preview</label><div class="shopify-preview" id="ase-shopify-preview">—</div></div>
-    <div id="ase-status" style="font-size:12px;min-height:18px;margin-bottom:8px"></div>
-    <div class="modal-actions">
-      <button class="btn" onclick="closeAddSessionFromError()">Cancel</button>
-      <button class="btn btn-primary" onclick="saveAddSessionFromError()" id="ase-save-btn">Create Session &amp; Link Booking</button>
-    </div>
-  </div>
-</div>
-
-<!-- Announcement Modal -->
-<div id="announcement-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;display:none;align-items:center;justify-content:center;padding:1rem">
-  <div style="background:white;border-radius:12px;width:100%;max-width:520px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
-      <h3 style="font-size:15px;font-weight:600;margin:0" id="ann-modal-title">New Announcement</h3>
-      <button onclick="closeAnnouncementModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">×</button>
-    </div>
-    <div style="display:flex;flex-direction:column;gap:12px">
-      <div>
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Title *</label>
-        <input id="ann-title" type="text" placeholder="e.g. Studio deep clean reminder" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-      </div>
-      <div>
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Message (optional)</label>
-        <textarea id="ann-body" rows="3" placeholder="Additional details..." style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;resize:vertical;box-sizing:border-box"></textarea>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-        <div>
-          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Priority</label>
-          <select id="ann-priority" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
-            <option value="normal">📢 Normal</option>
-            <option value="urgent">🚨 Urgent</option>
-          </select>
-        </div>
-        <div>
-          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Target studios</label>
-          <div id="ann-studio-picker"></div>
-        </div>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-        <div>
-          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Show from *</label>
-          <input id="ann-from" type="date" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-        </div>
-        <div>
-          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Show until (leave blank = indefinite)</label>
-          <input id="ann-until" type="date" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-        </div>
-      </div>
-    </div>
-    <div style="display:flex;gap:8px;margin-top:1.25rem;justify-content:flex-end">
-      <button onclick="closeAnnouncementModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
-      <button onclick="saveAnnouncement()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer" id="ann-save-btn">Save</button>
-    </div>
-  </div>
-</div>
-
-
-<!-- Task Modal -->
-<div id="task-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
-  <div style="background:white;border-radius:12px;width:100%;max-width:480px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
-      <h3 style="font-size:15px;font-weight:600;margin:0">New Task from Home Office</h3>
-      <button onclick="closeTaskModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">×</button>
-    </div>
-    <div style="display:flex;flex-direction:column;gap:12px">
-      <div>
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Task *</label>
-        <select id="task-modal-template" onchange="applyAdminTaskTemplate()"
-          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white;color:#888;margin-bottom:8px">
-          <option value="">📋 Pick from template library (optional)...</option>
-        </select>
-        <input id="task-modal-title" type="text" placeholder="e.g. Clean the front desk"
-          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-      </div>
-      <div>
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Notes (optional)</label>
-        <textarea id="task-modal-notes" rows="2" placeholder="Additional details..."
-          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;resize:vertical;box-sizing:border-box"></textarea>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
-        <div>
-          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Due date *</label>
-          <input id="task-modal-date" type="date"
-            style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-        </div>
-        <div>
-          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Repeat</label>
-          <select id="task-modal-repeat" onchange="toggleTaskModalRepeatDays()"
-            style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
-            <option value="none">No repeat</option>
-            <option value="daily">Daily</option>
-            <option value="weekly">Weekly</option>
-          </select>
-        </div>
-        <div>
-          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Target studios</label>
-          <div id="task-studio-picker"></div>
-        </div>
-      </div>
-      <div id="task-modal-days-row" style="display:none">
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">Repeat on</label>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
-          ${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d =>
-            `<label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;padding:4px 8px;border:0.5px solid #d0d0c8;border-radius:6px">
-              <input type="checkbox" value="${d.toLowerCase()}" class="task-modal-day-cb"> ${d}
-            </label>`).join('')}
-        </div>
-      </div>
-    </div>
-    <div style="display:flex;gap:8px;margin-top:1.25rem;justify-content:flex-end">
-      <button onclick="closeTaskModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
-      <button onclick="saveTaskFromAdmin()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer" id="task-modal-save-btn">Send to Studio</button>
-    </div>
-  </div>
-</div>
-
-
-<!-- Staff Modal -->
-<div id="staff-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
-  <div style="background:white;border-radius:12px;width:100%;max-width:560px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2);max-height:90vh;overflow-y:auto">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
-      <h3 style="font-size:15px;font-weight:600;margin:0" id="staff-modal-title">Add Staff Member</h3>
-      <button onclick="closeStaffModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">×</button>
-    </div>
-    <div style="display:flex;flex-direction:column;gap:12px">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-        <div>
-          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Full name *</label>
-          <input id="staff-name" type="text" placeholder="e.g. Sarah Jones"
-            style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-        </div>
-        <div>
-          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Email *</label>
-          <input id="staff-email" type="email" placeholder="sarah@email.com"
-            style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-        </div>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-        <div>
-          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">4CATS name (nickname)</label>
-          <input id="staff-nickname" type="text" placeholder="e.g. Rainbow Ruby"
-            style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-        </div>
-        <div>
-          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Province</label>
-          <select id="staff-province" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
-            <option value="">— select —</option>
-            <option value="BC">BC</option>
-            <option value="AB">AB</option>
-            <option value="ON">ON</option>
-          </select>
-        </div>
-      </div>
-      <div id="staff-password-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-        <div>
-          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Password *</label>
-          <input id="staff-password" type="password" placeholder="Set initial password"
-            style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-        </div>
-        <div>
-          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Role</label>
-          <select id="staff-role" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
-            <option value="staff">Staff</option>
-            <option value="manager">Manager</option>
-            <option value="admin">Admin</option>
-          </select>
-        </div>
-      </div>
-      <div>
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Employment type</label>
-        <select id="staff-employment" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
-          <option value="regular">Regular</option>
-          <option value="camp">Camp</option>
-        </select>
-      </div>
-      <div>
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Studios</label>
-        <div style="border:0.5px solid #d0d0c8;border-radius:6px;overflow:hidden">
-          <div style="padding:6px 10px;background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
-            <label style="font-size:12px;display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:500">
-              <input type="checkbox" id="staff-studio-all" onchange="toggleAllStaffStudios(this.checked)" checked> All studios / floater
-            </label>
-          </div>
-          <div id="staff-studio-list" style="max-height:180px;overflow-y:auto;padding:6px 0;display:none;columns:2"></div>
-        </div>
-      </div>
-      <!-- Training units assignment -->
-      <div id="staff-training-units-row">
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">Training units assigned</label>
-        <div id="staff-unit-list" style="display:flex;flex-direction:column;gap:4px;max-height:160px;overflow-y:auto;border:0.5px solid #e0e0d8;border-radius:6px;padding:6px 10px">
-          <div style="font-size:12px;color:#bbb">Loading units...</div>
-        </div>
-      </div>
-
-      <!-- Edit-only: reset password -->
-      <div id="staff-reset-pw-row" style="display:none;padding:10px;background:#fafaf8;border-radius:6px;border:0.5px solid #e0e0d8">
-        <div style="font-size:12px;color:#888;margin-bottom:6px">Reset password</div>
-        <div style="display:flex;gap:8px">
-          <input id="staff-new-password" type="password" placeholder="New password"
-            style="flex:1;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none">
-          <button onclick="resetStaffPassword()" style="padding:8px 14px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">Set</button>
-        </div>
-      </div>
-    </div>
-    <div style="display:flex;gap:8px;margin-top:1.25rem;justify-content:space-between;align-items:center">
-      <div id="staff-deactivate-btn-wrap" style="display:none">
-        <button id="staff-deactivate-btn" onclick="toggleStaffActive()" style="padding:8px 14px;border:0.5px solid #f5c6cb;border-radius:6px;background:white;font-size:13px;cursor:pointer;color:#c0392b">Deactivate</button>
-      </div>
-      <div style="display:flex;gap:8px;margin-left:auto">
-        <button onclick="closeStaffModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
-        <button onclick="saveStaff()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer" id="staff-save-btn">Save</button>
-      </div>
-    </div>
-  </div>
-</div>
-
-
-<!-- Template Modal -->
-<div id="template-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
-  <div style="background:white;border-radius:12px;width:100%;max-width:520px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2);max-height:90vh;overflow-y:auto">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
-      <h3 style="font-size:15px;font-weight:600;margin:0" id="template-modal-title">New Task Template</h3>
-      <button onclick="closeTemplateModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">×</button>
-    </div>
-    <div style="display:flex;flex-direction:column;gap:12px">
-      <div>
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Task title *</label>
-        <input id="tmpl-title" type="text" placeholder="e.g. Fill the brochure rack"
-          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-      </div>
-      <div>
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Notes (optional)</label>
-        <textarea id="tmpl-notes" rows="2" placeholder="Instructions or details..."
-          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;resize:vertical;box-sizing:border-box"></textarea>
-      </div>
-      <div>
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Reference link (optional)</label>
-        <input id="tmpl-url" type="url" placeholder="https://docs.google.com/..."
-          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-        <div>
-          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Target studio</label>
-          <select id="tmpl-studio" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
-            <option value="">All studios</option>
-          </select>
-        </div>
-        <div>
-          <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Repeat</label>
-          <select id="tmpl-repeat" onchange="toggleRepeatDays()" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
-            <option value="none">No repeat</option>
-            <option value="daily">Daily</option>
-            <option value="weekly">Weekly (pick days)</option>
-          </select>
-        </div>
-      </div>
-      <!-- Weekly day picker -->
-      <div id="tmpl-days-row" style="display:none">
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">Repeat on</label>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
-          ${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d =>
-            `<label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;padding:4px 8px;border:0.5px solid #d0d0c8;border-radius:6px">
-              <input type="checkbox" value="${d.toLowerCase()}" class="tmpl-day-cb"> ${d}
-            </label>`).join('')}
-        </div>
-      </div>
-    </div>
-    <div style="display:flex;gap:8px;margin-top:1.25rem;justify-content:space-between;align-items:center">
-      <div id="tmpl-delete-wrap" style="display:none">
-        <button onclick="deleteTemplate()" style="padding:8px 14px;border:0.5px solid #f5c6cb;border-radius:6px;background:white;font-size:13px;cursor:pointer;color:#c0392b">Delete</button>
-      </div>
-      <div style="display:flex;gap:8px;margin-left:auto">
-        <button onclick="closeTemplateModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
-        <button onclick="saveTemplate()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer" id="tmpl-save-btn">Save</button>
-      </div>
-    </div>
-  </div>
-</div>
-
-
-<!-- Task Edit Popup -->
-<div id="task-edit-popup" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center;padding:1rem">
-  <div style="background:white;border-radius:12px;width:100%;max-width:400px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
-      <strong id="task-edit-title" style="font-size:14px"></strong>
-      <button onclick="closeTaskEditPopup()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">×</button>
-    </div>
-    <div id="task-edit-notes" style="font-size:12px;color:#666;margin-bottom:0.75rem;display:none"></div>
-    <div id="task-edit-url-row" style="margin-bottom:0.75rem;display:none">
-      <a id="task-edit-link" href="#" target="_blank" style="font-size:12px;color:#5b4fcf">📎 Reference doc</a>
-    </div>
-    <div style="display:flex;flex-direction:column;gap:10px">
-      <div>
-        <label style="font-size:11px;color:#888;display:block;margin-bottom:4px">Status</label>
-        <select id="task-edit-status" style="width:100%;padding:7px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
-          <option value="pending">⬜ Pending</option>
-          <option value="complete">✅ Complete</option>
-        </select>
-      </div>
-      <div>
-        <label style="font-size:11px;color:#888;display:block;margin-bottom:4px">Assigned to</label>
-        <input id="task-edit-assignee" type="text" placeholder="Staff name..."
-          style="width:100%;padding:7px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-      </div>
-      <div>
-        <label style="font-size:11px;color:#888;display:block;margin-bottom:4px">Due date</label>
-        <input id="task-edit-date" type="date"
-          style="width:100%;padding:7px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-      </div>
-      <div>
-        <label style="font-size:11px;color:#888;display:block;margin-bottom:4px">Studio</label>
-        <div id="task-edit-studio-picker"></div>
-      </div>
-    </div>
-    <div style="display:flex;gap:8px;margin-top:1.25rem;justify-content:space-between">
-      <button onclick="deleteTaskFromEdit()" style="padding:7px 14px;border:0.5px solid #f5c6cb;border-radius:6px;background:white;font-size:12px;cursor:pointer;color:#c0392b">Delete</button>
-      <div style="display:flex;gap:8px">
-        <button onclick="closeTaskEditPopup()" style="padding:7px 14px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
-        <button onclick="saveTaskEdit()" style="padding:7px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">Save</button>
-      </div>
-    </div>
-  </div>
-</div>
-
-
-<!-- Training Unit Modal -->
-<div id="unit-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
-  <div style="background:white;border-radius:12px;width:100%;max-width:440px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
-      <h3 style="font-size:15px;font-weight:600;margin:0" id="unit-modal-title">New Training Unit</h3>
-      <button onclick="closeUnitModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">×</button>
-    </div>
-    <div style="display:flex;flex-direction:column;gap:12px">
-      <div>
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Unit name *</label>
-        <input id="unit-name" type="text" placeholder="e.g. Studio Safety"
-          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-      </div>
-      <div>
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Applies to</label>
-        <select id="unit-applies" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
-          <option value="all">All staff</option>
-          <option value="base">Base (regular + manager)</option>
-          <option value="manager">Managers only</option>
-          <option value="camp">Camp staff</option>
-        </select>
-      </div>
-      <div>
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Sort order</label>
-        <input id="unit-order" type="number" value="0" min="0"
-          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-      </div>
-    </div>
-    <div style="display:flex;gap:8px;margin-top:1.25rem;justify-content:space-between">
-      <div id="unit-delete-wrap" style="display:none">
-        <button onclick="deleteUnit()" style="padding:8px 14px;border:0.5px solid #f5c6cb;border-radius:6px;background:white;font-size:13px;cursor:pointer;color:#c0392b">Delete</button>
-      </div>
-      <div style="display:flex;gap:8px;margin-left:auto">
-        <button onclick="closeUnitModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
-        <button onclick="saveUnit()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer" id="unit-save-btn">Save</button>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- Training Item Modal -->
-<div id="item-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
-  <div style="background:white;border-radius:12px;width:100%;max-width:480px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
-      <h3 style="font-size:15px;font-weight:600;margin:0" id="item-modal-title">New Checklist Item</h3>
-      <button onclick="closeItemModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">×</button>
-    </div>
-    <div style="display:flex;flex-direction:column;gap:12px">
-      <div>
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Item title *</label>
-        <input id="item-title" type="text" placeholder="e.g. Can set up a pottery wheel"
-          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-      </div>
-      <div>
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Description (optional)</label>
-        <textarea id="item-desc" rows="2" placeholder="What does completing this item mean?"
-          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;resize:vertical;box-sizing:border-box"></textarea>
-      </div>
-      <div>
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Training doc / reference link (optional)</label>
-        <input id="item-url" type="url" placeholder="https://docs.google.com/..."
-          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-      </div>
-      <div>
-        <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Sort order</label>
-        <input id="item-order" type="number" value="0" min="0"
-          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box">
-      </div>
-    </div>
-    <div style="display:flex;gap:8px;margin-top:1.25rem;justify-content:space-between">
-      <div id="item-delete-wrap" style="display:none">
-        <button onclick="deleteItem()" style="padding:8px 14px;border:0.5px solid #f5c6cb;border-radius:6px;background:white;font-size:13px;cursor:pointer;color:#c0392b">Delete</button>
-      </div>
-      <div style="display:flex;gap:8px;margin-left:auto">
-        <button onclick="closeItemModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
-        <button onclick="saveItem()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer" id="item-save-btn">Save</button>
-      </div>
-    </div>
-  </div>
-</div>
-
-
-<!-- Due Date Popup -->
-<div id="due-date-popup" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center;padding:1rem">
-  <div style="background:white;border-radius:12px;width:100%;max-width:320px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
-      <strong style="font-size:14px">Set training due date</strong>
-      <button onclick="closeDueDatePopup()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">×</button>
-    </div>
-    <input id="due-date-input" type="date" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;box-sizing:border-box;margin-bottom:1rem">
-    <div style="font-size:11px;color:#aaa;margin-bottom:1rem">Leave blank to remove the due date.</div>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
-      <button onclick="closeDueDatePopup()" style="padding:7px 14px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
-      <button onclick="saveDueDateFromPopup()" style="padding:7px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">Save</button>
-    </div>
-  </div>
-</div>
-
-
-<!-- Mass Due Date Modal -->
-<div id="mass-due-date-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
-  <div style="background:white;border-radius:12px;width:100%;max-width:560px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2);max-height:90vh;overflow-y:auto">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
-      <h3 style="font-size:15px;font-weight:600;margin:0">Set Due Dates</h3>
-      <button onclick="closeMassDueDateModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">×</button>
-    </div>
-    <div style="font-size:12px;color:#888;margin-bottom:1rem">Sets due dates for all selected staff. Skips units already 100% complete.</div>
-
-    <!-- Staff target -->
-    <div style="margin-bottom:1rem">
-      <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">Apply to</label>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-        <button onclick="massSetTarget('all')" id="mass-target-all"
-          style="padding:5px 12px;font-size:12px;border-radius:6px;cursor:pointer;border:0.5px solid #1a1a1a;background:#1a1a1a;color:white">All staff</button>
-        <button onclick="massSetTarget('studio')" id="mass-target-studio"
-          style="padding:5px 12px;font-size:12px;border-radius:6px;cursor:pointer;border:0.5px solid #d0d0c8;background:white;color:#555">By studio</button>
-        <button onclick="massSetTarget('individual')" id="mass-target-individual"
-          style="padding:5px 12px;font-size:12px;border-radius:6px;cursor:pointer;border:0.5px solid #d0d0c8;background:white;color:#555">Individual</button>
-      </div>
-      <div id="mass-studio-picker-wrap" style="display:none">
-        <div id="mass-studio-picker"></div>
-      </div>
-      <div id="mass-individual-picker-wrap" style="display:none">
-        <select id="mass-individual-staff" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:white">
-          <option value="">Select staff member...</option>
-        </select>
-      </div>
-    </div>
-
-    <!-- Units + due dates -->
-    <div>
-      <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">Due dates per unit</label>
-      <div id="mass-unit-dates" style="display:flex;flex-direction:column;gap:6px"></div>
-    </div>
-
-    <div style="display:flex;gap:8px;margin-top:1.25rem;justify-content:flex-end">
-      <button onclick="closeMassDueDateModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
-      <button onclick="applyMassDueDates()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer" id="mass-due-save-btn">Apply</button>
-    </div>
-  </div>
-</div>
-
-</body>
-</html>
