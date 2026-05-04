@@ -214,8 +214,8 @@ select:focus, input:focus { border-color: #888; }
     <button class="tab-btn" onclick="switchTab('announcements')">Announcements</button>
     <button class="tab-btn" onclick="switchTab('training')">Training</button>
     <button class="tab-btn" onclick="switchTab('staff')">Staff</button>
+    <button class="tab-btn" onclick="switchTab('parties')">Parties</button>
     <button class="tab-btn" onclick="switchTab('users')">Users</button>
-    <button class="tab-btn" onclick="switchTab('guide')">📋 Guide</button>
     <div class="top-bar-right"><button class="signout-btn" onclick="signOut()">Sign out</button></div>
   </div>
   <div class="tab-content active" id="tab-schedule">
@@ -485,6 +485,24 @@ select:focus, input:focus { border-color: #888; }
     </div>
     <div id="staff-container"><div class="loading">Loading...</div></div>
   </div>
+  <div class="tab-content" id="tab-parties">
+    <div class="toolbar">
+      <div class="toolbar-group" style="gap:8px">
+        <input type="date" id="party-report-date" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none" onchange="loadPartyReport()">
+        <select id="party-report-studio" onchange="loadPartyReport()" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none;background:white">
+          <option value="">All studios</option>
+        </select>
+        <select id="party-report-status" onchange="loadPartyReport()" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none;background:white">
+          <option value="">All statuses</option>
+          <option value="all_good">✅ No balance</option>
+          <option value="charge">💳 Balance paid (POS)</option>
+          <option value="credit">🎁 Credit sent (gift card)</option>
+          <option value="not_filled">⚠️ Not filled out</option>
+        </select>
+      </div>
+    </div>
+    <div id="party-report-container"><div class="loading">Loading...</div></div>
+  </div>
   <div class="tab-content" id="tab-users">
     <div class="users-layout">
       <div class="invite-card">
@@ -697,7 +715,7 @@ async function initApp() {
 }
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','training','staff','users','guide'][i] === tab))
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','training','staff','parties','users'][i] === tab))
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'))
   document.getElementById(`tab-${tab}`).classList.add('active')
   if (tab === 'curriculum') loadCurriculum()
@@ -707,6 +725,7 @@ function switchTab(tab) {
   if (tab === 'announcements') loadAnnouncementsTab()
   if (tab === 'training') loadTrainingTab()
   if (tab === 'staff') loadStaffTab()
+  if (tab === 'parties') loadPartyReport()
 }
 
 async function loadQualityBadge() {
@@ -3795,6 +3814,160 @@ async function applyMassDueDates() {
   alert(`Done! Updated ${upserts.length} due date${upserts.length !== 1 ? 's' : ''}${skipped ? `, skipped ${skipped} already complete` : ''}.`)
 }
 
+
+// ── Party Form Report ────────────────────────────────────────
+
+async function loadPartyReport() {
+  const container = document.getElementById('party-report-container')
+  container.innerHTML = '<div class="loading">Loading...</div>'
+
+  // Set default date to today
+  const dateEl = document.getElementById('party-report-date')
+  if (!dateEl.value) dateEl.value = new Date().toISOString().slice(0, 10)
+  const date = dateEl.value
+  const today = new Date().toISOString().slice(0, 10)
+  const isPast = date < today
+
+  // Populate studio filter
+  const studioSel = document.getElementById('party-report-studio')
+  if (studioSel.options.length === 1) {
+    Object.entries(STUDIO_VARIANT_MAP).forEach(([k, v]) => {
+      const o = document.createElement('option'); o.value = k; o.textContent = v; studioSel.appendChild(o)
+    })
+  }
+  const studioFilter = studioSel.value
+  const statusFilter = document.getElementById('party-report-status').value
+
+  // Load all party/splatter/adult/fieldtrip sessions for this date
+  let sessionQuery = sb.from('sessions')
+    .select('id, title, event_date, studio_id, spaces_left_cache')
+    .eq('event_date', date)
+    .in('session_type', ['party', 'splatter_party', 'adult_get_together', 'field_trip'])
+    .order('title')
+
+  if (studioFilter) sessionQuery = sessionQuery.eq('studio_id', studioFilter)
+  const { data: sessions } = await sessionQuery
+  if (!sessions?.length) {
+    container.innerHTML = `<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No parties found for ${date}.</div>`
+    return
+  }
+
+  // Load bookings for these sessions
+  const sessionIds = sessions.map(s => s.id)
+  const { data: bookings } = await sb.from('bookings')
+    .select('id, session_id, customer_name, customer_email, shopify_order_name, quantity')
+    .in('session_id', sessionIds)
+    .gt('quantity', 0)
+
+  // Load party_details for these bookings
+  const bookingIds = (bookings || []).map(b => b.id)
+  let partyDetails = []
+  if (bookingIds.length) {
+    const { data: pd } = await sb.from('party_details').select('*').in('booking_id', bookingIds)
+    partyDetails = pd || []
+  }
+  const pdMap = {}
+  partyDetails.forEach(pd => { pdMap[pd.booking_id] = pd })
+
+  // Build report rows
+  const rows = []
+  for (const session of sessions) {
+    const sessionBookings = (bookings || []).filter(b => b.session_id === session.id)
+    if (!sessionBookings.length) continue
+
+    for (const booking of sessionBookings) {
+      const pd = pdMap[booking.id]
+      const studioName = (STUDIO_VARIANT_MAP[session.studio_id] || session.studio_id || '').split(' - ').pop()
+
+      let status, statusHtml, rowBg = ''
+
+      if (!pd || !pd.actual_guests) {
+        if (isPast) {
+          status = 'not_filled'
+          statusHtml = '<span style="background:#fdecea;color:#c0392b;font-size:11px;padding:3px 8px;border-radius:4px;font-weight:600">⚠ Not filled out</span>'
+          rowBg = 'background:#fff8f8;'
+        } else {
+          status = 'not_filled'
+          statusHtml = '<span style="background:#f5f5f0;color:#aaa;font-size:11px;padding:3px 8px;border-radius:4px">Pending</span>'
+        }
+      } else if (pd.outcome === 'All good' || (!pd.outcome_amount && pd.actual_guests)) {
+        status = 'all_good'
+        statusHtml = '<span style="background:#e8f5e9;color:#2e7d32;font-size:11px;padding:3px 8px;border-radius:4px">✅ No balance</span>'
+      } else if (pd.outcome === 'Charge extra') {
+        const posOrder = pd.outcome_notes?.match(/POS order[:\s]+([^\s,)]+)/i)?.[1] || ''
+        status = 'charge'
+        statusHtml = `<span style="background:#e8f0fe;color:#1565c0;font-size:11px;padding:3px 8px;border-radius:4px">💳 Balance paid</span>`
+          + (posOrder ? `<div style="font-size:11px;color:#555;margin-top:3px">Order: <strong>${posOrder}</strong></div>` : '<div style="font-size:11px;color:#c0392b;margin-top:3px">⚠ No order # entered</div>')
+      } else if (pd.outcome === 'Issue credit') {
+        const last4 = pd.outcome_notes?.match(/ends?\s*\.{0,3}([A-Za-z0-9]{4})/i)?.[1] || ''
+        status = 'credit'
+        statusHtml = `<span style="background:#f3e5f5;color:#6a1b9a;font-size:11px;padding:3px 8px;border-radius:4px">🎁 Gift card sent</span>`
+          + (last4 ? `<div style="font-size:11px;color:#555;margin-top:3px">Card ends: <strong>...${last4}</strong></div>` : '')
+      } else {
+        status = 'not_filled'
+        statusHtml = '<span style="background:#f5f5f0;color:#aaa;font-size:11px;padding:3px 8px;border-radius:4px">Pending</span>'
+      }
+
+      if (statusFilter && status !== statusFilter) continue
+
+      rows.push({ session, booking, pd, status, statusHtml, studioName, rowBg })
+    }
+  }
+
+  if (!rows.length) {
+    container.innerHTML = `<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No parties match the selected filters.</div>`
+    return
+  }
+
+  // Summary counts
+  const counts = { all_good: 0, charge: 0, credit: 0, not_filled: 0 }
+  rows.forEach(r => counts[r.status]++)
+
+  const tableRows = rows.map(r => `
+    <tr style="border-bottom:0.5px solid #f5f5f0;${r.rowBg}" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background='${r.rowBg}'">
+      <td style="padding:10px 14px;font-size:12px;white-space:nowrap">${r.studioName}</td>
+      <td style="padding:10px 14px;font-size:12px">
+        <strong>${r.booking.customer_name || '—'}</strong>
+        <div style="font-size:11px;color:#888">${r.session.title?.replace(/^\d+.*?\|/, '').trim() || ''}</div>
+      </td>
+      <td style="padding:10px 14px;font-size:12px;color:#888">${r.booking.shopify_order_name || '—'}</td>
+      <td style="padding:10px 14px">${r.statusHtml}</td>
+      <td style="padding:10px 14px;font-size:11px;color:#888;max-width:200px">${r.pd?.notes || ''}</td>
+    </tr>`).join('')
+
+  container.innerHTML = `
+    <div style="display:flex;gap:10px;margin-bottom:1rem;flex-wrap:wrap">
+      <div style="background:white;border:0.5px solid #e0e0d8;border-radius:8px;padding:10px 18px;font-size:13px">
+        <span style="color:#888;font-size:11px;display:block">Total parties</span><strong>${rows.length}</strong>
+      </div>
+      <div style="background:white;border:0.5px solid #c8e6c9;border-radius:8px;padding:10px 18px;font-size:13px">
+        <span style="color:#2e7d32;font-size:11px;display:block">✅ No balance</span><strong style="color:#2e7d32">${counts.all_good}</strong>
+      </div>
+      <div style="background:white;border:0.5px solid #bbdefb;border-radius:8px;padding:10px 18px;font-size:13px">
+        <span style="color:#1565c0;font-size:11px;display:block">💳 Balance paid</span><strong style="color:#1565c0">${counts.charge}</strong>
+      </div>
+      <div style="background:white;border:0.5px solid #e1bee7;border-radius:8px;padding:10px 18px;font-size:13px">
+        <span style="color:#6a1b9a;font-size:11px;display:block">🎁 Gift card sent</span><strong style="color:#6a1b9a">${counts.credit}</strong>
+      </div>
+      <div style="background:white;border:0.5px solid ${counts.not_filled && isPast ? '#fdecea' : '#e0e0d8'};border-radius:8px;padding:10px 18px;font-size:13px">
+        <span style="color:${counts.not_filled && isPast ? '#c0392b' : '#888'};font-size:11px;display:block">⚠ Not filled out</span>
+        <strong style="color:${counts.not_filled && isPast ? '#c0392b' : '#555'}">${counts.not_filled}</strong>
+      </div>
+    </div>
+    <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
+          <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Studio</th>
+          <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Party / Host</th>
+          <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Order #</th>
+          <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Status</th>
+          <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Notes</th>
+        </tr></thead>
+        <tbody>${tableRows}</tbody>
+      </table>
+    </div>`
+}
+
 </script>
 
 <!-- EDIT TITLE MODAL -->
@@ -4373,120 +4546,6 @@ async function applyMassDueDates() {
       <button onclick="closeMassDueDateModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
       <button onclick="applyMassDueDates()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer" id="mass-due-save-btn">Apply</button>
     </div>
-  </div>
-</div>
-
-<!-- Guide Tab -->
-<div class="tab-content" id="tab-guide" style="max-width:760px">
-  <div style="margin-bottom:1.5rem">
-    <div style="font-size:18px;font-weight:600;margin-bottom:4px">Shopify Product Title Guide</div>
-    <div style="font-size:12px;color:#888">Formatting rules for scheduling staff when creating session products in Shopify.</div>
-  </div>
-
-  <!-- Golden Rule -->
-  <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;padding:1.25rem;margin-bottom:1rem">
-    <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.4px;color:#888;margin-bottom:10px">The Format</div>
-    <div style="font-family:monospace;font-size:15px;background:#f5f5f0;border-radius:8px;padding:12px 16px;color:#1a1a1a;letter-spacing:0.3px">
-      time date | Session Title
-    </div>
-    <div style="font-size:12px;color:#888;margin-top:8px">All three parts are required, separated by a space-pipe-space <code style="background:#f0f0e8;padding:1px 5px;border-radius:4px"> | </code></div>
-  </div>
-
-  <!-- Time -->
-  <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;padding:1.25rem;margin-bottom:1rem">
-    <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.4px;color:#888;margin-bottom:10px">Part 1 — Time</div>
-    <ul style="font-size:13px;line-height:1.8;padding-left:1.25rem;margin-bottom:10px">
-      <li>12-hour format, no space before am/pm</li>
-      <li>Use a colon for minutes only when not on the hour</li>
-      <li>Times starting with 9 must have an <strong>asterisk prefix</strong> for correct sorting</li>
-    </ul>
-    <table style="width:100%;border-collapse:collapse;font-size:12px">
-      <thead>
-        <tr style="background:#fafaf8">
-          <th style="padding:7px 10px;text-align:left;border:0.5px solid #e0e0d8;color:#2e7d32">✅ Correct</th>
-          <th style="padding:7px 10px;text-align:left;border:0.5px solid #e0e0d8;color:#c0392b">❌ Wrong</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr><td style="padding:6px 10px;border:0.5px solid #f0f0e8;font-family:monospace">*9am</td><td style="padding:6px 10px;border:0.5px solid #f0f0e8;font-family:monospace;color:#999">9am</td></tr>
-        <tr style="background:#fafaf8"><td style="padding:6px 10px;border:0.5px solid #f0f0e8;font-family:monospace">*9:30am</td><td style="padding:6px 10px;border:0.5px solid #f0f0e8;font-family:monospace;color:#999">9:30am / 9:30 am</td></tr>
-        <tr><td style="padding:6px 10px;border:0.5px solid #f0f0e8;font-family:monospace">10am</td><td style="padding:6px 10px;border:0.5px solid #f0f0e8;font-family:monospace;color:#999">10:00am / 10 am</td></tr>
-        <tr style="background:#fafaf8"><td style="padding:6px 10px;border:0.5px solid #f0f0e8;font-family:monospace">6:30pm</td><td style="padding:6px 10px;border:0.5px solid #f0f0e8;font-family:monospace;color:#999">6:30 pm / 6pm30</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- Date -->
-  <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;padding:1.25rem;margin-bottom:1rem">
-    <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.4px;color:#888;margin-bottom:10px">Part 2 — Date</div>
-    <div style="font-size:13px;margin-bottom:10px">Format: <code style="background:#f0f0e8;padding:2px 6px;border-radius:4px;font-size:12px">Day Mon DDth</code></div>
-    <ul style="font-size:13px;line-height:1.8;padding-left:1.25rem;margin-bottom:10px">
-      <li><strong>Day:</strong> 3-letter abbreviation — <code style="background:#f0f0e8;padding:1px 5px;border-radius:4px;font-size:11px">Mon Tue Wed Thu Fri Sat Sun</code></li>
-      <li><strong>Month:</strong> 3-letter abbreviation — <code style="background:#f0f0e8;padding:1px 5px;border-radius:4px;font-size:11px">Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec</code></li>
-      <li><strong>Day number</strong> with suffix: 1st 2nd 3rd 4th … 21st 22nd 23rd … 29th 30th 31st</li>
-    </ul>
-    <table style="width:100%;border-collapse:collapse;font-size:12px">
-      <thead>
-        <tr style="background:#fafaf8">
-          <th style="padding:7px 10px;text-align:left;border:0.5px solid #e0e0d8;color:#2e7d32">✅ Correct</th>
-          <th style="padding:7px 10px;text-align:left;border:0.5px solid #e0e0d8;color:#c0392b">❌ Wrong</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr><td style="padding:6px 10px;border:0.5px solid #f0f0e8;font-family:monospace">Sun May 10th</td><td style="padding:6px 10px;border:0.5px solid #f0f0e8;font-family:monospace;color:#999">Sunday May 10 / Sun May 10</td></tr>
-        <tr style="background:#fafaf8"><td style="padding:6px 10px;border:0.5px solid #f0f0e8;font-family:monospace">Wed Apr 29th</td><td style="padding:6px 10px;border:0.5px solid #f0f0e8;font-family:monospace;color:#999">Wed April 29th / Wednesday Apr 29th</td></tr>
-        <tr><td style="padding:6px 10px;border:0.5px solid #f0f0e8;font-family:monospace">Mon Jun 2nd</td><td style="padding:6px 10px;border:0.5px solid #f0f0e8;font-family:monospace;color:#999">Mon June 2</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- Session Title -->
-  <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;padding:1.25rem;margin-bottom:1rem">
-    <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.4px;color:#888;margin-bottom:10px">Part 3 — Session Title</div>
-    <div style="font-size:13px;line-height:1.7;color:#1a1a1a">Use the standard session name exactly as it appears in the system. Keep it clean — no extra details or artwork names.</div>
-  </div>
-
-  <!-- Examples -->
-  <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;padding:1.25rem;margin-bottom:1rem">
-    <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.4px;color:#888;margin-bottom:10px">Full Examples — Standard Sessions</div>
-    <div style="display:flex;flex-direction:column;gap:6px">
-      <div style="font-family:monospace;font-size:13px;background:#f5f5f0;border-radius:6px;padding:8px 12px">3pm Sun May 10th | Wheel Workshop</div>
-      <div style="font-family:monospace;font-size:13px;background:#f5f5f0;border-radius:6px;padding:8px 12px">*9:30am Sat Jun 7th | Kids Canvas Class</div>
-      <div style="font-family:monospace;font-size:13px;background:#f5f5f0;border-radius:6px;padding:8px 12px">6:30pm Fri May 2nd | Paint &amp; Sip</div>
-    </div>
-  </div>
-
-  <!-- Multi-week -->
-  <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;padding:1.25rem;margin-bottom:1rem">
-    <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.4px;color:#888;margin-bottom:6px">Multi-Week Kids Sessions</div>
-    <div style="font-size:13px;color:#888;margin-bottom:10px">Add a third segment for the series length:</div>
-    <div style="font-family:monospace;font-size:14px;background:#f5f5f0;border-radius:8px;padding:12px 16px;margin-bottom:10px">
-      time date | Session Title | X Week Session
-    </div>
-    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px">
-      <div style="font-family:monospace;font-size:13px;background:#f5f5f0;border-radius:6px;padding:8px 12px">5:45pm Mon Apr 13th | Post-Impressionists | 10 Week Session</div>
-      <div style="font-family:monospace;font-size:13px;background:#f5f5f0;border-radius:6px;padding:8px 12px">4pm Tue Sep 9th | Little Painters | 6 Week Session</div>
-    </div>
-    <div style="font-size:12px;color:#888;background:#fffde7;border:0.5px solid #ffe082;border-radius:6px;padding:8px 12px">
-      ℹ️ You only create one product — the system automatically generates Class 2, Class 3, etc. for the remaining weeks.
-    </div>
-  </div>
-
-  <!-- Variants -->
-  <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;padding:1.25rem;margin-bottom:1rem">
-    <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.4px;color:#888;margin-bottom:10px">Variants (Studio Locations)</div>
-    <div style="font-size:13px;margin-bottom:10px">Each product must have a variant for every studio that offers that session:</div>
-    <div style="display:flex;flex-direction:column;gap:6px">
-      <div style="font-family:monospace;font-size:12px;background:#f5f5f0;border-radius:6px;padding:7px 12px">BC / VANCOUVER - MAIN STREET</div>
-      <div style="font-family:monospace;font-size:12px;background:#f5f5f0;border-radius:6px;padding:7px 12px">ON / BURLINGTON - SOUTH</div>
-      <div style="font-family:monospace;font-size:12px;background:#f5f5f0;border-radius:6px;padding:7px 12px">AB / CALGARY - INGLEWOOD</div>
-    </div>
-  </div>
-
-  <!-- Why it matters -->
-  <div style="background:#fff3e0;border:0.5px solid #ffcc80;border-radius:12px;padding:1.25rem">
-    <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.4px;color:#e65100;margin-bottom:6px">⚠️ Why This Matters</div>
-    <div style="font-size:13px;line-height:1.7;color:#1a1a1a">The dashboard reads product titles to match Shopify registrations to the correct session and studio. If the format is off — wrong separator, extra words, missing asterisk, inconsistent spacing — the sync will fail and bookings won't appear on the schedule.</div>
   </div>
 </div>
 
