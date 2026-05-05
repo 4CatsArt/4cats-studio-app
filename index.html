@@ -1648,12 +1648,15 @@ function getSeriesClass1Title(title) {
 }
 
 async function findClass1SessionId(studioId, sessionTime, seriesTitle, sessionDate) {
-  const { data: exact } = await sb.from('sessions')
-    .select('id').eq('studio_id', studioId).eq('session_time', sessionTime).eq('title', seriesTitle).single()
-  if (exact) return exact.id
+  // Single query — fetch all sessions with same studio/time and filter in memory
   const { data: sessions } = await sb.from('sessions')
     .select('id, title, session_date').eq('studio_id', studioId).eq('session_time', sessionTime)
-  if (!sessions) return null
+  if (!sessions?.length) return null
+  const exact = sessions.find(s => s.title === seriesTitle)
+  if (exact) return exact.id
+  // fallthrough to fuzzy match below (no second DB query needed)
+  if (false) { // placeholder to keep structure
+  }
   const candidates = sessions.filter(s =>
     !isSeriesClass2Plus(s.title) &&
     s.title.toLowerCase().includes(seriesTitle.toLowerCase().split('|')[0].trim().toLowerCase().substring(0, 10))
@@ -1927,20 +1930,21 @@ async function loadDayView() {
     const visibleSessions = filtered.filter(s => (bookingCounts[s.id] || 0) > 0 || s.capacity === null || s.capacity > 0)
     filtered.length = 0; visibleSessions.forEach(s => filtered.push(s))
 
-    // Series class 2+ — copy booking count from class 1
-    for (const s of filtered) {
-      if (isSeriesClass2Plus(s.title) && !bookingCounts[s.id]) {
-        const class1Title = getSeriesClass1Title(s.title)
-        const class1Id = await findClass1SessionId(currentStudioId, s.session_time, class1Title, s.session_date)
-        if (class1Id) {
-          if (bookingCounts[class1Id] !== undefined) {
-            bookingCounts[s.id] = bookingCounts[class1Id]
-          } else {
-            const { data: c1bookings } = await sb.from('bookings').select('qty').eq('session_id', class1Id).gt('qty', 0)
-            if (c1bookings) bookingCounts[s.id] = c1bookings.reduce((sum, b) => sum + (b.qty || 0), 0)
-          }
-        }
+    // Series class 2+ — copy booking count from class 1 (batched)
+    const daySeriesSessions = filtered.filter(s => isSeriesClass2Plus(s.title) && !bookingCounts[s.id])
+    if (daySeriesSessions.length) {
+      const dayClass1Ids = await Promise.all(daySeriesSessions.map(s =>
+        findClass1SessionId(currentStudioId, s.session_time, getSeriesClass1Title(s.title), s.session_date)
+      ))
+      const missingIds = [...new Set(dayClass1Ids.filter(id => id && bookingCounts[id] === undefined))]
+      if (missingIds.length) {
+        const { data: c1b } = await sb.from('bookings').select('session_id, qty').in('session_id', missingIds).gt('qty', 0)
+        if (c1b) c1b.forEach(b => { bookingCounts[b.session_id] = (bookingCounts[b.session_id] || 0) + (b.qty || 0) })
       }
+      daySeriesSessions.forEach((s, i) => {
+        const id = dayClass1Ids[i]
+        if (id && bookingCounts[id] !== undefined) bookingCounts[s.id] = bookingCounts[id]
+      })
     }
   }
 
