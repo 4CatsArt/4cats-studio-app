@@ -1852,11 +1852,14 @@ async function loadDayView() {
     if (staff) staff.forEach(s => { staffData[s.session_id] = s })
 
     const { data: bookings } = await sb.from('bookings')
-      .select('id, session_id, customer_name, customer_email, customer_phone, shopify_order_name, qty, estimated_attendance, raw_payload, booked_at')
+      .select('id, session_id, customer_name, customer_email, customer_phone, shopify_order_name, qty, estimated_attendance, raw_payload, booked_at, aftercare, early_arrival')
       .in('session_id', ids).gt('qty', 0)
+    const aftercareCounts = {}, earlyArrivalCounts = {}
     if (bookings) {
       bookings.forEach(b => {
         bookingCounts[b.session_id] = (bookingCounts[b.session_id] || 0) + (b.qty || 0)
+        if (b.aftercare) aftercareCounts[b.session_id] = (aftercareCounts[b.session_id] || 0) + (b.qty || 0)
+        if (b.early_arrival) earlyArrivalCounts[b.session_id] = (earlyArrivalCounts[b.session_id] || 0) + (b.qty || 0)
         if (b.estimated_attendance) estimatedAtt[b.session_id] = (estimatedAtt[b.session_id] || 0) + b.estimated_attendance
         if (partySessionIds.includes(b.session_id)) {
           if (!partyBookings[b.session_id]) partyBookings[b.session_id] = []
@@ -1970,6 +1973,8 @@ async function loadDayView() {
 
   const totalPrepaid = Object.values(staffData).reduce((sum, s) => sum + (parseInt(s.prepaid_participants) || 0), 0)
   const grandTotal = totalNonParty + totalPartyGuests + totalPrepaid + currentWalkins
+  const totalAftercare = Object.values(aftercareCounts).reduce((sum, v) => sum + v, 0)
+  const totalEarlyArrival = Object.values(earlyArrivalCounts).reduce((sum, v) => sum + v, 0)
 
   const STUDIO_GROUP = { 'BC-YVR-MS':'A', 'BC-YYJ-VIC':'A' }
   const group = STUDIO_GROUP[currentStudioId] || 'B'
@@ -1986,10 +1991,12 @@ async function loadDayView() {
   }
   const t = thresholds[group][isWeekend ? 'weekend' : 'weekday'].find(t => grandTotal <= t.max)
   const partyNote = totalPartyGuests > 0 ? ` <span style="font-size:12px;opacity:0.8">(incl. ${totalPartyGuests} party guests)</span>` : ''
+  const aftercareNote = totalAftercare > 0 ? ` · <span style="font-size:12px;color:#5b4fcf;font-weight:600">${totalAftercare} aftercare</span>` : ''
+  const earlyArrNote = totalEarlyArrival > 0 ? ` · <span style="font-size:12px;color:#e65100;font-weight:600">${totalEarlyArrival} early arr.</span>` : ''
   const prepaidNote = totalPrepaid > 0 ? ` <span style="font-size:12px;opacity:0.8">(incl. ${totalPrepaid} prepaid)</span>` : ''
   const walkinsNote = currentWalkins > 0 ? ` <span style="font-size:12px;opacity:0.8">(incl. ${currentWalkins} drop-ins)</span>` : ''
   const bannerHtml = `<div style="background:${t.bg};color:${t.color};border-radius:10px;padding:12px 18px;margin-bottom:1rem;display:flex;align-items:center;justify-content:space-between;font-size:14px;gap:12px;">
-    <span><strong>${grandTotal} participants today</strong>${partyNote}${walkinsNote}${prepaidNote}</span>
+    <span><strong>${grandTotal} participants today</strong>${partyNote}${walkinsNote}${prepaidNote}${aftercareNote}${earlyArrNote}</span>
     <span style="font-weight:500">${t.msg}</span>
     <div style="display:flex;align-items:center;gap:8px;margin-left:auto" class="no-print">
       <button id="print-full-day-btn" onclick="printFullDay()" style="padding:4px 12px;background:white;color:#444;border:0.5px solid #d0d0c8;border-radius:6px;font-size:12px;cursor:pointer;white-space:nowrap">🖨 Print Full Day</button>
@@ -2077,6 +2084,8 @@ async function loadDayView() {
           <div class="stat-label">spaces left</div>
         </div>
         ${est ? `<div class="stat"><div class="stat-value">${est}</div><div class="stat-label">expected</div></div>` : ''}
+        ${aftercareCounts[s.id] ? `<div class="stat"><div class="stat-value" style="color:#5b4fcf">${aftercareCounts[s.id]}</div><div class="stat-label">aftercare</div></div>` : ''}
+        ${earlyArrivalCounts[s.id] ? `<div class="stat"><div class="stat-value" style="color:#e65100">${earlyArrivalCounts[s.id]}</div><div class="stat-label">early arr.</div></div>` : ''}
       </div>
 
       ${partyBlocksHtml}
@@ -2566,7 +2575,7 @@ function buildCampTable(bookings, tallyData, attendanceData, sessionId, dateLabe
         <td style="text-align:center"><input type="checkbox" class="attended-check" ${att?.attended?'checked':''} onchange="saveAttendance('${sessionId}','${b.shopify_order_name}','',this.checked)"></td>
         <td>${editInput('cn-'+uid,'','Child name')}</td><td>${editInput('ca-'+uid,'','Age','short')}</td>
         <td>${editCheck('wh-'+uid,false)}</td><td>${editInput('mn-'+uid,'','Medical notes')}</td>
-        <td>${editCheck('ac-'+uid,false)}</td><td>${editInput('pp-'+uid,b.customer_phone||getPayloadPhone(b.raw_payload),'Phone')}</td>
+        <td>${editCheck('ac-'+uid,b.aftercare||false)}</td><td>${editInput('pp-'+uid,b.customer_phone||getPayloadPhone(b.raw_payload),'Phone')}</td>
         <td>${editInput('ec-'+uid,'','Emergency contact')}</td>
         <td style="color:#888">${b.customer_name||'&mdash;'}</td><td style="text-align:center">${b.qty}</td>
         <td style="color:#888">${b.shopify_order_name||'&mdash;'}</td><td class="note-cell">${note||''}</td>
@@ -2586,7 +2595,7 @@ function buildCampTable(bookings, tallyData, attendanceData, sessionId, dateLabe
         <td style="text-align:center"><input type="checkbox" class="attended-check" ${att?.attended?'checked':''} onchange="saveAttendance('${sessionId}','${b.shopify_order_name}','${camperName.replace(/'/g,"\\'")}',this.checked)"></td>
         <td>${editInput('cn-'+uid,camperName,'Child name')}</td><td style="font-size:12px;color:#666">${ageDisplay}</td>
         <td>${editCheck('wh-'+uid,t?.walk_home||false)}</td><td>${editInput('mn-'+uid,t?.medical_notes||'','Medical notes')}</td>
-        <td>${editCheck('ac-'+uid,t?.aftercare||false)}</td><td>${editInput('pp-'+uid,t?.parent_phone||b.customer_phone||getPayloadPhone(b.raw_payload)||'','Phone')}</td>
+        <td>${editCheck('ac-'+uid,t?.aftercare!=null?t.aftercare:(b.aftercare||false))}</td><td>${editInput('pp-'+uid,t?.parent_phone||b.customer_phone||getPayloadPhone(b.raw_payload)||'','Phone')}</td>
         <td>${editInput('ec-'+uid,t?(t.emergency_contact_name||'')+(t.emergency_contact_phone?' '+t.emergency_contact_phone:''):'','Emergency contact')}</td>
         <td style="color:#888">${i===0?(b.customer_name||'&mdash;'):''}</td><td style="text-align:center">${i===0?b.qty:''}</td>
         <td style="color:#888">${i===0?(b.shopify_order_name||'&mdash;'):''}</td><td class="note-cell">${i===0?(note||''):''}</td>
