@@ -2281,20 +2281,22 @@ async function loadTableView() {
     if (b.early_arrival) earlyArrivalCounts[b.session_id] = (earlyArrivalCounts[b.session_id] || 0) + (b.qty || 0)
   })
 
-  // For series class 2+, inherit reg count from class 1
-  for (const s of allFiltered) {
-    if (isSeriesClass2Plus(s.title) && !bookingCounts[s.id]) {
-      const class1Title = getSeriesClass1Title(s.title)
-      const class1Id = await findClass1SessionId(currentStudioId, s.session_time, class1Title, s.session_date)
-      if (class1Id) {
-        if (bookingCounts[class1Id] !== undefined) {
-          bookingCounts[s.id] = bookingCounts[class1Id]
-        } else {
-          const { data: c1bookings } = await sb.from('bookings').select('qty').eq('session_id', class1Id).gt('qty', 0)
-          if (c1bookings) bookingCounts[s.id] = c1bookings.reduce((sum, b) => sum + (b.qty || 0), 0)
-        }
-      }
+  // For series class 2+, inherit reg count from class 1 (batched, no sequential awaits)
+  const seriesSessions = allFiltered.filter(s => isSeriesClass2Plus(s.title) && !bookingCounts[s.id])
+  if (seriesSessions.length) {
+    const class1Lookups = await Promise.all(seriesSessions.map(s =>
+      findClass1SessionId(currentStudioId, s.session_time, getSeriesClass1Title(s.title), s.session_date)
+    ))
+    // Collect any class1 IDs not already in bookingCounts
+    const missingClass1Ids = [...new Set(class1Lookups.filter(id => id && bookingCounts[id] === undefined))]
+    if (missingClass1Ids.length) {
+      const { data: c1bookings } = await sb.from('bookings').select('session_id, qty').in('session_id', missingClass1Ids).gt('qty', 0)
+      if (c1bookings) c1bookings.forEach(b => { bookingCounts[b.session_id] = (bookingCounts[b.session_id] || 0) + (b.qty || 0) })
     }
+    seriesSessions.forEach((s, i) => {
+      const class1Id = class1Lookups[i]
+      if (class1Id && bookingCounts[class1Id] !== undefined) bookingCounts[s.id] = bookingCounts[class1Id]
+    })
   }
 
   // Hide if 0 reg AND capacity is explicitly set to 0 (synced & closed out)
