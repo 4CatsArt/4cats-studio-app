@@ -1483,7 +1483,7 @@ function openAddSessionModal() {
 }
 
 function closeAddSessionModal() { document.getElementById('add-session-modal').style.display = 'none' }
-function asmSelectAll(checked) { document.querySelectorAll('#asm-studio-grid input[type=checkbox]').forEach(cb => cb.checked = checked) }
+function asmSelectAll(checked) { document.querySelectorAll('#asm-studio-grid input[type=checkbox]').forEach(cb => cb.checked = checked); updateAsmWeeksPreview() }
 
 function updateAsmPreview() {
   const date = document.getElementById('asm-date').value, time = document.getElementById('asm-time').value, title = document.getElementById('asm-title').value.trim()
@@ -1495,9 +1495,25 @@ function updateAsmPreview() {
   else previewEl.innerHTML = `<span>${t}</span>`
 }
 
+function updateAsmWeeksPreview() {
+  const weeks = parseInt(document.getElementById('asm-weeks').value)||1
+  const noteEl = document.getElementById('asm-series-note'), countEl = document.getElementById('asm-series-count')
+  const studios = document.querySelectorAll('#asm-studio-grid input[type=checkbox]:checked').length || 1
+  if (weeks > 1) {
+    noteEl.style.display = 'block'
+    countEl.textContent = `${weeks} weeks × ${studios} studio${studios!==1?'s':''} = ${weeks*studios} rows`
+  } else { noteEl.style.display = 'none' }
+}
+
+function addDays(dateStr, days) {
+  const d = new Date(dateStr + 'T12:00:00'); d.setDate(d.getDate() + days)
+  return d.toISOString().slice(0,10)
+}
+
 async function saveAddSessions() {
   const date = document.getElementById('asm-date').value, time = document.getElementById('asm-time').value, title = document.getElementById('asm-title').value.trim()
-  const type = document.getElementById('asm-type').value, capacity = parseInt(document.getElementById('asm-capacity').value)||0, show = document.getElementById('asm-show').value==='true'
+  const type = document.getElementById('asm-type').value, capacity = parseInt(document.getElementById('asm-capacity').value)||0
+  const show = document.getElementById('asm-show').value==='true', numWeeks = parseInt(document.getElementById('asm-weeks').value)||1
   if (!date) { alert('Please select a date.'); return }
   if (!time) { alert('Please enter a time.'); return }
   if (!title) { alert('Please enter a session title.'); return }
@@ -1506,15 +1522,37 @@ async function saveAddSessions() {
   const btn = document.getElementById('asm-save-btn'), statusEl = document.getElementById('asm-status')
   btn.textContent = 'Adding...'; btn.disabled = true; statusEl.textContent = ''
   const sessionTime = time.length===5 ? time+':00' : time
-  const rows = selected.map(studioId => ({ studio_id: studioId, session_date: date, session_time: sessionTime, title, session_type: type, capacity: capacity||0, show, spaces_left_cache: null }))
+
+  // Build rows: for series, generate all weeks across all studios
+  const rows = []
+  for (let week = 0; week < numWeeks; week++) {
+    const sessionDate = week === 0 ? date : addDays(date, week * 7)
+    const sessionTitle = numWeeks === 1 ? title
+      : week === 0 ? title
+      : `${title} | Class ${week+1} of ${numWeeks}`
+    for (const studioId of selected) {
+      rows.push({ studio_id: studioId, session_date: sessionDate, session_time: sessionTime, title: sessionTitle, session_type: type, capacity: capacity||0, show, spaces_left_cache: null })
+    }
+  }
+
   try {
     const { error } = await sb.from('sessions').insert(rows); if (error) throw error
-    const inserted = rows.map(r => ({ ...r, id: null, reg: 0 }))
-    statusEl.style.color = '#2e7d32'; statusEl.textContent = `✓ Added ${inserted.length} session${inserted.length!==1?'s':''} successfully.`
+    const totalSessions = rows.length
+    statusEl.style.color = '#2e7d32'
+    statusEl.textContent = numWeeks > 1
+      ? `✓ Added ${numWeeks}-week series across ${selected.length} studio${selected.length!==1?'s':''} (${totalSessions} rows).`
+      : `✓ Added ${totalSessions} session${totalSessions!==1?'s':''} successfully.`
     const from = document.getElementById('sch-from').value, to = document.getElementById('sch-to').value
-    if (date>=from && date<=to) { inserted.forEach(s => { scheduleData.push({...s,reg:0}); const studio=allStudios.find(st=>st.id===s.studio_id); if (studio&&!gridStudios.find(gs=>gs.id===studio.id)) gridStudios.push(studio) }); renderSchedule() }
+    rows.forEach(s => {
+      if (s.session_date>=from && s.session_date<=to) {
+        scheduleData.push({...s,id:null,reg:0})
+        const studio=allStudios.find(st=>st.id===s.studio_id)
+        if (studio&&!gridStudios.find(gs=>gs.id===studio.id)) gridStudios.push(studio)
+      }
+    })
+    renderSchedule()
     btn.textContent = 'Add More'; btn.disabled = false
-    setTimeout(() => { document.getElementById('asm-title').value=''; document.getElementById('asm-capacity').value='0'; asmSelectAll(false); statusEl.textContent=''; btn.textContent='Add Sessions'; updateAsmPreview() }, 2500)
+    setTimeout(() => { document.getElementById('asm-title').value=''; document.getElementById('asm-capacity').value='0'; document.getElementById('asm-weeks').value='1'; document.getElementById('asm-series-note').style.display='none'; asmSelectAll(false); statusEl.textContent=''; btn.textContent='Add Sessions'; updateAsmPreview() }, 3000)
   } catch(e) { statusEl.style.color='#c0392b'; statusEl.textContent='Error: '+e.message; btn.textContent='Add Sessions'; btn.disabled=false }
 }
 
@@ -4092,6 +4130,94 @@ async function loadPartyReport() {
   </div>
 </div>
 
+
+<!-- Add Session Modal -->
+<div id="add-session-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:white;border-radius:12px;width:100%;max-width:580px;max-height:90vh;overflow-y:auto;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
+      <h3 style="font-size:15px;font-weight:600;margin:0">Add Session</h3>
+      <button onclick="closeAddSessionModal()" style="background:none;border:none;font-size:22px;cursor:pointer;color:#888;line-height:1">×</button>
+    </div>
+
+    <!-- Date / Time / Type row -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px">
+      <div class="modal-field">
+        <label>Date *</label>
+        <input id="asm-date" type="date" oninput="updateAsmPreview()">
+      </div>
+      <div class="modal-field">
+        <label>Time * <span style="font-weight:400;color:#bbb">(e.g. 15:00)</span></label>
+        <input id="asm-time" type="time" oninput="updateAsmPreview()">
+      </div>
+      <div class="modal-field">
+        <label>Type</label>
+        <select id="asm-type">
+          <option value="class">Class</option>
+          <option value="workshop">Workshop</option>
+          <option value="camp">Camp</option>
+          <option value="party">Party</option>
+          <option value="glazing">Glazing</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Title -->
+    <div class="modal-field" style="margin-bottom:10px">
+      <label>Session Title *</label>
+      <input id="asm-title" type="text" placeholder="e.g. Mixed Media Kids" oninput="updateAsmPreview()">
+    </div>
+
+    <!-- Shopify preview -->
+    <div style="background:#f5f5f0;border-radius:8px;padding:9px 12px;margin-bottom:14px;font-size:12px">
+      <span style="font-size:10px;color:#aaa;text-transform:uppercase;letter-spacing:0.4px;margin-right:8px">Shopify title</span>
+      <span id="asm-shopify-preview" style="color:#888">Fill in date, time and title to preview</span>
+    </div>
+
+    <!-- Capacity / Weeks / Show row -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:14px">
+      <div class="modal-field">
+        <label>Capacity</label>
+        <input id="asm-capacity" type="number" value="0" min="0">
+      </div>
+      <div class="modal-field">
+        <label>Num Weeks <span style="font-weight:400;color:#bbb">(series)</span></label>
+        <input id="asm-weeks" type="number" value="1" min="1" max="52" oninput="updateAsmWeeksPreview()">
+      </div>
+      <div class="modal-field">
+        <label>Visible to Staff</label>
+        <select id="asm-show">
+          <option value="true">Yes — show</option>
+          <option value="false">No — hidden</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Series preview note -->
+    <div id="asm-series-note" style="display:none;background:#fff8e1;border:0.5px solid #ffe082;border-radius:8px;padding:9px 12px;margin-bottom:14px;font-size:12px;color:#7a5800">
+      📅 Will create <strong id="asm-series-count"></strong> session rows — one per week per studio (Class 2, 3… generated automatically).
+    </div>
+
+    <!-- Studios -->
+    <div class="modal-field" style="margin-bottom:14px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <label style="margin:0">Studios *</label>
+        <span style="font-size:11px;color:#888">
+          <a href="#" onclick="asmSelectAll(true);return false" style="color:#1a4fa0;text-decoration:none">All</a> ·
+          <a href="#" onclick="asmSelectAll(false);return false" style="color:#1a4fa0;text-decoration:none">None</a>
+        </span>
+      </div>
+      <div id="asm-studio-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:4px;border:0.5px solid #d0d0c8;border-radius:7px;padding:8px 10px;max-height:160px;overflow-y:auto"></div>
+    </div>
+
+    <div style="display:flex;align-items:center;justify-content:space-between;padding-top:1rem;border-top:0.5px solid #f0f0e8">
+      <span id="asm-status" style="font-size:12px"></span>
+      <div style="display:flex;gap:8px">
+        <button onclick="closeAddSessionModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
+        <button id="asm-save-btn" onclick="saveAddSessions()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">Add Sessions</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- Staff Modal -->
 <div id="staff-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
