@@ -1384,6 +1384,43 @@ function openEditTitleModal(title, date, time, type) {
 
 function closeEditTitleModal() { document.getElementById('edit-title-modal').style.display = 'none' }
 
+function toggleEtmReschedule() {
+  const section = document.getElementById('etm-reschedule-section'), toggle = document.getElementById('etm-reschedule-toggle')
+  const open = section.style.display !== 'none'
+  section.style.display = open ? 'none' : 'block'
+  toggle.textContent = open ? '▶ expand' : '▼ collapse'
+  if (!open && etmContext.date) document.getElementById('etm-new-date').value = etmContext.date
+}
+
+async function saveReschedule() {
+  const newDate = document.getElementById('etm-new-date').value
+  const statusEl = document.getElementById('etm-reschedule-status')
+  if (!newDate) { statusEl.style.color='#c0392b'; statusEl.textContent='Please pick a new date.'; return }
+  if (newDate === etmContext.date) { statusEl.style.color='#c0392b'; statusEl.textContent='New date is the same as the current date.'; return }
+  statusEl.style.color='#888'; statusEl.textContent='Saving...'
+  try {
+    let query
+    if (etmContext.scope === 'all') {
+      const ids = etmContext.sessions.map(s=>s.id).filter(Boolean)
+      if (!ids.length) { statusEl.style.color='#c0392b'; statusEl.textContent='No session IDs found. Please reload.'; return }
+      const { error } = await sb.from('sessions').update({ session_date: newDate }).in('id', ids); if (error) throw error
+      etmContext.sessions.forEach(s=>s.session_date=newDate)
+      scheduleData.forEach(s=>{ if(ids.includes(s.id)) s.session_date=newDate })
+    } else {
+      const sel = document.getElementById('etm-studio'), sessionId = sel.value
+      if (!sessionId) { statusEl.style.color='#c0392b'; statusEl.textContent='No session selected.'; return }
+      const { error } = await sb.from('sessions').update({ session_date: newDate }).eq('id', sessionId); if (error) throw error
+      const memSession = scheduleData.find(s=>s.id===sessionId); if (memSession) memSession.session_date=newDate
+      etmContext.sessions = etmContext.sessions.map(s=>s.id===sessionId?{...s,session_date:newDate}:s)
+    }
+    const label = etmContext.scope==='all' ? `${etmContext.sessions.length} studio${etmContext.sessions.length!==1?'s':''}` : getStudioName(document.getElementById('etm-studio').value)
+    statusEl.style.color='#2e7d32'; statusEl.textContent=`✓ Moved to ${fmtDate(newDate)} (${label}).`
+    etmContext.date = newDate
+    document.getElementById('etm-sub').textContent = `${fmtDate(newDate)} · ${(etmContext.time||'').substring(0,5)} · ${etmContext.sessions.length} studio${etmContext.sessions.length!==1?'s':''}`
+    renderSchedule()
+  } catch(e) { statusEl.style.color='#c0392b'; statusEl.textContent='Error: '+e.message }
+}
+
 function setEtmScope(scope) {
   etmContext.scope = scope
   document.getElementById('etm-scope-all').classList.toggle('active', scope==='all')
@@ -4130,6 +4167,78 @@ async function loadPartyReport() {
   </div>
 </div>
 
+
+<!-- Edit Session Modal -->
+<div id="edit-title-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:white;border-radius:12px;width:100%;max-width:540px;max-height:90vh;overflow-y:auto;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.25rem">
+      <h3 style="font-size:15px;font-weight:600;margin:0">Edit Session</h3>
+      <button onclick="closeEditTitleModal()" style="background:none;border:none;font-size:22px;cursor:pointer;color:#888;line-height:1">×</button>
+    </div>
+    <div id="etm-sub" style="font-size:12px;color:#888;margin-bottom:1.25rem"></div>
+
+    <!-- Scope buttons -->
+    <div class="modal-scope-row">
+      <button id="etm-scope-all" class="btn active" onclick="setEtmScope('all')" style="flex:1">All Studios</button>
+      <button id="etm-scope-one" class="btn" onclick="setEtmScope('one')" style="flex:1">One Studio</button>
+    </div>
+    <div id="etm-studio-selector" style="display:none;margin-bottom:1rem">
+      <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Studio</label>
+      <select id="etm-studio" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;background:white"></select>
+    </div>
+
+    <!-- Title & type -->
+    <div class="modal-field" style="margin-bottom:10px">
+      <label>Session Title</label>
+      <div style="font-size:11px;color:#aaa;margin-bottom:5px">Current: <span id="etm-current-title" style="font-style:italic"></span></div>
+      <input id="etm-new-title" type="text" oninput="updateEtmPreview()">
+    </div>
+    <div class="modal-field" style="margin-bottom:10px">
+      <label>Session Type</label>
+      <select id="etm-type">
+        <option value="class">Class</option>
+        <option value="workshop">Workshop</option>
+        <option value="camp">Camp</option>
+        <option value="party">Party</option>
+        <option value="glazing">Glazing</option>
+      </select>
+    </div>
+    <div style="background:#f5f5f0;border-radius:8px;padding:9px 12px;margin-bottom:14px;font-size:12px">
+      <span style="font-size:10px;color:#aaa;text-transform:uppercase;letter-spacing:0.4px;margin-right:8px">Shopify title</span>
+      <span id="etm-shopify-preview" style="color:#888">—</span>
+    </div>
+
+    <!-- Reschedule section -->
+    <div style="border:0.5px solid #e0e0d8;border-radius:8px;overflow:hidden;margin-bottom:14px">
+      <div style="padding:9px 12px;background:#fafaf8;display:flex;align-items:center;justify-content:space-between;cursor:pointer" onclick="toggleEtmReschedule()">
+        <span style="font-size:12px;font-weight:500">📅 Reschedule (holiday skip)</span>
+        <span id="etm-reschedule-toggle" style="font-size:11px;color:#888">▶ expand</span>
+      </div>
+      <div id="etm-reschedule-section" style="display:none;padding:12px">
+        <div style="font-size:12px;color:#888;margin-bottom:10px">Move this session to a new date — use when a holiday falls on class day.</div>
+        <div style="display:flex;gap:10px;align-items:flex-end">
+          <div class="modal-field" style="flex:1;margin:0">
+            <label>New Date</label>
+            <input id="etm-new-date" type="date">
+          </div>
+          <button onclick="saveReschedule()" style="padding:8px 14px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:12px;cursor:pointer;height:36px;white-space:nowrap">Move Date</button>
+        </div>
+        <div id="etm-reschedule-status" style="font-size:12px;margin-top:8px"></div>
+      </div>
+    </div>
+
+    <!-- Hide / Delete -->
+    <div id="etm-delete-line" style="display:flex;gap:8px;margin-bottom:14px;padding-bottom:14px;border-bottom:0.5px solid #f0f0e8">
+      <button id="etm-hide-btn" onclick="toggleEtmHide()" class="btn btn-warn" style="flex:1">Hide all studios</button>
+      <button id="etm-delete-btn" onclick="deleteEtmSession()" class="btn" style="background:#fff0f0;color:#c0392b;border-color:#f5c6cb;flex:1">Delete</button>
+    </div>
+
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button onclick="closeEditTitleModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
+      <button id="etm-save-btn" onclick="saveEditTitle()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">Save Changes</button>
+    </div>
+  </div>
+</div>
 
 <!-- Add Session Modal -->
 <div id="add-session-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
