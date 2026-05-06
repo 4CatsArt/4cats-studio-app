@@ -1392,31 +1392,118 @@ function toggleEtmReschedule() {
   if (!open && etmContext.date) document.getElementById('etm-new-date').value = etmContext.date
 }
 
+// Parse series info from a session title
+// Returns { baseTitle, classNum, totalClasses } or null if not a series
+function parseSeriesTitle(title) {
+  const m = title.match(/^(.+?)\s*\|\s*Class\s+(\d+)\s+of\s+(\d+)/i)
+  if (m) return { baseTitle: m[1].trim(), classNum: parseInt(m[2]), totalClasses: parseInt(m[3]) }
+  return null // class 1 — base title with no class designation
+}
+
+// Find subsequent sessions in the same series (class N+1, N+2 … at same time, any studio)
+function findSubsequentSeriesSessions(baseTitle, fromClassNum, totalClasses, sessionTime, studioIds) {
+  const results = []
+  for (let n = fromClassNum + 1; n <= totalClasses; n++) {
+    const expectedTitle = `${baseTitle} | Class ${n} of ${totalClasses}`
+    const matches = scheduleData.filter(s =>
+      s.title === expectedTitle &&
+      s.session_time === sessionTime &&
+      (studioIds.length === 0 || studioIds.includes(s.studio_id))
+    )
+    if (matches.length) results.push({ classNum: n, sessions: matches })
+  }
+  return results
+}
+
+function getEtmSeriesContext() {
+  const title = etmContext.title, time = etmContext.time
+  const studioIds = etmContext.scope === 'one'
+    ? [document.getElementById('etm-studio').value].filter(Boolean)
+    : etmContext.sessions.map(s=>s.studio_id)
+  const parsed = parseSeriesTitle(title)
+  if (parsed) {
+    return { ...parsed, studioIds, time }
+  }
+  // Could be class 1 — check if any class 2+ with this base title exists
+  const class2 = scheduleData.find(s => s.title.startsWith(title + ' | Class 2 of') && s.session_time === time)
+  if (class2) {
+    const m = class2.title.match(/Class \d+ of (\d+)/i)
+    return { baseTitle: title, classNum: 1, totalClasses: m ? parseInt(m[1]) : 1, studioIds, time }
+  }
+  return null
+}
+
+function updateBumpPreview() {
+  const preview = document.getElementById('etm-bump-preview')
+  const checked = document.getElementById('etm-bump-rest').checked
+  const newDate = document.getElementById('etm-new-date').value
+  if (!checked || !newDate) { preview.textContent = ''; return }
+  const ctx = getEtmSeriesContext()
+  if (!ctx || ctx.totalClasses <= 1 || ctx.classNum >= ctx.totalClasses) {
+    preview.textContent = 'No subsequent classes found in this series.'
+    preview.style.color = '#aaa'; return
+  }
+  const subsequent = findSubsequentSeriesSessions(ctx.baseTitle, ctx.classNum, ctx.totalClasses, ctx.time, ctx.studioIds)
+  if (!subsequent.length) { preview.textContent = 'No subsequent classes found in scheduleData (may be outside loaded date range).'; preview.style.color='#e65100'; return }
+  const lines = subsequent.map(g => {
+    const orig = g.sessions[0].session_date
+    const bumped = addDays(orig, 7)
+    return `Class ${g.classNum}: ${fmtDate(orig)} → ${fmtDate(bumped)}`
+  })
+  preview.style.color = '#1a4fa0'
+  preview.innerHTML = lines.join(' &nbsp;·&nbsp; ')
+}
+
 async function saveReschedule() {
   const newDate = document.getElementById('etm-new-date').value
+  const bumpRest = document.getElementById('etm-bump-rest').checked
   const statusEl = document.getElementById('etm-reschedule-status')
   if (!newDate) { statusEl.style.color='#c0392b'; statusEl.textContent='Please pick a new date.'; return }
   if (newDate === etmContext.date) { statusEl.style.color='#c0392b'; statusEl.textContent='New date is the same as the current date.'; return }
   statusEl.style.color='#888'; statusEl.textContent='Saving...'
+
   try {
-    let query
+    // Step 1: move the current session
+    let thisIds
     if (etmContext.scope === 'all') {
-      const ids = etmContext.sessions.map(s=>s.id).filter(Boolean)
-      if (!ids.length) { statusEl.style.color='#c0392b'; statusEl.textContent='No session IDs found. Please reload.'; return }
-      const { error } = await sb.from('sessions').update({ session_date: newDate }).in('id', ids); if (error) throw error
+      thisIds = etmContext.sessions.map(s=>s.id).filter(Boolean)
+      if (!thisIds.length) { statusEl.style.color='#c0392b'; statusEl.textContent='No session IDs found. Please reload.'; return }
+      const { error } = await sb.from('sessions').update({ session_date: newDate }).in('id', thisIds); if (error) throw error
       etmContext.sessions.forEach(s=>s.session_date=newDate)
-      scheduleData.forEach(s=>{ if(ids.includes(s.id)) s.session_date=newDate })
+      scheduleData.forEach(s=>{ if(thisIds.includes(s.id)) s.session_date=newDate })
     } else {
       const sel = document.getElementById('etm-studio'), sessionId = sel.value
       if (!sessionId) { statusEl.style.color='#c0392b'; statusEl.textContent='No session selected.'; return }
+      thisIds = [sessionId]
       const { error } = await sb.from('sessions').update({ session_date: newDate }).eq('id', sessionId); if (error) throw error
       const memSession = scheduleData.find(s=>s.id===sessionId); if (memSession) memSession.session_date=newDate
       etmContext.sessions = etmContext.sessions.map(s=>s.id===sessionId?{...s,session_date:newDate}:s)
     }
+
+    let bumpCount = 0
+    // Step 2: bump subsequent classes if requested
+    if (bumpRest) {
+      const ctx = getEtmSeriesContext()
+      if (ctx && ctx.classNum < ctx.totalClasses) {
+        const subsequent = findSubsequentSeriesSessions(ctx.baseTitle, ctx.classNum, ctx.totalClasses, ctx.time, ctx.studioIds)
+        for (const group of subsequent) {
+          const ids = group.sessions.map(s=>s.id).filter(Boolean)
+          if (!ids.length) continue
+          const bumpedDate = addDays(group.sessions[0].session_date, 7)
+          const { error } = await sb.from('sessions').update({ session_date: bumpedDate }).in('id', ids); if (error) throw error
+          group.sessions.forEach(s=>s.session_date=bumpedDate)
+          scheduleData.forEach(s=>{ if(ids.includes(s.id)) s.session_date=bumpedDate })
+          bumpCount += ids.length
+        }
+      }
+    }
+
     const label = etmContext.scope==='all' ? `${etmContext.sessions.length} studio${etmContext.sessions.length!==1?'s':''}` : getStudioName(document.getElementById('etm-studio').value)
-    statusEl.style.color='#2e7d32'; statusEl.textContent=`✓ Moved to ${fmtDate(newDate)} (${label}).`
+    const bumpMsg = bumpCount > 0 ? ` + ${bumpCount} subsequent row${bumpCount!==1?'s':''} bumped.` : ''
+    statusEl.style.color='#2e7d32'; statusEl.textContent=`✓ Moved to ${fmtDate(newDate)} (${label}).${bumpMsg}`
     etmContext.date = newDate
     document.getElementById('etm-sub').textContent = `${fmtDate(newDate)} · ${(etmContext.time||'').substring(0,5)} · ${etmContext.sessions.length} studio${etmContext.sessions.length!==1?'s':''}`
+    document.getElementById('etm-bump-preview').textContent = ''
     renderSchedule()
   } catch(e) { statusEl.style.color='#c0392b'; statusEl.textContent='Error: '+e.message }
 }
@@ -4216,13 +4303,18 @@ async function loadPartyReport() {
       </div>
       <div id="etm-reschedule-section" style="display:none;padding:12px">
         <div style="font-size:12px;color:#888;margin-bottom:10px">Move this session to a new date — use when a holiday falls on class day.</div>
-        <div style="display:flex;gap:10px;align-items:flex-end">
+        <div style="display:flex;gap:10px;align-items:flex-end;margin-bottom:10px">
           <div class="modal-field" style="flex:1;margin:0">
             <label>New Date</label>
-            <input id="etm-new-date" type="date">
+            <input id="etm-new-date" type="date" oninput="updateBumpPreview()">
           </div>
           <button onclick="saveReschedule()" style="padding:8px 14px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:12px;cursor:pointer;height:36px;white-space:nowrap">Move Date</button>
         </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;padding:8px 10px;background:#f5f5f0;border-radius:6px;margin-bottom:6px">
+          <input type="checkbox" id="etm-bump-rest" onchange="updateBumpPreview()" style="width:15px;height:15px;accent-color:#1a1a1a">
+          <span>Also bump all remaining classes in series +1 week</span>
+        </label>
+        <div id="etm-bump-preview" style="font-size:11px;color:#888;padding-left:4px;min-height:14px"></div>
         <div id="etm-reschedule-status" style="font-size:12px;margin-top:8px"></div>
       </div>
     </div>
