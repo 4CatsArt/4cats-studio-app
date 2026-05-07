@@ -216,6 +216,7 @@ select:focus, input:focus { border-color: #888; }
     <button class="tab-btn" onclick="switchTab('staff')">Staff</button>
     <button class="tab-btn" onclick="switchTab('parties')">Parties</button>
     <button class="tab-btn" onclick="switchTab('users')">Users</button>
+    <button class="tab-btn" onclick="switchTab('clay')">🏺 Clay</button>
     <button class="tab-btn" onclick="switchTab('guide')">📋 Guide</button>
     <div class="top-bar-right"><button class="signout-btn" onclick="signOut()">Sign out</button></div>
   </div>
@@ -720,7 +721,7 @@ async function initApp() {
 }
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','training','staff','parties','users','guide'][i] === tab))
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','training','staff','parties','users','clay','guide'][i] === tab))
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'))
   document.getElementById(`tab-${tab}`).classList.add('active')
   if (tab === 'curriculum') loadCurriculum()
@@ -731,6 +732,7 @@ function switchTab(tab) {
   if (tab === 'training') loadTrainingTab()
   if (tab === 'staff') loadStaffTab()
   if (tab === 'parties') loadPartyReport()
+  if (tab === 'clay') loadClayTab()
 }
 
 async function loadQualityBadge() {
@@ -4391,7 +4393,395 @@ async function trConfirm() {
     btn.disabled = false
   }
 }
+
+// ═══════════════════════════════════════════════════════════════
+// CLAY TRACKER
+// ═══════════════════════════════════════════════════════════════
+
+const CLAY_STAGES = [
+  { key: 'submitted',     label: 'Submitted',          color: '#e0e0d8', text: '#555',    next: 'bisque_kiln',  nextLabel: 'Put in Bisque Kiln' },
+  { key: 'bisque_kiln',   label: 'In Bisque Kiln 🔥',  color: '#fff3e0', text: '#e65100', next: 'bisque_done',  nextLabel: 'Bisque Done' },
+  { key: 'bisque_done',   label: 'Bisque Done ✅',      color: '#e8f5e9', text: '#2e7d32', next: 'glaze_kiln',   nextLabel: 'Put in Glaze Kiln', emailTrigger: true },
+  { key: 'glaze_kiln',    label: 'In Glaze Kiln 🔥',   color: '#fff3e0', text: '#e65100', next: 'ready_pickup', nextLabel: 'Ready for Pickup' },
+  { key: 'ready_pickup',  label: '🎉 Ready for Pickup', color: '#e3f2fd', text: '#1565c0', next: null,           emailTrigger: true },
+]
+
+function getClayStage(key) { return CLAY_STAGES.find(s => s.key === key) || CLAY_STAGES[0] }
+
+function clayStageChip(key) {
+  const s = getClayStage(key)
+  return `<span style="display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;background:${s.color};color:${s.text}">${s.label}</span>`
+}
+
+async function loadClayTab() {
+  // Populate studio dropdowns
+  const studioSel = document.getElementById('clay-filter-studio')
+  const newStudioSel = document.getElementById('clay-new-studio')
+  if (studioSel && studioSel.options.length <= 1) {
+    const studioOptions = currentStudioId
+      ? `<option value="${currentStudioId}">${getStudioName(currentStudioId)}</option>`
+      : window.allStudios ? window.allStudios.map(s => `<option value="${s.id}">${getStudioName(s.id)}</option>`).join('') : ''
+    studioSel.innerHTML = '<option value="">All Studios</option>' + studioOptions
+    if (newStudioSel) newStudioSel.innerHTML = '<option value="">— Select studio —</option>' + studioOptions
+    if (currentStudioId) studioSel.value = currentStudioId
+  }
+
+  const studioFilter = document.getElementById('clay-filter-studio')?.value || ''
+  const stageFilter  = document.getElementById('clay-filter-stage')?.value || ''
+  const list = document.getElementById('clay-list')
+  list.innerHTML = '<div style="color:#aaa;font-size:14px;padding:40px;text-align:center">Loading...</div>'
+
+  let q = sb.from('clay_tickets').select(`
+    id, ticket_number, studio_id, stage, description, notes, created_at, updated_at,
+    signin_entries(id, name, email, phone)
+  `).order('created_at', { ascending: false }).limit(200)
+
+  if (studioFilter) q = q.eq('studio_id', studioFilter)
+  if (stageFilter)  q = q.eq('stage', stageFilter)
+
+  const { data, error } = await q
+  if (error) { list.innerHTML = `<div style="color:#c0392b;padding:20px">Error loading clay tickets: ${error.message}</div>`; return }
+  if (!data?.length) { list.innerHTML = '<div style="color:#aaa;font-size:14px;padding:40px;text-align:center">No clay tickets found.</div>'; return }
+
+  list.innerHTML = data.map(t => {
+    const stage = getClayStage(t.stage)
+    const contacts = (t.signin_entries || [])
+    const contactHtml = contacts.length
+      ? contacts.map(c => `<span style="font-size:12px;color:#555;background:#f5f5f0;border-radius:12px;padding:2px 8px;display:inline-block;margin:2px">${c.name}${c.email ? ` <span style="color:#aaa">${c.email}</span>` : ''}${c.phone ? ` <span style="color:#aaa">${c.phone}</span>` : ''}</span>`).join('')
+      : '<span style="font-size:12px;color:#aaa">No contacts</span>'
+
+    const nextBtn = stage.next
+      ? `<button onclick="advanceClayStage('${t.id}','${stage.next}', this)" style="padding:5px 12px;background:#1a1a2e;color:white;border:none;border-radius:6px;font-size:11px;cursor:pointer;white-space:nowrap">→ ${stage.nextLabel}</button>`
+      : '<span style="font-size:11px;color:#4caf50;font-weight:600">Complete ✓</span>'
+
+    const date = new Date(t.created_at).toLocaleDateString('en-CA', { month:'short', day:'numeric' })
+
+    return `
+    <div style="background:white;border-radius:10px;border:1px solid #e0e0d8;padding:14px 16px;margin-bottom:10px;display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap" id="clay-row-${t.id}">
+      <div style="min-width:70px;text-align:center">
+        <div style="font-size:22px;font-weight:900;color:#7a4f00;letter-spacing:2px;font-variant-numeric:tabular-nums">${t.ticket_number}</div>
+        <div style="font-size:10px;color:#aaa;margin-top:2px">${date}</div>
+        <div style="font-size:10px;color:#888;margin-top:1px">${getStudioName(t.studio_id)?.split(' - ')[1] || t.studio_id}</div>
+      </div>
+      <div style="flex:1;min-width:200px">
+        ${clayStageChip(t.stage)}
+        ${t.description ? `<div style="font-size:13px;color:#333;margin-top:6px">${t.description}</div>` : ''}
+        ${t.notes ? `<div style="font-size:12px;color:#888;margin-top:4px">📝 ${t.notes}</div>` : ''}
+        <div style="margin-top:8px">${contactHtml}</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+        ${nextBtn}
+        <button onclick="openClayDetail('${t.id}')" style="padding:5px 12px;border:1px solid #d0d0c8;border-radius:6px;font-size:11px;cursor:pointer;background:none;color:#666">Edit / View</button>
+      </div>
+    </div>`
+  }).join('')
+}
+
+async function advanceClayStage(ticketId, newStage, btn) {
+  btn.disabled = true
+  btn.textContent = '...'
+  const { error } = await sb.from('clay_tickets').update({ stage: newStage, updated_at: new Date().toISOString() }).eq('id', ticketId)
+  if (error) { btn.disabled = false; btn.textContent = '!Error'; showToast?.('Error updating stage'); return }
+
+  const stage = getClayStage(newStage)
+  if (stage.emailTrigger) {
+    // Queue email (logged to console for now — wire to Shopify/email service when ready)
+    const { data: ticket } = await sb.from('clay_tickets').select('ticket_number, signin_entries(name, email)').eq('id', ticketId).single()
+    const emails = (ticket?.signin_entries || []).filter(c => c.email).map(c => c.email)
+    console.log(`[Clay email trigger] Stage: ${newStage} | Ticket #${ticket?.ticket_number} | Emails: ${emails.join(', ')}`)
+    if (emails.length) showAdminToast(`📧 Email queued for ${emails.length} contact(s) — stage: ${stage.label}`, 4000)
+  }
+
+  loadClayTab()
+}
+
+function openNewClayTicketModal() {
+  // Pre-select current studio
+  const newStudioSel = document.getElementById('clay-new-studio')
+  if (currentStudioId) newStudioSel.value = currentStudioId
+  document.getElementById('clay-new-desc').value = ''
+  document.getElementById('clay-new-contacts').value = ''
+  document.getElementById('clay-new-notes').value = ''
+  document.getElementById('clay-modal').style.display = 'flex'
+}
+
+function closeClayModal() { document.getElementById('clay-modal').style.display = 'none' }
+
+async function saveNewClayTicket() {
+  const studio = document.getElementById('clay-new-studio').value
+  if (!studio) { alert('Please select a studio'); return }
+
+  const desc     = document.getElementById('clay-new-desc').value.trim() || null
+  const notes    = document.getElementById('clay-new-notes').value.trim() || null
+  const rawContacts = document.getElementById('clay-new-contacts').value.trim()
+
+  const btn = document.getElementById('clay-save-btn')
+  btn.disabled = true; btn.textContent = 'Creating...'
+
+  // Get next ticket number
+  const { data: ticketNum, error: seqErr } = await sb.rpc('next_clay_ticket_number')
+  if (seqErr) { btn.disabled = false; btn.textContent = 'Create Ticket'; alert('Error getting ticket number'); return }
+
+  // Insert ticket
+  const { data: ticket, error } = await sb.from('clay_tickets').insert({
+    ticket_number: ticketNum, studio_id: studio, description: desc, notes, stage: 'submitted'
+  }).select().single()
+
+  if (error) { btn.disabled = false; btn.textContent = 'Create Ticket'; alert('Error creating ticket: ' + error.message); return }
+
+  // Parse and insert contacts as signin_entries if provided
+  if (rawContacts) {
+    const lines = rawContacts.split('\n').map(l => l.trim()).filter(Boolean)
+    const entries = lines.map(line => {
+      const [namePart, emailPart] = line.split(',').map(s => s.trim())
+      return { studio_id: studio, mode: 'workshop', name: namePart || line, email: emailPart || null, clay_ticket_id: ticket.id }
+    }).filter(e => e.name)
+    if (entries.length) await sb.from('signin_entries').insert(entries)
+  }
+
+  btn.disabled = false; btn.textContent = 'Create Ticket'
+  closeClayModal()
+  loadClayTab()
+  showAdminToast(`Ticket #${ticketNum} created`)
+}
+
+async function openClayDetail(ticketId) {
+  const modal = document.getElementById('clay-detail-modal')
+  const content = document.getElementById('clay-detail-content')
+  content.innerHTML = '<div style="color:#aaa;padding:20px;text-align:center">Loading...</div>'
+  modal.style.display = 'flex'
+
+  const { data: t, error } = await sb.from('clay_tickets')
+    .select('*, signin_entries(id, name, email, phone)')
+    .eq('id', ticketId).single()
+
+  if (error || !t) { content.innerHTML = '<div style="color:#c0392b">Error loading ticket</div>'; return }
+
+  const stage = getClayStage(t.stage)
+  const stageOptions = CLAY_STAGES.map(s => `<option value="${s.key}" ${s.key === t.stage ? 'selected' : ''}>${s.label}</option>`).join('')
+  const contacts = t.signin_entries || []
+
+  content.innerHTML = `
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+      <div style="font-size:36px;font-weight:900;color:#7a4f00;letter-spacing:3px">${t.ticket_number}</div>
+      <div>
+        <div style="font-size:14px;font-weight:600">${getStudioName(t.studio_id)}</div>
+        <div style="font-size:12px;color:#aaa">${new Date(t.created_at).toLocaleDateString('en-CA', { month:'long', day:'numeric', year:'numeric' })}</div>
+      </div>
+    </div>
+    <div style="display:grid;gap:12px">
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Stage</div>
+        <select id="clay-edit-stage-${ticketId}" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:13px;outline:none;background:white">${stageOptions}</select>
+      </div>
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Description</div>
+        <input type="text" id="clay-edit-desc-${ticketId}" value="${t.description || ''}" placeholder="e.g. 3 mugs + 1 bowl" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none">
+      </div>
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Notes</div>
+        <input type="text" id="clay-edit-notes-${ticketId}" value="${t.notes || ''}" placeholder="Any special instructions..." style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none">
+      </div>
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Contacts (${contacts.length})</div>
+        ${contacts.length ? contacts.map(c => `
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:#f8f8f5;border-radius:6px;margin-bottom:4px">
+            <div>
+              <span style="font-size:13px;font-weight:600">${c.name}</span>
+              ${c.email ? `<span style="font-size:12px;color:#888;margin-left:8px">${c.email}</span>` : ''}
+              ${c.phone ? `<span style="font-size:12px;color:#888;margin-left:8px">${c.phone}</span>` : ''}
+            </div>
+          </div>`).join('') : '<div style="font-size:13px;color:#aaa">No contacts on this ticket.</div>'}
+        <div style="margin-top:8px">
+          <div style="font-size:11px;color:#888;margin-bottom:4px">Add contact:</div>
+          <div style="display:flex;gap:6px">
+            <input type="text" id="clay-add-name-${ticketId}" placeholder="Name" style="flex:1;padding:7px 10px;border:1px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none">
+            <input type="email" id="clay-add-email-${ticketId}" placeholder="Email" style="flex:1.5;padding:7px 10px;border:1px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none">
+            <button onclick="addClayContact('${ticketId}','${t.studio_id}')" style="padding:7px 12px;background:#1a1a2e;color:white;border:none;border-radius:6px;font-size:12px;cursor:pointer">Add</button>
+          </div>
+        </div>
+      </div>
+      <button onclick="saveClayEdits('${ticketId}')" style="padding:10px;background:#1a1a2e;color:white;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">Save Changes</button>
+    </div>
+  `
+}
+
+async function addClayContact(ticketId, studioId) {
+  const name = document.getElementById(`clay-add-name-${ticketId}`)?.value.trim()
+  const email = document.getElementById(`clay-add-email-${ticketId}`)?.value.trim()
+  if (!name) { alert('Name is required'); return }
+  await sb.from('signin_entries').insert({ studio_id: studioId, mode: 'workshop', name, email: email || null, clay_ticket_id: ticketId })
+  openClayDetail(ticketId)
+}
+
+async function saveClayEdits(ticketId) {
+  const stage = document.getElementById(`clay-edit-stage-${ticketId}`)?.value
+  const desc  = document.getElementById(`clay-edit-desc-${ticketId}`)?.value.trim() || null
+  const notes = document.getElementById(`clay-edit-notes-${ticketId}`)?.value.trim() || null
+  const { error } = await sb.from('clay_tickets').update({ stage, description: desc, notes, updated_at: new Date().toISOString() }).eq('id', ticketId)
+  if (error) { alert('Error saving: ' + error.message); return }
+  closeClayDetailModal()
+  loadClayTab()
+  showAdminToast('Ticket updated')
+}
+
+function closeClayDetailModal() { document.getElementById('clay-detail-modal').style.display = 'none' }
+
+function showAdminToast(msg, duration = 2500) {
+  // Reuse existing toast mechanism or create a simple one
+  let toast = document.getElementById('admin-toast')
+  if (!toast) {
+    toast = document.createElement('div')
+    toast.id = 'admin-toast'
+    toast.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1a1a2e;color:white;padding:12px 24px;border-radius:10px;font-size:14px;z-index:9999;opacity:0;transition:opacity 0.3s;pointer-events:none'
+    document.body.appendChild(toast)
+  }
+  toast.textContent = msg
+  toast.style.opacity = '1'
+  clearTimeout(toast._timer)
+  toast._timer = setTimeout(() => { toast.style.opacity = '0' }, duration)
+}
 </script>
+
+
+<!-- Clay Tracker Tab -->
+<div class="tab-content" id="tab-clay">
+  <div style="padding:1.5rem;max-width:900px">
+
+    <!-- Header + filters -->
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:1.25rem">
+      <div style="font-size:18px;font-weight:600">🏺 Clay Tracker</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <select id="clay-filter-studio" onchange="loadClayTab()" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none;background:white">
+          <option value="">All Studios</option>
+        </select>
+        <select id="clay-filter-stage" onchange="loadClayTab()" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none;background:white">
+          <option value="">All Stages</option>
+          <option value="submitted">Submitted</option>
+          <option value="bisque_kiln">In Bisque Kiln</option>
+          <option value="bisque_done">Bisque Done ✅</option>
+          <option value="glaze_kiln">In Glaze Kiln</option>
+          <option value="ready_pickup">Ready for Pickup 🎉</option>
+        </select>
+        <button onclick="openNewClayTicketModal()" style="height:32px;padding:0 14px;background:#1a1a2e;color:white;border:none;border-radius:6px;font-size:12px;cursor:pointer">+ New Ticket</button>
+      </div>
+    </div>
+
+    <div id="clay-list">
+      <div style="color:#aaa;font-size:14px;padding:40px;text-align:center">Loading...</div>
+    </div>
+  </div>
+</div>
+
+<!-- New Task Modal -->
+<div id="task-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:white;border-radius:14px;padding:24px;width:520px;max-width:95vw;max-height:90vh;overflow-y:auto">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+      <div style="font-size:16px;font-weight:700">New Task</div>
+      <button onclick="closeTaskModal()" style="background:none;border:none;font-size:22px;color:#aaa;cursor:pointer;line-height:1">&#215;</button>
+    </div>
+    <div style="display:grid;gap:14px">
+
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Template (optional)</div>
+        <select id="task-modal-template" onchange="fillTaskFromTemplate()" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:13px;outline:none;background:white">
+          <option value="">📋 Pick from template library (optional)...</option>
+        </select>
+      </div>
+
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Task Title *</div>
+        <input type="text" id="task-modal-title" placeholder="e.g. Clean supply closet" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none">
+      </div>
+
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Notes (optional)</div>
+        <input type="text" id="task-modal-notes" placeholder="Any additional details..." style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none">
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div>
+          <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Due Date</div>
+          <input type="date" id="task-modal-date" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none">
+        </div>
+        <div>
+          <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Repeat</div>
+          <select id="task-modal-repeat" onchange="onTaskRepeatChange()" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:13px;outline:none;background:white">
+            <option value="none">One-time</option>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+            <option value="monthly">Monthly</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="task-modal-days-row" style="display:none">
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Repeat on days</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:4px;font-size:13px"><input type="checkbox" class="task-modal-day-cb" value="mon">Mon</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:13px"><input type="checkbox" class="task-modal-day-cb" value="tue">Tue</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:13px"><input type="checkbox" class="task-modal-day-cb" value="wed">Wed</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:13px"><input type="checkbox" class="task-modal-day-cb" value="thu">Thu</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:13px"><input type="checkbox" class="task-modal-day-cb" value="fri">Fri</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:13px"><input type="checkbox" class="task-modal-day-cb" value="sat">Sat</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:13px"><input type="checkbox" class="task-modal-day-cb" value="sun">Sun</label>
+        </div>
+      </div>
+
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Send to Studios</div>
+        <div id="task-studio-picker"></div>
+      </div>
+
+    </div>
+    <div style="display:flex;gap:8px;margin-top:20px;justify-content:flex-end">
+      <button onclick="closeTaskModal()" style="padding:9px 18px;border:1px solid #d0d0c8;border-radius:8px;background:none;font-size:13px;cursor:pointer">Cancel</button>
+      <button id="task-modal-save-btn" onclick="saveTaskFromAdmin()" style="padding:9px 18px;background:#1a1a2e;color:white;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">Send to Studio</button>
+    </div>
+  </div>
+</div>
+
+<!-- New Clay Ticket Modal -->
+<div id="clay-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center">
+  <div style="background:white;border-radius:14px;padding:24px;width:480px;max-width:95vw;max-height:90vh;overflow-y:auto">
+    <div style="font-size:16px;font-weight:700;margin-bottom:16px">New Clay Ticket</div>
+    <div style="display:grid;gap:12px">
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Studio *</div>
+        <select id="clay-new-studio" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none;background:white">
+          <option value="">— Select studio —</option>
+        </select>
+      </div>
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Description (optional)</div>
+        <input type="text" id="clay-new-desc" placeholder="e.g. 3 mugs + 1 bowl" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none">
+      </div>
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Contacts (name + email, one per line)</div>
+        <textarea id="clay-new-contacts" placeholder="Jane Smith, jane@example.com&#10;Bob Jones, bob@example.com" rows="4" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:13px;outline:none;font-family:inherit;resize:vertical"></textarea>
+        <div style="font-size:11px;color:#aaa;margin-top:4px">These emails will receive kiln-stage notifications</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Notes (optional)</div>
+        <input type="text" id="clay-new-notes" placeholder="Any special instructions..." style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:20px;justify-content:flex-end">
+      <button onclick="closeClayModal()" style="padding:9px 18px;border:1px solid #d0d0c8;border-radius:8px;background:none;font-size:13px;cursor:pointer">Cancel</button>
+      <button onclick="saveNewClayTicket()" id="clay-save-btn" style="padding:9px 18px;background:#1a1a2e;color:white;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">Create Ticket</button>
+    </div>
+  </div>
+</div>
+
+<!-- Clay Ticket Detail Modal -->
+<div id="clay-detail-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center">
+  <div style="background:white;border-radius:14px;padding:24px;width:520px;max-width:95vw;max-height:90vh;overflow-y:auto">
+    <div id="clay-detail-content"></div>
+    <div style="display:flex;gap:8px;margin-top:20px;justify-content:flex-end">
+      <button onclick="closeClayDetailModal()" style="padding:9px 18px;border:1px solid #d0d0c8;border-radius:8px;background:none;font-size:13px;cursor:pointer">Close</button>
+    </div>
+  </div>
+</div>
 
 <!-- Guide Tab -->
 <div class="tab-content" id="tab-guide" style="max-width:760px">
