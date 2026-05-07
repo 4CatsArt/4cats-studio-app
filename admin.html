@@ -262,6 +262,7 @@ select:focus, input:focus { border-color: #888; }
         <button class="btn btn-primary" onclick="openAddSessionModal()">+ Add Session</button>
         <button class="btn" id="btn-discover" onclick="discoverFromShopify()" style="background:#f0fdf4;color:#166534;border-color:#bbf7d0">🔍 Discover from Shopify</button>
         <button class="btn" onclick="openCloseStudioModal()" style="background:#fff0f0;color:#c0392b;border-color:#f5c6cb">🔒 Close Studio Day</button>
+        <button class="btn" onclick="openTransferModal()" style="background:#f0f4ff;color:#1a4fa0;border-color:#bed0f7">↔ Transfer Booking</button>
       </div>
     </div>
     <div class="stats-row" id="stats-row"></div>
@@ -4140,6 +4141,244 @@ async function loadPartyReport() {
       </table>
     </div>`
 }
+
+// ── Transfer Booking ──────────────────────────────────────────────────────────
+
+let tr = { bookings: [], sessionMap: {}, selectedIds: new Set(), previewItems: [], oldProductData: null, newProductData: null }
+
+function openTransferModal() {
+  tr = { bookings: [], sessionMap: {}, selectedIds: new Set(), previewItems: [], oldProductData: null, newProductData: null }
+  document.getElementById('tr-order').value = ''
+  document.getElementById('tr-new-title').value = ''
+  document.getElementById('tr-lookup-status').textContent = ''
+  document.getElementById('tr-step-bookings').style.display = 'none'
+  document.getElementById('tr-step-preview').style.display = 'none'
+  document.getElementById('tr-status').textContent = ''
+  document.getElementById('transfer-modal').style.display = 'flex'
+  setTimeout(() => document.getElementById('tr-order').focus(), 50)
+}
+
+function closeTransferModal() { document.getElementById('transfer-modal').style.display = 'none' }
+
+async function trLookUpOrder() {
+  const raw = document.getElementById('tr-order').value.trim()
+  if (!raw) return
+  const statusEl = document.getElementById('tr-lookup-status')
+  statusEl.style.color = '#888'
+  statusEl.textContent = 'Looking up…'
+  document.getElementById('tr-step-bookings').style.display = 'none'
+  document.getElementById('tr-step-preview').style.display = 'none'
+
+  try {
+    const withHash = raw.startsWith('#') ? raw : '#' + raw
+    const withoutHash = raw.startsWith('#') ? raw.slice(1) : raw
+    const { data: bookings } = await sb.from('bookings')
+      .select('id, session_id, qty, customer_name, customer_email, shopify_order_name, studio_id, booked_at, product_title')
+      .or(`shopify_order_name.eq.${withHash},shopify_order_name.eq.${withoutHash}`)
+      .order('booked_at', { ascending: true })
+
+    if (!bookings?.length) { statusEl.style.color = '#c0392b'; statusEl.textContent = 'No bookings found for that order number.'; return }
+
+    const ids = [...new Set(bookings.map(b => b.session_id).filter(Boolean))]
+    let sessionMap = {}
+    if (ids.length) {
+      const { data: sessions } = await sb.from('sessions')
+        .select('id, title, session_date, session_time, studio_id, capacity, spaces_left_cache, session_type')
+        .in('id', ids)
+      sessions?.forEach(s => { sessionMap[s.id] = s })
+    }
+    tr.bookings = bookings
+    tr.sessionMap = sessionMap
+    tr.selectedIds = new Set(bookings.map(b => b.id))
+
+    statusEl.textContent = ''
+    trRenderBookings()
+  } catch(e) { statusEl.style.color = '#c0392b'; statusEl.textContent = 'Error: ' + e.message }
+}
+
+function trRenderBookings() {
+  const list = tr.bookings.map(b => {
+    const s = tr.sessionMap[b.session_id]
+    const sessionLabel = s
+      ? `<span style="color:#1a4fa0">${s.title}</span> · ${fmtDate(s.session_date)} · ${(s.session_time||'').substring(0,5)} · ${getStudioName(s.studio_id)}`
+      : `<span style="color:#c0392b">Unlinked</span>`
+    const checked = tr.selectedIds.has(b.id) ? 'checked' : ''
+    return `<label style="display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:0.5px solid #f0f0e8;cursor:pointer">
+      <input type="checkbox" ${checked} onchange="trToggle('${b.id}',this.checked)"
+        style="margin-top:2px;width:14px;height:14px;accent-color:#1a1a1a;flex-shrink:0">
+      <div>
+        <div style="font-size:12px;font-weight:500">${b.customer_name || '—'} <span style="font-weight:400;color:#888">${b.customer_email||''}</span></div>
+        <div style="font-size:11px;color:#555;margin-top:2px">${sessionLabel} · <b>${b.qty}</b> spot${b.qty!==1?'s':''}</div>
+      </div>
+    </label>`
+  }).join('')
+  document.getElementById('tr-bookings-list').innerHTML = list || '<div style="font-size:12px;color:#888">No bookings.</div>'
+  document.getElementById('tr-step-bookings').style.display = 'block'
+}
+
+function trToggle(id, checked) {
+  if (checked) tr.selectedIds.add(id); else tr.selectedIds.delete(id)
+}
+
+function parseShopifyTitleDate(title) {
+  const timeMatch = title.match(/^[\*]?(\d{1,2}(?::\d{2})?(?:am|pm))/i)
+  if (!timeMatch) return null
+  const raw = timeMatch[1].toLowerCase()
+  let h = 0, m = 0
+  const wm = raw.match(/^(\d{1,2}):(\d{2})(am|pm)$/)
+  const wom = raw.match(/^(\d{1,2})(am|pm)$/)
+  if (wm) { h = parseInt(wm[1]); m = parseInt(wm[2]); if (wm[3]==='pm'&&h<12) h+=12; if (wm[3]==='am'&&h===12) h=0 }
+  else if (wom) { h = parseInt(wom[1]); if (wom[2]==='pm'&&h<12) h+=12; if (wom[2]==='am'&&h===12) h=0 }
+  const sessionTime = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00`
+  const dateMatch = title.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+(\d{1,2})/i)
+  if (!dateMatch) return null
+  const now = new Date()
+  let year = now.getFullYear()
+  let d = new Date(`${dateMatch[1]} ${dateMatch[2]} ${year}`)
+  if (isNaN(d.getTime())) return null
+  if (d < new Date(now.getTime() - 30*24*60*60*1000)) { year++; d = new Date(`${dateMatch[1]} ${dateMatch[2]} ${year}`) }
+  const sessionDate = dateStr(d)
+  const titleMatch = title.match(/\|\s*(.+?)(?:\s*\|.*)?$/)
+  if (!titleMatch) return null
+  return { sessionDate, sessionTime, sessionTitle: titleMatch[1].trim() }
+}
+
+async function trPreview() {
+  const newTitle = document.getElementById('tr-new-title').value.trim()
+  const statusEl = document.getElementById('tr-status')
+  if (!tr.selectedIds.size) { statusEl.style.color='#c0392b'; statusEl.textContent='Select at least one booking.'; return }
+  if (!newTitle) { statusEl.style.color='#c0392b'; statusEl.textContent='Enter the new Shopify product title.'; return }
+
+  const parsed = parseShopifyTitleDate(newTitle)
+  if (!parsed) { statusEl.style.color='#c0392b'; statusEl.textContent="Could not parse a date from that title. Check format: e.g. 3pm Sat May 17th | Wheel Workshop"; return }
+
+  statusEl.style.color = '#888'; statusEl.textContent = 'Loading preview…'
+  document.getElementById('tr-step-preview').style.display = 'none'
+  tr.oldProductData = null; tr.newProductData = null
+
+  const { sessionDate: newDate, sessionTitle: newSessionTitle } = parsed
+  const selectedBookings = tr.bookings.filter(b => tr.selectedIds.has(b.id))
+  tr.previewItems = []
+
+  for (const booking of selectedBookings) {
+    const cur = tr.sessionMap[booking.session_id]
+    if (!cur) { tr.previewItems.push({ booking, cur: null, tgt: null, isMain: false, err: 'No session linked to this booking' }); continue }
+    const isMain = cur.title === newSessionTitle
+    const { data: tgts } = await sb.from('sessions')
+      .select('id, title, session_date, session_time, studio_id, capacity, spaces_left_cache')
+      .eq('title', cur.title).eq('session_time', cur.session_time).eq('studio_id', cur.studio_id).eq('session_date', newDate)
+      .limit(1)
+    const tgt = tgts?.[0] || null
+    tr.previewItems.push({ booking, cur, tgt, isMain, err: tgt ? null : `No "${cur.title}" session found on ${fmtDate(newDate)} at this studio` })
+  }
+
+  const mainItem = tr.previewItems.find(item => item.isMain && item.tgt)
+  if (mainItem) {
+    try {
+      const oldShopifyTitle = buildShopifyTitle(mainItem.cur.session_date, mainItem.cur.session_time, mainItem.cur.title)
+      if (oldShopifyTitle && oldShopifyTitle !== 'OVERRIDE') {
+        const r = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body: JSON.stringify({ action:'get_all', product_title: oldShopifyTitle }) })
+        const d = await r.json(); if (!d.error) tr.oldProductData = d
+      }
+      const r2 = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body: JSON.stringify({ action:'get_all', product_title: newTitle }) })
+      const d2 = await r2.json(); if (!d2.error) tr.newProductData = d2
+    } catch(e) { /* non-fatal */ }
+  }
+
+  trRenderPreview(newDate)
+  statusEl.textContent = ''
+}
+
+function trRenderPreview(newDate) {
+  let html = ''
+  for (const item of tr.previewItems) {
+    const { booking, cur, tgt, isMain, err } = item
+    if (err) {
+      html += `<div style="padding:8px 12px;background:#fff5f5;border:0.5px solid #f5c6cb;border-radius:7px;margin-bottom:6px;font-size:12px;color:#c0392b">⚠ ${err}</div>`
+      continue
+    }
+    const tag = isMain
+      ? `<span style="font-size:10px;background:#e8f0fe;color:#1a4fa0;border-radius:4px;padding:1px 6px;margin-left:5px">main</span>`
+      : `<span style="font-size:10px;background:#f5f5f0;color:#888;border-radius:4px;padding:1px 6px;margin-left:5px">add-on</span>`
+    const shopifyLine = isMain
+      ? (tr.oldProductData && tr.newProductData
+          ? `<div style="font-size:11px;color:#2e7d32;margin-top:3px">Shopify: old date +${booking.qty} inventory · new date −${booking.qty} inventory</div>`
+          : `<div style="font-size:11px;color:#e65100;margin-top:3px">⚠ Shopify product not found — inventory won’t be adjusted</div>`)
+      : `<div style="font-size:11px;color:#888;margin-top:3px">Supabase only (no Shopify inventory)</div>`
+    html += `<div style="padding:9px 12px;border:0.5px solid #e0e0d8;border-radius:7px;margin-bottom:6px">
+      <div style="font-size:12px;font-weight:500">${cur.title}${tag}</div>
+      <div style="font-size:12px;color:#444;margin-top:3px">${fmtDate(cur.session_date)} → <b>${fmtDate(newDate)}</b> · ${booking.qty} spot${booking.qty!==1?'s':''} · ${getStudioName(cur.studio_id)}</div>
+      ${shopifyLine}
+    </div>`
+  }
+  if (!tr.previewItems.length) html = '<div style="font-size:12px;color:#888">Nothing to transfer.</div>'
+  document.getElementById('tr-preview-list').innerHTML = html
+  const allFailed = tr.previewItems.length > 0 && tr.previewItems.every(i => i.err)
+  document.getElementById('tr-confirm-btn').disabled = allFailed
+  document.getElementById('tr-step-preview').style.display = 'block'
+}
+
+function trBackToBookings() {
+  document.getElementById('tr-step-preview').style.display = 'none'
+  document.getElementById('tr-status').textContent = ''
+}
+
+async function trConfirm() {
+  const statusEl = document.getElementById('tr-status')
+  const btn = document.getElementById('tr-confirm-btn')
+  statusEl.style.color = '#888'; statusEl.textContent = 'Transferring…'
+  btn.disabled = true
+
+  try {
+    for (const item of tr.previewItems) {
+      if (!item.tgt) continue
+      const qty = item.booking.qty || 1
+
+      const { error } = await sb.from('bookings').update({ session_id: item.tgt.id }).eq('id', item.booking.id)
+      if (error) throw error
+
+      const oldCache = item.cur.spaces_left_cache
+      if (oldCache !== null && oldCache !== undefined) {
+        const nc = (oldCache || 0) + qty
+        await sb.from('sessions').update({ spaces_left_cache: nc }).eq('id', item.cur.id)
+        const mem = scheduleData.find(s => s.id === item.cur.id)
+        if (mem) { mem.spaces_left_cache = nc; mem.reg = Math.max(0, mem.reg - qty) }
+      } else {
+        const mem = scheduleData.find(s => s.id === item.cur.id)
+        if (mem) mem.reg = Math.max(0, mem.reg - qty)
+      }
+      const newCache = item.tgt.spaces_left_cache
+      if (newCache !== null && newCache !== undefined) {
+        const nc = Math.max(0, (newCache || 0) - qty)
+        await sb.from('sessions').update({ spaces_left_cache: nc }).eq('id', item.tgt.id)
+        const mem = scheduleData.find(s => s.id === item.tgt.id)
+        if (mem) { mem.spaces_left_cache = nc; mem.reg += qty }
+      } else {
+        const mem = scheduleData.find(s => s.id === item.tgt.id)
+        if (mem) mem.reg += qty
+      }
+
+      if (item.isMain && tr.oldProductData && tr.newProductData) {
+        const variantTitle = STUDIO_VARIANT_MAP[item.cur.studio_id]
+        const oldVar = tr.oldProductData.variants.find(v => v.variant_title === variantTitle)
+        const newVar = tr.newProductData.variants.find(v => v.variant_title === variantTitle)
+        if (oldVar) await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
+          body: JSON.stringify({ action:'set', inventory_item_id: oldVar.inventory_item_id, quantity: oldVar.inventory_quantity + qty }) })
+        if (newVar) await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
+          body: JSON.stringify({ action:'set', inventory_item_id: newVar.inventory_item_id, quantity: Math.max(0, newVar.inventory_quantity - qty) }) })
+      }
+    }
+
+    const moved = tr.previewItems.filter(i => i.tgt).length
+    statusEl.style.color = '#2e7d32'
+    statusEl.textContent = `✓ ${moved} booking${moved!==1?'s':''} transferred`
+    btn.textContent = 'Close'; btn.onclick = closeTransferModal; btn.disabled = false
+    renderSchedule()
+  } catch(e) {
+    statusEl.style.color = '#c0392b'; statusEl.textContent = 'Error: ' + e.message
+    btn.disabled = false
+  }
+}
 </script>
 
 <!-- Guide Tab -->
@@ -4422,7 +4661,62 @@ async function loadPartyReport() {
   </div>
 </div>
 
-<!-- Staff Modal -->
+<!-- Transfer Booking Modal -->
+<div id="transfer-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:white;border-radius:12px;width:100%;max-width:560px;max-height:90vh;overflow-y:auto;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+
+    <!-- Header -->
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:1.25rem">
+      <div>
+        <h3 style="font-size:15px;font-weight:600;margin:0">Transfer Booking</h3>
+        <p style="font-size:12px;color:#888;margin:3px 0 0">Move a customer to a new date, including add-ons</p>
+      </div>
+      <button onclick="closeTransferModal()" style="background:none;border:none;font-size:22px;cursor:pointer;color:#888;line-height:1;flex-shrink:0;margin-left:1rem">&#xD7;</button>
+    </div>
+
+    <!-- Step 1: Order lookup -->
+    <div style="margin-bottom:1rem">
+      <label style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:5px">Order number</label>
+      <div style="display:flex;gap:8px">
+        <input id="tr-order" type="text" placeholder="#1234"
+          style="flex:1;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none"
+          onkeydown="if(event.key==='Enter') trLookUpOrder()">
+        <button onclick="trLookUpOrder()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:7px;font-size:13px;cursor:pointer">Look Up</button>
+      </div>
+      <div id="tr-lookup-status" style="font-size:12px;margin-top:6px;min-height:16px"></div>
+    </div>
+
+    <!-- Step 2: Bookings + new title -->
+    <div id="tr-step-bookings" style="display:none">
+      <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.4px;margin-bottom:4px">Bookings in this order</div>
+      <div id="tr-bookings-list" style="margin-bottom:1rem;padding-bottom:4px"></div>
+
+      <div class="modal-field" style="margin-bottom:0.875rem">
+        <label style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:5px">New Shopify product title <span style="text-transform:none;letter-spacing:0;font-weight:400">(for main session)</span></label>
+        <input id="tr-new-title" type="text" placeholder="e.g. 3pm Sat May 17th | Wheel Workshop"
+          style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;font-family:inherit"
+          onkeydown="if(event.key==='Enter') trPreview()">
+        <div style="font-size:11px;color:#aaa;margin-top:4px">Add-ons will automatically move to the same new date. Only enter the title for the main session.</div>
+      </div>
+
+      <button onclick="trPreview()" style="padding:8px 18px;background:#1a1a1a;color:white;border:none;border-radius:7px;font-size:13px;cursor:pointer">Preview Transfer &#x2192;</button>
+    </div>
+
+    <!-- Step 3: Preview + confirm -->
+    <div id="tr-step-preview" style="display:none;margin-top:1.25rem;padding-top:1.25rem;border-top:0.5px solid #f0f0e8">
+      <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.4px;margin-bottom:8px">Transfer preview</div>
+      <div id="tr-preview-list" style="margin-bottom:1rem"></div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <button onclick="trBackToBookings()" style="padding:7px 14px;border:0.5px solid #d0d0c8;border-radius:7px;background:white;font-size:13px;cursor:pointer">&#x2190; Back</button>
+        <button id="tr-confirm-btn" onclick="trConfirm()" style="padding:8px 20px;background:#1a1a1a;color:white;border:none;border-radius:7px;font-size:13px;cursor:pointer">Confirm Transfer</button>
+        <span id="tr-status" style="font-size:12px"></span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Staff Modal --><!-- Staff Modal -->
 <div id="staff-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
   <div style="background:white;border-radius:12px;width:100%;max-width:560px;max-height:90vh;overflow-y:auto;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
