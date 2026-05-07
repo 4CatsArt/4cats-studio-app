@@ -50,6 +50,16 @@
   .pipeline-stage { flex: 1; min-width: 100px; text-align: center; padding: 8px 6px; border-radius: 8px; font-size: 11px; font-weight: 600; cursor: pointer; border: 2px solid transparent; transition: all 0.15s; white-space: nowrap; }
   .pipeline-stage.active { border-color: #1a1a2e; }
 
+  /* Bulk action bar */
+  .bulk-bar { position: sticky; top: 0; z-index: 50; background: #1a1a2e; color: white; padding: 10px 16px; display: none; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; border-bottom: 2px solid #f0c040; }
+  .bulk-bar.show { display: flex; }
+  .bulk-info { font-size: 13px; font-weight: 600; }
+  .bulk-info span { color: #f0c040; }
+  .bulk-error { font-size: 12px; color: #ff8a80; margin-top: 2px; }
+  .bulk-advance-btn { padding: 8px 18px; background: #f0c040; color: #1a1a2e; border: none; border-radius: 8px; font-size: 13px; font-weight: 700; cursor: pointer; }
+  .bulk-advance-btn:disabled { background: #555; color: #aaa; cursor: not-allowed; }
+  .bulk-clear-btn { padding: 8px 14px; border: 1px solid #555; border-radius: 8px; background: none; color: #aaa; font-size: 12px; cursor: pointer; }
+
   /* Workshop group */
   .workshop-group { margin-bottom: 20px; }
   .workshop-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 2px solid #e0e0d8; }
@@ -58,7 +68,9 @@
   .workshop-count { font-size: 12px; color: #888; background: #f0f0e8; border-radius: 12px; padding: 2px 8px; }
 
   /* Ticket card */
-  .ticket-card { background: white; border-radius: 10px; border: 1px solid #e0e0d8; padding: 14px 16px; margin-bottom: 8px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .ticket-card { background: white; border-radius: 10px; border: 1px solid #e0e0d8; padding: 14px 16px; margin-bottom: 8px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; transition: border-color 0.15s, background 0.15s; }
+  .ticket-card.selected { border-color: #2d6a9f; background: #f0f6ff; }
+  .ticket-checkbox { width: 22px; height: 22px; accent-color: #2d6a9f; cursor: pointer; flex-shrink: 0; }
   .ticket-num { font-size: 26px; font-weight: 900; color: #7a4f00; letter-spacing: 2px; font-variant-numeric: tabular-nums; min-width: 72px; }
   .ticket-body { flex: 1; min-width: 160px; }
   .ticket-desc { font-size: 13px; color: #333; margin-bottom: 4px; }
@@ -158,6 +170,18 @@
     <button class="sort-btn active" id="sort-new" onclick="setSort('newest')">Newest first</button>
     <button class="sort-btn" id="sort-old" onclick="setSort('oldest')">Oldest first</button>
     <button onclick="loadTickets()" style="height:32px;padding:0 12px;border:1px solid #d0d0c8;border-radius:6px;font-size:12px;background:white;cursor:pointer">↻ Refresh</button>
+  </div>
+
+  <!-- Bulk action bar (appears when tickets are selected) -->
+  <div class="bulk-bar" id="bulk-bar">
+    <div>
+      <div class="bulk-info"><span id="bulk-count">0</span> ticket(s) selected</div>
+      <div class="bulk-error" id="bulk-error"></div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="bulk-clear-btn" onclick="clearSelection()">✕ Clear</button>
+      <button class="bulk-advance-btn" id="bulk-advance-btn" onclick="promptBulkAdvance()">Advance Selected →</button>
+    </div>
   </div>
 
   <div class="content">
@@ -349,6 +373,8 @@ function renderTickets() {
   })
 
   if (!tickets.length) {
+    selectedIds.clear()
+    document.getElementById('bulk-bar').classList.remove('show')
     document.getElementById('tickets-container').innerHTML = '<div class="empty">No active clay tickets.</div>'
     return
   }
@@ -372,15 +398,20 @@ function renderTickets() {
       : a.date.localeCompare(b.date)
   })
 
-  const html = sortedGroups.map(g => `
+  const html = sortedGroups.map(g => {
+    const groupId = g.tickets.map(t => t.id).join(',')
+    return `
     <div class="workshop-group">
       <div class="workshop-header">
         <div class="workshop-title">${g.label}</div>
-        <span class="workshop-count">${g.tickets.length} ticket${g.tickets.length !== 1 ? 's' : ''}</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button onclick="selectAllInGroup([${g.tickets.map(t=>`'${t.id}'`).join(',')}])" style="padding:4px 10px;border:1px solid #d0d0c8;border-radius:6px;font-size:11px;background:white;cursor:pointer;color:#555">Select all</button>
+          <span class="workshop-count">${g.tickets.length} ticket${g.tickets.length !== 1 ? 's' : ''}</span>
+        </div>
       </div>
       ${g.tickets.map(t => renderTicketCard(t)).join('')}
     </div>
-  `).join('')
+  `}).join('')
 
   document.getElementById('tickets-container').innerHTML = html
 }
@@ -402,6 +433,7 @@ function renderTicketCard(t) {
 
   return `
     <div class="ticket-card" id="ticket-card-${t.id}">
+      <input type="checkbox" class="ticket-checkbox" id="cb-${t.id}" onchange="onTicketCheck('${t.id}')" title="Select ticket">
       <div class="ticket-num">${t.ticket_number}</div>
       <div class="ticket-body">
         <span class="stage-chip stage-${t.stage}">${stage.label}</span>
@@ -413,6 +445,97 @@ function renderTicketCard(t) {
         ${actionHtml}
       </div>
     </div>`
+}
+
+// ── MULTI-SELECT ──────────────────────────────────
+let selectedIds = new Set()
+
+function onTicketCheck(id) {
+  const cb = document.getElementById(`cb-${id}`)
+  const card = document.getElementById(`ticket-card-${id}`)
+  if (cb.checked) {
+    selectedIds.add(id)
+    card.classList.add('selected')
+  } else {
+    selectedIds.delete(id)
+    card.classList.remove('selected')
+  }
+  updateBulkBar()
+}
+
+function selectAllInGroup(ids) {
+  ids.forEach(id => {
+    selectedIds.add(id)
+    const cb = document.getElementById(`cb-${id}`)
+    const card = document.getElementById(`ticket-card-${id}`)
+    if (cb) cb.checked = true
+    if (card) card.classList.add('selected')
+  })
+  updateBulkBar()
+}
+
+function clearSelection() {
+  selectedIds.forEach(id => {
+    const cb = document.getElementById(`cb-${id}`)
+    const card = document.getElementById(`ticket-card-${id}`)
+    if (cb) cb.checked = false
+    if (card) card.classList.remove('selected')
+  })
+  selectedIds.clear()
+  updateBulkBar()
+}
+
+function updateBulkBar() {
+  const bar = document.getElementById('bulk-bar')
+  const countEl = document.getElementById('bulk-count')
+  const errorEl = document.getElementById('bulk-error')
+  const advBtn = document.getElementById('bulk-advance-btn')
+
+  if (selectedIds.size === 0) {
+    bar.classList.remove('show')
+    return
+  }
+
+  bar.classList.add('show')
+  countEl.textContent = selectedIds.size
+
+  // Validate all same stage
+  const stages = [...selectedIds].map(id => allTickets.find(t => t.id === id)?.stage).filter(Boolean)
+  const uniqueStages = [...new Set(stages)]
+
+  if (uniqueStages.length > 1) {
+    errorEl.textContent = `⚠️ Mixed stages selected (${uniqueStages.join(', ')}) — select tickets at the same stage only`
+    advBtn.disabled = true
+  } else if (uniqueStages.length === 1 && !getStage(uniqueStages[0]).next) {
+    errorEl.textContent = '⚠️ Selected tickets are already at the final stage'
+    advBtn.disabled = true
+  } else {
+    errorEl.textContent = ''
+    advBtn.disabled = false
+    const nextStage = getStage(uniqueStages[0])?.next
+    const nextLabel = STAGES.find(s => s.key === nextStage)?.nextLabel || ''
+    advBtn.textContent = `${nextLabel} (${selectedIds.size}) →`
+  }
+}
+
+function promptBulkAdvance() {
+  const stages = [...selectedIds].map(id => allTickets.find(t => t.id === id)?.stage).filter(Boolean)
+  const uniqueStages = [...new Set(stages)]
+  if (uniqueStages.length !== 1) return
+
+  const currentStage = uniqueStages[0]
+  const nextStage = getStage(currentStage).next
+  if (!nextStage) return
+
+  const nextLabel = STAGES.find(s => s.key === nextStage)?.nextLabel || nextStage
+  const tickets = [...selectedIds].map(id => allTickets.find(t => t.id === id)).filter(Boolean)
+  const nums = tickets.map(t => t.ticket_number).join(', ')
+
+  pendingAdvance = { bulk: true, ids: [...selectedIds], newStage: nextStage }
+  document.getElementById('confirm-ticket-num').textContent = `${selectedIds.size} tickets`
+  document.getElementById('confirm-sub').textContent = `#${nums}`
+  document.getElementById('confirm-new-stage').textContent = `→ ${nextLabel}`
+  document.getElementById('confirm-overlay').classList.add('show')
 }
 
 // ── ADVANCE STAGE ─────────────────────────────────
@@ -431,40 +554,45 @@ function closeConfirm() {
 
 async function confirmAdvance() {
   if (!pendingAdvance) return
-  const { ticketId, ticketNumber, newStage } = pendingAdvance
   const btn = document.getElementById('confirm-yes-btn')
-  btn.disabled = true
-  btn.textContent = '...'
+  btn.disabled = true; btn.textContent = '...'
   closeConfirm()
+
+  const { newStage } = pendingAdvance
+  const stage = getStage(newStage)
+  const idsToUpdate = pendingAdvance.bulk ? pendingAdvance.ids : [pendingAdvance.ticketId]
 
   const { error } = await sb.from('clay_tickets')
     .update({ stage: newStage, updated_at: new Date().toISOString() })
-    .eq('id', ticketId)
+    .in('id', idsToUpdate)
 
-  btn.disabled = false
-  btn.textContent = 'Confirm'
+  btn.disabled = false; btn.textContent = 'Confirm'
 
   if (error) { showToast('Error updating — try again'); return }
 
-  const stage = getStage(newStage)
-
-  // Email trigger notification
+  // Email trigger
   if (stage.emailTrigger) {
-    const ticket = allTickets.find(t => t.id === ticketId)
-    const emails = (ticket?.signin_entries || []).filter(c => c.email).map(c => c.email)
-    if (emails.length) {
+    const affected = allTickets.filter(t => idsToUpdate.includes(t.id))
+    const emails = affected.flatMap(t => (t.signin_entries || []).filter(c => c.email).map(c => c.email))
+    const unique = [...new Set(emails)]
+    if (unique.length) {
       const banner = document.getElementById('email-banner')
-      banner.textContent = `📧 Notification will be sent to: ${emails.join(', ')} (stage: ${stage.label})`
+      banner.textContent = `📧 Notifications will be sent to: ${unique.join(', ')} (stage: ${stage.label})`
       banner.classList.add('show')
       setTimeout(() => banner.classList.remove('show'), 6000)
     }
   }
 
-  showToast(`Ticket #${ticketNumber} → ${stage.label}`)
+  const nums = idsToUpdate.map(id => allTickets.find(t => t.id === id)?.ticket_number).filter(Boolean).join(', ')
+  showToast(`${idsToUpdate.length > 1 ? idsToUpdate.length + ' tickets' : '#' + nums} → ${stage.label}`)
 
-  // Update locally to avoid full reload
-  const t = allTickets.find(t => t.id === ticketId)
-  if (t) t.stage = newStage
+  // Update local state
+  idsToUpdate.forEach(id => {
+    const t = allTickets.find(t => t.id === id)
+    if (t) t.stage = newStage
+  })
+
+  clearSelection()
   renderTickets()
 }
 
