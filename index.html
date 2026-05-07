@@ -1847,11 +1847,18 @@ async function loadDayView() {
   let partyBookings = {} // session_id -> [bookings]
   let partyDetails = {}  // booking_id -> party_detail row
 
-  const aftercareCounts = {}, earlyArrivalCounts = {}
+  const aftercareCounts = {}, earlyArrivalCounts = {}, signinData = {}
   if (filtered.length) {
     const ids = filtered.map(s => s.id)
     const { data: staff } = await sb.from('session_staff').select('*').in('session_id', ids)
     if (staff) staff.forEach(s => { staffData[s.session_id] = s })
+
+    // Sign-in entries for today
+    const { data: signins } = await sb.from('signin_entries').select('session_id, name, mode').in('session_id', ids)
+    if (signins) signins.forEach(e => {
+      if (!signinData[e.session_id]) signinData[e.session_id] = []
+      signinData[e.session_id].push({ name: e.name, mode: e.mode })
+    })
 
     const { data: bookings } = await sb.from('bookings')
       .select('id, session_id, customer_name, customer_email, customer_phone, shopify_order_name, qty, estimated_attendance, raw_payload, booked_at, aftercare, early_arrival')
@@ -2085,6 +2092,7 @@ async function loadDayView() {
         ${est ? `<div class="stat"><div class="stat-value">${est}</div><div class="stat-label">expected</div></div>` : ''}
         ${aftercareCounts[s.id] ? `<div class="stat"><div class="stat-value" style="color:#5b4fcf">${aftercareCounts[s.id]}</div><div class="stat-label">aftercare</div></div>` : ''}
         ${earlyArrivalCounts[s.id] ? `<div class="stat"><div class="stat-value" style="color:#e65100">${earlyArrivalCounts[s.id]}</div><div class="stat-label">early arr.</div></div>` : ''}
+        ${signinData[s.id]?.length ? `<div class="stat stat-clickable" onclick="showSignins('${s.id}', '${s.title.replace(/'/g,"\\'")}')"><div class="stat-value" style="color:#2d6a9f">${signinData[s.id].length}</div><div class="stat-label">signed in ↗</div></div>` : ''}
       </div>
 
       ${partyBlocksHtml}
@@ -2398,6 +2406,65 @@ function editInput(id, value, placeholder, cls) {
 }
 function editCheck(id, checked) {
   return `<input type="checkbox" id="${id}" ${checked ? 'checked' : ''}>`
+}
+
+async function showSignins(sessionId, title) {
+  const { data, error } = await sb.from('signin_entries')
+    .select('name, email, phone, mode, signed_in_at, clay_ticket_id, clay_tickets(ticket_number)')
+    .eq('session_id', sessionId)
+    .order('signed_in_at')
+
+  const overlay = document.createElement('div')
+  overlay.className = 'overlay'
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove() })
+
+  let bodyHtml = ''
+  if (error || !data?.length) {
+    bodyHtml = '<div style="color:#aaa;padding:20px;text-align:center">No sign-ins recorded yet.</div>'
+  } else {
+    const byTicket = {}
+    const noTicket = []
+    data.forEach(e => {
+      const tNum = e.clay_tickets?.ticket_number
+      if (tNum) {
+        if (!byTicket[tNum]) byTicket[tNum] = []
+        byTicket[tNum].push(e)
+      } else {
+        noTicket.push(e)
+      }
+    })
+
+    bodyHtml = `<div style="font-size:12px;color:#888;margin-bottom:12px">${data.length} signed in</div>`
+
+    Object.entries(byTicket).forEach(([ticketNum, entries]) => {
+      bodyHtml += `<div style="background:#fffbea;border:1px solid #f0e098;border-radius:8px;padding:10px 14px;margin-bottom:8px">
+        <div style="font-size:11px;color:#7a6200;font-weight:700;margin-bottom:8px">🏺 Clay Ticket #${ticketNum}</div>
+        ${entries.map(e => `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:0.5px solid #f0e098">
+          <span style="font-size:13px;font-weight:600">${e.name}</span>
+          <span style="font-size:12px;color:#888">${e.email || e.phone || ''}</span>
+        </div>`).join('')}
+      </div>`
+    })
+
+    if (noTicket.length) {
+      bodyHtml += `<div style="background:#f8f8f5;border:1px solid #e0e0d8;border-radius:8px;padding:10px 14px">
+        ${noTicket.map(e => `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:0.5px solid #eee">
+          <span style="font-size:13px;font-weight:600">${e.name}</span>
+          <span style="font-size:12px;color:#888">${e.email || e.phone || ''}</span>
+        </div>`).join('')}
+      </div>`
+    }
+  }
+
+  overlay.innerHTML = `
+    <div class="overlay-card" style="max-width:480px">
+      <div class="overlay-header">
+        <div><div class="overlay-title">Sign-ins</div><div class="overlay-sub">${title}</div></div>
+        <button class="close-btn" onclick="this.closest('.overlay').remove()">&#215;</button>
+      </div>
+      <div style="padding:0.5rem 0">${bodyHtml}</div>
+    </div>`
+  document.body.appendChild(overlay)
 }
 
 async function showBookings(sessionId, title, dateLabel, sessionType, sessionTime) {
