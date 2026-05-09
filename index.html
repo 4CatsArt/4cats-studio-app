@@ -1825,6 +1825,7 @@ async function saveAllSessions() {
 // ── DAY VIEW ──────────────────────────────────────────────────
 
 async function loadDayView() {
+  todaySessionsCache = []
   loadPartyFormBanner()
   document.getElementById('date-bar').textContent = formatDate(currentDate)
   const container = document.getElementById('sessions-container')
@@ -2064,30 +2065,19 @@ async function loadDayView() {
         buildPartyBookingBlock(b, partyDetails[b.id] || null, subtype, idx, s.title, dateStr(currentDate))
       ).join('')
 
-      // Check-in list — party guests who checked in via the sign-in page
-      const partyCheckins = (signinData[s.id] || []).filter(e => e.mode === 'party')
-        .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-      const checkinListHtml = partyCheckins.length
-        ? `<div style="margin-top:14px;border-top:0.5px solid #f0b8cc;padding-top:12px">
-            <div style="font-size:11px;font-weight:600;color:#99354e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between">
-              <span>✅ Checked In</span>
-              <span style="background:#fce8f0;color:#99354e;border-radius:12px;padding:2px 10px;font-size:12px;font-weight:700">${partyCheckins.length}</span>
-            </div>
-            <div style="display:flex;flex-wrap:wrap;gap:6px">
-              ${partyCheckins.map(e => {
-                const t = e.created_at ? new Date(e.created_at).toLocaleTimeString('en-CA', { hour:'numeric', minute:'2-digit', hour12:true }) : ''
-                return `<span style="background:#fff0f5;border:0.5px solid #f0b8cc;border-radius:20px;padding:3px 12px;font-size:12px;color:#7a2940">
-                  ${e.name}${t ? `<span style="color:#c06080;margin-left:5px;font-size:11px">${t}</span>` : ''}
-                </span>`
-              }).join('')}
-            </div>
-          </div>`
-        : `<div style="margin-top:14px;border-top:0.5px solid #f0b8cc;padding-top:10px;font-size:12px;color:#c06080">No guests checked in yet.</div>`
+      // Check-in list — shown as a button that opens the sign-ins overlay
+      const partyCheckinCount = (signinData[s.id] || []).filter(e => e.mode === 'party').length
+      const checkinBtnHtml = `<div style="margin-top:14px;border-top:0.5px solid #f0b8cc;padding-top:12px">
+        <button onclick="showSignins('${s.id}', '${s.title.replace(/'/g, "\\'")}')"
+          style="padding:7px 18px;background:#fff0f5;border:0.5px solid #f0b8cc;border-radius:8px;font-size:13px;color:#99354e;font-weight:600;cursor:pointer">
+          ✅ Checked In (${partyCheckinCount})
+        </button>
+      </div>`
 
       partyBlocksHtml = `
         <div class="party-base-pill">📋 Base: ${baseInfo}</div>
         ${sessionPartyBookings.length > 0 ? partyBlocksList : '<p style="font-size:13px;color:#aaa;padding:8px 0">No bookings yet for this party slot.</p>'}
-        ${checkinListHtml}
+        ${checkinBtnHtml}
       `
     }
 
@@ -2430,23 +2420,42 @@ function editCheck(id, checked) {
   return `<input type="checkbox" id="${id}" ${checked ? 'checked' : ''}>`
 }
 
+let todaySessionsCache = []  // cached for reassign dropdown
+
 async function showSignins(sessionId, title) {
   const { data, error } = await sb.from('signin_entries')
-    .select('name, email, phone, mode, signed_in_at, clay_ticket_id, clay_tickets(ticket_number)')
+    .select('id, name, email, phone, mode, signed_in_at, clay_ticket_id, clay_tickets(ticket_number)')
     .eq('session_id', sessionId)
     .order('signed_in_at')
 
+  // Load today's sessions for reassign dropdown (cached)
+  if (!todaySessionsCache.length) {
+    const today = dateStr(currentDate)
+    const { data: sessions } = await sb.from('sessions')
+      .select('id, title, session_time')
+      .eq('studio_id', currentStudioId)
+      .eq('session_date', today)
+      .order('session_time')
+    todaySessionsCache = sessions || []
+  }
+  const sessionOptions = todaySessionsCache
+    .filter(s => s.id !== sessionId)
+    .map(s => `<option value="${s.id}">${fmtTime(s.session_time)} · ${s.title.replace(/"/g,'&quot;')}</option>`)
+    .join('')
+
   const overlay = document.createElement('div')
   overlay.className = 'overlay'
-  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove() })
+  overlay.id = 'signins-overlay'
+  overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); todaySessionsCache = [] } })
 
-  let bodyHtml = ''
-  if (error || !data?.length) {
-    bodyHtml = '<div style="color:#aaa;padding:20px;text-align:center">No sign-ins recorded yet.</div>'
-  } else {
+  function buildBody(entries) {
+    if (error || !entries?.length) {
+      return '<div style="color:#aaa;padding:20px;text-align:center">No sign-ins recorded yet.</div>'
+    }
+
     const byTicket = {}
     const noTicket = []
-    data.forEach(e => {
+    entries.forEach(e => {
       const tNum = e.clay_tickets?.ticket_number
       if (tNum) {
         if (!byTicket[tNum]) byTicket[tNum] = []
@@ -2456,37 +2465,99 @@ async function showSignins(sessionId, title) {
       }
     })
 
-    bodyHtml = `<div style="font-size:12px;color:#888;margin-bottom:12px">${data.length} signed in</div>`
+    function entryRow(e) {
+      const t = e.signed_in_at ? new Date(e.signed_in_at).toLocaleTimeString('en-CA', { hour:'numeric', minute:'2-digit', hour12:true }) : ''
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:0.5px solid #f0f0e8;gap:10px;flex-wrap:wrap">
+        <div>
+          <span style="font-size:13px;font-weight:600">${e.name}</span>
+          ${e.email || e.phone ? `<span style="font-size:12px;color:#888;margin-left:8px">${e.email || e.phone}</span>` : ''}
+          ${t ? `<span style="font-size:11px;color:#aaa;margin-left:6px">${t}</span>` : ''}
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-shrink:0" id="reassign-row-${e.id}">
+          <select id="reassign-sel-${e.id}"
+            style="padding:4px 8px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:12px;outline:none;background:white;max-width:220px">
+            <option value="">Move to...</option>
+            ${sessionOptions}
+          </select>
+          <button onclick="reassignSignin('${e.id}', '${sessionId}', '${title.replace(/'/g,"\\'")}')"
+            style="padding:4px 12px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:12px;cursor:pointer;white-space:nowrap">
+            Move →
+          </button>
+        </div>
+      </div>`
+    }
+
+    let html = `<div style="font-size:12px;color:#888;margin-bottom:12px">${entries.length} signed in</div>`
 
     Object.entries(byTicket).forEach(([ticketNum, entries]) => {
-      bodyHtml += `<div style="background:#fffbea;border:1px solid #f0e098;border-radius:8px;padding:10px 14px;margin-bottom:8px">
-        <div style="font-size:11px;color:#7a6200;font-weight:700;margin-bottom:8px">🏺 Clay Ticket #${ticketNum}</div>
-        ${entries.map(e => `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:0.5px solid #f0e098">
-          <span style="font-size:13px;font-weight:600">${e.name}</span>
-          <span style="font-size:12px;color:#888">${e.email || e.phone || ''}</span>
-        </div>`).join('')}
+      html += `<div style="background:#fffbea;border:1px solid #f0e098;border-radius:8px;padding:10px 14px;margin-bottom:8px">
+        <div style="font-size:11px;color:#7a6200;font-weight:700;margin-bottom:6px">🏺 Clay Ticket #${ticketNum}</div>
+        ${entries.map(entryRow).join('')}
       </div>`
     })
 
     if (noTicket.length) {
-      bodyHtml += `<div style="background:#f8f8f5;border:1px solid #e0e0d8;border-radius:8px;padding:10px 14px">
-        ${noTicket.map(e => `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:0.5px solid #eee">
-          <span style="font-size:13px;font-weight:600">${e.name}</span>
-          <span style="font-size:12px;color:#888">${e.email || e.phone || ''}</span>
-        </div>`).join('')}
+      html += `<div style="background:#f8f8f5;border:1px solid #e0e0d8;border-radius:8px;padding:10px 14px">
+        ${noTicket.map(entryRow).join('')}
       </div>`
     }
+    return html
   }
 
   overlay.innerHTML = `
-    <div class="overlay-card" style="max-width:480px">
+    <div class="overlay-card" style="max-width:560px">
       <div class="overlay-header">
-        <div><div class="overlay-title">Sign-ins</div><div class="overlay-sub">${title}</div></div>
-        <button class="close-btn" onclick="this.closest('.overlay').remove()">&#215;</button>
+        <div><div class="overlay-title">Checked In</div><div class="overlay-sub">${title}</div></div>
+        <button class="close-btn" onclick="this.closest('.overlay').remove();todaySessionsCache=[]">&#215;</button>
       </div>
-      <div style="padding:0.5rem 0">${bodyHtml}</div>
+      <div id="signins-body" style="padding:0.5rem 0">${buildBody(data)}</div>
     </div>`
   document.body.appendChild(overlay)
+}
+
+async function reassignSignin(entryId, origSessionId, origTitle) {
+  const sel = document.getElementById(`reassign-sel-${entryId}`)
+  const newSessionId = sel?.value
+  if (!newSessionId) { alert('Please select a session to move this guest to.'); return }
+
+  const newSession = todaySessionsCache.find(s => s.id === newSessionId)
+  const newTitle = newSession ? `${fmtTime(newSession.session_time)} · ${newSession.title}` : 'the new session'
+
+  const btn = sel.nextElementSibling
+  btn.textContent = 'Moving...'
+  btn.disabled = true
+
+  const { error } = await sb.from('signin_entries')
+    .update({ session_id: newSessionId })
+    .eq('id', entryId)
+
+  if (error) {
+    alert('Error moving guest — please try again')
+    btn.textContent = 'Move →'
+    btn.disabled = false
+    return
+  }
+
+  // Remove row from overlay and update count
+  const row = document.getElementById(`reassign-row-${entryId}`)?.closest('[style*="border-bottom"]')
+  if (row) row.style.opacity = '0.4'
+
+  const body = document.getElementById('signins-body')
+  const countEl = body?.querySelector('div[style*="color:#888"]')
+  if (countEl) {
+    const current = parseInt(countEl.textContent) || 0
+    countEl.textContent = `${Math.max(0, current - 1)} signed in`
+  }
+
+  // Mark the moved row visually
+  const rowDiv = document.getElementById(`reassign-row-${entryId}`)
+  if (rowDiv) {
+    rowDiv.innerHTML = `<span style="font-size:12px;color:#2e7d32">✓ Moved to ${newTitle}</span>`
+  }
+
+  // Refresh signinData so the stat updates when overlay closes
+  signinData[origSessionId] = (signinData[origSessionId] || []).filter(e => e.id !== entryId)
+  if (!signinData[newSessionId]) signinData[newSessionId] = []
 }
 
 async function showBookings(sessionId, title, dateLabel, sessionType, sessionTime) {
