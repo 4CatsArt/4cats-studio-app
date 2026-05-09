@@ -246,6 +246,8 @@ let sortCol = 'created_at'
 let sortDir = 'desc'
 let selectedIds = new Set()
 let pendingAdvance = null
+let pendingEmailTimeout = null
+let pendingEmailInterval = null
 
 // ── AUTH ──────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
@@ -476,32 +478,65 @@ async function confirmAdvance() {
   if (error) { showToast('Error — try again'); return }
 
   // Email trigger
-  if (STAGES[nextStage]?.emailTrigger) {
-    const affected = allTickets.filter(t => ids.includes(t.id))
-    const emails   = [...new Set(affected.flatMap(t => (t.signin_entries||[]).filter(c=>c.email).map(c=>c.email)))]
-    if (emails.length) {
-      // Call Edge Function for each ticket
-      for (const t of affected) {
-        const ticketEmails = (t.signin_entries||[]).filter(c=>c.email).map(c=>c.email)
-        if (!ticketEmails.length) continue
-        const fnName = nextStage === 'bisque_ready' ? 'send-bisque-email' : 'send-pickup-email'
-        fetch(`https://snxibhbhhchjthfmjtaj.supabase.co/functions/v1/${fnName}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json',
-            'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA' },
-          body: JSON.stringify({
-            emails: ticketEmails,
-            ticketNumber: t.ticket_number,
-            studioId: studioId,
-            description: t.description || ''
-          })
-        }).catch(err => console.error('Email send error:', err))
-      }
-      const b = document.getElementById('email-banner')
-      b.textContent = `📧 Email sent to: ${emails.join(', ')}`
-      b.classList.add('show'); clearTimeout(b._t); b._t = setTimeout(() => b.classList.remove('show'), 6000)
-    }
+if (STAGES[nextStage]?.emailTrigger) {
+  const affected = allTickets.filter(t => ids.includes(t.id))
+  const prevStage = affected[0]?.stage  // all same stage, so just grab first
+  // revert display stage temporarily (already updated in Supabase, but store for undo)
+  
+  // Clear any previous pending email
+  if (pendingEmailTimeout) {
+    clearTimeout(pendingEmailTimeout)
+    clearInterval(pendingEmailInterval)
+    pendingEmailTimeout = null
+    pendingEmailInterval = null
   }
+
+  // Show countdown banner
+  const b = document.getElementById('email-banner')
+  let secondsLeft = 60
+  const fnName = nextStage === 'bisque_ready' ? 'send-bisque-email' : 'send-pickup-email'
+  const emailList = [...new Set(affected.flatMap(t => (t.signin_entries||[]).filter(c=>c.email).map(c=>c.email)))]
+
+  function updateBanner() {
+    b.innerHTML = `📧 Email sending in <strong>0:${String(secondsLeft).padStart(2,'0')}</strong> &nbsp; <button onclick="undoEmailSend()" style="padding:3px 10px;border:1px solid #2e7d32;border-radius:5px;background:white;color:#2e7d32;font-size:12px;font-weight:600;cursor:pointer;">✕ Undo</button>`
+  }
+  updateBanner()
+  b.classList.add('show')
+
+  pendingEmailInterval = setInterval(() => {
+    secondsLeft--
+    if (secondsLeft <= 0) { clearInterval(pendingEmailInterval); return }
+    updateBanner()
+  }, 1000)
+
+  pendingEmailTimeout = setTimeout(async () => {
+    clearInterval(pendingEmailInterval)
+    b.classList.remove('show')
+    pendingEmailTimeout = null
+    pendingEmailInterval = null
+    // Fire emails — one per ticket
+    for (const t of affected) {
+      const ticketEmails = (t.signin_entries||[]).filter(c=>c.email).map(c=>c.email)
+      if (!ticketEmails.length) continue
+      fetch(`https://snxibhbhhchjthfmjtaj.supabase.co/functions/v1/${fnName}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA'
+        },
+        body: JSON.stringify({
+          emails: ticketEmails,
+          ticketNumber: t.ticket_number,
+          studioId: studioId,
+          description: t.description || ''
+        })
+      }).catch(err => console.error('Email send error:', err))
+    }
+  }, 60000)
+
+  // Store undo info
+  window._undoEmailData = { ids, prevStage }
+}
 
   const nums = ids.map(id => allTickets.find(t => t.id === id)?.ticket_number).filter(Boolean).join(', ')
   showToast(`${ids.length > 1 ? ids.length + ' tickets' : '#' + nums} → ${STAGES[nextStage].label}`)
@@ -509,7 +544,28 @@ async function confirmAdvance() {
   clearSelection(); renderTable()
   pendingAdvance = null
 }
+async function undoEmailSend() {
+  if (pendingEmailTimeout) {
+    clearTimeout(pendingEmailTimeout)
+    clearInterval(pendingEmailInterval)
+    pendingEmailTimeout = null
+    pendingEmailInterval = null
+  }
+  const b = document.getElementById('email-banner')
+  b.classList.remove('show')
 
+  const { ids, prevStage } = window._undoEmailData || {}
+  if (!ids || !prevStage) return
+
+  const { error } = await sb.from('clay_tickets').update({ stage: prevStage }).in('id', ids)
+  if (error) { showToast('Undo failed — check connection'); return }
+
+  // Revert local state
+  ids.forEach(id => { const t = allTickets.find(t => t.id === id); if (t) t.stage = prevStage })
+  renderTable()
+  showToast('↩ Undone — stage reverted, no email sent')
+  window._undoEmailData = null
+}
 function fmtDate(d) {
   if (!d) return '—'
   const dt = d.includes('T') ? new Date(d) : new Date(d + 'T12:00:00')
