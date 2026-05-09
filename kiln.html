@@ -69,6 +69,11 @@
   .type-class    { background:#e0f2f1; color:#00695c; }
   .type-camp     { background:#fff8e1; color:#f57f17; }
 
+  /* Clay type badge — shown in product column */
+  .clay-badge { display:inline-block; padding:1px 7px; border-radius:6px; font-size:10px; font-weight:700; margin-left:5px; vertical-align:middle; }
+  .clay-badge-clay { background:#efebe9; color:#4e342e; }
+  .clay-badge-obc  { background:#fbe9e7; color:#bf360c; }
+
   .advance-btn { padding:5px 10px; background:#1a1a2e; color:white; border:none; border-radius:6px; font-size:11px; font-weight:600; cursor:pointer; white-space:nowrap; }
   .advance-btn:hover { background:#2d3a5e; }
   .done-badge { font-size:11px; color:#2e7d32; font-weight:600; }
@@ -259,6 +264,13 @@ function typeChip(type) {
   return `<span class="type-chip ${cls}">${label}</span>`
 }
 
+// Returns a small badge for clay_type, or empty string if null
+function clayBadge(clayType) {
+  if (clayType === 'clay') return `<span class="clay-badge clay-badge-clay">-clay</span>`
+  if (clayType === 'obc')  return `<span class="clay-badge clay-badge-obc">-OBC</span>`
+  return ''
+}
+
 let studioId = null
 let currentUser = null
 let allTickets = []
@@ -317,7 +329,7 @@ async function loadTickets() {
   const stageF = document.getElementById('filter-stage').value
 
   let q = sb.from('clay_tickets')
-    .select(`id, ticket_number, studio_id, stage, is_party, description, created_at, glazed_on,
+    .select(`id, ticket_number, studio_id, stage, is_party, description, clay_type, created_at, glazed_on,
              kiln_delay_sent_at, bisque_email_sent_at, pickup_email_sent_at,
              bisque_expiry_date, pickup_expiry_date, session_id,
              signin_entries(name, email),
@@ -373,7 +385,13 @@ function renderTable() {
     const stage   = STAGES[t.stage] || STAGES.drying
     const type    = sessionType(t)
     const session = t.sessions
-    const product = session ? `${session.title}${session.session_date ? ' · ' + fmtDate(session.session_date) : ''}` : (t.description || '—')
+    const isOBC   = t.clay_type === 'obc'
+
+    // Product column: session title + clay badge + date
+    const product = session
+      ? `${session.title}${clayBadge(t.clay_type)}${session.session_date ? '<br><span style="color:#aaa;font-size:11px">' + fmtDate(session.session_date) + '</span>' : ''}`
+      : (t.description || '—')
+
     const date = fmtDate(t.created_at)
     const glazedOn = t.glazed_on
       ? `<input type="date" value="${t.glazed_on}" onchange="updateGlazedOn('${t.id}',this.value)" style="border:1px solid #d0d0c8;border-radius:6px;font-size:11px;padding:3px 6px;outline:none;background:white;width:120px">`
@@ -393,7 +411,7 @@ function renderTable() {
       </span>`
     })()
 
-    // Expiry cell — bisque_expiry for bisque_ready, pickup_expiry for ready_pickup
+    // Expiry cell
     const today = new Date().toISOString().split('T')[0]
     const expiryCell = (() => {
       if (t.stage === 'drying') return `<span style="color:#ccc;font-size:11px">—</span>`
@@ -406,15 +424,22 @@ function renderTable() {
       </div>`
     })()
 
-    // Flag row if either relevant expiry is past
     const relevantExpiry = t.stage === 'bisque_ready' ? t.bisque_expiry_date : t.stage === 'ready_pickup' ? t.pickup_expiry_date : null
     const rowExpired = relevantExpiry && relevantExpiry <= today
 
-    const action = t.stage === 'drying'
-      ? `<div style="display:flex;flex-direction:column;gap:4px">
-           <button class="advance-btn" onclick="promptAdvance('${t.id}','${t.ticket_number}','bisque_ready','→ Bisque Fired — Ready for Glazing')">→ Bisque Fired</button>
-           <button class="advance-btn" style="background:#2e7d32" onclick="promptAdvance('${t.id}','${t.ticket_number}','ready_pickup','→ Skip to Ready for Pickup 🎉')">→ Skip to Pickup</button>
-         </div>`
+    // ── Action column ─────────────────────────────────────────
+    // OBC (oven-bake clay) skips bisque — only show direct-to-pickup at drying stage
+    const isDrying = t.stage === 'drying' || t.stage === 'submitted'
+    const action = isDrying
+      ? isOBC
+        ? `<button class="advance-btn" style="background:#2e7d32"
+               onclick="promptAdvance('${t.id}','${t.ticket_number}','ready_pickup','→ Ready for Pickup 🎉')">
+             → Ready for Pickup
+           </button>`
+        : `<div style="display:flex;flex-direction:column;gap:4px">
+             <button class="advance-btn" onclick="promptAdvance('${t.id}','${t.ticket_number}','bisque_ready','→ Bisque Fired — Ready for Glazing')">→ Bisque Fired</button>
+             <button class="advance-btn" style="background:#2e7d32" onclick="promptAdvance('${t.id}','${t.ticket_number}','ready_pickup','→ Skip to Ready for Pickup 🎉')">→ Skip to Pickup</button>
+           </div>`
       : stage.next
         ? `<button class="advance-btn" onclick="promptAdvance('${t.id}','${t.ticket_number}','${stage.next}','${(stage.nextLabel||'').replace(/'/g,"\\'")}')">
              ${stage.nextLabel}
@@ -486,10 +511,33 @@ function updateBulkBar() {
   if (stages.length > 1) {
     errEl.textContent = '⚠️ Mixed stages — select tickets at the same stage only to advance'
     advBtn.disabled = true; advBtn.textContent = 'Advance →'
-  } else if (stages.length === 1 && !STAGES[stages[0]]?.next) {
+    return
+  }
+  if (stages.length === 1 && !STAGES[stages[0]]?.next) {
     errEl.textContent = '⚠️ Already at final stage'
     advBtn.disabled = true; advBtn.textContent = 'Advance →'
-  } else if (stages.length === 1) {
+    return
+  }
+
+  // At drying stage: check for mixed clay types (OBC can't bulk-advance to bisque)
+  if (stages.length === 1 && (stages[0] === 'drying' || stages[0] === 'submitted')) {
+    const clayTypes = [...new Set(selected.map(t => t.clay_type || 'clay'))]
+    if (clayTypes.length > 1) {
+      errEl.textContent = '⚠️ Mixed Clay + OBC — advance these individually'
+      advBtn.disabled = true; advBtn.textContent = 'Advance →'
+      return
+    }
+    // All OBC: bulk advance straight to pickup
+    if (clayTypes[0] === 'obc') {
+      errEl.textContent = ''
+      advBtn.disabled = false
+      advBtn.textContent = `→ Ready for Pickup (${selectedIds.size})`
+      return
+    }
+  }
+
+  // Normal case
+  if (stages.length === 1) {
     errEl.textContent = ''
     advBtn.disabled = false
     advBtn.textContent = `${STAGES[stages[0]].nextLabel} (${selectedIds.size}) →`
@@ -500,13 +548,19 @@ function promptBulkAdvance() {
   const selected = [...selectedIds].map(id => allTickets.find(t => t.id === id)).filter(Boolean)
   const stages   = [...new Set(selected.map(t => t.stage))]
   if (stages.length !== 1) return
-  const nextStage = STAGES[stages[0]].next
+
+  // Determine next stage: OBC at drying goes straight to pickup
+  const isDrying = stages[0] === 'drying' || stages[0] === 'submitted'
+  const allOBC   = isDrying && selected.every(t => t.clay_type === 'obc')
+  const nextStage = allOBC ? 'ready_pickup' : STAGES[stages[0]]?.next
   if (!nextStage) return
+
+  const nextLabel = allOBC ? '→ Ready for Pickup 🎉' : STAGES[stages[0]].nextLabel
   const nums = selected.map(t => t.ticket_number).join(', ')
   pendingAdvance = { bulk: true, ids: [...selectedIds], nextStage }
-  document.getElementById('confirm-num').textContent = `${selectedIds.size} tickets`
+  document.getElementById('confirm-num').textContent = `${selectedIds.size} ticket${selectedIds.size > 1 ? 's' : ''}`
   document.getElementById('confirm-sub').textContent = `#${nums}`
-  document.getElementById('confirm-stage').textContent = STAGES[stages[0]].nextLabel
+  document.getElementById('confirm-stage').textContent = nextLabel
   document.getElementById('confirm-overlay').classList.add('show')
 }
 
@@ -553,7 +607,6 @@ async function confirmAdvance() {
     const affected = allTickets.filter(t => ids.includes(t.id))
     const prevStage = affected[0]?.stage
 
-    // Clear any previous pending advance email
     if (pendingEmailTimeout) {
       clearTimeout(pendingEmailTimeout)
       clearInterval(pendingEmailInterval)
@@ -599,7 +652,6 @@ async function confirmAdvance() {
           })
         }).catch(err => console.error('Email send error:', err))
 
-        // Write email timestamp to Supabase and local state
         const tsCol = nextStage === 'bisque_ready' ? 'bisque_email_sent_at' : 'pickup_email_sent_at'
         const now   = new Date().toISOString()
         sb.from('clay_tickets').update({ [tsCol]: now }).eq('id', t.id)
@@ -644,7 +696,6 @@ async function undoEmailSend() {
 function promptKilnDelay() {
   const selected = [...selectedIds].map(id => allTickets.find(t => t.id === id)).filter(Boolean)
 
-  // Only drying or bisque_ready, and only if not already sent
   const eligible = selected.filter(t =>
     (t.stage === 'drying' || t.stage === 'bisque_ready') && !t.kiln_delay_sent_at
   )
@@ -657,7 +708,6 @@ function promptKilnDelay() {
   const alreadySent = selected.length - eligible.length
   const skippedNote = alreadySent > 0 ? ` (${alreadySent} already notified — skipping)` : ''
 
-  // Clear any previous pending delay email
   if (pendingDelayTimeout) {
     clearTimeout(pendingDelayTimeout)
     clearInterval(pendingDelayInterval)
@@ -692,7 +742,6 @@ function promptKilnDelay() {
       const ticketEmails = (t.signin_entries||[]).filter(c=>c.email).map(c=>c.email)
       if (!ticketEmails.length) continue
 
-      // Fire email
       fetch('https://snxibhbhhchjthfmjtaj.supabase.co/functions/v1/send-kiln-delay-email', {
         method: 'POST',
         headers: {
@@ -707,12 +756,10 @@ function promptKilnDelay() {
         })
       }).catch(err => console.error('Delay email error:', err))
 
-      // Write timestamp to Supabase
       await sb.from('clay_tickets')
         .update({ kiln_delay_sent_at: now })
         .eq('id', t.id)
 
-      // Update local state
       t.kiln_delay_sent_at = now
     }
 
