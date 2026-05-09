@@ -2104,7 +2104,7 @@ async function loadDayView() {
         ${est ? `<div class="stat"><div class="stat-value">${est}</div><div class="stat-label">expected</div></div>` : ''}
         ${aftercareCounts[s.id] ? `<div class="stat"><div class="stat-value" style="color:#5b4fcf">${aftercareCounts[s.id]}</div><div class="stat-label">aftercare</div></div>` : ''}
         ${earlyArrivalCounts[s.id] ? `<div class="stat"><div class="stat-value" style="color:#e65100">${earlyArrivalCounts[s.id]}</div><div class="stat-label">early arr.</div></div>` : ''}
-        ${signinData[s.id]?.length ? `<div class="stat stat-clickable" onclick="showSignins('${s.id}', '${s.title.replace(/'/g,"\\'")}')"><div class="stat-value" style="color:#2d6a9f">${signinData[s.id].length}</div><div class="stat-label">signed in ↗</div></div>` : ''}
+        ${signinData[s.id]?.length ? `<div class="stat"><button onclick="showSignins('${s.id}', '${s.title.replace(/'/g, "\\'")}');" style="padding:7px 18px;background:#f0f6ff;border:0.5px solid #c5d8f0;border-radius:8px;font-size:13px;color:#2d6a9f;font-weight:600;cursor:pointer">✅ Checked In (${signinData[s.id].length})</button></div>` : ''}
       </div>
 
       ${partyBlocksHtml}
@@ -2432,15 +2432,35 @@ async function showSignins(sessionId, title) {
   if (!todaySessionsCache.length) {
     const today = dateStr(currentDate)
     const { data: sessions } = await sb.from('sessions')
-      .select('id, title, session_time')
+      .select('id, title, session_time, session_type')
       .eq('studio_id', currentStudioId)
       .eq('session_date', today)
       .order('session_time')
-    todaySessionsCache = sessions || []
+
+    // For party sessions, fetch the customer name to disambiguate same-time parties
+    const partySessions = (sessions || []).filter(s => s.session_type === 'party')
+    const partyNameMap = {}
+    if (partySessions.length) {
+      const { data: bookings } = await sb.from('bookings')
+        .select('session_id, customer_name')
+        .in('session_id', partySessions.map(s => s.id))
+        .gt('qty', 0)
+        .limit(50)
+      if (bookings) bookings.forEach(b => {
+        if (!partyNameMap[b.session_id]) partyNameMap[b.session_id] = b.customer_name
+      })
+    }
+
+    todaySessionsCache = (sessions || []).map(s => ({
+      ...s,
+      displayLabel: s.session_type === 'party' && partyNameMap[s.id]
+        ? `${fmtTime(s.session_time)} · ${s.title} — ${partyNameMap[s.id]}`
+        : `${fmtTime(s.session_time)} · ${s.title}`
+    }))
   }
   const sessionOptions = todaySessionsCache
     .filter(s => s.id !== sessionId)
-    .map(s => `<option value="${s.id}">${fmtTime(s.session_time)} · ${s.title.replace(/"/g,'&quot;')}</option>`)
+    .map(s => `<option value="${s.id}">${s.displayLabel.replace(/"/g,'&quot;')}</option>`)
     .join('')
 
   const overlay = document.createElement('div')
@@ -2521,7 +2541,7 @@ async function reassignSignin(entryId, origSessionId, origTitle) {
   if (!newSessionId) { alert('Please select a session to move this guest to.'); return }
 
   const newSession = todaySessionsCache.find(s => s.id === newSessionId)
-  const newTitle = newSession ? `${fmtTime(newSession.session_time)} · ${newSession.title}` : 'the new session'
+  const newTitle = newSession ? newSession.displayLabel : 'the new session'
 
   const btn = sel.nextElementSibling
   btn.textContent = 'Moving...'
