@@ -4503,22 +4503,153 @@ const STAR_COLORS = { 5: '#2e7d32', 4: '#558b2f', 3: '#f57f17', 2: '#e65100', 1:
 const REVIEW_STATUS_LABELS = { pending: 'Pending', approved: 'Approved ✓', dismissed: 'Dismissed' }
 
 async function loadReviewsTab() {
+  // Populate studio dropdowns (both sections share the same studios)
+  ;['followup-filter-studio', 'reviews-filter-studio'].forEach(id => {
+    const sel = document.getElementById(id)
+    if (sel && sel.options.length === 1) {
+      allStudios.forEach(s => {
+        const opt = document.createElement('option')
+        opt.value = s.id; opt.textContent = s.name || s.id
+        sel.appendChild(opt)
+      })
+    }
+  })
+  loadPartyFollowup()
+  loadReviewsList()
+}
+
+async function loadPartyFollowup() {
+  const container = document.getElementById('followup-list')
+  if (!container) return
+  container.innerHTML = '<div style="color:#aaa;padding:16px;text-align:center">Loading…</div>'
+
+  const days = parseInt(document.getElementById('followup-filter-days')?.value || '60')
+  const studioFilter = document.getElementById('followup-filter-studio')?.value || ''
+
+  const today = dateStr(new Date())
+  const cutoff = dateStr(new Date(Date.now() - days * 86400000))
+
+  // 1. Get past party sessions in range
+  let sessQ = sb.from('sessions')
+    .select('id, session_date, session_time, title, studio_id')
+    .eq('session_type', 'party')
+    .lte('session_date', today)
+    .gte('session_date', cutoff)
+    .order('session_date', { ascending: false })
+  if (studioFilter) sessQ = sessQ.eq('studio_id', studioFilter)
+
+  const { data: sessions, error: sessErr } = await sessQ
+  if (sessErr) { container.innerHTML = `<div style="color:#c0392b;padding:16px">Error: ${sessErr.message}</div>`; return }
+  if (!sessions?.length) { container.innerHTML = '<div style="color:#aaa;padding:16px;text-align:center">No past parties in this range.</div>'; return }
+
+  const sessionIds = sessions.map(s => s.id)
+
+  // 2. Get bookings + party_details for those sessions
+  const { data: bookings } = await sb.from('bookings')
+    .select('id, session_id, customer_name, customer_email')
+    .in('session_id', sessionIds)
+    .gt('qty', 0)
+
+  const { data: pds } = await sb.from('party_details')
+    .select('booking_id, actual_guests, thank_you_sent_at, party_ticket_number, outcome')
+    .in('booking_id', (bookings || []).map(b => b.id))
+
+  // Index for quick lookup
+  const bookingsBySession = {}
+  ;(bookings || []).forEach(b => {
+    if (!bookingsBySession[b.session_id]) bookingsBySession[b.session_id] = []
+    bookingsBySession[b.session_id].push(b)
+  })
+  const pdByBooking = {}
+  ;(pds || []).forEach(p => { pdByBooking[p.booking_id] = p })
+
+  // 3. Render table
+  const unsent = sessions.reduce((n, s) => {
+    const bs = bookingsBySession[s.id] || []
+    return n + bs.filter(b => !pdByBooking[b.id]?.thank_you_sent_at).length
+  }, 0)
+
+  const badgeHtml = unsent > 0
+    ? `<span style="background:#e65100;color:white;font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;margin-left:10px">${unsent} email${unsent !== 1 ? 's' : ''} not sent</span>`
+    : `<span style="background:#2e7d32;color:white;font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;margin-left:10px">All sent ✓</span>`
+
+  let html = `
+    <div style="margin-bottom:12px;font-size:13px;color:#666">${sessions.length} parties · ${badgeHtml}</div>
+    <div style="background:white;border:1px solid #e0e0d8;border-radius:10px;overflow:hidden">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead>
+          <tr style="background:#fafaf8;border-bottom:1px solid #e0e0d8">
+            <th style="padding:9px 14px;text-align:left;font-weight:600;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;white-space:nowrap">Date</th>
+            <th style="padding:9px 14px;text-align:left;font-weight:600;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:0.5px">Studio</th>
+            <th style="padding:9px 14px;text-align:left;font-weight:600;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:0.5px">Customer</th>
+            <th style="padding:9px 14px;text-align:left;font-weight:600;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:0.5px">Party Type</th>
+            <th style="padding:9px 14px;text-align:center;font-weight:600;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:0.5px" title="After-party form filled">📋 Form</th>
+            <th style="padding:9px 14px;text-align:center;font-weight:600;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:0.5px" title="Thank-you email sent">✉️ Email</th>
+          </tr>
+        </thead>
+        <tbody>`
+
+  sessions.forEach(s => {
+    const bs = bookingsBySession[s.id] || []
+    if (!bs.length) {
+      // Session with no booking yet
+      const fmtDate = new Date(s.session_date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })
+      html += `<tr style="border-bottom:0.5px solid #f0f0e8;background:#fffdf5">
+        <td style="padding:9px 14px;white-space:nowrap;color:#888">${fmtDate}</td>
+        <td style="padding:9px 14px;color:#888">${getStudioName(s.studio_id)}</td>
+        <td style="padding:9px 14px;color:#aaa;font-style:italic" colspan="2">No booking on file</td>
+        <td style="padding:9px 14px;text-align:center">—</td>
+        <td style="padding:9px 14px;text-align:center">—</td>
+      </tr>`
+      return
+    }
+
+    bs.forEach((b, bi) => {
+      const pd = pdByBooking[b.id]
+      const formDone = !!(pd?.actual_guests)
+      const emailSent = !!(pd?.thank_you_sent_at)
+      const rowBg = !emailSent ? 'background:#fff8f0' : ''
+      const borderLeft = !emailSent ? 'border-left:3px solid #e65100' : 'border-left:3px solid transparent'
+      const fmtDate = bi === 0
+        ? new Date(s.session_date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })
+        : ''
+      const partyType = s.title.replace(/\d+:\d+(am|pm)\s*/i, '').replace(/\|.*$/, '').trim()
+
+      html += `<tr style="border-bottom:0.5px solid #f0f0e8;${rowBg};${borderLeft}">
+        <td style="padding:9px 14px;white-space:nowrap;color:#555">${fmtDate}</td>
+        <td style="padding:9px 14px;color:#555">${bi === 0 ? getStudioName(s.studio_id) : ''}</td>
+        <td style="padding:9px 14px">
+          <div style="font-weight:500;color:#1a1a1a">${b.customer_name || '—'}</div>
+          ${b.customer_email ? `<div style="font-size:11px;color:#aaa">${b.customer_email}</div>` : ''}
+        </td>
+        <td style="padding:9px 14px;color:#555">${partyType}</td>
+        <td style="padding:9px 14px;text-align:center">
+          ${formDone
+            ? `<span style="color:#2e7d32;font-weight:700" title="Form filled">✓</span>`
+            : `<span style="color:#bbb" title="Form not filled">✗</span>`}
+        </td>
+        <td style="padding:9px 14px;text-align:center">
+          ${emailSent
+            ? `<span style="color:#2e7d32;font-weight:700" title="Sent ${new Date(pd.thank_you_sent_at).toLocaleDateString('en-CA',{month:'short',day:'numeric'})}">✓</span>`
+            : b.customer_email
+              ? `<span style="color:#e65100;font-weight:700" title="Not sent yet">!</span>`
+              : `<span style="color:#ccc" title="No email on file">—</span>`}
+        </td>
+      </tr>`
+    })
+  })
+
+  html += `</tbody></table></div>`
+  container.innerHTML = html
+}
+
+async function loadReviewsList() {
   const list = document.getElementById('reviews-list')
   if (!list) return
   list.innerHTML = '<div style="color:#aaa;padding:20px;text-align:center">Loading…</div>'
 
   const statusFilter = document.getElementById('reviews-filter-status')?.value || 'pending'
   const studioFilter = document.getElementById('reviews-filter-studio')?.value || ''
-
-  // Populate studio dropdown once
-  const studioSel = document.getElementById('reviews-filter-studio')
-  if (studioSel && studioSel.options.length === 1) {
-    allStudios.forEach(s => {
-      const opt = document.createElement('option')
-      opt.value = s.id; opt.textContent = s.name || s.id
-      studioSel.appendChild(opt)
-    })
-  }
 
   let q = sb.from('party_reviews')
     .select('*')
@@ -4868,24 +4999,50 @@ function showAdminToast(msg, duration = 2500) {
 
 <!-- Reviews Tab -->
 <div class="tab-content" id="tab-reviews">
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem;flex-wrap:wrap;gap:10px">
+
+  <!-- ── Party Follow-up ── -->
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;flex-wrap:wrap;gap:10px">
     <div>
-      <div style="font-size:18px;font-weight:600;margin-bottom:4px">Party Reviews</div>
-      <div style="font-size:13px;color:#888">Customer feedback submitted after parties. Approve to share with the studio.</div>
+      <div style="font-size:18px;font-weight:600;margin-bottom:4px">Party Follow-up</div>
+      <div style="font-size:13px;color:#888">All past parties — flag shows whether the after-party form and thank-you email are done.</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <select id="followup-filter-studio" onchange="loadPartyFollowup()" style="padding:6px 10px;border:1px solid #d0d0c8;border-radius:6px;font-size:13px;background:white">
+        <option value="">All Studios</option>
+      </select>
+      <select id="followup-filter-days" onchange="loadPartyFollowup()" style="padding:6px 10px;border:1px solid #d0d0c8;border-radius:6px;font-size:13px;background:white">
+        <option value="30">Last 30 days</option>
+        <option value="60" selected>Last 60 days</option>
+        <option value="90">Last 90 days</option>
+        <option value="180">Last 6 months</option>
+      </select>
+    </div>
+  </div>
+
+  <div id="followup-list" style="margin-bottom:2.5rem">
+    <div style="color:#aaa;padding:20px;text-align:center">Loading…</div>
+  </div>
+
+  <!-- ── Customer Reviews ── -->
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;flex-wrap:wrap;gap:10px;border-top:1px solid #e0e0d8;padding-top:2rem">
+    <div>
+      <div style="font-size:18px;font-weight:600;margin-bottom:4px">Customer Reviews</div>
+      <div style="font-size:13px;color:#888">Submitted feedback. Approve to share with the studio.</div>
     </div>
     <div style="display:flex;gap:8px;align-items:center">
-      <select id="reviews-filter-status" onchange="loadReviewsTab()" style="padding:6px 10px;border:1px solid #d0d0c8;border-radius:6px;font-size:13px;background:white">
+      <select id="reviews-filter-status" onchange="loadReviewsList()" style="padding:6px 10px;border:1px solid #d0d0c8;border-radius:6px;font-size:13px;background:white">
         <option value="pending">Pending</option>
         <option value="approved">Approved</option>
         <option value="dismissed">Dismissed</option>
         <option value="all">All</option>
       </select>
-      <select id="reviews-filter-studio" onchange="loadReviewsTab()" style="padding:6px 10px;border:1px solid #d0d0c8;border-radius:6px;font-size:13px;background:white">
+      <select id="reviews-filter-studio" onchange="loadReviewsList()" style="padding:6px 10px;border:1px solid #d0d0c8;border-radius:6px;font-size:13px;background:white">
         <option value="">All Studios</option>
       </select>
     </div>
   </div>
   <div id="reviews-list" style="display:grid;gap:12px"></div>
+
 </div>
 
 <!-- Guide Tab -->
