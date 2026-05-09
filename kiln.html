@@ -39,9 +39,11 @@
   .bulk-advance-btn { padding:7px 16px; background:#f0c040; color:#1a1a2e; border:none; border-radius:6px; font-size:12px; font-weight:700; cursor:pointer; }
   .bulk-advance-btn:disabled { background:#555; color:#aaa; cursor:not-allowed; }
   .bulk-clear-btn { padding:7px 12px; border:1px solid #555; border-radius:6px; background:none; color:#aaa; font-size:12px; cursor:pointer; }
+  .bulk-delay-btn { padding:7px 14px; background:#e67e22; color:white; border:none; border-radius:6px; font-size:12px; font-weight:700; cursor:pointer; white-space:nowrap; }
+  .bulk-delay-btn:hover { background:#d35400; }
 
   .tbl-wrap { padding:12px 16px; overflow-x:auto; }
-  table { width:100%; border-collapse:collapse; background:white; border-radius:10px; overflow:hidden; box-shadow:0 1px 4px rgba(0,0,0,0.06); font-size:13px; min-width:700px; }
+  table { width:100%; border-collapse:collapse; background:white; border-radius:10px; overflow:hidden; box-shadow:0 1px 4px rgba(0,0,0,0.06); font-size:13px; min-width:780px; }
   thead { background:#1a1a2e; color:white; }
   th { padding:10px 12px; text-align:left; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; white-space:nowrap; cursor:pointer; user-select:none; }
   th:hover { background:#2d3a5e; }
@@ -77,6 +79,11 @@
 
   .email-banner { background:#e8f5e9; border:1px solid #a5d6a7; border-radius:8px; padding:10px 14px; margin:8px 16px; font-size:13px; color:#2e7d32; display:none; }
   .email-banner.show { display:block; }
+
+  .delay-banner { background:#fef3e2; border:1px solid #f0c040; border-radius:8px; padding:10px 14px; margin:8px 16px; font-size:13px; color:#b7700a; display:none; }
+  .delay-banner.show { display:block; }
+
+  .delay-sent { font-size:11px; color:#e67e22; font-weight:600; white-space:nowrap; }
 
   .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:#1a1a2e; color:white; padding:10px 20px; border-radius:8px; font-size:13px; z-index:200; opacity:0; transition:opacity 0.3s; pointer-events:none; }
   .toast.show { opacity:1; }
@@ -146,13 +153,15 @@
       <div class="bulk-count"><span id="bulk-count">0</span> selected</div>
       <div class="bulk-error" id="bulk-error"></div>
     </div>
-    <div style="display:flex;gap:8px">
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button class="bulk-clear-btn" onclick="clearSelection()">✕ Clear</button>
+      <button class="bulk-delay-btn" id="bulk-delay-btn" onclick="promptKilnDelay()">🔥 Kiln Delay Email</button>
       <button class="bulk-advance-btn" id="bulk-advance-btn" onclick="promptBulkAdvance()">Advance →</button>
     </div>
   </div>
 
   <div class="email-banner" id="email-banner"></div>
+  <div class="delay-banner" id="delay-banner"></div>
 
   <div class="tbl-wrap">
     <table>
@@ -166,11 +175,12 @@
           <th onclick="sortBy('stage')">Stage</th>
           <th onclick="sortBy('glazed_on')">Glazed On</th>
           <th class="no-sort">Names</th>
+          <th class="no-sort">Delay Email</th>
           <th class="no-sort">Action</th>
         </tr>
       </thead>
       <tbody id="table-body">
-        <tr class="empty-row"><td colspan="9">Loading...</td></tr>
+        <tr class="empty-row"><td colspan="10">Loading...</td></tr>
       </tbody>
     </table>
   </div>
@@ -219,7 +229,6 @@ const STAGES = {
 }
 
 function sessionType(t) {
-  // Derive type from session_type or is_party flag
   if (t.is_party) return 'party'
   const st = (t.sessions?.session_type || '').toLowerCase()
   if (st.includes('party'))  return 'party'
@@ -248,6 +257,8 @@ let selectedIds = new Set()
 let pendingAdvance = null
 let pendingEmailTimeout = null
 let pendingEmailInterval = null
+let pendingDelayTimeout = null
+let pendingDelayInterval = null
 
 // ── AUTH ──────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
@@ -291,11 +302,11 @@ function showApp() {
 
 // ── LOAD ──────────────────────────────────
 async function loadTickets() {
-  document.getElementById('table-body').innerHTML = '<tr class="empty-row"><td colspan="9">Loading...</td></tr>'
+  document.getElementById('table-body').innerHTML = '<tr class="empty-row"><td colspan="10">Loading...</td></tr>'
   const stageF = document.getElementById('filter-stage').value
 
   let q = sb.from('clay_tickets')
-    .select(`id, ticket_number, studio_id, stage, is_party, description, created_at, glazed_on, session_id,
+    .select(`id, ticket_number, studio_id, stage, is_party, description, created_at, glazed_on, kiln_delay_sent_at, session_id,
              signin_entries(name, email),
              sessions(title, session_date, session_time, session_type)`)
     .order('created_at', { ascending: false })
@@ -307,7 +318,7 @@ async function loadTickets() {
 
   const { data, error } = await q
   if (error) {
-    document.getElementById('table-body').innerHTML = `<tr class="empty-row"><td colspan="9" style="color:#c0392b">Error: ${error.message}</td></tr>`
+    document.getElementById('table-body').innerHTML = `<tr class="empty-row"><td colspan="10" style="color:#c0392b">Error: ${error.message}</td></tr>`
     return
   }
   allTickets = data || []
@@ -341,7 +352,7 @@ function renderTable() {
   })
 
   if (!tickets.length) {
-    document.getElementById('table-body').innerHTML = '<tr class="empty-row"><td colspan="9">No active artwork tickets.</td></tr>'
+    document.getElementById('table-body').innerHTML = '<tr class="empty-row"><td colspan="10">No active artwork tickets.</td></tr>'
     selectedIds.clear(); updateBulkBar(); return
   }
 
@@ -354,6 +365,11 @@ function renderTable() {
     const glazedOn = t.glazed_on
       ? `<input type="date" value="${t.glazed_on}" onchange="updateGlazedOn('${t.id}',this.value)" style="border:1px solid #d0d0c8;border-radius:6px;font-size:11px;padding:3px 6px;outline:none;background:white;width:120px">`
       : `<input type="date" onchange="updateGlazedOn('${t.id}',this.value)" style="border:1px solid #d0d0c8;border-radius:6px;font-size:11px;padding:3px 6px;outline:none;background:white;width:120px">`
+
+    const delayCell = t.kiln_delay_sent_at
+      ? `<span class="delay-sent">📧 ${fmtDate(t.kiln_delay_sent_at)}</span>`
+      : `<span style="color:#ccc;font-size:11px">—</span>`
+
     const action = t.stage === 'drying'
       ? `<div style="display:flex;flex-direction:column;gap:4px">
            <button class="advance-btn" onclick="promptAdvance('${t.id}','${t.ticket_number}','bisque_ready','→ Bisque Fired — Ready for Glazing')">→ Bisque Fired</button>
@@ -377,6 +393,7 @@ function renderTable() {
       <td><span class="stage-chip stage-${t.stage}">${stage.label}</span></td>
       <td>${glazedOn}</td>
       <td style="font-size:12px;color:#555">${(t.signin_entries||[]).map(c=>c.name).join(', ') || '<span style="color:#bbb">—</span>'}</td>
+      <td>${delayCell}</td>
       <td>${action}</td>
     </tr>`
   }).join('')
@@ -426,7 +443,7 @@ function updateBulkBar() {
   const stages   = [...new Set(selected.map(t => t.stage))]
 
   if (stages.length > 1) {
-    errEl.textContent = '⚠️ Mixed stages — select tickets at the same stage only'
+    errEl.textContent = '⚠️ Mixed stages — select tickets at the same stage only to advance'
     advBtn.disabled = true; advBtn.textContent = 'Advance →'
   } else if (stages.length === 1 && !STAGES[stages[0]]?.next) {
     errEl.textContent = '⚠️ Already at final stage'
@@ -461,7 +478,7 @@ function promptAdvance(id, num, nextStage, nextLabel) {
 }
 
 function closeConfirm() { document.getElementById('confirm-overlay').classList.remove('show'); }
- 
+
 async function confirmAdvance() {
   if (!pendingAdvance) return
   const btn = document.getElementById('confirm-yes')
@@ -478,65 +495,60 @@ async function confirmAdvance() {
   if (error) { showToast('Error — try again'); return }
 
   // Email trigger
-if (STAGES[nextStage]?.emailTrigger) {
-  const affected = allTickets.filter(t => ids.includes(t.id))
-  const prevStage = affected[0]?.stage  // all same stage, so just grab first
-  // revert display stage temporarily (already updated in Supabase, but store for undo)
-  
-  // Clear any previous pending email
-  if (pendingEmailTimeout) {
-    clearTimeout(pendingEmailTimeout)
-    clearInterval(pendingEmailInterval)
-    pendingEmailTimeout = null
-    pendingEmailInterval = null
-  }
+  if (STAGES[nextStage]?.emailTrigger) {
+    const affected = allTickets.filter(t => ids.includes(t.id))
+    const prevStage = affected[0]?.stage
 
-  // Show countdown banner
-  const b = document.getElementById('email-banner')
-  let secondsLeft = 60
-  const fnName = nextStage === 'bisque_ready' ? 'send-bisque-email' : 'send-pickup-email'
-  const emailList = [...new Set(affected.flatMap(t => (t.signin_entries||[]).filter(c=>c.email).map(c=>c.email)))]
-
-  function updateBanner() {
-    b.innerHTML = `📧 Email sending in <strong>0:${String(secondsLeft).padStart(2,'0')}</strong> &nbsp; <button onclick="undoEmailSend()" style="padding:3px 10px;border:1px solid #2e7d32;border-radius:5px;background:white;color:#2e7d32;font-size:12px;font-weight:600;cursor:pointer;">✕ Undo</button>`
-  }
-  updateBanner()
-  b.classList.add('show')
-
-  pendingEmailInterval = setInterval(() => {
-    secondsLeft--
-    if (secondsLeft <= 0) { clearInterval(pendingEmailInterval); return }
-    updateBanner()
-  }, 1000)
-
-  pendingEmailTimeout = setTimeout(async () => {
-    clearInterval(pendingEmailInterval)
-    b.classList.remove('show')
-    pendingEmailTimeout = null
-    pendingEmailInterval = null
-    // Fire emails — one per ticket
-    for (const t of affected) {
-      const ticketEmails = (t.signin_entries||[]).filter(c=>c.email).map(c=>c.email)
-      if (!ticketEmails.length) continue
-      fetch(`https://snxibhbhhchjthfmjtaj.supabase.co/functions/v1/${fnName}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA'
-        },
-        body: JSON.stringify({
-          emails: ticketEmails,
-          ticketNumber: t.ticket_number,
-          studioId: studioId,
-          description: t.description || ''
-        })
-      }).catch(err => console.error('Email send error:', err))
+    // Clear any previous pending advance email
+    if (pendingEmailTimeout) {
+      clearTimeout(pendingEmailTimeout)
+      clearInterval(pendingEmailInterval)
+      pendingEmailTimeout = null
+      pendingEmailInterval = null
     }
-  }, 60000)
 
-  // Store undo info
-  window._undoEmailData = { ids, prevStage }
-}
+    const b = document.getElementById('email-banner')
+    let secondsLeft = 60
+    const fnName = nextStage === 'bisque_ready' ? 'send-bisque-email' : 'send-pickup-email'
+
+    function updateBanner() {
+      b.innerHTML = `📧 Email sending in <strong>0:${String(secondsLeft).padStart(2,'0')}</strong> &nbsp; <button onclick="undoEmailSend()" style="padding:3px 10px;border:1px solid #2e7d32;border-radius:5px;background:white;color:#2e7d32;font-size:12px;font-weight:600;cursor:pointer;">✕ Undo</button>`
+    }
+    updateBanner()
+    b.classList.add('show')
+
+    pendingEmailInterval = setInterval(() => {
+      secondsLeft--
+      if (secondsLeft <= 0) { clearInterval(pendingEmailInterval); return }
+      updateBanner()
+    }, 1000)
+
+    pendingEmailTimeout = setTimeout(async () => {
+      clearInterval(pendingEmailInterval)
+      b.classList.remove('show')
+      pendingEmailTimeout = null
+      pendingEmailInterval = null
+      for (const t of affected) {
+        const ticketEmails = (t.signin_entries||[]).filter(c=>c.email).map(c=>c.email)
+        if (!ticketEmails.length) continue
+        fetch(`https://snxibhbhhchjthfmjtaj.supabase.co/functions/v1/${fnName}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA'
+          },
+          body: JSON.stringify({
+            emails: ticketEmails,
+            ticketNumber: t.ticket_number,
+            studioId: studioId,
+            description: t.description || ''
+          })
+        }).catch(err => console.error('Email send error:', err))
+      }
+    }, 60000)
+
+    window._undoEmailData = { ids, prevStage }
+  }
 
   const nums = ids.map(id => allTickets.find(t => t.id === id)?.ticket_number).filter(Boolean).join(', ')
   showToast(`${ids.length > 1 ? ids.length + ' tickets' : '#' + nums} → ${STAGES[nextStage].label}`)
@@ -544,6 +556,7 @@ if (STAGES[nextStage]?.emailTrigger) {
   clearSelection(); renderTable()
   pendingAdvance = null
 }
+
 async function undoEmailSend() {
   if (pendingEmailTimeout) {
     clearTimeout(pendingEmailTimeout)
@@ -560,12 +573,104 @@ async function undoEmailSend() {
   const { error } = await sb.from('clay_tickets').update({ stage: prevStage }).in('id', ids)
   if (error) { showToast('Undo failed — check connection'); return }
 
-  // Revert local state
   ids.forEach(id => { const t = allTickets.find(t => t.id === id); if (t) t.stage = prevStage })
   renderTable()
   showToast('↩ Undone — stage reverted, no email sent')
   window._undoEmailData = null
 }
+
+// ── KILN DELAY ────────────────────────────
+function promptKilnDelay() {
+  const selected = [...selectedIds].map(id => allTickets.find(t => t.id === id)).filter(Boolean)
+
+  // Only drying or bisque_ready, and only if not already sent
+  const eligible = selected.filter(t =>
+    (t.stage === 'drying' || t.stage === 'bisque_ready') && !t.kiln_delay_sent_at
+  )
+
+  if (!eligible.length) {
+    showToast('No eligible tickets — all already notified or at pickup stage', 3500)
+    return
+  }
+
+  const alreadySent = selected.length - eligible.length
+  const skippedNote = alreadySent > 0 ? ` (${alreadySent} already notified — skipping)` : ''
+
+  // Clear any previous pending delay email
+  if (pendingDelayTimeout) {
+    clearTimeout(pendingDelayTimeout)
+    clearInterval(pendingDelayInterval)
+    pendingDelayTimeout = null
+    pendingDelayInterval = null
+  }
+
+  const b = document.getElementById('delay-banner')
+  let secondsLeft = 60
+
+  function updateDelayBanner() {
+    b.innerHTML = `🔥 Kiln delay email sending to ${eligible.length} ticket${eligible.length > 1 ? 's' : ''}${skippedNote} in <strong>0:${String(secondsLeft).padStart(2,'0')}</strong> &nbsp; <button onclick="undoDelayEmail()" style="padding:3px 10px;border:1px solid #b7700a;border-radius:5px;background:white;color:#b7700a;font-size:12px;font-weight:600;cursor:pointer;">✕ Undo</button>`
+  }
+  updateDelayBanner()
+  b.classList.add('show')
+
+  pendingDelayInterval = setInterval(() => {
+    secondsLeft--
+    if (secondsLeft <= 0) { clearInterval(pendingDelayInterval); return }
+    updateDelayBanner()
+  }, 1000)
+
+  pendingDelayTimeout = setTimeout(async () => {
+    clearInterval(pendingDelayInterval)
+    b.classList.remove('show')
+    pendingDelayTimeout = null
+    pendingDelayInterval = null
+
+    const now = new Date().toISOString()
+
+    for (const t of eligible) {
+      const ticketEmails = (t.signin_entries||[]).filter(c=>c.email).map(c=>c.email)
+      if (!ticketEmails.length) continue
+
+      // Fire email
+      fetch('https://snxibhbhhchjthfmjtaj.supabase.co/functions/v1/send-kiln-delay-email', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA'
+        },
+        body: JSON.stringify({
+          emails: ticketEmails,
+          ticketNumber: t.ticket_number,
+          studioId: studioId,
+          description: t.description || ''
+        })
+      }).catch(err => console.error('Delay email error:', err))
+
+      // Write timestamp to Supabase
+      await sb.from('clay_tickets')
+        .update({ kiln_delay_sent_at: now })
+        .eq('id', t.id)
+
+      // Update local state
+      t.kiln_delay_sent_at = now
+    }
+
+    renderTable()
+    showToast(`🔥 Kiln delay email sent to ${eligible.length} ticket${eligible.length > 1 ? 's' : ''}`)
+  }, 60000)
+}
+
+function undoDelayEmail() {
+  if (pendingDelayTimeout) {
+    clearTimeout(pendingDelayTimeout)
+    clearInterval(pendingDelayInterval)
+    pendingDelayTimeout = null
+    pendingDelayInterval = null
+  }
+  document.getElementById('delay-banner').classList.remove('show')
+  showToast('↩ Kiln delay email cancelled')
+}
+
 function fmtDate(d) {
   if (!d) return '—'
   const dt = d.includes('T') ? new Date(d) : new Date(d + 'T12:00:00')
@@ -578,8 +683,8 @@ async function updateGlazedOn(id, date) {
   const t = allTickets.find(t => t.id === id)
   if (t) t.glazed_on = date || null
   showToast('Glazed date saved')
-} 
- 
+}
+
 function showToast(msg, ms=2500) {
   const t = document.getElementById('toast')
   t.textContent = msg; t.classList.add('show')
