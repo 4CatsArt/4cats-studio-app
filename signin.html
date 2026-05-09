@@ -28,6 +28,21 @@
   .lock-btn.locked { background: #e8f5e9; border-color: #4caf50; color: #2e7d32; }
   .session-locked-label { font-size: 13px; color: #333; font-weight: 600; flex: 1; }
 
+  /* Clay type bar — shown for dual-path sessions */
+  .clay-type-bar { background: #fff8e1; border-bottom: 2px solid #ffe082; padding: 12px 20px; display: none; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .clay-type-bar.show { display: flex; }
+  .clay-type-prompt { font-size: 13px; color: #6d4c00; font-weight: 600; }
+  .clay-type-prompt span { font-weight: 400; color: #8a6200; }
+  .clay-type-btns { display: flex; gap: 8px; }
+  .clay-type-btn {
+    padding: 9px 20px; border-radius: 20px; border: 1.5px solid #d0b040;
+    background: white; color: #6d4c00; font-size: 13px; font-weight: 600;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .clay-type-btn:hover { border-color: #b08000; background: #fffde7; }
+  .clay-type-btn.selected-clay { background: #5d4037; border-color: #5d4037; color: white; }
+  .clay-type-btn.selected-obc  { background: #e65100; border-color: #e65100; color: white; }
+
   /* Ticket section */
   .ticket-bar { background: #fffbea; border-bottom: 1px solid #f0e098; padding: 12px 20px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .ticket-info { display: flex; align-items: center; gap: 10px; flex: 1; }
@@ -110,6 +125,17 @@
   <button class="lock-btn" id="lock-btn" onclick="toggleLock()">🔒 Lock</button>
 </div>
 
+<!-- Clay type selector — shown for dual-path sessions only -->
+<div class="clay-type-bar" id="clay-type-bar">
+  <div class="clay-type-prompt">
+    🪴 Ask the guest which clay they're using: <span>(required before creating ticket)</span>
+  </div>
+  <div class="clay-type-btns">
+    <button class="clay-type-btn" id="clay-btn-clay" onclick="selectClayType('clay')">🏺 Clay</button>
+    <button class="clay-type-btn" id="clay-btn-obc"  onclick="selectClayType('obc')">🎨 Oven-Bake Clay</button>
+  </div>
+</div>
+
 <div class="ticket-bar" id="ticket-bar">
   <div class="ticket-info">
     <div>
@@ -151,7 +177,16 @@ const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 const { createClient } = supabase
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY)
 
-// Studio ID map (abbreviated)
+// ── Dual-path session keywords ────────────────────────────────
+// Sessions whose titles contain any of these strings will prompt
+// staff to ask the guest: Clay or Oven-Bake Clay?
+const DUAL_PATH_KEYWORDS = [
+  'Friday Night Mixer',
+  'Thursday Clay Night',
+  'Early Bird Workshop'
+]
+
+// Studio ID map
 const STUDIO_NAMES = {
   'BC-RICH-GC':'Richmond - Garden City','BC-RICH-STV':'Richmond - Steveston','BC-SUR-SSR':'Surrey - South',
   'BC-YVR-KIT':'Vancouver - Kitsilano','BC-YVR-MS':'Vancouver - Main Street','BC-YVR-UBC':'Vancouver - UBC',
@@ -174,6 +209,8 @@ let currentTicketNumber = null
 let lastTicketId = null
 let lastTicketNumber = null
 let personCount = 0
+let currentClayType = null    // 'clay' | 'obc' | null
+let isDualPathSession = false // true when selected session matches DUAL_PATH_KEYWORDS
 
 // ── Init ──────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
@@ -214,6 +251,7 @@ async function loadSessions() {
     opt.value = s.id
     opt.textContent = `${time} · ${s.title}`
     opt.dataset.type = s.session_type || ''
+    opt.dataset.title = s.title || ''
     sel.appendChild(opt)
   })
 
@@ -231,6 +269,32 @@ function onSessionChange() {
   if (!opt) return
   const t = (opt.dataset.type || '').toLowerCase()
   if (t.includes('party')) setMode('party')
+
+  // Check if this session needs the clay-type prompt
+  const title = opt.dataset.title || opt.textContent || ''
+  isDualPathSession = DUAL_PATH_KEYWORDS.some(kw => title.includes(kw))
+  currentClayType = null
+  updateClayTypeUI()
+}
+
+// ── Clay Type ─────────────────────────────────────────────────
+function selectClayType(type) {
+  currentClayType = type
+  updateClayTypeUI()
+}
+
+function updateClayTypeUI() {
+  const bar = document.getElementById('clay-type-bar')
+  const showBar = isDualPathSession && currentMode === 'workshop'
+  bar.classList.toggle('show', showBar)
+
+  // Reset both buttons, then highlight selected
+  const btnClay = document.getElementById('clay-btn-clay')
+  const btnOBC  = document.getElementById('clay-btn-obc')
+  btnClay.className = 'clay-type-btn'
+  btnOBC.className  = 'clay-type-btn'
+  if (currentClayType === 'clay') btnClay.classList.add('selected-clay')
+  if (currentClayType === 'obc')  btnOBC.classList.add('selected-obc')
 }
 
 // ── Mode ──────────────────────────────────────────────────────
@@ -240,8 +304,9 @@ function setMode(mode) {
   document.getElementById('btn-party').className = 'mode-btn' + (mode === 'party' ? ' active-party' : '')
   document.getElementById('submit-btn').className = `submit-btn ${mode}-submit`
   document.getElementById('submit-btn').textContent = mode === 'party' ? 'Sign In Child' : 'Sign In'
-  // Hide ticket bar for parties (parties don't need clay tickets)
+  // Hide ticket bar and clay type bar for parties
   document.getElementById('ticket-bar').style.display = mode === 'party' ? 'none' : ''
+  updateClayTypeUI()
   rebuildPeople()
 }
 
@@ -272,6 +337,15 @@ function toggleLock() {
 // ── Clay Tickets ──────────────────────────────────────────────
 async function createNewTicket() {
   if (!studioId) { showToast('No studio set'); return }
+
+  // For dual-path sessions, clay type must be selected first
+  if (isDualPathSession && currentMode === 'workshop' && !currentClayType) {
+    showToast('Please select Clay or Oven-Bake Clay above first')
+    document.getElementById('clay-type-bar').style.animation = 'none'
+    document.getElementById('clay-type-bar').offsetHeight // reflow
+    return
+  }
+
   const sessionId = document.getElementById('session-select').value || null
 
   // Get next number from Supabase function
@@ -284,7 +358,8 @@ async function createNewTicket() {
     ticket_number: ticketNum,
     studio_id: studioId,
     session_id: sessionId,
-    stage: 'submitted'
+    stage: 'submitted',
+    clay_type: currentClayType || null   // 'clay' | 'obc' | null
   }).select().single()
 
   if (err2) { showToast('Error creating ticket'); console.error(err2); return }
@@ -370,6 +445,12 @@ async function submitSignIn() {
   }
   document.getElementById('no-session-warning').style.display = 'none'
 
+  // For dual-path sessions, require clay type selection
+  if (isDualPathSession && currentMode === 'workshop' && !currentClayType) {
+    showToast('Please select Clay or Oven-Bake Clay above')
+    return
+  }
+
   // Collect people
   const rows = document.querySelectorAll('[id^="person-"]')
   const entries = []
@@ -443,6 +524,9 @@ function resetForNext() {
     document.getElementById('ticket-hint').textContent = 'Tap "+ New Ticket" or "Same ticket" if this group shares with the previous one.'
     document.getElementById('same-ticket-btn').style.display = ''
   }
+  // Reset clay type selection for next group
+  currentClayType = null
+  updateClayTypeUI()
 }
 
 // ── Toast ─────────────────────────────────────────────────────
