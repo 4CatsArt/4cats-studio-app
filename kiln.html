@@ -87,6 +87,14 @@
   .last-email .email-label { display:block; }
   .last-email .email-date  { display:block; color:#888; font-weight:400; }
 
+  .expiry-cell { font-size:11px; }
+  .expiry-cell input { border:1px solid #d0d0c8; border-radius:6px; font-size:11px; padding:3px 6px; outline:none; background:white; width:120px; }
+  .expiry-cell.expired input { border-color:#c0392b !important; background:#fff5f5 !important; }
+  .expiry-expired-flag { display:block; font-size:10px; color:#c0392b; font-weight:700; margin-top:3px; }
+  tbody tr.row-expired { background:#fff8f8 !important; }
+  tbody tr.row-expired:hover { background:#ffebee !important; }
+  tbody tr.row-expired.selected { background:#fce4ec !important; }
+
   .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:#1a1a2e; color:white; padding:10px 20px; border-radius:8px; font-size:13px; z-index:200; opacity:0; transition:opacity 0.3s; pointer-events:none; }
   .toast.show { opacity:1; }
 
@@ -178,11 +186,12 @@
           <th onclick="sortBy('glazed_on')">Glazed On</th>
           <th class="no-sort">Names</th>
           <th class="no-sort">Last Email</th>
+          <th class="no-sort">Expiry</th>
           <th class="no-sort">Action</th>
         </tr>
       </thead>
       <tbody id="table-body">
-        <tr class="empty-row"><td colspan="10">Loading...</td></tr>
+        <tr class="empty-row"><td colspan="11">Loading...</td></tr>
       </tbody>
     </table>
   </div>
@@ -309,7 +318,8 @@ async function loadTickets() {
 
   let q = sb.from('clay_tickets')
     .select(`id, ticket_number, studio_id, stage, is_party, description, created_at, glazed_on,
-             kiln_delay_sent_at, bisque_email_sent_at, pickup_email_sent_at, session_id,
+             kiln_delay_sent_at, bisque_email_sent_at, pickup_email_sent_at,
+             bisque_expiry_date, pickup_expiry_date, session_id,
              signin_entries(name, email),
              sessions(title, session_date, session_time, session_type)`)
     .order('created_at', { ascending: false })
@@ -321,7 +331,7 @@ async function loadTickets() {
 
   const { data, error } = await q
   if (error) {
-    document.getElementById('table-body').innerHTML = `<tr class="empty-row"><td colspan="10" style="color:#c0392b">Error: ${error.message}</td></tr>`
+    document.getElementById('table-body').innerHTML = `<tr class="empty-row"><td colspan="11" style="color:#c0392b">Error: ${error.message}</td></tr>`
     return
   }
   allTickets = data || []
@@ -355,7 +365,7 @@ function renderTable() {
   })
 
   if (!tickets.length) {
-    document.getElementById('table-body').innerHTML = '<tr class="empty-row"><td colspan="10">No active artwork tickets.</td></tr>'
+    document.getElementById('table-body').innerHTML = '<tr class="empty-row"><td colspan="11">No active artwork tickets.</td></tr>'
     selectedIds.clear(); updateBulkBar(); return
   }
 
@@ -383,6 +393,23 @@ function renderTable() {
       </span>`
     })()
 
+    // Expiry cell — bisque_expiry for bisque_ready, pickup_expiry for ready_pickup
+    const today = new Date().toISOString().split('T')[0]
+    const expiryCell = (() => {
+      if (t.stage === 'drying') return `<span style="color:#ccc;font-size:11px">—</span>`
+      const field = t.stage === 'bisque_ready' ? 'bisque_expiry_date' : 'pickup_expiry_date'
+      const val   = t[field] || ''
+      const isExpired = val && val <= today
+      return `<div class="expiry-cell${isExpired ? ' expired' : ''}">
+        <input type="date" value="${val}" onchange="updateExpiry('${t.id}','${field}',this.value)">
+        ${isExpired ? `<span class="expiry-expired-flag">⚠️ Expired</span>` : ''}
+      </div>`
+    })()
+
+    // Flag row if either relevant expiry is past
+    const relevantExpiry = t.stage === 'bisque_ready' ? t.bisque_expiry_date : t.stage === 'ready_pickup' ? t.pickup_expiry_date : null
+    const rowExpired = relevantExpiry && relevantExpiry <= today
+
     const action = t.stage === 'drying'
       ? `<div style="display:flex;flex-direction:column;gap:4px">
            <button class="advance-btn" onclick="promptAdvance('${t.id}','${t.ticket_number}','bisque_ready','→ Bisque Fired — Ready for Glazing')">→ Bisque Fired</button>
@@ -397,7 +424,7 @@ function renderTable() {
     const checked  = selectedIds.has(t.id) ? 'checked' : ''
     const selClass = selectedIds.has(t.id) ? ' selected' : ''
 
-    return `<tr id="row-${t.id}" class="${selClass}">
+    return `<tr id="row-${t.id}" class="${selClass}${rowExpired ? ' row-expired' : ''}">
       <td><input type="checkbox" ${checked} onchange="onCheck('${t.id}',this.checked)"></td>
       <td class="ticket-num">${t.ticket_number}</td>
       <td style="white-space:nowrap;color:#888;font-size:12px">${date}</td>
@@ -407,6 +434,7 @@ function renderTable() {
       <td>${glazedOn}</td>
       <td style="font-size:12px;color:#555">${(t.signin_entries||[]).map(c=>c.name).join(', ') || '<span style="color:#bbb">—</span>'}</td>
       <td>${lastEmailCell}</td>
+      <td>${expiryCell}</td>
       <td>${action}</td>
     </tr>`
   }).join('')
@@ -558,11 +586,14 @@ async function confirmAdvance() {
           })
         }).catch(err => console.error('Email send error:', err))
 
-        // Write timestamp to Supabase and local state
-        const tsCol = nextStage === 'bisque_ready' ? 'bisque_email_sent_at' : 'pickup_email_sent_at'
-        const now = new Date().toISOString()
-        sb.from('clay_tickets').update({ [tsCol]: now }).eq('id', t.id)
-          .then(() => { t[tsCol] = now })
+        // Write email timestamp + expiry date (+60 days) to Supabase and local state
+        const tsCol     = nextStage === 'bisque_ready' ? 'bisque_email_sent_at' : 'pickup_email_sent_at'
+        const expiryCol = nextStage === 'bisque_ready' ? 'bisque_expiry_date'   : 'pickup_expiry_date'
+        const now       = new Date().toISOString()
+        const expiry    = new Date(); expiry.setDate(expiry.getDate() + 60)
+        const expiryStr = expiry.toISOString().split('T')[0]
+        sb.from('clay_tickets').update({ [tsCol]: now, [expiryCol]: expiryStr }).eq('id', t.id)
+          .then(() => { t[tsCol] = now; t[expiryCol] = expiryStr })
       }
       renderTable()
     }, 60000)
@@ -703,6 +734,15 @@ async function updateGlazedOn(id, date) {
   const t = allTickets.find(t => t.id === id)
   if (t) t.glazed_on = date || null
   showToast('Glazed date saved')
+}
+
+async function updateExpiry(id, field, date) {
+  const { error } = await sb.from('clay_tickets').update({ [field]: date || null }).eq('id', id)
+  if (error) { showToast('Error saving expiry date'); return }
+  const t = allTickets.find(t => t.id === id)
+  if (t) t[field] = date || null
+  renderTable()
+  showToast('Expiry date updated')
 }
 
 function showToast(msg, ms=2500) {
