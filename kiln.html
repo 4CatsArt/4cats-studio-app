@@ -83,7 +83,9 @@
   .delay-banner { background:#fef3e2; border:1px solid #f0c040; border-radius:8px; padding:10px 14px; margin:8px 16px; font-size:13px; color:#b7700a; display:none; }
   .delay-banner.show { display:block; }
 
-  .delay-sent { font-size:11px; color:#e67e22; font-weight:600; white-space:nowrap; }
+  .last-email { font-size:11px; font-weight:600; white-space:nowrap; line-height:1.6; }
+  .last-email .email-label { display:block; }
+  .last-email .email-date  { display:block; color:#888; font-weight:400; }
 
   .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:#1a1a2e; color:white; padding:10px 20px; border-radius:8px; font-size:13px; z-index:200; opacity:0; transition:opacity 0.3s; pointer-events:none; }
   .toast.show { opacity:1; }
@@ -175,7 +177,7 @@
           <th onclick="sortBy('stage')">Stage</th>
           <th onclick="sortBy('glazed_on')">Glazed On</th>
           <th class="no-sort">Names</th>
-          <th class="no-sort">Delay Email</th>
+          <th class="no-sort">Last Email</th>
           <th class="no-sort">Action</th>
         </tr>
       </thead>
@@ -306,7 +308,8 @@ async function loadTickets() {
   const stageF = document.getElementById('filter-stage').value
 
   let q = sb.from('clay_tickets')
-    .select(`id, ticket_number, studio_id, stage, is_party, description, created_at, glazed_on, kiln_delay_sent_at, session_id,
+    .select(`id, ticket_number, studio_id, stage, is_party, description, created_at, glazed_on,
+             kiln_delay_sent_at, bisque_email_sent_at, pickup_email_sent_at, session_id,
              signin_entries(name, email),
              sessions(title, session_date, session_time, session_type)`)
     .order('created_at', { ascending: false })
@@ -366,9 +369,19 @@ function renderTable() {
       ? `<input type="date" value="${t.glazed_on}" onchange="updateGlazedOn('${t.id}',this.value)" style="border:1px solid #d0d0c8;border-radius:6px;font-size:11px;padding:3px 6px;outline:none;background:white;width:120px">`
       : `<input type="date" onchange="updateGlazedOn('${t.id}',this.value)" style="border:1px solid #d0d0c8;border-radius:6px;font-size:11px;padding:3px 6px;outline:none;background:white;width:120px">`
 
-    const delayCell = t.kiln_delay_sent_at
-      ? `<span class="delay-sent">📧 ${fmtDate(t.kiln_delay_sent_at)}</span>`
-      : `<span style="color:#ccc;font-size:11px">—</span>`
+    const lastEmailCell = (() => {
+      const candidates = [
+        { ts: t.bisque_email_sent_at,  label: 'Ready to Glaze', color: '#2e7d32' },
+        { ts: t.pickup_email_sent_at,  label: 'Ready for Pickup', color: '#1565c0' },
+        { ts: t.kiln_delay_sent_at,    label: 'Kiln Delay', color: '#e67e22' },
+      ].filter(c => c.ts)
+      if (!candidates.length) return `<span style="color:#ccc;font-size:11px">—</span>`
+      const latest = candidates.sort((a, b) => new Date(b.ts) - new Date(a.ts))[0]
+      return `<span class="last-email">
+        <span class="email-label" style="color:${latest.color}">📧 ${latest.label}</span>
+        <span class="email-date">${fmtDate(latest.ts)}</span>
+      </span>`
+    })()
 
     const action = t.stage === 'drying'
       ? `<div style="display:flex;flex-direction:column;gap:4px">
@@ -393,7 +406,7 @@ function renderTable() {
       <td><span class="stage-chip stage-${t.stage}">${stage.label}</span></td>
       <td>${glazedOn}</td>
       <td style="font-size:12px;color:#555">${(t.signin_entries||[]).map(c=>c.name).join(', ') || '<span style="color:#bbb">—</span>'}</td>
-      <td>${delayCell}</td>
+      <td>${lastEmailCell}</td>
       <td>${action}</td>
     </tr>`
   }).join('')
@@ -544,7 +557,14 @@ async function confirmAdvance() {
             description: t.description || ''
           })
         }).catch(err => console.error('Email send error:', err))
+
+        // Write timestamp to Supabase and local state
+        const tsCol = nextStage === 'bisque_ready' ? 'bisque_email_sent_at' : 'pickup_email_sent_at'
+        const now = new Date().toISOString()
+        sb.from('clay_tickets').update({ [tsCol]: now }).eq('id', t.id)
+          .then(() => { t[tsCol] = now })
       }
+      renderTable()
     }, 60000)
 
     window._undoEmailData = { ids, prevStage }
