@@ -217,6 +217,7 @@ select:focus, input:focus { border-color: #888; }
     <button class="tab-btn" onclick="switchTab('parties')">Parties</button>
     <button class="tab-btn" onclick="switchTab('users')">Users</button>
     <button class="tab-btn" onclick="switchTab('clay')">🏺 Clay</button>
+    <button class="tab-btn" onclick="switchTab('reviews')">⭐ Reviews</button>
     <button class="tab-btn" onclick="switchTab('guide')">📋 Guide</button>
     <div class="top-bar-right"><button class="signout-btn" onclick="signOut()">Sign out</button></div>
   </div>
@@ -721,7 +722,7 @@ async function initApp() {
 }
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','training','staff','parties','users','clay','guide'][i] === tab))
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','training','staff','parties','users','clay','reviews','guide'][i] === tab))
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'))
   document.getElementById(`tab-${tab}`).classList.add('active')
   if (tab === 'curriculum') loadCurriculum()
@@ -733,6 +734,7 @@ function switchTab(tab) {
   if (tab === 'staff') loadStaffTab()
   if (tab === 'parties') loadPartyReport()
   if (tab === 'clay') loadClayTab()
+  if (tab === 'reviews') loadReviewsTab()
 }
 
 async function loadQualityBadge() {
@@ -4495,6 +4497,87 @@ async function advanceClayStage(ticketId, newStage, btn) {
   loadClayTab()
 }
 
+// ── PARTY REVIEWS ──────────────────────────────────────────
+
+const STAR_COLORS = { 5: '#2e7d32', 4: '#558b2f', 3: '#f57f17', 2: '#e65100', 1: '#c62828' }
+const REVIEW_STATUS_LABELS = { pending: 'Pending', approved: 'Approved ✓', dismissed: 'Dismissed' }
+
+async function loadReviewsTab() {
+  const list = document.getElementById('reviews-list')
+  if (!list) return
+  list.innerHTML = '<div style="color:#aaa;padding:20px;text-align:center">Loading…</div>'
+
+  const statusFilter = document.getElementById('reviews-filter-status')?.value || 'pending'
+  const studioFilter = document.getElementById('reviews-filter-studio')?.value || ''
+
+  // Populate studio dropdown once
+  const studioSel = document.getElementById('reviews-filter-studio')
+  if (studioSel && studioSel.options.length === 1) {
+    allStudios.forEach(s => {
+      const opt = document.createElement('option')
+      opt.value = s.id; opt.textContent = s.name || s.id
+      studioSel.appendChild(opt)
+    })
+  }
+
+  let q = sb.from('party_reviews')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(100)
+
+  if (statusFilter !== 'all') q = q.eq('status', statusFilter)
+  if (studioFilter) q = q.eq('studio_id', studioFilter)
+
+  const { data, error } = await q
+  if (error) { list.innerHTML = `<div style="color:#c0392b;padding:20px">Error: ${error.message}</div>`; return }
+  if (!data?.length) { list.innerHTML = '<div style="color:#aaa;padding:20px;text-align:center">No reviews found.</div>'; return }
+
+  list.innerHTML = data.map(r => {
+    const stars = '★'.repeat(r.rating || 0) + '☆'.repeat(5 - (r.rating || 0))
+    const starColor = STAR_COLORS[r.rating] || '#888'
+    const studioName = getStudioName(r.studio_id)
+    const date = r.created_at ? new Date(r.created_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' }) : ''
+    const statusColor = r.status === 'approved' ? '#2e7d32' : r.status === 'dismissed' ? '#888' : '#c0392b'
+
+    return `<div id="review-card-${r.id}" style="background:white;border:1px solid #e0e0d8;border-radius:10px;padding:16px 20px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+        <div>
+          <span style="font-size:20px;color:${starColor};letter-spacing:2px">${stars}</span>
+          <span style="font-size:12px;color:${starColor};font-weight:700;margin-left:6px">${r.rating}/5</span>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <span style="font-size:11px;color:#888;background:#f5f5f0;padding:3px 8px;border-radius:4px">${studioName}</span>
+          ${r.ticket_number ? `<span style="font-size:11px;color:#666;background:#f0f0e8;padding:3px 8px;border-radius:4px">Ticket ${r.ticket_number}</span>` : ''}
+          <span style="font-size:11px;color:${statusColor};font-weight:600">${REVIEW_STATUS_LABELS[r.status] || r.status}</span>
+          <span style="font-size:11px;color:#aaa">${date}</span>
+        </div>
+      </div>
+      ${r.customer_name ? `<div style="font-size:12px;color:#888;margin-bottom:6px">— ${r.customer_name}</div>` : ''}
+      ${r.comment ? `<div style="font-size:14px;color:#333;line-height:1.6;margin-bottom:12px">"${r.comment}"</div>` : '<div style="font-size:13px;color:#aaa;margin-bottom:12px"><em>No comment left</em></div>'}
+      ${r.status === 'pending' ? `
+        <div style="display:flex;gap:8px">
+          <button onclick="setReviewStatus('${r.id}','approved')" style="padding:6px 16px;background:#2e7d32;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">✓ Approve for Studio</button>
+          <button onclick="setReviewStatus('${r.id}','dismissed')" style="padding:6px 16px;background:none;border:1px solid #d0d0c8;color:#666;border-radius:6px;font-size:13px;cursor:pointer">Dismiss</button>
+        </div>` : r.status === 'approved' ? `
+        <div style="display:flex;gap:8px">
+          <button onclick="setReviewStatus('${r.id}','dismissed')" style="padding:6px 14px;background:none;border:1px solid #d0d0c8;color:#888;border-radius:6px;font-size:12px;cursor:pointer">Revoke</button>
+        </div>` : `
+        <div>
+          <button onclick="setReviewStatus('${r.id}','pending')" style="padding:6px 14px;background:none;border:1px solid #d0d0c8;color:#888;border-radius:6px;font-size:12px;cursor:pointer">Restore to Pending</button>
+        </div>`}
+    </div>`
+  }).join('')
+}
+
+async function setReviewStatus(reviewId, newStatus) {
+  const { error } = await sb.from('party_reviews')
+    .update({ status: newStatus, updated_at: new Date().toISOString() })
+    .eq('id', reviewId)
+  if (error) { alert('Error updating review: ' + error.message); return }
+  loadReviewsTab()
+}
+
+
 function openNewClayTicketModal() {
   // Pre-select current studio
   const newStudioSel = document.getElementById('clay-new-studio')
@@ -4781,6 +4864,28 @@ function showAdminToast(msg, duration = 2500) {
       <button onclick="closeClayDetailModal()" style="padding:9px 18px;border:1px solid #d0d0c8;border-radius:8px;background:none;font-size:13px;cursor:pointer">Close</button>
     </div>
   </div>
+</div>
+
+<!-- Reviews Tab -->
+<div class="tab-content" id="tab-reviews">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem;flex-wrap:wrap;gap:10px">
+    <div>
+      <div style="font-size:18px;font-weight:600;margin-bottom:4px">Party Reviews</div>
+      <div style="font-size:13px;color:#888">Customer feedback submitted after parties. Approve to share with the studio.</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <select id="reviews-filter-status" onchange="loadReviewsTab()" style="padding:6px 10px;border:1px solid #d0d0c8;border-radius:6px;font-size:13px;background:white">
+        <option value="pending">Pending</option>
+        <option value="approved">Approved</option>
+        <option value="dismissed">Dismissed</option>
+        <option value="all">All</option>
+      </select>
+      <select id="reviews-filter-studio" onchange="loadReviewsTab()" style="padding:6px 10px;border:1px solid #d0d0c8;border-radius:6px;font-size:13px;background:white">
+        <option value="">All Studios</option>
+      </select>
+    </div>
+  </div>
+  <div id="reviews-list" style="display:grid;gap:12px"></div>
 </div>
 
 <!-- Guide Tab -->
