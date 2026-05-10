@@ -1,0 +1,1067 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>4Cats Inventory Admin</title>
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <!--
+  ═══════════════════════════════════════════════════════════════
+  BEFORE DEPLOYING — run these SQL fixes in Supabase if not done:
+
+  1. Fix admin write policy (uses id instead of user_id):
+     DROP POLICY IF EXISTS "inv_items_admin_write" ON inventory_items;
+     CREATE POLICY "inv_items_admin_write" ON inventory_items
+       FOR ALL USING (
+         EXISTS (SELECT 1 FROM studio_users WHERE user_id = auth.uid() AND studio_id IS NULL)
+       );
+
+  2. Allow logistics/admin to read studio_stock (should already exist):
+     Already covered by "stock_admin" policy (studio_id IS NULL).
+
+  3. Staff profiles read policy (if not already set):
+     CREATE POLICY "staff_admin_read" ON staff_profiles
+       FOR ALL USING (
+         EXISTS (SELECT 1 FROM studio_users WHERE user_id = auth.uid() AND studio_id IS NULL)
+       );
+
+  4. Studio item overrides admin policy:
+     CREATE POLICY "overrides_admin_all" ON studio_item_overrides
+       FOR ALL USING (
+         EXISTS (SELECT 1 FROM studio_users WHERE user_id = auth.uid() AND studio_id IS NULL)
+       );
+  ═══════════════════════════════════════════════════════════════
+  -->
+
+  <style>
+    :root {
+      --green:      #1B4332;
+      --green-mid:  #2D6A4F;
+      --green-lite: #D1FAE5;
+      --gold:       #E9A319;
+      --gold-lite:  #FEF3C7;
+      --cream:      #FDFAF4;
+      --white:      #FFFFFF;
+      --text:       #1C1C1C;
+      --muted:      #6B7280;
+      --border:     #E5DFD3;
+      --red:        #DC2626;
+      --red-lite:   #FEE2E2;
+      --yellow:     #D97706;
+      --yellow-lite:#FFFBEB;
+      --shadow:     0 2px 12px rgba(0,0,0,0.07);
+      --radius:     12px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Nunito', sans-serif; background: var(--cream); color: var(--text); min-height: 100vh; }
+
+    /* ── SCREENS ── */
+    .screen { display: none; }
+    .screen.active { display: block; }
+
+    /* ── LOGIN ── */
+    #login-screen {
+      min-height: 100vh; background: var(--green);
+      display: none; align-items: center; justify-content: center; padding: 2rem;
+    }
+    #login-screen.active { display: flex; }
+    .login-box {
+      background: var(--white); border-radius: 20px; padding: 2.5rem;
+      width: 100%; max-width: 400px; box-shadow: 0 24px 64px rgba(0,0,0,0.35);
+    }
+    .login-logo { text-align: center; margin-bottom: 2rem; }
+    .login-logo span { font-size: 2.5rem; display: block; margin-bottom: 0.5rem; }
+    .login-logo h1 { font-size: 1.6rem; font-weight: 900; color: var(--green); }
+    .login-logo p { color: var(--muted); font-size: 0.85rem; margin-top: 0.2rem; }
+    .form-group { margin-bottom: 1rem; }
+    .form-group label { display: block; font-weight: 800; font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 0.35rem; }
+    .form-group input { width: 100%; padding: 0.8rem 1rem; border: 2px solid var(--border); border-radius: 10px; font-family: 'Nunito', sans-serif; font-size: 1rem; outline: none; transition: border-color 0.2s; background: var(--cream); }
+    .form-group input:focus { border-color: var(--green); background: var(--white); }
+    .btn-login { width: 100%; padding: 0.95rem; background: var(--green); color: white; border: none; border-radius: 10px; font-family: 'Nunito', sans-serif; font-size: 1rem; font-weight: 800; cursor: pointer; margin-top: 0.5rem; transition: background 0.2s; }
+    .btn-login:hover { background: var(--green-mid); }
+    .error-msg { background: var(--red-lite); color: var(--red); padding: 0.65rem 1rem; border-radius: 8px; font-size: 0.85rem; margin-top: 0.75rem; display: none; }
+
+    /* ── APP LAYOUT ── */
+    #app-screen { min-height: 100vh; display: flex; flex-direction: column; }
+    .app-header {
+      background: var(--green); padding: 0.7rem 1.5rem;
+      display: flex; align-items: center; justify-content: space-between;
+      position: sticky; top: 0; z-index: 100;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }
+    .app-header-left { display: flex; align-items: center; gap: 1rem; }
+    .app-header h1 { color: white; font-size: 1.05rem; font-weight: 900; }
+    .app-header p { color: rgba(255,255,255,0.6); font-size: 0.75rem; }
+    .header-role-badge { background: var(--gold); color: white; border-radius: 50px; padding: 0.2rem 0.7rem; font-size: 0.7rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; }
+    .logout-btn { background: rgba(255,255,255,0.15); border: none; border-radius: 8px; padding: 0.4rem 0.8rem; color: white; font-family: 'Nunito', sans-serif; font-size: 0.8rem; font-weight: 700; cursor: pointer; transition: background 0.15s; }
+    .logout-btn:hover { background: rgba(255,255,255,0.25); }
+
+    /* ── TABS ── */
+    .tab-bar { background: var(--white); border-bottom: 2px solid var(--border); display: flex; padding: 0 1.5rem; }
+    .tab-btn {
+      padding: 0.85rem 1.25rem; border: none; background: none;
+      font-family: 'Nunito', sans-serif; font-size: 0.88rem; font-weight: 700;
+      color: var(--muted); cursor: pointer; border-bottom: 3px solid transparent;
+      margin-bottom: -2px; transition: all 0.15s; white-space: nowrap;
+    }
+    .tab-btn:hover { color: var(--text); }
+    .tab-btn.active { color: var(--green); border-bottom-color: var(--green); }
+    .tab-btn .badge { display: inline-flex; align-items: center; justify-content: center; background: var(--red); color: white; border-radius: 50%; width: 18px; height: 18px; font-size: 0.65rem; font-weight: 900; margin-left: 0.35rem; }
+
+    .tab-content { display: none; padding: 1.5rem; flex: 1; }
+    .tab-content.active { display: block; }
+
+    /* ── SHARED COMPONENTS ── */
+    .section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.25rem; }
+    .section-title { font-size: 1.1rem; font-weight: 900; color: var(--text); }
+    .section-sub { font-size: 0.8rem; color: var(--muted); margin-top: 0.1rem; }
+
+    .card { background: var(--white); border-radius: var(--radius); padding: 1.25rem; box-shadow: var(--shadow); margin-bottom: 1rem; }
+    .card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
+    .card-title { font-size: 0.95rem; font-weight: 800; }
+    .card-sub { font-size: 0.78rem; color: var(--muted); }
+
+    .btn { padding: 0.55rem 1rem; border-radius: 8px; border: none; font-family: 'Nunito', sans-serif; font-size: 0.85rem; font-weight: 700; cursor: pointer; transition: all 0.15s; }
+    .btn-green { background: var(--green); color: white; }
+    .btn-green:hover { background: var(--green-mid); }
+    .btn-gold { background: var(--gold); color: white; box-shadow: 0 2px 8px rgba(233,163,25,0.35); }
+    .btn-gold:hover { opacity: 0.9; }
+    .btn-outline { background: transparent; border: 2px solid var(--border); color: var(--text); }
+    .btn-outline:hover { border-color: var(--green); color: var(--green); }
+    .btn-red { background: var(--red-lite); color: var(--red); }
+    .btn-red:hover { background: var(--red); color: white; }
+    .btn-sm { padding: 0.35rem 0.7rem; font-size: 0.78rem; }
+
+    .pill { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 50px; font-size: 0.72rem; font-weight: 800; }
+    .pill-green { background: var(--green-lite); color: var(--green); }
+    .pill-red { background: var(--red-lite); color: var(--red); }
+    .pill-yellow { background: var(--yellow-lite); color: var(--yellow); }
+    .pill-grey { background: #F3F4F6; color: var(--muted); }
+
+    select.select-input, input.text-input {
+      padding: 0.6rem 0.85rem; border: 2px solid var(--border); border-radius: 8px;
+      font-family: 'Nunito', sans-serif; font-size: 0.88rem; font-weight: 600;
+      color: var(--text); background: var(--cream); outline: none; cursor: pointer;
+      transition: border-color 0.2s;
+    }
+    select.select-input:focus, input.text-input:focus { border-color: var(--green); }
+
+    .search-wrap { position: relative; }
+    .search-wrap svg { position: absolute; left: 0.7rem; top: 50%; transform: translateY(-50%); pointer-events: none; }
+    .search-wrap input { padding-left: 2.25rem; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th { text-align: left; padding: 0.6rem 0.85rem; font-size: 0.72rem; font-weight: 900; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); border-bottom: 2px solid var(--border); background: var(--cream); }
+    td { padding: 0.65rem 0.85rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #FAFAF7; }
+
+    .loading-state { text-align: center; padding: 3rem; color: var(--muted); font-size: 0.9rem; }
+    .empty-state { text-align: center; padding: 2.5rem; color: var(--muted); }
+    .empty-state .empty-icon { font-size: 2.5rem; margin-bottom: 0.5rem; }
+
+    /* ── ORDERS TAB ── */
+    .supplier-block { margin-bottom: 1.5rem; }
+    .supplier-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.85rem 1.25rem; background: var(--green); border-radius: var(--radius) var(--radius) 0 0;
+      color: white;
+    }
+    .supplier-name { font-size: 1rem; font-weight: 900; }
+    .supplier-count { font-size: 0.8rem; color: rgba(255,255,255,0.7); }
+    .supplier-body { background: var(--white); border-radius: 0 0 var(--radius) var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+    .order-row { padding: 0.85rem 1.25rem; border-bottom: 1px solid var(--border); display: flex; align-items: flex-start; gap: 1rem; }
+    .order-row:last-child { border-bottom: none; }
+    .order-item-name { font-weight: 700; font-size: 0.9rem; }
+    .order-item-sku { font-size: 0.75rem; color: var(--muted); }
+    .order-studios { font-size: 0.78rem; color: var(--muted); margin-top: 0.2rem; }
+    .order-qty { text-align: right; flex-shrink: 0; }
+    .order-qty-num { font-size: 1.1rem; font-weight: 900; color: var(--green); }
+    .order-qty-label { font-size: 0.72rem; color: var(--muted); }
+    .order-cost { font-size: 0.78rem; color: var(--muted); }
+
+    /* ── STOCK TAB ── */
+    .stock-filters { display: flex; gap: 0.75rem; margin-bottom: 1.25rem; flex-wrap: wrap; align-items: center; }
+    .stock-legend { display: flex; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }
+    .legend-item { display: flex; align-items: center; gap: 0.35rem; font-size: 0.78rem; color: var(--muted); font-weight: 600; }
+    .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+    .dot-green { background: #10B981; }
+    .dot-yellow { background: #F59E0B; }
+    .dot-red { background: #EF4444; }
+    .dot-grey { background: #D1D5DB; }
+    .qty-cell { font-weight: 800; font-size: 0.9rem; }
+    .qty-good { color: #059669; }
+    .qty-low { color: #D97706; }
+    .qty-zero { color: var(--red); }
+    .qty-uncounted { color: #9CA3AF; font-style: italic; font-weight: 600; }
+
+    /* ── CATALOG TAB ── */
+    .catalog-filters { display: flex; gap: 0.75rem; margin-bottom: 1.25rem; flex-wrap: wrap; align-items: center; }
+    .toggle-switch { position: relative; display: inline-block; width: 36px; height: 20px; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider { position: absolute; cursor: pointer; inset: 0; background: #D1D5DB; border-radius: 50px; transition: 0.2s; }
+    .toggle-slider:before { content: ''; position: absolute; width: 14px; height: 14px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.2s; }
+    input:checked + .toggle-slider { background: var(--green); }
+    input:checked + .toggle-slider:before { transform: translateX(16px); }
+
+    /* ── STAFF TAB ── */
+    .staff-filters { display: flex; gap: 0.75rem; margin-bottom: 1.25rem; flex-wrap: wrap; align-items: center; }
+    .staff-avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--green-lite); color: var(--green); display: inline-flex; align-items: center; justify-content: center; font-weight: 900; font-size: 0.8rem; flex-shrink: 0; }
+
+    /* ── MODAL ── */
+    .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 500; display: none; align-items: center; justify-content: center; padding: 1rem; }
+    .modal-bg.open { display: flex; }
+    .modal-box { background: var(--white); border-radius: 16px; padding: 1.75rem; width: 100%; max-width: 560px; max-height: 90vh; overflow-y: auto; box-shadow: 0 24px 64px rgba(0,0,0,0.25); }
+    .modal-title { font-size: 1.1rem; font-weight: 900; margin-bottom: 1.25rem; }
+    .modal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.85rem; }
+    .modal-full { grid-column: 1/-1; }
+    .field-label { font-size: 0.75rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 0.3rem; }
+    .field-input { width: 100%; padding: 0.65rem 0.85rem; border: 2px solid var(--border); border-radius: 8px; font-family: 'Nunito', sans-serif; font-size: 0.9rem; color: var(--text); background: var(--cream); outline: none; }
+    .field-input:focus { border-color: var(--green); }
+    .modal-actions { display: flex; gap: 0.75rem; justify-content: flex-end; margin-top: 1.5rem; }
+
+    /* ── ORDER OUTPUT MODAL ── */
+    .order-output { background: #1C1C1C; color: #F0FFF4; border-radius: 10px; padding: 1.25rem; font-family: 'Courier New', monospace; font-size: 0.82rem; line-height: 1.6; max-height: 400px; overflow-y: auto; white-space: pre-wrap; margin-bottom: 1rem; }
+    .copy-btn { display: flex; align-items: center; gap: 0.5rem; }
+
+    /* ── STUDIO OVERRIDES ── */
+    .overrides-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.5rem; margin-top: 0.75rem; }
+    .override-item { display: flex; align-items: center; justify-content: space-between; background: var(--cream); border-radius: 8px; padding: 0.5rem 0.75rem; font-size: 0.82rem; font-weight: 600; }
+
+    @media (max-width: 640px) {
+      .modal-grid { grid-template-columns: 1fr; }
+      .tab-btn { padding: 0.75rem 0.75rem; font-size: 0.8rem; }
+      .tab-content { padding: 1rem; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ═══════ LOGIN ═══════ -->
+<div id="login-screen" class="screen active">
+  <div class="login-box">
+    <div class="login-logo">
+      <span>📦</span>
+      <h1>Inventory Admin</h1>
+      <p>4Cats Logistics & Home Office</p>
+    </div>
+    <div class="form-group">
+      <label>Email</label>
+      <input type="email" id="login-email" placeholder="you@4cats.com" autocomplete="email">
+    </div>
+    <div class="form-group">
+      <label>Password</label>
+      <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password">
+    </div>
+    <button class="btn-login" onclick="login()">Sign In →</button>
+    <div id="login-error" class="error-msg"></div>
+  </div>
+</div>
+
+<!-- ═══════ APP ═══════ -->
+<div id="app-screen" class="screen">
+  <div class="app-header">
+    <div class="app-header-left">
+      <div>
+        <h1>📦 Inventory Admin</h1>
+        <p>4Cats Art Studios</p>
+      </div>
+      <span class="header-role-badge" id="role-badge">Admin</span>
+    </div>
+    <button class="logout-btn" onclick="logout()">Sign Out</button>
+  </div>
+
+  <div class="tab-bar">
+    <button class="tab-btn active" onclick="switchTab('orders', this)">
+      🚨 Orders<span class="badge" id="orders-badge" style="display:none">0</span>
+    </button>
+    <button class="tab-btn" onclick="switchTab('stock', this)">📊 Stock Overview</button>
+    <button class="tab-btn" id="catalog-tab-btn" onclick="switchTab('catalog', this)">📋 Catalog</button>
+    <button class="tab-btn" onclick="switchTab('staff', this)">👥 Staff</button>
+  </div>
+
+  <!-- ── ORDERS TAB ── -->
+  <div id="tab-orders" class="tab-content active">
+    <div class="section-header">
+      <div>
+        <div class="section-title">Reorder Alerts</div>
+        <div class="section-sub">Studios below minimum threshold, grouped by supplier</div>
+      </div>
+      <button class="btn btn-outline btn-sm" onclick="loadOrders()">↺ Refresh</button>
+    </div>
+    <div id="orders-content"><div class="loading-state">Loading order alerts…</div></div>
+  </div>
+
+  <!-- ── STOCK TAB ── -->
+  <div id="tab-stock" class="tab-content">
+    <div class="section-header">
+      <div>
+        <div class="section-title">Stock Overview</div>
+        <div class="section-sub">Current stock levels per studio</div>
+      </div>
+    </div>
+    <div class="stock-filters">
+      <select class="select-input" id="stock-studio" onchange="loadStockForStudio()">
+        <option value="">— Select a studio —</option>
+      </select>
+      <div class="search-wrap">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9CA3AF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+        <input type="search" class="text-input search-wrap" id="stock-search" placeholder="Search items…" oninput="renderStockTable()" style="padding-left:2.1rem">
+      </div>
+      <select class="select-input" id="stock-filter" onchange="renderStockTable()">
+        <option value="all">All Items</option>
+        <option value="low">Low / At Risk</option>
+        <option value="zero">Empty</option>
+        <option value="uncounted">Never Counted</option>
+      </select>
+    </div>
+    <div class="stock-legend">
+      <div class="legend-item"><div class="legend-dot dot-green"></div> Good (≥ threshold)</div>
+      <div class="legend-item"><div class="legend-dot dot-yellow"></div> Low (below threshold)</div>
+      <div class="legend-item"><div class="legend-dot dot-red"></div> Empty</div>
+      <div class="legend-item"><div class="legend-dot dot-grey"></div> Never counted</div>
+    </div>
+    <div id="stock-content"><div class="empty-state"><div class="empty-icon">🏪</div><p>Select a studio above</p></div></div>
+  </div>
+
+  <!-- ── CATALOG TAB ── -->
+  <div id="tab-catalog" class="tab-content">
+    <div class="section-header">
+      <div>
+        <div class="section-title">Item Catalog</div>
+        <div class="section-sub">Manage inventory items, thresholds, and studio visibility</div>
+      </div>
+      <button class="btn btn-green btn-sm" id="add-item-btn" onclick="openAddItem()" style="display:none">+ Add Item</button>
+    </div>
+    <div class="catalog-filters">
+      <div class="search-wrap">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9CA3AF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+        <input type="search" class="text-input" id="catalog-search" placeholder="Search catalog…" oninput="renderCatalog()" style="padding-left:2.1rem">
+      </div>
+      <select class="select-input" id="catalog-filter-supplier" onchange="renderCatalog()">
+        <option value="">All Suppliers</option>
+      </select>
+      <select class="select-input" id="catalog-filter-active" onchange="renderCatalog()">
+        <option value="">Active & Inactive</option>
+        <option value="true">Active Only</option>
+        <option value="false">Inactive Only</option>
+      </select>
+    </div>
+    <div class="card" style="padding:0; overflow:hidden;">
+      <div id="catalog-content"><div class="loading-state">Loading catalog…</div></div>
+    </div>
+  </div>
+
+  <!-- ── STAFF TAB ── -->
+  <div id="tab-staff" class="tab-content">
+    <div class="section-header">
+      <div>
+        <div class="section-title">Staff Management</div>
+        <div class="section-sub">View and manage studio staff</div>
+      </div>
+    </div>
+    <div class="staff-filters">
+      <select class="select-input" id="staff-studio" onchange="loadStaffForStudio()">
+        <option value="">— Select a studio —</option>
+      </select>
+      <select class="select-input" id="staff-filter-active" onchange="renderStaffTable()">
+        <option value="true">Active Staff</option>
+        <option value="false">Inactive Staff</option>
+        <option value="">All Staff</option>
+      </select>
+    </div>
+    <div id="staff-content"><div class="empty-state"><div class="empty-icon">👥</div><p>Select a studio above</p></div></div>
+  </div>
+</div>
+
+<!-- ── EDIT ITEM MODAL ── -->
+<div class="modal-bg" id="item-modal">
+  <div class="modal-box">
+    <div class="modal-title" id="item-modal-title">Edit Item</div>
+    <div class="modal-grid">
+      <div class="modal-full">
+        <div class="field-label">Item Name</div>
+        <input class="field-input" id="f-name" placeholder="e.g. dish soap">
+      </div>
+      <div>
+        <div class="field-label">SKU</div>
+        <input class="field-input" id="f-sku" placeholder="e.g. DAWN">
+      </div>
+      <div>
+        <div class="field-label">Supplier</div>
+        <input class="field-input" id="f-supplier" placeholder="e.g. Amazon">
+      </div>
+      <div>
+        <div class="field-label">Category</div>
+        <select class="field-input" id="f-category">
+          <option value="Everyday">Everyday</option>
+          <option value="Occasional">Occasional</option>
+        </select>
+      </div>
+      <div>
+        <div class="field-label">Unit Type</div>
+        <select class="field-input" id="f-unit-type">
+          <option value="Each">Each</option>
+          <option value="Pack">Pack</option>
+          <option value="Case">Case</option>
+          <option value="Bottle/Jar">Bottle/Jar</option>
+        </select>
+      </div>
+      <div>
+        <div class="field-label">Cost per Unit (CA$)</div>
+        <input class="field-input" id="f-cost" type="number" step="0.01" placeholder="0.00">
+      </div>
+      <div>
+        <div class="field-label">Reorder Threshold</div>
+        <input class="field-input" id="f-threshold" type="number" placeholder="min qty before reorder">
+      </div>
+      <div>
+        <div class="field-label">Order Pack Size</div>
+        <input class="field-input" id="f-pack-size" type="number" placeholder="units per order">
+      </div>
+      <div>
+        <div class="field-label">Lead Time (days)</div>
+        <input class="field-input" id="f-lead-time" type="number" placeholder="14">
+      </div>
+      <div>
+        <div class="field-label">Count Full At (0-1, blank = whole units)</div>
+        <input class="field-input" id="f-count-full" type="number" step="0.05" min="0" max="1" placeholder="e.g. 0.2">
+      </div>
+      <div style="display:flex; align-items:center; gap:0.75rem; padding-top:1.25rem">
+        <label class="toggle-switch"><input type="checkbox" id="f-active"><span class="toggle-slider"></span></label>
+        <span style="font-size:0.85rem; font-weight:700">Active</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:0.75rem; padding-top:1.25rem">
+        <label class="toggle-switch"><input type="checkbox" id="f-default-visible" checked><span class="toggle-slider"></span></label>
+        <span style="font-size:0.85rem; font-weight:700">Visible by default</span>
+      </div>
+      <div class="modal-full">
+        <div class="field-label">Notes</div>
+        <input class="field-input" id="f-notes" placeholder="Counting instructions for staff">
+      </div>
+      <!-- Studio overrides (only shown in edit mode) -->
+      <div class="modal-full" id="overrides-section" style="display:none">
+        <div class="field-label">Studio Visibility Overrides</div>
+        <div style="font-size:0.78rem; color:var(--muted); margin-bottom:0.5rem">Toggle to show/hide this item for specific studios (overrides default visibility)</div>
+        <div class="overrides-grid" id="overrides-grid"></div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal('item-modal')">Cancel</button>
+      <button class="btn btn-green" id="item-save-btn" onclick="saveItem()">Save Item</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── ORDER OUTPUT MODAL ── -->
+<div class="modal-bg" id="order-modal">
+  <div class="modal-box" style="max-width:680px">
+    <div class="modal-title" id="order-modal-title">Order List</div>
+    <div class="order-output" id="order-output"></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal('order-modal')">Close</button>
+      <button class="btn btn-green copy-btn" onclick="copyOrder()">📋 Copy to Clipboard</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const SUPABASE_URL      = 'https://snxibhbhhchjthfmjtaj.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA';
+
+const { createClient } = supabase;
+const db = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// ── STATE ────────────────────────────────────────────────
+let currentUser  = null;
+let userRole     = null;
+let allItems     = [];   // inventory_items[]
+let stockData    = {};   // { sku: { qty_on_hand, last_count_date } } for selected studio
+let staffData    = [];   // staff_profiles[] for selected studio
+let editingItem  = null; // item being edited
+let overrideMap  = {};   // { sku: { studio_id: visible } }
+let activeTab    = 'orders';
+let tabLoaded    = { orders: false, stock: false, catalog: false, staff: false };
+
+const STUDIO_NAMES = {
+  'BC-RICH-GC':'Richmond – Garden City','BC-RICH-STV':'Richmond – Steveston',
+  'BC-SUR-SSR':'Surrey – South','BC-YVR-KIT':'Vancouver – Kitsilano',
+  'BC-YVR-MS':'Vancouver – Main Street','BC-YVR-UBC':'Vancouver – UBC',
+  'BC-YYJ-CSV':'Victoria – Cook Street','BC-YYJ-ESQ':'Victoria – Esquimalt',
+  'BC-YYJ-OB':'Victoria – Oak Bay','BC-YYJ-VIC':'Victoria – Uptown',
+  'AB-YYC-ING':'Calgary – Inglewood','AB-STA-STA':'St Albert',
+  'ON-BRL-BRL':'Burlington – South','ON-CMB-GLT':'Cambridge – Galt',
+  'ON-ERN-ERN':'Erin','ON-HAM-OS':'Hamilton – Ottawa St',
+  'ON-HAM-WD':'Hamilton – Waterdown','ON-HAM-WH':'Hamilton – West Harbour',
+  'ON-KGN-AP':'Kingston – Arlington Park','ON-LDN-BYR':'London – Byron',
+  'ON-LDN-WVG':'London – Wortley Village','ON-MIS-PC':'Mississauga – Port Credit',
+  'ON-OAK-OAK':'Oakville – North','ON-OAK-WST':'Oakville – West',
+  'ON-YOW-GLB':'Ottawa – The Glebe','ON-STC-STC':'St Catharines',
+  'ON-YYZ-AVE':'Toronto – Avenue Road','ON-YYZ-BP':'Toronto – Baby Point',
+  'ON-YYZ-LEA':'Toronto – Leaside','ON-YYZ-BEA':'Toronto – The Beaches',
+  'ON-WTR-WTR':'Waterloo – Uptown'
+};
+
+const STUDIO_IDS = Object.keys(STUDIO_NAMES);
+
+// ── AUTH ─────────────────────────────────────────────────
+async function login() {
+  const email    = document.getElementById('login-email').value.trim();
+  const password = document.getElementById('login-password').value;
+  const errEl    = document.getElementById('login-error');
+  errEl.style.display = 'none';
+
+  const { data, error } = await db.auth.signInWithPassword({ email, password });
+  if (error) { errEl.textContent = error.message; errEl.style.display = 'block'; return; }
+
+  currentUser = data.user;
+  const { data: u } = await db.from('studio_users').select('role, studio_id')
+    .eq('user_id', currentUser.id).limit(1).maybeSingle();
+
+  if (!u || !['admin','logistics'].includes(u.role)) {
+    errEl.textContent = 'You do not have access to this page.';
+    errEl.style.display = 'block';
+    await db.auth.signOut();
+    return;
+  }
+
+  userRole = u.role;
+  initApp();
+}
+
+async function logout() {
+  await db.auth.signOut();
+  location.reload();
+}
+
+function initApp() {
+  document.getElementById('login-screen').classList.remove('active');
+  document.getElementById('app-screen').classList.add('active');
+  document.getElementById('role-badge').textContent = userRole === 'admin' ? 'Admin' : 'Logistics';
+
+  // Show catalog add button and tab only for admin
+  if (userRole === 'admin') {
+    document.getElementById('add-item-btn').style.display = 'inline-flex';
+  } else {
+    document.getElementById('catalog-tab-btn').style.opacity = '0.5';
+  }
+
+  // Populate studio dropdowns
+  const stockSel = document.getElementById('stock-studio');
+  const staffSel = document.getElementById('staff-studio');
+  STUDIO_IDS.forEach(id => {
+    [stockSel, staffSel].forEach(sel => {
+      const o = document.createElement('option');
+      o.value = id; o.textContent = STUDIO_NAMES[id];
+      sel.appendChild(o);
+    });
+  });
+
+  loadOrders();
+}
+
+// ── TAB SWITCHING ────────────────────────────────────────
+function switchTab(tab, btn) {
+  activeTab = tab;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById(`tab-${tab}`).classList.add('active');
+
+  if (!tabLoaded[tab]) {
+    tabLoaded[tab] = true;
+    if (tab === 'catalog') loadCatalog();
+  }
+}
+
+// ── ORDERS TAB ───────────────────────────────────────────
+async function loadOrders() {
+  document.getElementById('orders-content').innerHTML = '<div class="loading-state">Loading order alerts…</div>';
+
+  // Load items with thresholds
+  const { data: items } = await db.from('inventory_items')
+    .select('sku, name, supplier, reorder_threshold, order_pack_size, cost_per_unit, unit_type, lead_time_days')
+    .eq('active', true).not('reorder_threshold', 'is', null);
+
+  if (!items?.length) {
+    document.getElementById('orders-content').innerHTML = '<div class="empty-state"><div class="empty-icon">✅</div><p>No items with reorder thresholds configured.</p></div>';
+    return;
+  }
+
+  const skus = items.map(i => i.sku);
+  const itemMap = Object.fromEntries(items.map(i => [i.sku, i]));
+
+  // Load studio stock for those SKUs
+  const { data: stock } = await db.from('studio_stock')
+    .select('studio_id, sku, qty_on_hand, last_count_date')
+    .in('sku', skus).limit(8000);
+
+  // Find low-stock situations
+  const lowStock = (stock || []).filter(row => {
+    const item = itemMap[row.sku];
+    return item && row.qty_on_hand <= item.reorder_threshold;
+  });
+
+  if (!lowStock.length) {
+    document.getElementById('orders-content').innerHTML = '<div class="empty-state"><div class="empty-icon">✅</div><p>All studios are stocked above minimum thresholds!</p></div>';
+    const badge = document.getElementById('orders-badge');
+    badge.style.display = 'none';
+    return;
+  }
+
+  // Group by supplier → item → studios
+  const bySupplier = {};
+  lowStock.forEach(row => {
+    const item = itemMap[row.sku];
+    const sup  = item.supplier || 'Unknown';
+    if (!bySupplier[sup]) bySupplier[sup] = {};
+    if (!bySupplier[sup][row.sku]) bySupplier[sup][row.sku] = { item, studios: [] };
+    bySupplier[sup][row.sku].studios.push({ studio_id: row.studio_id, qty: row.qty_on_hand, lastCount: row.last_count_date });
+  });
+
+  // Badge count = number of distinct supplier alerts
+  const alertCount = Object.keys(bySupplier).length;
+  const badge = document.getElementById('orders-badge');
+  badge.textContent = alertCount;
+  badge.style.display = 'inline-flex';
+
+  let html = '';
+  for (const [supplier, skuMap] of Object.entries(bySupplier).sort(([a],[b]) => a.localeCompare(b))) {
+    const itemCount   = Object.keys(skuMap).length;
+    const studioCount = new Set(Object.values(skuMap).flatMap(v => v.studios.map(s => s.studio_id))).size;
+
+    html += `
+      <div class="supplier-block">
+        <div class="supplier-header">
+          <div>
+            <div class="supplier-name">${supplier}</div>
+            <div class="supplier-count">${itemCount} item${itemCount>1?'s':''} · ${studioCount} studio${studioCount>1?'s':''} affected</div>
+          </div>
+          <button class="btn btn-gold btn-sm" onclick="createOrderList('${supplier}', ${JSON.stringify(skuMap).replace(/"/g,'&quot;')})">
+            📋 Create Order List
+          </button>
+        </div>
+        <div class="supplier-body">`;
+
+    for (const [sku, { item, studios }] of Object.entries(skuMap).sort(([,a],[,b]) => a.item.name.localeCompare(b.item.name))) {
+      const totalNeeded = studios.reduce((sum, s) => {
+        const need = item.reorder_threshold - s.qty;
+        const packs = item.order_pack_size ? Math.ceil(need / item.order_pack_size) * item.order_pack_size : need;
+        return sum + Math.max(0, packs);
+      }, 0);
+      const totalCost = item.cost_per_unit ? (totalNeeded * item.cost_per_unit).toFixed(2) : null;
+      const studioList = studios.map(s => `${STUDIO_NAMES[s.studio_id] || s.studio_id} (${s.qty})`).join(', ');
+
+      html += `
+        <div class="order-row">
+          <div style="flex:1">
+            <div class="order-item-name">${item.name}</div>
+            <div class="order-item-sku">${sku} · ${item.unit_type || 'unit'}</div>
+            <div class="order-studios">${studioList}</div>
+          </div>
+          <div class="order-qty">
+            <div class="order-qty-num">${totalNeeded}</div>
+            <div class="order-qty-label">units needed</div>
+            ${totalCost ? `<div class="order-cost">~CA$${totalCost}</div>` : ''}
+          </div>
+        </div>`;
+    }
+
+    html += `</div></div>`;
+  }
+
+  document.getElementById('orders-content').innerHTML = html;
+}
+
+function createOrderList(supplier, skuMap) {
+  const now    = new Date().toLocaleDateString('en-CA', { year:'numeric', month:'long', day:'numeric' });
+  let text     = `ORDER REQUEST — ${supplier.toUpperCase()}\n`;
+  text        += `Generated: ${now}\n`;
+  text        += `${'─'.repeat(60)}\n\n`;
+  text        += `${'Item'.padEnd(32)} ${'SKU'.padEnd(16)} ${'Qty'.padEnd(8)} ${'Unit $'.padEnd(10)} Total\n`;
+  text        += `${'─'.repeat(60)}\n`;
+
+  let grandTotal = 0;
+  const breakdown = [];
+
+  for (const [sku, { item, studios }] of Object.entries(skuMap).sort(([,a],[,b]) => a.item.name.localeCompare(b.item.name))) {
+    const totalNeeded = studios.reduce((sum, s) => {
+      const need  = item.reorder_threshold - s.qty;
+      const packs = item.order_pack_size ? Math.ceil(need / item.order_pack_size) * item.order_pack_size : Math.max(0, need);
+      return sum + Math.max(0, packs);
+    }, 0);
+    const unitCost   = item.cost_per_unit || 0;
+    const lineCost   = totalNeeded * unitCost;
+    grandTotal      += lineCost;
+
+    const nameStr = item.name.substring(0, 31).padEnd(32);
+    const skuStr  = sku.padEnd(16);
+    const qtyStr  = String(totalNeeded).padEnd(8);
+    const costStr = unitCost ? `$${unitCost.toFixed(2)}`.padEnd(10) : 'N/A'.padEnd(10);
+    const totalStr = unitCost ? `$${lineCost.toFixed(2)}` : '';
+    text += `${nameStr} ${skuStr} ${qtyStr} ${costStr} ${totalStr}\n`;
+
+    const studioLines = studios.map(s => `  ${STUDIO_NAMES[s.studio_id] || s.studio_id}: needs ${Math.max(0, item.reorder_threshold - s.qty)} (has ${s.qty})`).join('\n');
+    breakdown.push(`${item.name}:\n${studioLines}`);
+  }
+
+  text += `${'─'.repeat(60)}\n`;
+  text += `ESTIMATED TOTAL: CA$${grandTotal.toFixed(2)}\n\n`;
+  text += `STUDIO BREAKDOWN:\n${'─'.repeat(60)}\n`;
+  text += breakdown.join('\n\n');
+
+  document.getElementById('order-modal-title').textContent = `Order List — ${supplier}`;
+  document.getElementById('order-output').textContent = text;
+  document.getElementById('order-modal').classList.add('open');
+}
+
+function copyOrder() {
+  const text = document.getElementById('order-output').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.querySelector('#order-modal .copy-btn');
+    btn.textContent = '✅ Copied!';
+    setTimeout(() => { btn.innerHTML = '📋 Copy to Clipboard'; }, 2000);
+  });
+}
+
+// ── STOCK TAB ────────────────────────────────────────────
+async function loadStockForStudio() {
+  const studioId = document.getElementById('stock-studio').value;
+  if (!studioId) return;
+  document.getElementById('stock-content').innerHTML = '<div class="loading-state">Loading stock…</div>';
+
+  const { data } = await db.from('studio_stock')
+    .select('sku, qty_on_hand, last_count_date, last_updated')
+    .eq('studio_id', studioId).limit(5000);
+
+  stockData = Object.fromEntries((data || []).map(r => [r.sku, r]));
+
+  // Load items if not already loaded
+  if (!allItems.length) await loadAllItems();
+
+  renderStockTable();
+}
+
+function renderStockTable() {
+  const studioId   = document.getElementById('stock-studio').value;
+  if (!studioId || !allItems.length) return;
+
+  const search = document.getElementById('stock-search').value.toLowerCase();
+  const filter = document.getElementById('stock-filter').value;
+
+  const rows = allItems
+    .filter(item => item.active)
+    .filter(item => !search || item.name.toLowerCase().includes(search) || item.sku.toLowerCase().includes(search))
+    .map(item => ({ item, stock: stockData[item.sku] || { qty_on_hand: 0, last_count_date: null } }))
+    .filter(({ item, stock }) => {
+      if (filter === 'uncounted') return !stock.last_count_date;
+      if (filter === 'zero')      return stock.qty_on_hand <= 0;
+      if (filter === 'low')       return item.reorder_threshold && stock.qty_on_hand < item.reorder_threshold;
+      return true;
+    })
+    .sort((a, b) => a.item.name.localeCompare(b.item.name));
+
+  if (!rows.length) {
+    document.getElementById('stock-content').innerHTML = '<div class="empty-state"><div class="empty-icon">🔍</div><p>No items match this filter.</p></div>';
+    return;
+  }
+
+  let html = `<div class="card" style="padding:0; overflow:hidden"><table>
+    <thead><tr>
+      <th>Item</th><th>SKU</th><th>Qty on Hand</th><th>Threshold</th><th>Status</th><th>Last Count</th>
+    </tr></thead><tbody>`;
+
+  rows.forEach(({ item, stock }) => {
+    const qty       = stock.qty_on_hand ?? 0;
+    const threshold = item.reorder_threshold;
+    const counted   = !!stock.last_count_date;
+    const lastCount = counted ? new Date(stock.last_count_date).toLocaleDateString('en-CA') : 'Never';
+
+    let qtyClass = 'qty-good', statusPill = `<span class="pill pill-green">Good</span>`;
+    if (!counted) {
+      qtyClass = 'qty-uncounted'; statusPill = `<span class="pill pill-grey">Uncounted</span>`;
+    } else if (qty <= 0) {
+      qtyClass = 'qty-zero'; statusPill = `<span class="pill pill-red">Empty</span>`;
+    } else if (threshold && qty < threshold) {
+      qtyClass = 'qty-low'; statusPill = `<span class="pill pill-yellow">Low</span>`;
+    }
+
+    html += `<tr>
+      <td style="font-weight:700">${item.name}</td>
+      <td style="color:var(--muted); font-size:0.8rem">${item.sku}</td>
+      <td class="qty-cell ${qtyClass}">${counted ? qty : '—'}</td>
+      <td style="color:var(--muted)">${threshold ?? '—'}</td>
+      <td>${statusPill}</td>
+      <td style="color:var(--muted); font-size:0.8rem">${lastCount}</td>
+    </tr>`;
+  });
+
+  html += '</tbody></table></div>';
+  document.getElementById('stock-content').innerHTML = html;
+}
+
+// ── CATALOG TAB ──────────────────────────────────────────
+async function loadCatalog() {
+  await loadAllItems();
+  buildSupplierFilter();
+  renderCatalog();
+}
+
+async function loadAllItems() {
+  const { data } = await db.from('inventory_items').select('*').order('name');
+  allItems = data || [];
+}
+
+function buildSupplierFilter() {
+  const suppliers = [...new Set(allItems.map(i => i.supplier).filter(Boolean))].sort();
+  const sel = document.getElementById('catalog-filter-supplier');
+  sel.innerHTML = '<option value="">All Suppliers</option>';
+  suppliers.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = s; sel.appendChild(o); });
+}
+
+function renderCatalog() {
+  const search   = document.getElementById('catalog-search').value.toLowerCase();
+  const supplier = document.getElementById('catalog-filter-supplier').value;
+  const activeF  = document.getElementById('catalog-filter-active').value;
+
+  const filtered = allItems.filter(item => {
+    if (search && !item.name.toLowerCase().includes(search) && !item.sku.toLowerCase().includes(search)) return false;
+    if (supplier && item.supplier !== supplier) return false;
+    if (activeF === 'true'  && !item.active) return false;
+    if (activeF === 'false' &&  item.active) return false;
+    return true;
+  });
+
+  if (!filtered.length) {
+    document.getElementById('catalog-content').innerHTML = '<div class="loading-state">No items match.</div>';
+    return;
+  }
+
+  let html = `<table><thead><tr>
+    <th>Item</th><th>SKU</th><th>Supplier</th><th>Unit</th>
+    <th>Cost</th><th>Min</th><th>Pack</th><th>Visible</th><th>Active</th>
+    ${userRole === 'admin' ? '<th></th>' : ''}
+  </tr></thead><tbody>`;
+
+  filtered.forEach(item => {
+    html += `<tr>
+      <td style="font-weight:700; max-width:200px">${item.name}</td>
+      <td style="color:var(--muted); font-size:0.78rem">${item.sku}</td>
+      <td style="font-size:0.82rem">${item.supplier || '—'}</td>
+      <td style="font-size:0.82rem">${item.unit_type || '—'}</td>
+      <td style="font-size:0.82rem">${item.cost_per_unit ? `CA$${item.cost_per_unit}` : '—'}</td>
+      <td style="font-size:0.82rem">${item.reorder_threshold ?? '—'}</td>
+      <td style="font-size:0.82rem">${item.order_pack_size ?? '—'}</td>
+      <td>${item.default_visible !== false ? '<span class="pill pill-green">Default</span>' : '<span class="pill pill-grey">Hidden</span>'}</td>
+      <td>${item.active ? '<span class="pill pill-green">Active</span>' : '<span class="pill pill-grey">Inactive</span>'}</td>
+      ${userRole === 'admin' ? `<td><button class="btn btn-outline btn-sm" onclick="openEditItem('${item.sku}')">Edit</button></td>` : ''}
+    </tr>`;
+  });
+
+  html += '</tbody></table>';
+  document.getElementById('catalog-content').innerHTML = html;
+}
+
+// ── ITEM EDIT / ADD ──────────────────────────────────────
+async function openEditItem(sku) {
+  editingItem = allItems.find(i => i.sku === sku);
+  if (!editingItem) return;
+
+  document.getElementById('item-modal-title').textContent = 'Edit Item';
+  document.getElementById('f-sku').value            = editingItem.sku;
+  document.getElementById('f-sku').readOnly         = true;
+  document.getElementById('f-name').value           = editingItem.name || '';
+  document.getElementById('f-supplier').value       = editingItem.supplier || '';
+  document.getElementById('f-category').value       = editingItem.category || 'Everyday';
+  document.getElementById('f-unit-type').value      = editingItem.unit_type || 'Each';
+  document.getElementById('f-cost').value           = editingItem.cost_per_unit || '';
+  document.getElementById('f-threshold').value      = editingItem.reorder_threshold || '';
+  document.getElementById('f-pack-size').value      = editingItem.order_pack_size || '';
+  document.getElementById('f-lead-time').value      = editingItem.lead_time_days || '';
+  document.getElementById('f-count-full').value     = editingItem.count_full_at || '';
+  document.getElementById('f-notes').value          = editingItem.notes || '';
+  document.getElementById('f-active').checked       = editingItem.active !== false;
+  document.getElementById('f-default-visible').checked = editingItem.default_visible !== false;
+
+  // Load studio overrides
+  await loadOverridesForItem(sku);
+  document.getElementById('overrides-section').style.display = 'block';
+
+  document.getElementById('item-modal').classList.add('open');
+}
+
+function openAddItem() {
+  editingItem = null;
+  document.getElementById('item-modal-title').textContent = 'Add New Item';
+  document.getElementById('f-sku').readOnly = false;
+  ['f-sku','f-name','f-supplier','f-cost','f-threshold','f-pack-size','f-lead-time','f-count-full','f-notes'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+  document.getElementById('f-category').value = 'Everyday';
+  document.getElementById('f-unit-type').value = 'Each';
+  document.getElementById('f-active').checked = true;
+  document.getElementById('f-default-visible').checked = true;
+  document.getElementById('overrides-section').style.display = 'none';
+  document.getElementById('item-modal').classList.add('open');
+}
+
+async function loadOverridesForItem(sku) {
+  const { data } = await db.from('studio_item_overrides').select('studio_id, visible').eq('sku', sku);
+  const map = Object.fromEntries((data || []).map(r => [r.studio_id, r.visible]));
+  const item = allItems.find(i => i.sku === sku);
+  const defaultVis = item?.default_visible !== false;
+
+  let html = '';
+  STUDIO_IDS.forEach(sid => {
+    const hasOverride = map[sid] !== undefined;
+    const vis = hasOverride ? map[sid] : defaultVis;
+    html += `
+      <div class="override-item">
+        <span style="font-size:0.8rem">${STUDIO_NAMES[sid]}</span>
+        <label class="toggle-switch">
+          <input type="checkbox" data-studio="${sid}" data-sku="${sku}" ${vis ? 'checked' : ''} onchange="saveOverride(this)">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>`;
+  });
+  document.getElementById('overrides-grid').innerHTML = html;
+}
+
+async function saveOverride(checkbox) {
+  const studio_id = checkbox.dataset.studio;
+  const sku       = checkbox.dataset.sku;
+  const visible   = checkbox.checked;
+
+  await db.from('studio_item_overrides')
+    .upsert({ studio_id, sku, visible }, { onConflict: 'studio_id,sku' });
+}
+
+async function saveItem() {
+  const btn = document.getElementById('item-save-btn');
+  btn.textContent = 'Saving…'; btn.disabled = true;
+
+  const payload = {
+    name:              document.getElementById('f-name').value.trim(),
+    supplier:          document.getElementById('f-supplier').value.trim() || null,
+    category:          document.getElementById('f-category').value,
+    unit_type:         document.getElementById('f-unit-type').value,
+    cost_per_unit:     parseFloat(document.getElementById('f-cost').value) || null,
+    reorder_threshold: parseFloat(document.getElementById('f-threshold').value) || null,
+    order_pack_size:   parseInt(document.getElementById('f-pack-size').value) || null,
+    lead_time_days:    parseInt(document.getElementById('f-lead-time').value) || null,
+    count_full_at:     parseFloat(document.getElementById('f-count-full').value) || null,
+    notes:             document.getElementById('f-notes').value.trim() || null,
+    active:            document.getElementById('f-active').checked,
+    default_visible:   document.getElementById('f-default-visible').checked,
+    updated_at:        new Date().toISOString(),
+  };
+
+  let error;
+  if (editingItem) {
+    ({ error } = await db.from('inventory_items').update(payload).eq('sku', editingItem.sku));
+  } else {
+    const sku = document.getElementById('f-sku').value.trim().toUpperCase();
+    if (!sku) { alert('SKU is required.'); btn.textContent = 'Save Item'; btn.disabled = false; return; }
+    ({ error } = await db.from('inventory_items').insert({ sku, ...payload }));
+  }
+
+  if (error) {
+    alert('Error saving: ' + error.message);
+  } else {
+    closeModal('item-modal');
+    await loadAllItems();
+    buildSupplierFilter();
+    renderCatalog();
+  }
+
+  btn.textContent = 'Save Item'; btn.disabled = false;
+}
+
+// ── STAFF TAB ────────────────────────────────────────────
+async function loadStaffForStudio() {
+  const studioId = document.getElementById('staff-studio').value;
+  if (!studioId) return;
+  document.getElementById('staff-content').innerHTML = '<div class="loading-state">Loading staff…</div>';
+
+  const { data } = await db.from('staff_profiles')
+    .select('id, display_name, nickname, email, role, employment_type, is_active, studio_ids')
+    .contains('studio_ids', [studioId])
+    .order('display_name');
+
+  staffData = data || [];
+  renderStaffTable();
+}
+
+function renderStaffTable() {
+  const activeF  = document.getElementById('staff-filter-active').value;
+  const studioId = document.getElementById('staff-studio').value;
+  if (!studioId) return;
+
+  const filtered = staffData.filter(s => {
+    if (activeF === 'true'  && !s.is_active) return false;
+    if (activeF === 'false' &&  s.is_active) return false;
+    return true;
+  });
+
+  if (!filtered.length) {
+    document.getElementById('staff-content').innerHTML = '<div class="empty-state"><div class="empty-icon">👤</div><p>No staff found for this studio.</p></div>';
+    return;
+  }
+
+  let html = `<div class="card" style="padding:0; overflow:hidden"><table>
+    <thead><tr>
+      <th>Name</th><th>Nickname</th><th>Email</th><th>Role</th><th>Type</th>
+      <th>Studios</th><th>Status</th>
+    </tr></thead><tbody>`;
+
+  filtered.forEach(s => {
+    const initials = s.display_name.split(' ').map(w => w[0]).join('').toUpperCase().substring(0, 2);
+    const studios  = (s.studio_ids || []).map(id => STUDIO_NAMES[id] || id).join(', ');
+    html += `<tr>
+      <td>
+        <div style="display:flex; align-items:center; gap:0.6rem">
+          <div class="staff-avatar">${initials}</div>
+          <div style="font-weight:700">${s.display_name}</div>
+        </div>
+      </td>
+      <td style="color:var(--muted); font-size:0.82rem">${s.nickname || '—'}</td>
+      <td style="font-size:0.82rem">${s.email || '—'}</td>
+      <td><span class="pill ${s.role === 'manager' ? 'pill-green' : 'pill-grey'}">${s.role || 'staff'}</span></td>
+      <td style="font-size:0.82rem">${s.employment_type || 'regular'}</td>
+      <td style="font-size:0.75rem; color:var(--muted); max-width:200px">${studios}</td>
+      <td>${s.is_active ? '<span class="pill pill-green">Active</span>' : '<span class="pill pill-grey">Inactive</span>'}</td>
+    </tr>`;
+  });
+
+  html += `</tbody></table></div>`;
+  html += `<p style="font-size:0.78rem; color:var(--muted); margin-top:0.75rem; padding:0 0.25rem">To add or edit staff, use the Staff tab in admin.html.</p>`;
+  document.getElementById('staff-content').innerHTML = html;
+}
+
+// ── MODAL HELPERS ─────────────────────────────────────────
+function closeModal(id) {
+  document.getElementById(id).classList.remove('open');
+}
+
+document.querySelectorAll('.modal-bg').forEach(bg => {
+  bg.addEventListener('click', e => { if (e.target === bg) bg.classList.remove('open'); });
+});
+
+// ── AUTO LOGIN ────────────────────────────────────────────
+document.getElementById('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+
+(async () => {
+  const { data: { session } } = await db.auth.getSession();
+  if (!session) return;
+  currentUser = session.user;
+  const { data: u } = await db.from('studio_users').select('role, studio_id')
+    .eq('user_id', currentUser.id).limit(1).maybeSingle();
+  if (!u || !['admin','logistics'].includes(u.role)) return;
+  userRole = u.role;
+  initApp();
+})();
+</script>
+</body>
+</html>
