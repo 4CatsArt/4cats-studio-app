@@ -32,6 +32,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .party-alert-item .alert-time { font-size: 11px; color: #c06080; margin-top: 2px; }
 .party-alert-dismiss { background: #fff; border: 0.5px solid #f0b8cc; color: #99354e; font-size: 11px; font-weight: 500; cursor: pointer; padding: 4px 12px; border-radius: 20px; white-space: nowrap; flex-shrink: 0; transition: background 0.15s; }
 .party-alert-dismiss:hover { background: #fce8f0; }
+.party-cancel-header { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: #9a4e00; text-transform: uppercase; letter-spacing: 0.5px; padding: 10px 0 6px; }
+.party-cancel-item { display: flex; align-items: center; gap: 12px; padding: 10px 14px; margin-bottom: 5px; border-radius: 10px; background: #fff8f0; border: 1px solid #ffd0a0; font-size: 13px; color: #5a2e00; }
+.party-cancel-item .alert-icon { font-size: 15px; flex-shrink: 0; }
+.party-cancel-item .alert-body { flex: 1; min-width: 0; }
+.party-cancel-item .alert-body strong { color: #9a4e00; }
+.party-cancel-item .alert-time { font-size: 11px; color: #c07030; margin-top: 2px; }
+.party-cancel-dismiss { background: #fff; border: 0.5px solid #ffd0a0; color: #9a4e00; font-size: 11px; font-weight: 500; cursor: pointer; padding: 4px 12px; border-radius: 20px; white-space: nowrap; flex-shrink: 0; transition: background 0.15s; }
+.party-cancel-dismiss:hover { background: #fff3e0; }
 .booking-alert { display: flex; align-items: flex-start; gap: 12px; padding: 11px 16px; margin-bottom: 6px; border-radius: 10px; font-size: 13px; line-height: 1.45; animation: alertSlideIn 0.25s ease; box-shadow: 0 2px 8px rgba(0,0,0,0.12); }
 .booking-alert.alert-new { background: #e8f5e9; border: 1px solid #a5d6a7; color: #1b5e20; }
 .booking-alert.alert-cancel { background: #fff3e0; border: 1px solid #ffcc80; color: #7a4000; }
@@ -377,12 +385,20 @@ function setupRealtimeBookings() {
     })
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'bookings' }, payload => {
       const b = payload.new
-      const session = todaySessionsMap[b.session_id]
-      if (!session) return
       const oldQty = payload.old?.qty
-      if (b.qty === 0 && (oldQty == null || oldQty > 0)) {
+      const isCancel = b.qty === 0 && (oldQty == null || oldQty > 0)
+
+      // Day-of ephemeral cancel alert (today's sessions)
+      const session = todaySessionsMap[b.session_id]
+      if (session && isCancel) {
         showBookingAlert('cancel', b.customer_name, oldQty || b.qty, session.title, session.time)
         setTimeout(() => { if (currentView === 'day') loadDayView() }, 800)
+      }
+
+      // Persistent party cancel alert (upcoming party sessions, weekdays only)
+      const dow = new Date().getDay()
+      if (partySessionIds.has(b.session_id) && isCancel && dow !== 0 && dow !== 6) {
+        addRealtimePartyCancelAlert(b)
       }
     })
     .subscribe()
@@ -434,29 +450,6 @@ function getDismissedPartyAlerts() {
   } catch { return new Set() }
 }
 
-function dismissPartyAlert(bookingId, btn) {
-  try {
-    const key = `4cats_dismissed_parties_${currentStudioId}`
-    const dismissed = getDismissedPartyAlerts()
-    dismissed.add(String(bookingId))
-    localStorage.setItem(key, JSON.stringify([...dismissed]))
-  } catch {}
-  btn.closest('.party-alert-item').remove()
-  refreshPartyAlertsHeader()
-}
-
-function refreshPartyAlertsHeader() {
-  const container = document.getElementById('party-alerts')
-  if (!container) return
-  const items = container.querySelectorAll('.party-alert-item')
-  if (!items.length) {
-    container.style.display = 'none'
-    return
-  }
-  const header = container.querySelector('.party-alerts-header')
-  if (header) header.innerHTML = `🎂 ${items.length} new party booking${items.length !== 1 ? 's' : ''} — please review`
-}
-
 async function loadPartyAlerts() {
   // Only show on weekdays (Mon–Fri)
   const dow = new Date().getDay()
@@ -468,11 +461,11 @@ async function loadPartyAlerts() {
   container.innerHTML = ''
   container.style.display = 'none'
 
-  const dismissed = getDismissedPartyAlerts()
   const today = dateStr(new Date())
-
-  // Fetch upcoming party sessions (today onwards, next 90 days)
   const futureLimit = dateStr(addDays(new Date(), 90))
+  const since90 = dateStr(addDays(new Date(), -90))
+
+  // Fetch upcoming party sessions (today → +90 days)
   const { data: partySessions } = await sb.from('sessions')
     .select('id, title, session_date, session_time')
     .eq('studio_id', currentStudioId)
@@ -487,42 +480,62 @@ async function loadPartyAlerts() {
   const sessionMap = {}
   partySessions.forEach(s => { sessionMap[s.id] = s })
 
-  const { data: bookings } = await sb.from('bookings')
-    .select('id, session_id, customer_name, qty, shopify_order_name, booked_at')
-    .in('session_id', [...partySessionIds])
-    .gt('qty', 0)
+  // Run both queries in parallel
+  const [{ data: newBookings }, { data: cancelledBookings }] = await Promise.all([
+    sb.from('bookings')
+      .select('id, session_id, customer_name, qty, shopify_order_name, booked_at')
+      .in('session_id', [...partySessionIds])
+      .gt('qty', 0),
+    sb.from('bookings')
+      .select('id, session_id, customer_name, qty, shopify_order_name, booked_at')
+      .in('session_id', [...partySessionIds])
+      .eq('qty', 0)
+      .gte('booked_at', since90)   // limit to last 90 days to avoid ancient history
+  ])
 
-  if (!bookings?.length) return
+  const dismissedNew = getDismissedPartyAlerts()
+  const dismissedCancels = getDismissedPartyCancels()
 
-  const undismissed = bookings.filter(b => !dismissed.has(String(b.id)))
-  if (!undismissed.length) return
+  const undismissedNew = (newBookings || []).filter(b => !dismissedNew.has(String(b.id)))
+  const undismissedCancels = (cancelledBookings || []).filter(b => !dismissedCancels.has(String(b.id)))
 
-  // Sort soonest first
-  undismissed.sort((a, b) => {
+  if (!undismissedNew.length && !undismissedCancels.length) return
+
+  container.style.display = 'block'
+
+  // Sort both soonest first
+  const byDate = (a, z) => {
     const da = sessionMap[a.session_id]?.session_date || ''
-    const db = sessionMap[b.session_id]?.session_date || ''
-    return da < db ? -1 : da > db ? 1 : 0
-  })
+    const dz = sessionMap[z.session_id]?.session_date || ''
+    return da < dz ? -1 : da > dz ? 1 : 0
+  }
 
-  renderPartyAlerts(undismissed, sessionMap)
+  if (undismissedNew.length) {
+    undismissedNew.sort(byDate)
+    renderPartyAlerts(undismissedNew, sessionMap, false)
+  }
+  if (undismissedCancels.length) {
+    undismissedCancels.sort(byDate)
+    renderPartyCancels(undismissedCancels, sessionMap, false)
+  }
 }
 
-function renderPartyAlerts(bookings, sessionMap) {
+// ── NEW PARTY BOOKING ALERTS ──────────────────────────────────
+function renderPartyAlerts(bookings, sessionMap, clearFirst = true) {
   const container = document.getElementById('party-alerts')
   if (!container) return
 
-  // Clear and rebuild
-  container.innerHTML = ''
-  container.style.display = 'block'
+  if (clearFirst) {
+    container.querySelectorAll('.party-alerts-header, .party-alert-item').forEach(el => el.remove())
+    container.style.display = 'block'
+  }
 
   const header = document.createElement('div')
   header.className = 'party-alerts-header'
   header.innerHTML = `🎂 ${bookings.length} new party booking${bookings.length !== 1 ? 's' : ''} — please review`
   container.appendChild(header)
 
-  bookings.forEach(b => {
-    container.appendChild(buildPartyAlertItem(b, sessionMap[b.session_id]))
-  })
+  bookings.forEach(b => container.appendChild(buildPartyAlertItem(b, sessionMap[b.session_id])))
 }
 
 function buildPartyAlertItem(b, session) {
@@ -547,8 +560,33 @@ function buildPartyAlertItem(b, session) {
   return el
 }
 
+function dismissPartyAlert(bookingId, btn) {
+  try {
+    const key = `4cats_dismissed_parties_${currentStudioId}`
+    const dismissed = getDismissedPartyAlerts()
+    dismissed.add(String(bookingId))
+    localStorage.setItem(key, JSON.stringify([...dismissed]))
+  } catch {}
+  btn.closest('.party-alert-item').remove()
+  refreshPartyAlertsSection()
+}
+
+function refreshPartyAlertsSection() {
+  const container = document.getElementById('party-alerts')
+  if (!container) return
+  const newItems = container.querySelectorAll('.party-alert-item')
+  const cancelItems = container.querySelectorAll('.party-cancel-item')
+  // Update new bookings header count
+  const newHeader = container.querySelector('.party-alerts-header')
+  if (newHeader) {
+    if (!newItems.length) newHeader.remove()
+    else newHeader.innerHTML = `🎂 ${newItems.length} new party booking${newItems.length !== 1 ? 's' : ''} — please review`
+  }
+  // Hide container if nothing left
+  if (!newItems.length && !cancelItems.length) container.style.display = 'none'
+}
+
 function addRealtimePartyAlert(b) {
-  // Called from realtime channel for party session bookings
   const dismissed = getDismissedPartyAlerts()
   if (dismissed.has(String(b.id))) return
 
@@ -557,11 +595,8 @@ function addRealtimePartyAlert(b) {
       if (!session) return
       const container = document.getElementById('party-alerts')
       if (!container) return
-
-      // Show the section
       container.style.display = 'block'
 
-      // Update or create header
       let header = container.querySelector('.party-alerts-header')
       const count = container.querySelectorAll('.party-alert-item').length + 1
       if (header) {
@@ -570,10 +605,109 @@ function addRealtimePartyAlert(b) {
         header = document.createElement('div')
         header.className = 'party-alerts-header'
         header.innerHTML = `🎂 1 new party booking — please review`
-        container.insertBefore(header, container.firstChild)
+        // Insert before cancel section if it exists
+        const cancelHeader = container.querySelector('.party-cancel-header')
+        container.insertBefore(header, cancelHeader || container.firstChild)
       }
+      // Insert new item before cancel section
+      const cancelHeader = container.querySelector('.party-cancel-header')
+      container.insertBefore(buildPartyAlertItem(b, session), cancelHeader || null)
+    })
+}
 
-      container.appendChild(buildPartyAlertItem(b, session))
+// ── PARTY CANCELLATION ALERTS ─────────────────────────────────
+function getDismissedPartyCancels() {
+  try {
+    const raw = localStorage.getItem(`4cats_dismissed_party_cancels_${currentStudioId}`)
+    return new Set(raw ? JSON.parse(raw) : [])
+  } catch { return new Set() }
+}
+
+function renderPartyCancels(bookings, sessionMap, clearFirst = true) {
+  const container = document.getElementById('party-alerts')
+  if (!container) return
+
+  if (clearFirst) {
+    container.querySelectorAll('.party-cancel-header, .party-cancel-item').forEach(el => el.remove())
+    container.style.display = 'block'
+  }
+
+  const header = document.createElement('div')
+  header.className = 'party-cancel-header'
+  header.innerHTML = `🚫 ${bookings.length} party cancellation${bookings.length !== 1 ? 's' : ''} — please review`
+  container.appendChild(header)
+
+  bookings.forEach(b => container.appendChild(buildPartyCancelItem(b, sessionMap[b.session_id])))
+}
+
+function buildPartyCancelItem(b, session) {
+  const dateLabel = session?.session_date ? formatDateShort(session.session_date) : '—'
+  const timeLabel = session?.session_time ? session.session_time.slice(0, 5) : ''
+  const title = session?.title
+    ? session.title.replace(/\s*\|\s*\d+.*$/i, '').replace(/^\*?\d+[ap]m\s+\w+\s+\w+\s*\|\s*/i, '').trim()
+    : 'Party'
+  const orderText = b.shopify_order_name ? ` · ${shopifyOrderLink(b.shopify_order_name)}` : ''
+
+  const el = document.createElement('div')
+  el.className = 'party-cancel-item'
+  el.dataset.bookingId = String(b.id)
+  el.innerHTML = `
+    <span class="alert-icon">🚫</span>
+    <div class="alert-body">
+      <div><strong>${b.customer_name || 'Party booking'}</strong> cancelled${orderText}</div>
+      <div class="alert-time">${title} · ${dateLabel}${timeLabel ? ' at ' + timeLabel : ''}</div>
+    </div>
+    <button class="party-cancel-dismiss" onclick="dismissPartyCancel('${b.id}', this)">Dismiss</button>`
+  return el
+}
+
+function dismissPartyCancel(bookingId, btn) {
+  try {
+    const key = `4cats_dismissed_party_cancels_${currentStudioId}`
+    const dismissed = getDismissedPartyCancels()
+    dismissed.add(String(bookingId))
+    localStorage.setItem(key, JSON.stringify([...dismissed]))
+  } catch {}
+  btn.closest('.party-cancel-item').remove()
+  refreshPartyCancelSection()
+}
+
+function refreshPartyCancelSection() {
+  const container = document.getElementById('party-alerts')
+  if (!container) return
+  const cancelItems = container.querySelectorAll('.party-cancel-item')
+  const cancelHeader = container.querySelector('.party-cancel-header')
+  if (cancelHeader) {
+    if (!cancelItems.length) cancelHeader.remove()
+    else cancelHeader.innerHTML = `🚫 ${cancelItems.length} party cancellation${cancelItems.length !== 1 ? 's' : ''} — please review`
+  }
+  if (!cancelItems.length && !container.querySelectorAll('.party-alert-item').length) {
+    container.style.display = 'none'
+  }
+}
+
+function addRealtimePartyCancelAlert(b) {
+  const dismissed = getDismissedPartyCancels()
+  if (dismissed.has(String(b.id))) return
+
+  sb.from('sessions').select('id, title, session_date, session_time').eq('id', b.session_id).single()
+    .then(({ data: session }) => {
+      if (!session) return
+      const container = document.getElementById('party-alerts')
+      if (!container) return
+      container.style.display = 'block'
+
+      let header = container.querySelector('.party-cancel-header')
+      const count = container.querySelectorAll('.party-cancel-item').length + 1
+      if (header) {
+        header.innerHTML = `🚫 ${count} party cancellation${count !== 1 ? 's' : ''} — please review`
+      } else {
+        header = document.createElement('div')
+        header.className = 'party-cancel-header'
+        header.innerHTML = `🚫 1 party cancellation — please review`
+        container.appendChild(header)
+      }
+      container.appendChild(buildPartyCancelItem(b, session))
     })
 }
 
