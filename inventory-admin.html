@@ -203,6 +203,24 @@
     .overrides-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.5rem; margin-top: 0.75rem; }
     .override-item { display: flex; align-items: center; justify-content: space-between; background: var(--cream); border-radius: 8px; padding: 0.5rem 0.75rem; font-size: 0.82rem; font-weight: 600; }
 
+    /* ── FORECAST TAB ── */
+    .forecast-filters { display: flex; gap: 0.75rem; margin-bottom: 1.25rem; flex-wrap: wrap; align-items: center; }
+    .forecast-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem; margin-bottom: 0.5rem; }
+    .forecast-card { background: var(--white); border-radius: var(--radius); padding: 1.1rem 1.25rem; box-shadow: var(--shadow); border-left: 4px solid var(--border); }
+    .forecast-card.critical { border-left-color: var(--red); }
+    .forecast-card.low { border-left-color: var(--yellow); }
+    .forecast-card.ok { border-left-color: #10B981; }
+    .forecast-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.75rem; }
+    .forecast-item-name { font-weight: 800; font-size: 0.92rem; line-height: 1.25; }
+    .forecast-item-sku { font-size: 0.72rem; color: var(--muted); margin-top: 0.1rem; }
+    .forecast-bar-wrap { background: var(--border); border-radius: 50px; height: 8px; margin-bottom: 0.75rem; overflow: hidden; }
+    .forecast-bar { height: 100%; border-radius: 50px; transition: width 0.4s ease; min-width: 4px; }
+    .forecast-nums { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.5rem; text-align: center; }
+    .forecast-num { font-size: 1.1rem; font-weight: 900; }
+    .forecast-num-label { font-size: 0.68rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .forecast-estimate-note { font-size: 0.72rem; color: var(--yellow); margin-top: 0.6rem; font-style: italic; }
+    .text-red { color: var(--red); }
+
     @media (max-width: 640px) {
       .modal-grid { grid-template-columns: 1fr; }
       .tab-btn { padding: 0.75rem 0.75rem; font-size: 0.8rem; }
@@ -252,6 +270,7 @@
     </button>
     <button class="tab-btn" onclick="switchTab('stock', this)">📊 Stock Overview</button>
     <button class="tab-btn" id="catalog-tab-btn" onclick="switchTab('catalog', this)">📋 Catalog</button>
+    <button class="tab-btn" onclick="switchTab('forecast', this)">🔮 Forecast</button>
     <button class="tab-btn" onclick="switchTab('staff', this)">👥 Staff</button>
   </div>
 
@@ -325,6 +344,29 @@
     <div class="card" style="padding:0; overflow:hidden;">
       <div id="catalog-content"><div class="loading-state">Loading catalog…</div></div>
     </div>
+  </div>
+
+  <!-- ── FORECAST TAB ── -->
+  <div id="tab-forecast" class="tab-content">
+    <div class="section-header">
+      <div>
+        <div class="section-title">Material Forecast</div>
+        <div class="section-sub">Projected material usage based on upcoming sessions and bookings</div>
+      </div>
+      <button class="btn btn-outline btn-sm" onclick="loadForecast()">↺ Refresh</button>
+    </div>
+    <div class="forecast-filters">
+      <select class="select-input" id="forecast-studio" onchange="loadForecast()">
+        <option value="">— Select a studio —</option>
+      </select>
+      <select class="select-input" id="forecast-weeks" onchange="loadForecast()">
+        <option value="1">Next 1 week</option>
+        <option value="2" selected>Next 2 weeks</option>
+        <option value="4">Next 4 weeks</option>
+        <option value="8">Next 8 weeks</option>
+      </select>
+    </div>
+    <div id="forecast-content"><div class="empty-state"><div class="empty-icon">🔮</div><p>Select a studio above</p></div></div>
   </div>
 
   <!-- ── STAFF TAB ── -->
@@ -522,10 +564,11 @@ function initApp() {
   }
 
   // Populate studio dropdowns
-  const stockSel = document.getElementById('stock-studio');
-  const staffSel = document.getElementById('staff-studio');
+  const stockSel    = document.getElementById('stock-studio');
+  const staffSel    = document.getElementById('staff-studio');
+  const forecastSel = document.getElementById('forecast-studio');
   STUDIO_IDS.forEach(id => {
-    [stockSel, staffSel].forEach(sel => {
+    [stockSel, staffSel, forecastSel].forEach(sel => {
       const o = document.createElement('option');
       o.value = id; o.textContent = STUDIO_NAMES[id];
       sel.appendChild(o);
@@ -546,8 +589,7 @@ function switchTab(tab, btn) {
   if (!tabLoaded[tab]) {
     tabLoaded[tab] = true;
     if (tab === 'catalog') loadCatalog();
-  }
-}
+  }}
 
 // ── ORDERS TAB ───────────────────────────────────────────
 async function loadOrders() {
@@ -1017,6 +1059,265 @@ function renderStaffTable() {
   html += `</tbody></table></div>`;
   html += `<p style="font-size:0.78rem; color:var(--muted); margin-top:0.75rem; padding:0 0.25rem">To add or edit staff, use the Staff tab in admin.html.</p>`;
   document.getElementById('staff-content').innerHTML = html;
+}
+
+// ── FORECAST TAB ─────────────────────────────────────────
+
+// Virtual SKU aggregation rules (which real SKUs sum into each virtual)
+const VIRTUAL_SKU_PATTERNS = {
+  'OBC-TOTAL':        sku => /50-24$/.test(sku),
+  'UNDERGLAZE-TOTAL': sku => /^SB-1/.test(sku),
+  'ACRYLIC-TOTAL':    sku => /^ACRG-/.test(sku),
+  'TEMPERA-TOTAL':    sku => /^(TEM36-|TEM-F|TEMVAR)/.test(sku),
+};
+const VIRTUAL_SKU_NAMES = {
+  'OBC-TOTAL':        'Oven-bake Clay (all colours)',
+  'UNDERGLAZE-TOTAL': 'Underglaze (all colours)',
+  'ACRYLIC-TOTAL':    'Acrylic Paint (all colours)',
+  'TEMPERA-TOTAL':    'Tempera Paint (all colours)',
+};
+
+// Kids party rates by medium
+const KIDS_PARTY_RATES = {
+  clay:     { 'TEMP-CLAY-WHT': 0.0075, 'UNDERGLAZE-TOTAL': 0.1875 },
+  obc:      { 'OBC-TOTAL': 0.04167 },
+  painting: { '8X8-MC': 1.0 },
+  besties:  { 'OBC-TOTAL': 0.04167, 'PAN8X16-10': 1.0 },
+};
+
+async function loadForecast() {
+  const studioId = document.getElementById('forecast-studio').value;
+  const weeks    = parseInt(document.getElementById('forecast-weeks').value) || 2;
+  if (!studioId) return;
+
+  document.getElementById('forecast-content').innerHTML = '<div class="loading-state">Calculating forecast…</div>';
+
+  const today   = new Date().toISOString().split('T')[0];
+  const endDate = new Date();
+  endDate.setDate(endDate.getDate() + weeks * 7);
+  const endStr  = endDate.toISOString().split('T')[0];
+
+  // Load sessions in range with a program_type (skip glazing — no new materials)
+  const { data: sessions } = await db.from('sessions')
+    .select('id, title, session_date, session_time, program_type, session_type')
+    .eq('studio_id', studioId)
+    .gte('session_date', today)
+    .lte('session_date', endStr)
+    .not('program_type', 'is', null)
+    .neq('program_type', 'glazing')
+    .order('session_date').order('session_time');
+
+  if (!sessions?.length) {
+    document.getElementById('forecast-content').innerHTML = '<div class="empty-state"><div class="empty-icon">📅</div><p>No tagged sessions in this period.</p></div>';
+    return;
+  }
+
+  const sessionIds = sessions.map(s => s.id);
+
+  // Booking headcounts
+  const { data: bookings } = await db.from('bookings')
+    .select('session_id, qty')
+    .in('session_id', sessionIds)
+    .gt('qty', 0)
+    .is('returned_at', null);
+
+  const headcountMap = {};
+  (bookings || []).forEach(b => {
+    headcountMap[b.session_id] = (headcountMap[b.session_id] || 0) + (b.qty || 1);
+  });
+
+  // Party details (for parties, adult get-togethers, field trips)
+  const partyTypes = ['clay_party','splatter_party','adult_get_together','field_trip'];
+  const partySessionIds = sessions.filter(s => partyTypes.includes(s.program_type)).map(s => s.id);
+  const partyDetailsMap = {};
+  if (partySessionIds.length) {
+    const { data: pds } = await db.from('party_details')
+      .select('session_id, expected_guests, actual_guests, medium')
+      .in('session_id', partySessionIds);
+    (pds || []).forEach(pd => { partyDetailsMap[pd.session_id] = pd; });
+  }
+
+  // Material rates per program type
+  const programTypes = [...new Set(sessions.map(s => s.program_type).filter(Boolean))];
+  const { data: rates } = await db.from('session_material_rates')
+    .select('program_type, sku, qty_per_person, notes')
+    .in('program_type', programTypes);
+
+  const ratesMap = {};
+  (rates || []).forEach(r => {
+    if (!ratesMap[r.program_type]) ratesMap[r.program_type] = {};
+    ratesMap[r.program_type][r.sku] = { qty: r.qty_per_person, isEst: (r.notes||'').includes('ESTIMATE') };
+  });
+
+  // Studio stock
+  const { data: allStock } = await db.from('studio_stock')
+    .select('sku, qty_on_hand').eq('studio_id', studioId).limit(5000);
+  const stockMap = {};
+  (allStock || []).forEach(s => { stockMap[s.sku] = s.qty_on_hand ?? 0; });
+
+  // Aggregate virtual SKUs from real stock
+  Object.entries(VIRTUAL_SKU_PATTERNS).forEach(([vsku, testFn]) => {
+    stockMap[vsku] = Object.entries(stockMap)
+      .filter(([sku]) => testFn(sku))
+      .reduce((sum, [, qty]) => sum + qty, 0);
+  });
+
+  // Item names
+  const { data: itemData } = await db.from('inventory_items')
+    .select('sku, name, unit_type, unit_size_notes');
+  const itemMap = Object.fromEntries((itemData || []).map(i => [i.sku, i]));
+  Object.entries(VIRTUAL_SKU_NAMES).forEach(([sku, name]) => {
+    if (!itemMap[sku]) itemMap[sku] = { sku, name, unit_type: 'units', unit_size_notes: null };
+  });
+
+  // Build projections
+  const projections = {}; // { sku: { projected, hasEst } }
+  const breakdown = [];
+
+  function addProjection(sku, qty, isEst) {
+    if (!projections[sku]) projections[sku] = { projected: 0, hasEst: false };
+    projections[sku].projected += qty;
+    if (isEst) projections[sku].hasEst = true;
+  }
+
+  for (const s of sessions) {
+    const pt = s.program_type;
+    let headcount = headcountMap[s.id] || 0;
+    let sessionRates = { ...(ratesMap[pt] || {}) };
+    let isEst = false, mediumLabel = null, mediumMissing = false;
+    const pd = partyDetailsMap[s.id];
+
+    // Override rates for parties based on confirmed medium
+    if (pt === 'clay_party') {
+      headcount = pd?.actual_guests || pd?.expected_guests || headcount;
+      const med = pd?.medium;
+      mediumLabel = med;
+      if (!med) { mediumMissing = true; isEst = true; }
+      const partyRates = KIDS_PARTY_RATES[med || 'obc'];
+      sessionRates = Object.fromEntries(Object.entries(partyRates).map(([k,v]) => [k, { qty: v, isEst: !med }]));
+    } else if (pt === 'splatter_party') {
+      headcount = pd?.actual_guests || pd?.expected_guests || headcount;
+      // 1 watercolour paper sheet pp (÷30 sheets/pad) + 1 30x30 canvas per party
+      sessionRates = { 'WCV9X12-6': { qty: 0.03333, isEst: false } };
+      addProjection('30X30-10', 1, false); // flat per party
+    } else if (pt === 'adult_get_together' || pt === 'field_trip') {
+      headcount = pd?.actual_guests || pd?.expected_guests || headcount;
+      mediumLabel = pd?.medium;
+    }
+
+    if (headcount === 0) continue;
+
+    const sessionMats = {};
+    for (const [sku, rateInfo] of Object.entries(sessionRates)) {
+      const qty = rateInfo.qty * headcount;
+      addProjection(sku, qty, rateInfo.isEst);
+      sessionMats[sku] = qty;
+      if (rateInfo.isEst) isEst = true;
+    }
+
+    if (Object.keys(sessionMats).length > 0) {
+      breakdown.push({ date: s.session_date, time: s.session_time, title: s.title, pt, headcount, mats: sessionMats, isEst, mediumLabel, mediumMissing });
+    }
+  }
+
+  renderForecast(projections, stockMap, itemMap, breakdown);
+}
+
+function renderForecast(projections, stockMap, itemMap, breakdown) {
+  if (!Object.keys(projections).length) {
+    document.getElementById('forecast-content').innerHTML = '<div class="empty-state"><div class="empty-icon">✅</div><p>No material usage projected for this period.</p></div>';
+    return;
+  }
+
+  // Sort: most critical first (largest negative remaining)
+  const sorted = Object.entries(projections).sort(([skuA, a], [skuB, b]) => {
+    const remA = (stockMap[skuA] || 0) - a.projected;
+    const remB = (stockMap[skuB] || 0) - b.projected;
+    return remA - remB;
+  });
+
+  let summaryHtml = '<div class="forecast-grid">';
+  for (const [sku, { projected, hasEst }] of sorted) {
+    const onHand    = stockMap[sku] || 0;
+    const remaining = onHand - projected;
+    const item      = itemMap[sku] || { name: sku, unit_size_notes: null };
+    const pct       = onHand > 0 ? Math.min(100, (projected / onHand) * 100) : 100;
+    const status    = remaining < 0 ? 'critical' : remaining < projected * 0.25 ? 'low' : 'ok';
+    const statusTxt = remaining < 0 ? '🔴 Reorder needed' : remaining < projected * 0.25 ? '🟡 Running low' : '🟢 OK';
+    const barCol    = remaining < 0 ? 'var(--red)' : remaining < projected * 0.25 ? 'var(--yellow)' : '#10B981';
+    const pillCls   = remaining < 0 ? 'pill-red' : remaining < projected * 0.25 ? 'pill-yellow' : 'pill-green';
+    const displayName = VIRTUAL_SKU_NAMES[sku] || item.name;
+
+    summaryHtml += `
+      <div class="forecast-card ${status}">
+        <div class="forecast-card-header">
+          <div>
+            <div class="forecast-item-name">${displayName}</div>
+            <div class="forecast-item-sku">${sku}${item.unit_size_notes ? ' · ' + item.unit_size_notes : ''}</div>
+          </div>
+          <span class="pill ${pillCls}" style="flex-shrink:0">${statusTxt}</span>
+        </div>
+        <div class="forecast-bar-wrap">
+          <div class="forecast-bar" style="width:${pct}%; background:${barCol}"></div>
+        </div>
+        <div class="forecast-nums">
+          <div><div class="forecast-num">${fmt2(onHand)}</div><div class="forecast-num-label">On hand</div></div>
+          <div><div class="forecast-num">${fmt2(projected)}${hasEst ? '<span style="color:var(--yellow)">*</span>' : ''}</div><div class="forecast-num-label">Projected use</div></div>
+          <div><div class="forecast-num ${remaining < 0 ? 'text-red' : ''}">${fmt2(remaining)}</div><div class="forecast-num-label">Remaining</div></div>
+        </div>
+        ${hasEst ? '<div class="forecast-estimate-note">* Includes estimates for choice sessions</div>' : ''}
+      </div>`;
+  }
+  summaryHtml += '</div>';
+
+  // Breakdown table
+  const skuShortName = sku => {
+    const n = VIRTUAL_SKU_NAMES[sku] || itemMap[sku]?.name || sku;
+    return n.length > 20 ? n.substring(0, 18) + '…' : n;
+  };
+
+  let tableHtml = `
+    <div class="section-title" style="margin:1.5rem 0 0.75rem">Session Breakdown</div>
+    <div class="card" style="padding:0; overflow:hidden; overflow-x:auto">
+    <table><thead><tr>
+      <th>Date</th><th>Time</th><th>Session</th><th>Type</th><th style="text-align:center">Guests</th><th>Projected Materials</th>
+    </tr></thead><tbody>`;
+
+  for (const row of breakdown) {
+    const ptLabel = row.pt.replace(/_/g, ' ');
+    const medPill = row.mediumLabel
+      ? `<span class="pill pill-grey" style="font-size:0.65rem;margin-left:4px">${row.mediumLabel}</span>`
+      : row.mediumMissing
+      ? `<span class="pill pill-red" style="font-size:0.65rem;margin-left:4px">medium?</span>`
+      : '';
+
+    const matList = Object.entries(row.mats)
+      .map(([sku, qty]) => `${skuShortName(sku)}: <strong>${fmt3(qty)}</strong>`)
+      .join('&emsp;');
+
+    tableHtml += `<tr style="${row.isEst ? 'background:#FFFBEB' : ''}">
+      <td style="font-size:0.8rem;white-space:nowrap">${row.date}</td>
+      <td style="font-size:0.8rem;color:var(--muted);white-space:nowrap">${fmtSessionTime(row.time)}</td>
+      <td style="font-weight:700;font-size:0.85rem;max-width:180px">${row.title}</td>
+      <td style="font-size:0.78rem">${ptLabel}${medPill}</td>
+      <td style="text-align:center;font-weight:700">${row.headcount}</td>
+      <td style="font-size:0.78rem;color:var(--muted)">${matList}${row.isEst ? ' <span style="color:var(--yellow);font-style:italic">est.</span>' : ''}</td>
+    </tr>`;
+  }
+
+  tableHtml += '</tbody></table></div>';
+  document.getElementById('forecast-content').innerHTML = summaryHtml + tableHtml;
+}
+
+function fmt2(n) { return (Math.round(n * 100) / 100).toFixed(2); }
+function fmt3(n) { return (Math.round(n * 1000) / 1000).toFixed(3); }
+
+function fmtSessionTime(t) {
+  if (!t) return '';
+  const [h, m] = t.split(':').map(Number);
+  const ampm = h >= 12 ? 'pm' : 'am';
+  const h12  = h % 12 || 12;
+  return m === 0 ? `${h12}${ampm}` : `${h12}:${m.toString().padStart(2,'0')}${ampm}`;
 }
 
 // ── MODAL HELPERS ─────────────────────────────────────────
