@@ -21,6 +21,17 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 
 /* BOOKING ALERTS */
 #booking-alerts { position: sticky; top: 0; z-index: 200; padding: 0; }
+
+/* PARTY BOOKING ALERTS */
+#party-alerts { margin-bottom: 0.5rem; }
+.party-alerts-header { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: #99354e; text-transform: uppercase; letter-spacing: 0.5px; padding: 10px 0 6px; }
+.party-alert-item { display: flex; align-items: center; gap: 12px; padding: 10px 14px; margin-bottom: 5px; border-radius: 10px; background: #fff5f8; border: 1px solid #f0b8cc; font-size: 13px; color: #5a1a2e; }
+.party-alert-item .alert-icon { font-size: 15px; flex-shrink: 0; }
+.party-alert-item .alert-body { flex: 1; min-width: 0; }
+.party-alert-item .alert-body strong { color: #99354e; }
+.party-alert-item .alert-time { font-size: 11px; color: #c06080; margin-top: 2px; }
+.party-alert-dismiss { background: #fff; border: 0.5px solid #f0b8cc; color: #99354e; font-size: 11px; font-weight: 500; cursor: pointer; padding: 4px 12px; border-radius: 20px; white-space: nowrap; flex-shrink: 0; transition: background 0.15s; }
+.party-alert-dismiss:hover { background: #fce8f0; }
 .booking-alert { display: flex; align-items: flex-start; gap: 12px; padding: 11px 16px; margin-bottom: 6px; border-radius: 10px; font-size: 13px; line-height: 1.45; animation: alertSlideIn 0.25s ease; box-shadow: 0 2px 8px rgba(0,0,0,0.12); }
 .booking-alert.alert-new { background: #e8f5e9; border: 1px solid #a5d6a7; color: #1b5e20; }
 .booking-alert.alert-cancel { background: #fff3e0; border: 1px solid #ffcc80; color: #7a4000; }
@@ -259,6 +270,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
     <button class="signout-btn" onclick="signOut()">Sign out</button>
   </div>
 
+  <div id="party-alerts" style="display:none"></div>
+
   <div class="toolbar">
     <div class="toolbar-left">
       <button class="nav-btn" onclick="shiftDate(-1)">&#8592;</button>
@@ -350,11 +363,17 @@ function setupRealtimeBookings() {
   rtBookingChannel = sb.channel('rt-bookings-' + (currentStudioId || 'x'))
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'bookings' }, payload => {
       const b = payload.new
+      // Day-of ephemeral alert (today's sessions)
       const session = todaySessionsMap[b.session_id]
-      if (!session) return
-      showBookingAlert('new', b.customer_name, b.qty, session.title, session.time)
-      // Refresh view after a short delay so counts update
-      setTimeout(() => { if (currentView === 'day') loadDayView() }, 800)
+      if (session) {
+        showBookingAlert('new', b.customer_name, b.qty, session.title, session.time)
+        setTimeout(() => { if (currentView === 'day') loadDayView() }, 800)
+      }
+      // Persistent party alert (upcoming party sessions, weekdays only)
+      const dow = new Date().getDay()
+      if (partySessionIds.has(b.session_id) && dow !== 0 && dow !== 6) {
+        addRealtimePartyAlert(b)
+      }
     })
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'bookings' }, payload => {
       const b = payload.new
@@ -397,6 +416,165 @@ function showBookingAlert(type, customerName, qty, sessionTitle, sessionTime) {
 
   // Auto-dismiss after 45 seconds
   setTimeout(() => { if (el.parentNode) el.remove() }, 45000)
+}
+
+// ── PARTY BOOKING ALERTS (persistent, weekdays only) ──────────
+let partySessionIds = new Set() // upcoming party session IDs; used by realtime channel
+
+function formatDateShort(dateStr) {
+  // dateStr is 'YYYY-MM-DD'
+  const d = new Date(dateStr + 'T12:00:00')
+  return d.toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })
+}
+
+function getDismissedPartyAlerts() {
+  try {
+    const raw = localStorage.getItem(`4cats_dismissed_parties_${currentStudioId}`)
+    return new Set(raw ? JSON.parse(raw) : [])
+  } catch { return new Set() }
+}
+
+function dismissPartyAlert(bookingId, btn) {
+  try {
+    const key = `4cats_dismissed_parties_${currentStudioId}`
+    const dismissed = getDismissedPartyAlerts()
+    dismissed.add(String(bookingId))
+    localStorage.setItem(key, JSON.stringify([...dismissed]))
+  } catch {}
+  btn.closest('.party-alert-item').remove()
+  refreshPartyAlertsHeader()
+}
+
+function refreshPartyAlertsHeader() {
+  const container = document.getElementById('party-alerts')
+  if (!container) return
+  const items = container.querySelectorAll('.party-alert-item')
+  if (!items.length) {
+    container.style.display = 'none'
+    return
+  }
+  const header = container.querySelector('.party-alerts-header')
+  if (header) header.innerHTML = `🎂 ${items.length} new party booking${items.length !== 1 ? 's' : ''} — please review`
+}
+
+async function loadPartyAlerts() {
+  // Only show on weekdays (Mon–Fri)
+  const dow = new Date().getDay()
+  if (dow === 0 || dow === 6) return
+
+  const container = document.getElementById('party-alerts')
+  if (!container || !currentStudioId) return
+
+  container.innerHTML = ''
+  container.style.display = 'none'
+
+  const dismissed = getDismissedPartyAlerts()
+  const today = dateStr(new Date())
+
+  // Fetch upcoming party sessions (today onwards, next 90 days)
+  const futureLimit = dateStr(addDays(new Date(), 90))
+  const { data: partySessions } = await sb.from('sessions')
+    .select('id, title, session_date, session_time')
+    .eq('studio_id', currentStudioId)
+    .eq('session_type', 'party')
+    .gte('session_date', today)
+    .lte('session_date', futureLimit)
+    .order('session_date')
+
+  if (!partySessions?.length) return
+
+  partySessionIds = new Set(partySessions.map(s => s.id))
+  const sessionMap = {}
+  partySessions.forEach(s => { sessionMap[s.id] = s })
+
+  const { data: bookings } = await sb.from('bookings')
+    .select('id, session_id, customer_name, qty, shopify_order_name, booked_at')
+    .in('session_id', [...partySessionIds])
+    .gt('qty', 0)
+
+  if (!bookings?.length) return
+
+  const undismissed = bookings.filter(b => !dismissed.has(String(b.id)))
+  if (!undismissed.length) return
+
+  // Sort soonest first
+  undismissed.sort((a, b) => {
+    const da = sessionMap[a.session_id]?.session_date || ''
+    const db = sessionMap[b.session_id]?.session_date || ''
+    return da < db ? -1 : da > db ? 1 : 0
+  })
+
+  renderPartyAlerts(undismissed, sessionMap)
+}
+
+function renderPartyAlerts(bookings, sessionMap) {
+  const container = document.getElementById('party-alerts')
+  if (!container) return
+
+  // Clear and rebuild
+  container.innerHTML = ''
+  container.style.display = 'block'
+
+  const header = document.createElement('div')
+  header.className = 'party-alerts-header'
+  header.innerHTML = `🎂 ${bookings.length} new party booking${bookings.length !== 1 ? 's' : ''} — please review`
+  container.appendChild(header)
+
+  bookings.forEach(b => {
+    container.appendChild(buildPartyAlertItem(b, sessionMap[b.session_id]))
+  })
+}
+
+function buildPartyAlertItem(b, session) {
+  const dateLabel = session?.session_date ? formatDateShort(session.session_date) : '—'
+  const timeLabel = session?.session_time ? session.session_time.slice(0, 5) : ''
+  const title = session?.title
+    ? session.title.replace(/\s*\|\s*\d+.*$/i, '').replace(/^\*?\d+[ap]m\s+\w+\s+\w+\s*\|\s*/i, '').trim()
+    : 'Party'
+  const guestText = b.qty > 1 ? ` · ${b.qty} guests` : ''
+  const orderText = b.shopify_order_name ? ` · ${b.shopify_order_name}` : ''
+
+  const el = document.createElement('div')
+  el.className = 'party-alert-item'
+  el.dataset.bookingId = String(b.id)
+  el.innerHTML = `
+    <span class="alert-icon">🎂</span>
+    <div class="alert-body">
+      <div><strong>${b.customer_name || 'New party booking'}</strong>${guestText}${orderText}</div>
+      <div class="alert-time">${title} · ${dateLabel}${timeLabel ? ' at ' + timeLabel : ''}</div>
+    </div>
+    <button class="party-alert-dismiss" onclick="dismissPartyAlert('${b.id}', this)">Dismiss</button>`
+  return el
+}
+
+function addRealtimePartyAlert(b) {
+  // Called from realtime channel for party session bookings
+  const dismissed = getDismissedPartyAlerts()
+  if (dismissed.has(String(b.id))) return
+
+  sb.from('sessions').select('id, title, session_date, session_time').eq('id', b.session_id).single()
+    .then(({ data: session }) => {
+      if (!session) return
+      const container = document.getElementById('party-alerts')
+      if (!container) return
+
+      // Show the section
+      container.style.display = 'block'
+
+      // Update or create header
+      let header = container.querySelector('.party-alerts-header')
+      const count = container.querySelectorAll('.party-alert-item').length + 1
+      if (header) {
+        header.innerHTML = `🎂 ${count} new party booking${count !== 1 ? 's' : ''} — please review`
+      } else {
+        header = document.createElement('div')
+        header.className = 'party-alerts-header'
+        header.innerHTML = `🎂 1 new party booking — please review`
+        container.insertBefore(header, container.firstChild)
+      }
+
+      container.appendChild(buildPartyAlertItem(b, session))
+    })
 }
 
 // ── PARTY PRICING TABLES (from Shopify product CSV) ─────────────
@@ -1954,6 +2132,7 @@ async function loadApp() {
   await loadCurriculumData()
   await loadCurrentView()
   setupRealtimeBookings()
+  await loadPartyAlerts()
 }
 
 function syncDatePicker() {
