@@ -860,6 +860,7 @@ async function loadSchedule() {
   }
   scheduleData = sessions.map(s => ({ ...s, reg: counts[s.id] || 0 }))
   gridStudios = allStudios.filter(s => [...new Set(sessions.map(x => x.studio_id))].includes(s.id))
+  await fetchCurriculumData()
   renderSchedule()
 }
 
@@ -949,12 +950,17 @@ function renderSchedule() {
         || studioSessions.find(s => s.shopify_status === 'draft')
         || studioSessions.find(s => s.shopify_status)
       const statusPill = statusPillHtml(anySession?.shopify_status, shopifyTitle, date, row.time||'00:00:00')
+      const curricLink = getCurriculumLinkForRow(date, row.type)
+      const curricHtml = curricLink
+        ? `<div style="margin-top:3px"><a href="${curricLink.url}" target="_blank" style="font-size:10px;color:#5b4fcf;text-decoration:none;display:inline-flex;align-items:center;gap:3px" title="Open curriculum">📚 Curriculum${curricLink.theme ? ' — ' + curricLink.theme : ''}</a></div>`
+        : ''
       bodyHtml += `<tr><td class="session-info">
         <div class="session-title-wrap">
           <span class="session-title-cell">${row.title} <span class="badge ${badge}">${row.type}</span>${statusPill}</span>
           <button class="btn-edit-title" data-ctx="${editDataKey}" onclick="openEditTitleModalFromBtn(this)" title="Edit / Delete session">✎</button>
         </div>
         <div class="session-time-cell">${time} &nbsp;${shopifyBtn}</div>
+        ${curricHtml}
       </td>`
       let rowTotal = 0
       gridStudios.forEach(studio => {
@@ -1693,6 +1699,30 @@ async function saveAddSessions() {
 // ═══════════════════════════════════════════════
 let curriculumData = []
 
+// Fetch curriculum data without triggering a render — safe to call from any tab
+async function fetchCurriculumData() {
+  if (curriculumData.length) return  // already loaded
+  const { data } = await sb.from('curriculum_weeks').select('*').order('week_start', { ascending: true, nullsFirst: false })
+  curriculumData = data || []
+}
+
+// Return a curriculum entry matching a session row, or null
+// - Class sessions: matched by weekly date range
+// - Other types (wheel, glazing, etc.): matched by session_type_key
+function getCurriculumLinkForRow(date, sessionType) {
+  if (!curriculumData.length) return null
+  // Fixed session type match (e.g. glazing, workshop links)
+  const fixed = curriculumData.find(r => r.session_type_key && r.session_type_key === sessionType && r.curriculum_url)
+  if (fixed) return { url: fixed.curriculum_url, theme: fixed.theme || null }
+  // Weekly date-range match (kids class curriculum)
+  if (sessionType === 'class') {
+    const weekly = curriculumData.find(r => r.week_start && r.week_start <= date && r.week_end >= date && r.curriculum_url)
+    if (weekly) return { url: weekly.curriculum_url, theme: weekly.theme || null }
+  }
+  return null
+}
+
+
 async function loadCurriculum() {
   const { data } = await sb.from('curriculum_weeks').select('*').order('week_start', { ascending: true, nullsFirst: false })
   curriculumData = data || []; renderCurriculum()
@@ -1711,7 +1741,7 @@ function curriculumRow(r) {
   const isFixed = !r.week_start
   const weekLabel = isFixed ? `<span style="font-weight:500">${r.theme||r.session_type_key}</span>` : `${r.week_start} – ${r.week_end}`
   const themeCell = isFixed ? '' : `<td style="padding:8px 14px">${editableCell(r.id,'theme',r.theme)}</td>`
-  return `<tr style="border-bottom:0.5px solid #f5f5f0" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''"><td style="padding:8px 14px;font-weight:500">${weekLabel}</td>${themeCell}<td style="padding:8px 14px">${editableCell(r.id,'curriculum_url',r.curriculum_url,'Paste URL...')}</td><td style="padding:8px 14px"><button class="btn" onclick="saveCurriculumRow('${r.id}')" style="font-size:11px;padding:4px 10px" id="cur-save-${r.id}">Save</button><button class="btn" onclick="deleteCurriculumRow('${r.id}')" style="font-size:11px;padding:4px 10px;color:#c0392b;border-color:#f5c6cb;margin-left:4px">Delete</button></td></tr>`
+  return `<tr style="border-bottom:0.5px solid #f5f5f0" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''"><td style="padding:8px 14px;font-weight:500">${weekLabel}</td>${themeCell}<td style="padding:8px 14px">${editableCell(r.id,'website_url',r.website_url,'https://...')}</td><td style="padding:8px 14px">${editableCell(r.id,'curriculum_url',r.curriculum_url,'Paste URL...')}</td><td style="padding:8px 14px"><button class="btn" onclick="saveCurriculumRow('${r.id}')" style="font-size:11px;padding:4px 10px" id="cur-save-${r.id}">Save</button><button class="btn" onclick="deleteCurriculumRow('${r.id}')" style="font-size:11px;padding:4px 10px;color:#c0392b;border-color:#f5c6cb;margin-left:4px">Delete</button></td></tr>`
 }
 
 function editableCell(id, field, value, placeholder) {
@@ -1720,10 +1750,12 @@ function editableCell(id, field, value, placeholder) {
 
 async function saveCurriculumRow(id) {
   const btn = document.getElementById(`cur-save-${id}`); btn.textContent = '...'; btn.disabled = true
-  const theme = document.getElementById(`cur-theme-${id}`)?.value?.trim()||null, curriculum_url = document.getElementById(`cur-curriculum_url-${id}`)?.value?.trim()||null
-  const { error } = await sb.from('curriculum_weeks').update({ theme, curriculum_url }).eq('id', id)
+  const theme = document.getElementById(`cur-theme-${id}`)?.value?.trim()||null
+  const website_url = document.getElementById(`cur-website_url-${id}`)?.value?.trim()||null
+  const curriculum_url = document.getElementById(`cur-curriculum_url-${id}`)?.value?.trim()||null
+  const { error } = await sb.from('curriculum_weeks').update({ theme, website_url, curriculum_url }).eq('id', id)
   if (error) { alert('Error: '+error.message); btn.textContent='Save'; btn.disabled=false; return }
-  const row = curriculumData.find(r=>r.id===id); if (row) { row.theme=theme; row.curriculum_url=curriculum_url }
+  const row = curriculumData.find(r=>r.id===id); if (row) { row.theme=theme; row.website_url=website_url; row.curriculum_url=curriculum_url }
   btn.textContent='Saved ✓'; btn.style.background='#2e7d32'; btn.style.color='white'
   setTimeout(()=>{ btn.textContent='Save'; btn.style.background=''; btn.style.color=''; btn.disabled=false },2000)
 }
@@ -5627,6 +5659,63 @@ function showAdminToast(msg, duration = 2500) {
         <button onclick="closeCloseStudioModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
         <button id="csd-save-btn" onclick="executeCloseStudio()" style="padding:8px 16px;background:#c0392b;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">🔒 Close Studio Day</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Add Curriculum Modal -->
+<div id="add-curriculum-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:white;border-radius:12px;width:100%;max-width:460px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
+      <h3 id="acm-modal-title" style="font-size:15px;font-weight:600;margin:0">Add Curriculum Week</h3>
+      <button onclick="closeAddCurriculumModal()" style="background:none;border:none;font-size:22px;cursor:pointer;color:#888;line-height:1">×</button>
+    </div>
+    <input type="hidden" id="acm-is-fixed" value="0">
+
+    <!-- Fixed session type fields -->
+    <div id="acm-fixed-fields" style="display:none;margin-bottom:10px">
+      <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Session Type Key *</label>
+      <input id="acm-session-type" type="text" placeholder="e.g. class, glazing, workshop, camp"
+        style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;box-sizing:border-box">
+      <div style="font-size:11px;color:#888;margin-top:4px">Must match the session type exactly (lowercase). Used to match fixed session links like Wheel or Glazing.</div>
+    </div>
+
+    <!-- Weekly date range fields -->
+    <div id="acm-week-fields" style="display:block;margin-bottom:10px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div>
+          <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Week Start *</label>
+          <input id="acm-week-start" type="date" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none">
+        </div>
+        <div>
+          <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Week End *</label>
+          <input id="acm-week-end" type="date" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none">
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-bottom:10px">
+      <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Theme / Title <span style="color:#bbb;text-transform:none">(optional)</span></label>
+      <input id="acm-theme" type="text" placeholder="e.g. Impressionism, Nature Studies..."
+        style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;box-sizing:border-box">
+    </div>
+
+    <div style="margin-bottom:10px">
+      <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Website URL <span style="color:#bbb;text-transform:none">(optional)</span></label>
+      <input id="acm-website-url" type="url" placeholder="https://..."
+        style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;box-sizing:border-box">
+    </div>
+
+    <div style="margin-bottom:1rem">
+      <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Curriculum URL <span style="color:#bbb;text-transform:none">(optional)</span></label>
+      <input id="acm-curriculum-url" type="url" placeholder="https://..."
+        style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;box-sizing:border-box">
+      <div style="font-size:11px;color:#888;margin-top:4px">This link appears on the schedule next to each matching class session.</div>
+    </div>
+
+    <div style="display:flex;gap:8px;justify-content:flex-end;padding-top:1rem;border-top:0.5px solid #f0f0e8">
+      <button onclick="closeAddCurriculumModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
+      <button id="acm-save-btn" onclick="saveAddCurriculum()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">Save</button>
     </div>
   </div>
 </div>
