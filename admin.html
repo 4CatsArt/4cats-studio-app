@@ -2299,6 +2299,18 @@ function openAddSessionFromError(encodedAction) {
   document.getElementById('ase-title').value = resolvedTitle
   document.getElementById('ase-type').value = resolvedType
   document.getElementById('ase-capacity').value = '0'
+
+  // Auto-detect number of weeks from product title (e.g. "5 Week Kids Session" → 5)
+  const weeksMatch = (action.productTitle || '').match(/(\d+)\s*[Ww]eek/)
+  const numWeeks = weeksMatch ? parseInt(weeksMatch[1]) : 1
+  document.getElementById('ase-weeks').value = numWeeks
+  const seriesNote = document.getElementById('ase-series-note')
+  if (numWeeks > 1) {
+    document.getElementById('ase-series-count').textContent = `${numWeeks} sessions (Class 1–${numWeeks})`
+    seriesNote.style.display = 'block'
+  } else {
+    seriesNote.style.display = 'none'
+  }
   document.getElementById('ase-status').textContent = ''
   document.getElementById('ase-save-btn').textContent = 'Create Session & Link Booking'
   document.getElementById('ase-save-btn').disabled = false
@@ -2330,49 +2342,57 @@ async function saveAddSessionFromError() {
   const title = document.getElementById('ase-title').value.trim()
   const type = document.getElementById('ase-type').value
   const capacity = parseInt(document.getElementById('ase-capacity').value) || 0
+  const numWeeks = parseInt(document.getElementById('ase-weeks').value) || 1
   const statusEl = document.getElementById('ase-status')
   if (!studioId||!date||!time||!title) { alert('Please fill in all fields.'); return }
   const btn = document.getElementById('ase-save-btn')
   btn.textContent = 'Creating...'; btn.disabled = true; statusEl.textContent = ''
   const sessionTime = time.length===5 ? time+':00' : time
+
   try {
-    // Check if session already exists using maybeSingle to avoid 406 errors
+    // Build series rows (same convention as saveAddSessions)
+    const rows = []
+    for (let week = 0; week < numWeeks; week++) {
+      const sessionDate = week === 0 ? date : dateStr(addDays(new Date(date + 'T12:00:00'), week * 7))
+      const sessionTitle = numWeeks === 1 ? title
+        : week === 0 ? `${title} | ${numWeeks} Week Session`
+        : `${title} | Class ${week+1} of ${numWeeks}`
+      rows.push({ studio_id: studioId, session_date: sessionDate, session_time: sessionTime,
+        title: sessionTitle, session_type: type, capacity, show: true, spaces_left_cache: null })
+    }
+
+    // Check if Class 1 session already exists
     const { data: existing } = await sb.from('sessions')
-      .select('id')
-      .eq('studio_id', studioId)
-      .eq('session_date', date)
-      .eq('session_time', sessionTime)
-      .eq('title', title)
-      .maybeSingle()
+      .select('id').eq('studio_id', studioId).eq('session_date', date)
+      .eq('session_time', sessionTime).maybeSingle()
+
     let sessionId = existing?.id
     if (!sessionId) {
-      const { error: insertError } = await sb.from('sessions').insert({
-        studio_id: studioId, session_date: date, session_time: sessionTime,
-        title, session_type: type, capacity: capacity, show: true, spaces_left_cache: null
-      })
+      // Insert all series rows
+      const { error: insertError } = await sb.from('sessions').insert(rows)
       if (insertError) throw insertError
-      // Fetch the newly created session id
+      // Fetch the Class 1 session id
       const { data: newSession, error: fetchError } = await sb.from('sessions')
-        .select('id')
-        .eq('studio_id', studioId)
-        .eq('session_date', date)
-        .eq('session_time', sessionTime)
-        .eq('title', title)
-        .maybeSingle()
+        .select('id').eq('studio_id', studioId).eq('session_date', date)
+        .eq('session_time', sessionTime).maybeSingle()
       if (fetchError) throw fetchError
       if (!newSession) throw new Error('Session was inserted but could not be retrieved')
       sessionId = newSession.id
     }
-    // Link the booking — use service role via RPC to bypass RLS
-    console.log('Linking booking:', aseContext.bookingId, 'to session:', sessionId)
-    const { data: rpcData, error: bookingError } = await sb.rpc('link_booking_to_session', {
+
+    // Link the booking to Class 1 via RPC
+    const { error: bookingError } = await sb.rpc('link_booking_to_session', {
       p_booking_id: aseContext.bookingId,
       p_session_id: sessionId
     })
-    console.log('RPC result:', rpcData, 'error:', bookingError)
     if (bookingError) throw bookingError
+
     statusEl.style.color = '#2e7d32'
-    statusEl.textContent = existing ? '✓ Session already existed — booking linked!' : '✓ Session created and booking linked!'
+    statusEl.textContent = existing
+      ? '✓ Session already existed — booking linked!'
+      : numWeeks > 1
+        ? `✓ Created ${numWeeks}-week series — booking linked to Class 1!`
+        : '✓ Session created and booking linked!'
     btn.textContent = 'Done'
     setTimeout(() => { closeAddSessionFromError(); loadQualityReport(); loadQualityBadge() }, 1200)
   } catch(e) {
@@ -5416,8 +5436,8 @@ function showAdminToast(msg, duration = 2500) {
       <span id="ase-shopify-preview" style="color:#888">Fill in fields to preview</span>
     </div>
 
-    <!-- Type / Capacity row -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:1.25rem">
+    <!-- Type / Capacity / Weeks row -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px">
       <div class="modal-field">
         <label>Type</label>
         <select id="ase-type">
@@ -5432,6 +5452,13 @@ function showAdminToast(msg, duration = 2500) {
         <label>Capacity <span style="font-weight:400;color:#bbb">(0 = unlimited)</span></label>
         <input id="ase-capacity" type="number" value="0" min="0">
       </div>
+      <div class="modal-field">
+        <label>Num Weeks <span style="font-weight:400;color:#bbb">(series)</span></label>
+        <input id="ase-weeks" type="number" value="1" min="1" max="52">
+      </div>
+    </div>
+    <div id="ase-series-note" style="display:none;background:#fff8e1;border:0.5px solid #ffe082;border-radius:8px;padding:9px 12px;margin-bottom:14px;font-size:12px;color:#7a5800">
+      📅 Will create <strong id="ase-series-count"></strong> weekly sessions — booking linked to Class 1.
     </div>
 
     <div style="display:flex;align-items:center;justify-content:space-between;padding-top:1rem;border-top:0.5px solid #f0f0e8">
