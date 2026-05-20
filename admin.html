@@ -2361,23 +2361,21 @@ async function saveAddSessionFromError() {
         title: sessionTitle, session_type: type, capacity, show: true, spaces_left_cache: null })
     }
 
-    // Check if Class 1 session already exists
-    const { data: existing } = await sb.from('sessions')
-      .select('id').eq('studio_id', studioId).eq('session_date', date)
-      .eq('session_time', sessionTime).maybeSingle()
-
-    let sessionId = existing?.id
-    if (!sessionId) {
-      // Insert all series rows
-      const { error: insertError } = await sb.from('sessions').insert(rows)
-      if (insertError) throw insertError
-      // Fetch the Class 1 session id
-      const { data: newSession, error: fetchError } = await sb.from('sessions')
+    // Try inserting all series rows; get IDs back immediately
+    const { data: inserted, error: insertError } = await sb.from('sessions').insert(rows).select('id, session_date')
+    let sessionId, alreadyExisted = false
+    if (!insertError && inserted?.length) {
+      // Use the first inserted row (Class 1) — rows are ordered by week
+      sessionId = inserted[0].id
+    } else {
+      // Sessions may already exist — fetch Class 1 by studio+date+time, take earliest
+      alreadyExisted = true
+      const { data: existing, error: fetchError } = await sb.from('sessions')
         .select('id').eq('studio_id', studioId).eq('session_date', date)
-        .eq('session_time', sessionTime).maybeSingle()
+        .eq('session_time', sessionTime).order('created_at', { ascending: true }).limit(1)
       if (fetchError) throw fetchError
-      if (!newSession) throw new Error('Session was inserted but could not be retrieved')
-      sessionId = newSession.id
+      if (!existing?.length) throw new Error(insertError?.message || 'Session could not be created or found')
+      sessionId = existing[0].id
     }
 
     // Link the booking to Class 1 via RPC
@@ -2388,7 +2386,7 @@ async function saveAddSessionFromError() {
     if (bookingError) throw bookingError
 
     statusEl.style.color = '#2e7d32'
-    statusEl.textContent = existing
+    statusEl.textContent = alreadyExisted
       ? '✓ Session already existed — booking linked!'
       : numWeeks > 1
         ? `✓ Created ${numWeeks}-week series — booking linked to Class 1!`
