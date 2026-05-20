@@ -2361,21 +2361,33 @@ async function saveAddSessionFromError() {
         title: sessionTitle, session_type: type, capacity, show: true, spaces_left_cache: null })
     }
 
-    // Try inserting all series rows; get IDs back immediately
-    const { data: inserted, error: insertError } = await sb.from('sessions').insert(rows).select('id, session_date')
+    // Build Class 1 title for duplicate detection
+    const class1Title = numWeeks === 1 ? title : `${title} | ${numWeeks} Week Session`
+
+    // Check if Class 1 already exists (exact title match) before inserting
+    const { data: preExisting } = await sb.from('sessions')
+      .select('id').eq('studio_id', studioId).eq('session_date', date)
+      .eq('session_time', sessionTime).eq('title', class1Title).limit(1)
+
     let sessionId, alreadyExisted = false
-    if (!insertError && inserted?.length) {
-      // Use the first inserted row (Class 1) — rows are ordered by week
-      sessionId = inserted[0].id
-    } else {
-      // Sessions may already exist — fetch Class 1 by studio+date+time, take earliest
+    if (preExisting?.length) {
+      sessionId = preExisting[0].id
       alreadyExisted = true
-      const { data: existing, error: fetchError } = await sb.from('sessions')
-        .select('id').eq('studio_id', studioId).eq('session_date', date)
-        .eq('session_time', sessionTime).order('created_at', { ascending: true }).limit(1)
-      if (fetchError) throw fetchError
-      if (!existing?.length) throw new Error(insertError?.message || 'Session could not be created or found')
-      sessionId = existing[0].id
+    } else {
+      // Insert all series rows; get IDs back immediately
+      const { data: inserted, error: insertError } = await sb.from('sessions').insert(rows).select('id, session_date')
+      if (!insertError && inserted?.length) {
+        sessionId = inserted[0].id
+      } else {
+        // Fallback: fetch by studio+date+time+title
+        const { data: fallback, error: fetchError } = await sb.from('sessions')
+          .select('id').eq('studio_id', studioId).eq('session_date', date)
+          .eq('session_time', sessionTime).eq('title', class1Title).limit(1)
+        if (fetchError) throw fetchError
+        if (!fallback?.length) throw new Error(insertError?.message || 'Session could not be created or found')
+        sessionId = fallback[0].id
+        alreadyExisted = true
+      }
     }
 
     // Link the booking to Class 1 via RPC
