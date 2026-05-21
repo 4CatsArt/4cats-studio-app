@@ -6160,7 +6160,7 @@ async function loadCampFormsTab() {
   const cfBatchSize = 1000
   while (true) {
     const { data: batch, error: batchError } = await sb.from('bookings')
-      .select('shopify_order_name, studio_id, customer_email, customer_name, qty, event_date, product_title')
+      .select('shopify_order_name, studio_id, customer_email, customer_name, qty, event_date, product_title, raw_payload')
       .gte('event_date', today)
       .or('product_title.ilike.%camp%,product_title.ilike.%no school%')
       .order('event_date', { ascending: true })
@@ -6177,17 +6177,30 @@ async function loadCampFormsTab() {
     return
   }
 
-  // 2. Collapse to one row per order (use earliest event_date, sum qty)
+  // Helper: check if a booking's raw_payload has Shopify participant properties
+  function hasShopifyParticipants(raw_payload) {
+    try {
+      const p = typeof raw_payload === 'string' ? JSON.parse(raw_payload) : raw_payload
+      if (!p?.line_items) return false
+      for (const li of p.line_items) {
+        if ((li.properties || []).some(prop => prop.name?.toLowerCase().startsWith('participant') && prop.value)) return true
+      }
+    } catch(e) {}
+    return false
+  }
+
+  // 2. Collapse to one row per order (use earliest event_date, max qty)
   const orderMap = {}
   for (const b of bookings) {
     const key = b.shopify_order_name
     if (!orderMap[key]) {
       orderMap[key] = { shopify_order_name: b.shopify_order_name, studio_id: b.studio_id,
         customer_email: b.customer_email || '', customer_name: b.customer_name || '',
-        qty: 0, first_date: b.event_date }
+        qty: 0, first_date: b.event_date, hasShopifyNames: false }
     }
     orderMap[key].qty = Math.max(orderMap[key].qty, b.qty || 1)
     if (b.event_date < orderMap[key].first_date) orderMap[key].first_date = b.event_date
+    if (hasShopifyParticipants(b.raw_payload)) orderMap[key].hasShopifyNames = true
   }
   const orders = Object.values(orderMap)
   const orderNames = orders.map(o => o.shopify_order_name)
@@ -6218,7 +6231,8 @@ async function loadCampFormsTab() {
   // 5. Build rows
   cfAllRows = orders.map(o => {
     const trows = tallyByOrder[o.shopify_order_name] || []
-    const hasMissingName = trows.length === 0 || trows.some(t => !t.camper_name)
+    // Not missing if: has tally rows with names, OR has Shopify participant properties in raw_payload
+    const hasMissingName = !o.hasShopifyNames && (trows.length === 0 || trows.some(t => !t.camper_name))
     const tok = tokenByOrder[o.shopify_order_name]
     let status = 'missing'
     if (tok?.submitted_at) status = 'done'
@@ -6371,12 +6385,23 @@ async function sendCampFormEmails(orderNames, btn) {
 async function loadCampFormsBadge() {
   const today = dateStr(new Date())
   const { data: bookings } = await sb.from('bookings')
-    .select('shopify_order_name')
+    .select('shopify_order_name, raw_payload')
     .gte('event_date', today)
     .or('product_title.ilike.%camp%,product_title.ilike.%no school%')
   if (!bookings?.length) return
 
-  const orderNames = [...new Set(bookings.map(b => b.shopify_order_name))]
+  // Track which orders have Shopify participant names in raw_payload
+  const shopifyNamesByOrder = {}
+  for (const b of bookings) {
+    if (!shopifyNamesByOrder[b.shopify_order_name]) shopifyNamesByOrder[b.shopify_order_name] = false
+    try {
+      const p = typeof b.raw_payload === 'string' ? JSON.parse(b.raw_payload) : b.raw_payload
+      if (p?.line_items?.some(li => (li.properties||[]).some(prop => prop.name?.toLowerCase().startsWith('participant') && prop.value)))
+        shopifyNamesByOrder[b.shopify_order_name] = true
+    } catch(e) {}
+  }
+
+  const orderNames = Object.keys(shopifyNamesByOrder)
   const { data: tallys } = await sb.from('tally_registrations')
     .select('shopify_order_name, camper_name')
     .in('shopify_order_name', orderNames)
@@ -6388,6 +6413,7 @@ async function loadCampFormsBadge() {
 
   let missingCount = 0
   for (const name of orderNames) {
+    if (shopifyNamesByOrder[name]) continue  // has Shopify participant names, not missing
     const trows = tallyByOrder[name] || []
     if (trows.length === 0 || trows.some(t => !t.camper_name)) missingCount++
   }
