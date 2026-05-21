@@ -220,6 +220,7 @@ select:focus, input:focus { border-color: #888; }
     <button class="tab-btn" onclick="switchTab('reviews')">⭐ Reviews</button>
     <button class="tab-btn" onclick="switchTab('guide')">📋 Guide</button>
     <button class="tab-btn" onclick="switchTab('setup')">🏠 Studio Setup</button>
+    <button class="tab-btn" onclick="switchTab('camps')">🏕 Camp Forms<span id="camps-badge" class="tab-badge" style="display:none"></span></button>
     <div class="top-bar-right"><button class="signout-btn" onclick="signOut()">Sign out</button></div>
   </div>
   <div class="tab-content active" id="tab-schedule">
@@ -721,10 +722,11 @@ async function initApp() {
   document.getElementById('rpt-date').value = dateStr(addDays(new Date(), -1))
   buildWeekOptions()
   loadQualityBadge()
+  loadCampFormsBadge()
 }
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','training','staff','parties','users','clay','reviews','guide','setup'][i] === tab))
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','training','staff','parties','users','clay','reviews','guide','setup','camps'][i] === tab))
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'))
   document.getElementById(`tab-${tab}`).classList.add('active')
   if (tab === 'curriculum') loadCurriculum()
@@ -738,6 +740,7 @@ function switchTab(tab) {
   if (tab === 'clay') loadClayTab()
   if (tab === 'reviews') loadReviewsTab()
   if (tab === 'setup') loadSetupTab()
+  if (tab === 'camps') loadCampFormsTab()
 }
 
 async function loadQualityBadge() {
@@ -6100,6 +6103,276 @@ function showSetupStatus(msg, isError = false) {
 
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+}
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- CAMP FORMS TAB                                             -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="tab-content" id="tab-camps">
+  <div class="toolbar">
+    <div class="toolbar-group">
+      <label>Studio</label>
+      <select id="cf-studio-filter" onchange="renderCampFormsTable()">
+        <option value="">All studios</option>
+      </select>
+      <label>Status</label>
+      <select id="cf-status-filter" onchange="renderCampFormsTable()">
+        <option value="">All</option>
+        <option value="missing">⚠ Info missing</option>
+        <option value="sent">📧 Form sent</option>
+        <option value="done">✅ Completed</option>
+      </select>
+    </div>
+    <div class="toolbar-sep"></div>
+    <div class="toolbar-group">
+      <button class="btn btn-primary" onclick="loadCampFormsTab()">↺ Refresh</button>
+      <button class="btn btn-primary" id="cf-send-selected-btn" onclick="sendSelectedCampForms()" style="display:none">📧 Send to Selected</button>
+    </div>
+    <div class="toolbar-sep"></div>
+    <div style="font-size:11px;color:#888">Upcoming camp orders with missing child info. Send parents a link to complete their registration.</div>
+  </div>
+
+  <div id="cf-stats-row" class="stats-row" style="display:none">
+    <div class="stat-card warn"><div class="val" id="cf-stat-missing">—</div><div class="lbl">Missing info</div></div>
+    <div class="stat-card"><div class="val" id="cf-stat-sent">—</div><div class="lbl">Form sent</div></div>
+    <div class="stat-card good"><div class="val" id="cf-stat-done">—</div><div class="lbl">Completed</div></div>
+  </div>
+
+  <div id="cf-container"><div class="empty">Click Refresh to scan for orders with missing child information.</div></div>
+</div>
+
+<script>
+// ── CAMP FORMS TAB ────────────────────────────────────────────────────────────
+
+let cfAllRows = []  // all loaded rows
+
+async function loadCampFormsTab() {
+  const container = document.getElementById('cf-container')
+  container.innerHTML = '<div class="loading">Scanning camp registrations…</div>'
+  document.getElementById('cf-stats-row').style.display = 'none'
+
+  const today = dateStr(new Date())
+
+  // 1. Fetch upcoming camp bookings
+  const { data: bookings, error } = await sb.from('bookings')
+    .select('shopify_order_name, studio_id, customer_email, customer_name, qty, event_date, product_title')
+    .gte('event_date', today)
+    .or('product_title.ilike.%camp%,product_title.ilike.%no school%')
+    .order('event_date', { ascending: true })
+
+  if (error || !bookings?.length) {
+    container.innerHTML = '<div class="empty">No upcoming camp bookings found.</div>'
+    return
+  }
+
+  // 2. Collapse to one row per order (use earliest event_date, sum qty)
+  const orderMap = {}
+  for (const b of bookings) {
+    const key = b.shopify_order_name
+    if (!orderMap[key]) {
+      orderMap[key] = { shopify_order_name: b.shopify_order_name, studio_id: b.studio_id,
+        customer_email: b.customer_email || '', customer_name: b.customer_name || '',
+        qty: 0, first_date: b.event_date }
+    }
+    orderMap[key].qty = Math.max(orderMap[key].qty, b.qty || 1)
+    if (b.event_date < orderMap[key].first_date) orderMap[key].first_date = b.event_date
+  }
+  const orders = Object.values(orderMap)
+  const orderNames = orders.map(o => o.shopify_order_name)
+
+  // 3. Fetch tally_registrations for these orders
+  const { data: tallys } = await sb.from('tally_registrations')
+    .select('shopify_order_name, camper_name, id')
+    .in('shopify_order_name', orderNames)
+  const tallyByOrder = {}
+  for (const t of (tallys || [])) {
+    if (!tallyByOrder[t.shopify_order_name]) tallyByOrder[t.shopify_order_name] = []
+    tallyByOrder[t.shopify_order_name].push(t)
+  }
+
+  // 4. Fetch camp_form_tokens for status
+  const { data: tokens } = await sb.from('camp_form_tokens')
+    .select('shopify_order_name, token, sent_at, submitted_at')
+    .in('shopify_order_name', orderNames)
+  const tokenByOrder = {}
+  for (const t of (tokens || [])) tokenByOrder[t.shopify_order_name] = t
+
+  // 5. Build rows
+  cfAllRows = orders.map(o => {
+    const trows = tallyByOrder[o.shopify_order_name] || []
+    const hasMissingName = trows.length === 0 || trows.some(t => !t.camper_name)
+    const tok = tokenByOrder[o.shopify_order_name]
+    let status = 'missing'
+    if (tok?.submitted_at) status = 'done'
+    else if (tok?.sent_at) status = 'sent'
+    else if (!hasMissingName) status = 'done'
+    return { ...o, status, token: tok?.token || null, sent_at: tok?.sent_at || null, submitted_at: tok?.submitted_at || null }
+  }).filter(r => r.status !== 'done' || true)  // show all for now
+
+  // 6. Populate studio filter
+  const studioSel = document.getElementById('cf-studio-filter')
+  const existingOpts = new Set([...studioSel.options].map(o => o.value))
+  const studios = [...new Set(cfAllRows.map(r => r.studio_id))].sort()
+  for (const sid of studios) {
+    if (!existingOpts.has(sid)) {
+      const opt = document.createElement('option')
+      opt.value = sid; opt.textContent = getStudioName(sid)
+      studioSel.appendChild(opt)
+    }
+  }
+
+  renderCampFormsTable()
+}
+
+function renderCampFormsTable() {
+  const container = document.getElementById('cf-container')
+  const studioFilter = document.getElementById('cf-studio-filter').value
+  const statusFilter = document.getElementById('cf-status-filter').value
+
+  let rows = cfAllRows
+  if (studioFilter) rows = rows.filter(r => r.studio_id === studioFilter)
+  if (statusFilter) rows = rows.filter(r => r.status === statusFilter)
+
+  // Stats
+  const missing = cfAllRows.filter(r => r.status === 'missing').length
+  const sent = cfAllRows.filter(r => r.status === 'sent').length
+  const done = cfAllRows.filter(r => r.status === 'done').length
+  document.getElementById('cf-stat-missing').textContent = missing
+  document.getElementById('cf-stat-sent').textContent = sent
+  document.getElementById('cf-stat-done').textContent = done
+  document.getElementById('cf-stats-row').style.display = 'flex'
+
+  // Badge
+  const badge = document.getElementById('camps-badge')
+  if (missing + sent > 0) { badge.textContent = missing + sent; badge.style.display = 'inline-block' }
+  else badge.style.display = 'none'
+
+  if (!rows.length) {
+    container.innerHTML = '<div class="empty">No orders match the current filters.</div>'
+    document.getElementById('cf-send-selected-btn').style.display = 'none'
+    return
+  }
+
+  const actionable = rows.filter(r => r.status !== 'done')
+  document.getElementById('cf-send-selected-btn').style.display = actionable.length ? 'inline-block' : 'none'
+
+  const statusIcon = { missing: '⚠', sent: '📧', done: '✅' }
+  const statusLabel = { missing: 'Not sent', sent: 'Sent', done: 'Completed' }
+
+  const tbody = rows.map(r => {
+    const formLink = r.token ? `https://4catsart.github.io/4cats-studio-app/camp-form.html?token=${r.token}` : ''
+    const canSend = r.status !== 'done' && r.customer_email
+    return `<tr>
+      <td style="text-align:center">${canSend ? `<input type="checkbox" class="cf-row-cb" data-order="${escHtml(r.shopify_order_name)}" style="width:14px;height:14px;accent-color:#1a1a1a" onchange="updateCfSendBtn()">` : ''}</td>
+      <td style="font-weight:500">${escHtml(r.shopify_order_name)}</td>
+      <td style="font-size:11px;color:#888">${escHtml(getStudioName(r.studio_id))}</td>
+      <td>${escHtml(r.customer_name || '—')}</td>
+      <td style="font-size:11px">${escHtml(r.customer_email || '—')}</td>
+      <td style="text-align:center">${r.qty}</td>
+      <td style="font-size:11px;color:#888">${r.first_date || '—'}</td>
+      <td><span style="font-size:12px">${statusIcon[r.status]} ${statusLabel[r.status]}</span>${r.sent_at ? `<div style="font-size:10px;color:#aaa">Sent ${r.sent_at.slice(0,10)}</div>` : ''}</td>
+      <td style="white-space:nowrap">
+        ${canSend ? `<button class="btn btn-primary" style="font-size:11px;padding:4px 10px" onclick="sendCampFormEmails(['${escHtml(r.shopify_order_name)}'],this)">📧 ${r.status==='sent'?'Resend':'Send'}</button>` : ''}
+        ${formLink ? `<a href="${formLink}" target="_blank" style="font-size:11px;color:#1a4fa0;margin-left:6px">🔗 Form</a>` : ''}
+      </td>
+    </tr>`
+  }).join('')
+
+  container.innerHTML = `<div class="grid-wrap" style="max-height:calc(100vh - 320px)">
+    <table class="grid-table" style="min-width:900px">
+      <thead><tr>
+        <th style="width:32px"><input type="checkbox" id="cf-select-all" title="Select all" onclick="toggleAllCfCheckboxes(this)" style="width:14px;height:14px;accent-color:#1a1a1a;cursor:pointer"></th>
+        <th style="text-align:left;min-width:100px">Order</th>
+        <th style="text-align:left;min-width:140px">Studio</th>
+        <th style="text-align:left;min-width:130px">Parent</th>
+        <th style="text-align:left;min-width:180px">Email</th>
+        <th>Children</th>
+        <th>First Date</th>
+        <th style="text-align:left;min-width:110px">Status</th>
+        <th style="text-align:left">Actions</th>
+      </tr></thead>
+      <tbody>${tbody}</tbody>
+    </table>
+  </div>`
+}
+
+function toggleAllCfCheckboxes(masterCb) {
+  document.querySelectorAll('.cf-row-cb').forEach(cb => cb.checked = masterCb.checked)
+  updateCfSendBtn()
+}
+
+function updateCfSendBtn() {
+  const checked = document.querySelectorAll('.cf-row-cb:checked').length
+  const btn = document.getElementById('cf-send-selected-btn')
+  if (btn) btn.textContent = checked ? `📧 Send to ${checked} Selected` : '📧 Send to Selected'
+}
+
+async function sendSelectedCampForms() {
+  const checked = [...document.querySelectorAll('.cf-row-cb:checked')].map(cb => cb.dataset.order)
+  if (!checked.length) return
+  await sendCampFormEmails(checked, document.getElementById('cf-send-selected-btn'))
+}
+
+async function sendCampFormEmails(orderNames, btn) {
+  const origText = btn?.textContent || ''
+  if (btn) { btn.textContent = 'Sending…'; btn.disabled = true }
+
+  const ordersToSend = cfAllRows
+    .filter(r => orderNames.includes(r.shopify_order_name))
+    .map(r => ({
+      shopify_order_name: r.shopify_order_name,
+      studio_id: r.studio_id,
+      customer_email: r.customer_email,
+      customer_name: r.customer_name,
+      num_children: r.qty
+    }))
+
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/send-camp-form`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_KEY}` },
+      body: JSON.stringify({ orders: ordersToSend })
+    })
+    const result = await res.json()
+    if (!result.success) throw new Error(result.error || 'Unknown error')
+
+    const ok = result.results.filter(r => r.success).length
+    const fail = result.results.filter(r => !r.success).length
+    alert(`Sent ${ok} email${ok!==1?'s':''}${fail?` · ${fail} failed`:''}. Refreshing…`)
+    loadCampFormsTab()
+  } catch(e) {
+    alert('Error sending: ' + e.message)
+    if (btn) { btn.textContent = origText; btn.disabled = false }
+  }
+}
+
+async function loadCampFormsBadge() {
+  const today = dateStr(new Date())
+  const { data: bookings } = await sb.from('bookings')
+    .select('shopify_order_name')
+    .gte('event_date', today)
+    .or('product_title.ilike.%camp%,product_title.ilike.%no school%')
+  if (!bookings?.length) return
+
+  const orderNames = [...new Set(bookings.map(b => b.shopify_order_name))]
+  const { data: tallys } = await sb.from('tally_registrations')
+    .select('shopify_order_name, camper_name')
+    .in('shopify_order_name', orderNames)
+  const tallyByOrder = {}
+  for (const t of (tallys || [])) {
+    if (!tallyByOrder[t.shopify_order_name]) tallyByOrder[t.shopify_order_name] = []
+    tallyByOrder[t.shopify_order_name].push(t)
+  }
+
+  let missingCount = 0
+  for (const name of orderNames) {
+    const trows = tallyByOrder[name] || []
+    if (trows.length === 0 || trows.some(t => !t.camper_name)) missingCount++
+  }
+
+  const badge = document.getElementById('camps-badge')
+  if (missingCount > 0 && badge) { badge.textContent = missingCount; badge.style.display = 'inline-block' }
 }
 </script>
 
