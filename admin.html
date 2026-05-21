@@ -6154,14 +6154,25 @@ async function loadCampFormsTab() {
 
   const today = dateStr(new Date())
 
-  // 1. Fetch upcoming camp bookings
-  const { data: bookings, error } = await sb.from('bookings')
-    .select('shopify_order_name, studio_id, customer_email, customer_name, qty, event_date, product_title')
-    .gte('event_date', today)
-    .or('product_title.ilike.%camp%,product_title.ilike.%no school%')
-    .order('event_date', { ascending: true })
+  // 1. Fetch upcoming camp bookings — paginate in batches of 1000 to get all records
+  const bookings = []
+  let cfFrom = 0
+  const cfBatchSize = 1000
+  while (true) {
+    const { data: batch, error: batchError } = await sb.from('bookings')
+      .select('shopify_order_name, studio_id, customer_email, customer_name, qty, event_date, product_title')
+      .gte('event_date', today)
+      .or('product_title.ilike.%camp%,product_title.ilike.%no school%')
+      .order('event_date', { ascending: true })
+      .range(cfFrom, cfFrom + cfBatchSize - 1)
+    if (batchError) { container.innerHTML = '<div class="empty">Error loading bookings: ' + batchError.message + '</div>'; return }
+    if (batch?.length) bookings.push(...batch)
+    if (!batch || batch.length < cfBatchSize) break
+    cfFrom += cfBatchSize
+    container.innerHTML = `<div class="loading">Scanning camp registrations… (${bookings.length} rows loaded)</div>`
+  }
 
-  if (error || !bookings?.length) {
+  if (!bookings.length) {
     container.innerHTML = '<div class="empty">No upcoming camp bookings found.</div>'
     return
   }
@@ -6181,22 +6192,28 @@ async function loadCampFormsTab() {
   const orders = Object.values(orderMap)
   const orderNames = orders.map(o => o.shopify_order_name)
 
-  // 3. Fetch tally_registrations for these orders
-  const { data: tallys } = await sb.from('tally_registrations')
-    .select('shopify_order_name, camper_name, id')
-    .in('shopify_order_name', orderNames)
+  // 3. Fetch tally_registrations — chunked to avoid .in() limits
   const tallyByOrder = {}
-  for (const t of (tallys || [])) {
-    if (!tallyByOrder[t.shopify_order_name]) tallyByOrder[t.shopify_order_name] = []
-    tallyByOrder[t.shopify_order_name].push(t)
+  for (let i = 0; i < orderNames.length; i += 500) {
+    const chunk = orderNames.slice(i, i + 500)
+    const { data: tallys } = await sb.from('tally_registrations')
+      .select('shopify_order_name, camper_name, id')
+      .in('shopify_order_name', chunk)
+    for (const t of (tallys || [])) {
+      if (!tallyByOrder[t.shopify_order_name]) tallyByOrder[t.shopify_order_name] = []
+      tallyByOrder[t.shopify_order_name].push(t)
+    }
   }
 
-  // 4. Fetch camp_form_tokens for status
-  const { data: tokens } = await sb.from('camp_form_tokens')
-    .select('shopify_order_name, token, sent_at, submitted_at')
-    .in('shopify_order_name', orderNames)
+  // 4. Fetch camp_form_tokens — chunked to avoid .in() limits
   const tokenByOrder = {}
-  for (const t of (tokens || [])) tokenByOrder[t.shopify_order_name] = t
+  for (let i = 0; i < orderNames.length; i += 500) {
+    const chunk = orderNames.slice(i, i + 500)
+    const { data: tokens } = await sb.from('camp_form_tokens')
+      .select('shopify_order_name, token, sent_at, submitted_at')
+      .in('shopify_order_name', chunk)
+    for (const t of (tokens || [])) tokenByOrder[t.shopify_order_name] = t
+  }
 
   // 5. Build rows
   cfAllRows = orders.map(o => {
@@ -6329,17 +6346,21 @@ async function sendCampFormEmails(orderNames, btn) {
     }))
 
   try {
-    const res = await fetch(`${SUPABASE_URL}/functions/v1/send-camp-form`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_KEY}` },
-      body: JSON.stringify({ orders: ordersToSend })
-    })
-    const result = await res.json()
-    if (!result.success) throw new Error(result.error || 'Unknown error')
-
-    const ok = result.results.filter(r => r.success).length
-    const fail = result.results.filter(r => !r.success).length
-    alert(`Sent ${ok} email${ok!==1?'s':''}${fail?` · ${fail} failed`:''}. Refreshing…`)
+    const batchSize = 10
+    let totalOk = 0, totalFail = 0
+    for (let i = 0; i < ordersToSend.length; i += batchSize) {
+      const batch = ordersToSend.slice(i, i + batchSize)
+      if (btn) btn.textContent = `Sending… (${Math.min(i + batchSize, ordersToSend.length)}/${ordersToSend.length})`
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/send-camp-form`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_KEY}` },
+        body: JSON.stringify({ orders: batch })
+      })
+      const result = await res.json()
+      totalOk += (result.results || []).filter(r => r.success).length
+      totalFail += (result.results || []).filter(r => !r.success).length
+    }
+    alert(`Sent ${totalOk} email${totalOk!==1?'s':''}${totalFail?` · ${totalFail} failed`:''}. Refreshing…`)
     loadCampFormsTab()
   } catch(e) {
     alert('Error sending: ' + e.message)
