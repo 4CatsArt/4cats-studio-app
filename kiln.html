@@ -282,6 +282,13 @@
       <button class="add-name-btn" onclick="addNameRow()">+ Add another name</button>
     </div>
 
+    <div class="add-field" id="add-studio-field">
+      <label>Studio *</label>
+      <select id="add-studio-select" onchange="onAddStudioChange()">
+        <option value="">— Select a studio —</option>
+      </select>
+    </div>
+
     <div class="add-field">
       <label>Session</label>
       <select id="add-session-select">
@@ -966,18 +973,53 @@ async function openAddModal() {
   updateAddClayPills()
   addNameRow()
 
-  // Load today's sessions into dropdown
+  // Studio field: show only when no studio is scoped (home office / all-studios view)
+  const studioField = document.getElementById('add-studio-field')
+  const studioSel   = document.getElementById('add-studio-select')
+  if (studioId) {
+    studioField.style.display = 'none'
+    studioSel.value = studioId
+  } else {
+    studioField.style.display = 'block'
+    studioSel.innerHTML = '<option value="">— Select a studio —</option>'
+    Object.entries(STUDIO_NAMES)
+      .sort((a, b) => a[1].localeCompare(b[1]))
+      .forEach(([id, name]) => {
+        const opt = document.createElement('option')
+        opt.value = id
+        opt.textContent = name
+        studioSel.appendChild(opt)
+      })
+    studioSel.value = ''
+  }
+
+  // Reset and load sessions for the current studio context
+  todaySessions = []
+  await loadAddSessions(studioId)
+
+  document.getElementById('add-overlay').classList.add('show')
+  document.querySelector('#add-name-list input')?.focus()
+}
+
+// Called when studio dropdown changes in the modal
+async function onAddStudioChange() {
+  const selectedStudio = document.getElementById('add-studio-select').value || null
+  todaySessions = []
+  await loadAddSessions(selectedStudio)
+}
+
+// Loads today's sessions for a given studio into the session dropdown
+async function loadAddSessions(studio) {
   const sel = document.getElementById('add-session-select')
   sel.innerHTML = '<option value="">— No session / unlinked —</option>'
-  if (studioId && !todaySessions.length) {
-    const today = new Date().toISOString().split('T')[0]
-    const { data } = await sb.from('sessions')
-      .select('id, title, session_time')
-      .eq('studio_id', studioId)
-      .eq('session_date', today)
-      .order('session_time')
-    todaySessions = data || []
-  }
+  if (!studio) return
+  const today = new Date().toISOString().split('T')[0]
+  const { data } = await sb.from('sessions')
+    .select('id, title, session_time')
+    .eq('studio_id', studio)
+    .eq('session_date', today)
+    .order('session_time')
+  todaySessions = data || []
   todaySessions.forEach(s => {
     const opt = document.createElement('option')
     opt.value = s.id
@@ -985,9 +1027,6 @@ async function openAddModal() {
     opt.textContent = `${h} · ${s.title}`
     sel.appendChild(opt)
   })
-
-  document.getElementById('add-overlay').classList.add('show')
-  document.querySelector('#add-name-list input')?.focus()
 }
 
 function closeAddModal() {
@@ -1029,6 +1068,10 @@ async function submitAddTicket() {
   }
   if (!names.length) { showToast('Please enter at least one name'); return }
 
+  // Resolve studio: use scoped studioId or the picker value
+  const effectiveStudioId = studioId || document.getElementById('add-studio-select').value || null
+  if (!effectiveStudioId) { showToast('Please select a studio'); return }
+
   const sessionId   = document.getElementById('add-session-select').value || null
   const stage       = document.getElementById('add-stage-select').value
   const description = document.getElementById('add-description').value.trim() || null
@@ -1048,7 +1091,7 @@ async function submitAddTicket() {
 
   const ticketRow = {
     ticket_number: tNum,
-    studio_id: studioId,
+    studio_id: effectiveStudioId,
     session_id: sessionId,
     stage,
     clay_type: addClayType || null,
@@ -1068,7 +1111,7 @@ async function submitAddTicket() {
   // Insert signin_entries for each name (no email — manual add)
   const entries = names.map(name => ({
     session_id: sessionId,
-    studio_id: studioId,
+    studio_id: effectiveStudioId,
     mode: 'workshop',
     name,
     clay_ticket_id: ticket.id
