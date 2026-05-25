@@ -3793,51 +3793,88 @@ function openTaskPopup(taskId) {
   const row = document.getElementById('task-row-' + taskId)
   if (!row) return
 
-  // Read data from the DOM row + find in tasks array
-  const titleEl = row.querySelector('.task-title')
-  const title = titleEl?.textContent?.trim() || ''
-
   // Rebuild staff datalist for popup
   const dl = document.getElementById('staff-list-popup')
   if (dl) dl.innerHTML = studioStaffList.map(s => `<option value="${s.nickname || s.display_name}">`).join('')
 
-  // We need the full task — fetch it
   sb.from('studio_tasks').select('*').eq('id', taskId).single().then(({ data: task }) => {
     if (!task) return
-    document.getElementById('task-popup-title').textContent = task.title
+
+    // Full edit + delete: studio-created tasks with no template
+    // Assignee only: home office tasks or template-based tasks
+    const isFullyEditable = task.source !== 'home_office' && !task.template_id
+
     // Source badge
     const sourceEl = document.getElementById('task-popup-source')
-    sourceEl.innerHTML = task.source === 'home_office'
-      ? '<span style="font-size:10px;background:#e8e8f0;color:#5b4fcf;padding:2px 6px;border-radius:4px">From Home Office</span>'
-      : ''
+    if (task.source === 'home_office') {
+      sourceEl.innerHTML = '<span style="font-size:10px;background:#e8e8f0;color:#5b4fcf;padding:2px 6px;border-radius:4px">From Home Office</span>'
+    } else if (task.template_id) {
+      sourceEl.innerHTML = '<span style="font-size:10px;background:#f5f5f0;color:#888;padding:2px 6px;border-radius:4px">From Template</span>'
+    } else {
+      sourceEl.innerHTML = ''
+    }
 
-    // Notes
-    const notesEl = document.getElementById('task-popup-notes')
-    const notesText = task.notes && !task.notes.startsWith('Assigned to:') ? task.notes : ''
-    notesEl.textContent = notesText
-    notesEl.style.display = notesText ? 'block' : 'none'
+    // Title: editable input vs read-only text
+    const titleStatic = document.getElementById('task-popup-title')
+    const titleInput  = document.getElementById('task-popup-title-input')
+    if (isFullyEditable) {
+      titleStatic.style.display = 'none'
+      titleInput.style.display  = 'block'
+      titleInput.value = task.title
+    } else {
+      titleStatic.style.display = 'block'
+      titleInput.style.display  = 'none'
+      titleStatic.textContent = task.title
+    }
 
-    // URL
-    const urlEl = document.getElementById('task-popup-url')
+    // Notes: editable textarea vs read-only display
+    const notesStatic = document.getElementById('task-popup-notes')
+    const notesInput  = document.getElementById('task-popup-notes-input')
+    const notesText   = task.notes && !task.notes.startsWith('Assigned to:') ? task.notes : ''
+    if (isFullyEditable) {
+      notesStatic.style.display = 'none'
+      notesInput.style.display  = 'block'
+      notesInput.value = notesText
+    } else {
+      notesInput.style.display  = 'none'
+      notesStatic.textContent   = notesText
+      notesStatic.style.display = notesText ? 'block' : 'none'
+    }
+
+    // URL (read-only; only shown for template/HO tasks that have one)
+    const urlEl  = document.getElementById('task-popup-url')
     const linkEl = document.getElementById('task-popup-link')
-    if (task.url) { linkEl.href = task.url; urlEl.style.display = 'block' }
+    if (!isFullyEditable && task.url) { linkEl.href = task.url; urlEl.style.display = 'block' }
     else urlEl.style.display = 'none'
 
-    // Assignee
-    document.getElementById('task-popup-assignee').value = task.assignee_name || ''
+    // Due date: editable vs read-only
+    const dueRow     = document.getElementById('task-popup-due-row')
+    const dueEditRow = document.getElementById('task-popup-due-edit-row')
+    const dueInput   = document.getElementById('task-popup-due-input')
+    const today      = new Date().toISOString().slice(0,10)
+    if (isFullyEditable) {
+      dueRow.style.display     = 'none'
+      dueEditRow.style.display = 'block'
+      dueInput.value = task.due_date || today
+    } else {
+      dueEditRow.style.display = 'none'
+      dueRow.style.display     = 'block'
+      if (task.due_date === today) dueRow.textContent = 'Due today'
+      else if (task.due_date < today) dueRow.innerHTML = '<span style="color:#c0392b">Overdue: ' + task.due_date + '</span>'
+      else dueRow.textContent = 'Due ' + task.due_date
+    }
 
-    // Due date
-    const today = new Date().toISOString().slice(0,10)
-    const dueEl = document.getElementById('task-popup-due')
-    if (task.due_date === today) dueEl.textContent = 'Due today'
-    else if (task.due_date < today) dueEl.innerHTML = '<span style="color:#c0392b">Overdue: ' + task.due_date + '</span>'
-    else dueEl.textContent = 'Due ' + task.due_date
+    // Assignee (all types)
+    document.getElementById('task-popup-assignee').value = task.assignee_name || ''
 
     // Status
     const statusEl = document.getElementById('task-popup-status')
     statusEl.innerHTML = task.status === 'complete'
       ? '<span style="color:#2e7d32">✓ Complete</span>'
       : '<span style="color:#888">Pending</span>'
+
+    // Delete button (studio-created only)
+    document.getElementById('task-popup-delete-btn').style.display = isFullyEditable ? 'inline-block' : 'none'
 
     document.getElementById('task-popup').style.display = 'flex'
   })
@@ -3848,32 +3885,50 @@ function closeTaskPopup() {
   activeTaskId = null
 }
 
-async function saveTaskAssignee() {
+async function saveTaskPopup() {
   if (!activeTaskId) return
+
   const assigneeName = document.getElementById('task-popup-assignee').value.trim() || null
   const assigneeProfile = assigneeName
     ? studioStaffList.find(s => (s.nickname || s.display_name) === assigneeName)
     : null
 
-  await sb.from('studio_tasks').update({
+  const titleInput = document.getElementById('task-popup-title-input')
+  const isFullyEditable = titleInput.style.display !== 'none'
+
+  let updates = {
     assignee_name: assigneeName,
     assignee_id: assigneeProfile?.id || null
-  }).eq('id', activeTaskId)
+  }
 
-  // Update the row tag in the DOM
+  if (isFullyEditable) {
+    const title = titleInput.value.trim()
+    if (!title) { alert('Task title cannot be empty.'); return }
+    updates.title    = title
+    updates.notes    = document.getElementById('task-popup-notes-input').value.trim() || null
+    updates.due_date = document.getElementById('task-popup-due-input').value || null
+  }
+
+  await sb.from('studio_tasks').update(updates).eq('id', activeTaskId)
+
+  // Refresh the task row in the DOM
   const row = document.getElementById('task-row-' + activeTaskId)
   if (row) {
-    const existing = row.querySelector('.assignee-tag')
-    if (existing) existing.remove()
-    if (assigneeName) {
-      const span = document.createElement('span')
-      span.className = 'assignee-tag'
-      span.style.cssText = 'font-size:10px;color:#2e7d32;flex-shrink:0'
-      span.textContent = '→ ' + assigneeName
-      const title = row.querySelector('.task-title')
-      if (title) title.insertAdjacentElement('afterend', span)
+    const { data: updated } = await sb.from('studio_tasks').select('*').eq('id', activeTaskId).single()
+    if (updated) {
+      row.innerHTML = buildTaskRowInner(updated)
+      row.style.opacity = updated.status === 'complete' ? '0.45' : '1'
     }
   }
+  closeTaskPopup()
+}
+
+async function deleteTaskFromPopup() {
+  if (!activeTaskId) return
+  if (!confirm('Delete this task?')) return
+  await sb.from('studio_tasks').delete().eq('id', activeTaskId)
+  const row = document.getElementById('task-row-' + activeTaskId)
+  if (row) row.remove()
   closeTaskPopup()
 }
 
@@ -3888,29 +3943,66 @@ document.addEventListener('click', e => {
 <!-- Task Detail Popup -->
 <div id="task-popup" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center;padding:1rem">
   <div style="background:white;border-radius:12px;width:100%;max-width:420px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+
+    <!-- Header -->
     <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:1rem;gap:12px">
-      <div>
+      <div style="flex:1;min-width:0">
         <div id="task-popup-source" style="margin-bottom:4px"></div>
+        <!-- Read-only title (home office / template) -->
         <strong id="task-popup-title" style="font-size:15px;line-height:1.4"></strong>
+        <!-- Editable title (studio-created) -->
+        <input id="task-popup-title-input" type="text"
+          style="display:none;width:100%;padding:6px 8px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:14px;font-weight:500;outline:none">
       </div>
       <button onclick="closeTaskPopup()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1;flex-shrink:0">×</button>
     </div>
+
+    <!-- Notes: read-only display -->
     <div id="task-popup-notes" style="font-size:13px;color:#555;margin-bottom:0.75rem;line-height:1.5;display:none"></div>
+    <!-- Notes: editable textarea (studio-created) -->
+    <textarea id="task-popup-notes-input" placeholder="Add notes..."
+      style="display:none;width:100%;padding:7px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;resize:vertical;outline:none;font-family:inherit;min-height:60px;margin-bottom:0.75rem;box-sizing:border-box"></textarea>
+
+    <!-- URL (read-only, template/HO tasks) -->
     <div id="task-popup-url" style="margin-bottom:0.75rem;display:none">
       <a id="task-popup-link" href="#" target="_blank" style="font-size:13px;color:#5b4fcf;text-decoration:none">📎 Reference doc</a>
     </div>
+
+    <!-- Due date: read-only -->
+    <div id="task-popup-due-row" style="display:none;font-size:12px;color:#888;margin-bottom:0.75rem"></div>
+    <!-- Due date: editable (studio-created) -->
+    <div id="task-popup-due-edit-row" style="display:none;margin-bottom:0.75rem">
+      <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Due date</label>
+      <input id="task-popup-due-input" type="date"
+        style="padding:6px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none">
+    </div>
+
+    <!-- Assignee (all task types) -->
     <div style="display:flex;align-items:center;gap:6px;padding:10px 0;border-top:0.5px solid #f0f0e8;border-bottom:0.5px solid #f0f0e8;margin-bottom:1rem">
       <span style="font-size:12px;color:#888;flex-shrink:0">Assign to:</span>
       <input id="task-popup-assignee" type="text" list="staff-list-popup" autocomplete="off"
         placeholder="Start typing a name..."
         style="flex:1;padding:6px 10px;border:0.5px solid #e0e0d8;border-radius:6px;font-size:13px;outline:none">
       <datalist id="staff-list-popup"></datalist>
-      <button onclick="saveTaskAssignee()" style="padding:6px 12px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">Save</button>
     </div>
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <div id="task-popup-due" style="font-size:12px;color:#888"></div>
+
+    <!-- Footer: status left, action buttons right -->
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
       <div id="task-popup-status" style="font-size:12px"></div>
+      <div style="display:flex;gap:6px">
+        <!-- Delete (studio-created only) -->
+        <button id="task-popup-delete-btn" onclick="deleteTaskFromPopup()"
+          style="display:none;padding:6px 12px;background:white;color:#c0392b;border:1px solid #f5c0c0;border-radius:6px;font-size:13px;cursor:pointer">
+          Delete
+        </button>
+        <!-- Save -->
+        <button onclick="saveTaskPopup()"
+          style="padding:6px 14px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">
+          Save
+        </button>
+      </div>
     </div>
+
   </div>
 </div>
 
