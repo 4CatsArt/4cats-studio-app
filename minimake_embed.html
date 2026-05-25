@@ -34,6 +34,38 @@
     margin-bottom: 10px;
   }
 
+  .mm-provinces {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 28px;
+  }
+
+  .mm-prov-chip {
+    font-family: 'Helvetica Neue', Arial, sans-serif;
+    font-size: 13px;
+    padding: 8px 20px;
+    border: 1.5px solid #ddd;
+    border-radius: 100px;
+    cursor: pointer;
+    background: #fff;
+    color: #444;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+  }
+
+  .mm-prov-chip:hover {
+    border-color: #c0392b;
+    color: #c0392b;
+  }
+
+  .mm-prov-chip.selected {
+    background: #c0392b;
+    border-color: #c0392b;
+    color: #fff;
+    font-weight: 600;
+  }
+
   .mm-studio-wrap {
     margin-bottom: 28px;
   }
@@ -203,10 +235,18 @@
 (function () {
   const EDGE_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co/functions/v1/public-minimake'
 
+  // Province label and the studio ID prefix it maps to
+  const PROVINCES = [
+    { label: 'British Columbia', prefix: 'BC' },
+    { label: 'Alberta',          prefix: 'AB' },
+    { label: 'Ontario',          prefix: 'ON' },
+  ]
+
   const root = document.getElementById('mm-root')
 
-  let allDates = []        // raw response from edge function
-  let studioList = []      // [{studio_id, studio_name}] — unique, sorted
+  let allDates = []
+  let studioList = []        // all studios across all provinces that have sessions this week
+  let selectedProvince = null
   let selectedStudio = null
   let selectedDate = null
 
@@ -223,13 +263,11 @@
         return
       }
 
-      // Build a unique sorted studio list from all dates
+      // Build unique sorted studio list from all dates
       const studioMap = {}
       for (const d of allDates) {
         for (const s of d.studios) {
-          if (!studioMap[s.studio_id]) {
-            studioMap[s.studio_id] = s.studio_name
-          }
+          if (!studioMap[s.studio_id]) studioMap[s.studio_id] = s.studio_name
         }
       }
       studioList = Object.entries(studioMap)
@@ -244,16 +282,65 @@
 
   function render() {
     root.innerHTML = ''
+    renderProvincePicker()
     renderStudioPicker()
     renderDatePicker()
     renderSlots()
   }
 
-  // ── Step 1: Studio ──────────────────────────────────
+  // ── Step 1: Province ────────────────────────────────
+  function renderProvincePicker() {
+    // Only show provinces that have at least one studio with sessions this week
+    const activeProvince = PROVINCES.filter(p =>
+      studioList.some(s => s.studio_id.startsWith(p.prefix))
+    )
+
+    // If only one province has sessions, auto-select it silently
+    if (activeProvince.length === 1 && !selectedProvince) {
+      selectedProvince = activeProvince[0].prefix
+    }
+
+    // If all studios are in one province, skip rendering the step entirely
+    if (activeProvince.length <= 1) return
+
+    const wrap = document.createElement('div')
+    wrap.className = 'mm-section'
+    wrap.innerHTML = `<div class="mm-step-label">Step 1 — Choose your province</div>`
+
+    const chips = document.createElement('div')
+    chips.className = 'mm-provinces'
+
+    for (const p of activeProvince) {
+      const chip = document.createElement('button')
+      chip.className = 'mm-prov-chip' + (selectedProvince === p.prefix ? ' selected' : '')
+      chip.textContent = p.label
+      chip.addEventListener('click', () => {
+        selectedProvince = p.prefix
+        selectedStudio = null
+        selectedDate = null
+        render()
+      })
+      chips.appendChild(chip)
+    }
+
+    wrap.appendChild(chips)
+    root.appendChild(wrap)
+    root.appendChild(Object.assign(document.createElement('hr'), { className: 'mm-divider' }))
+  }
+
+  // ── Step 2: Studio ──────────────────────────────────
   function renderStudioPicker() {
+    if (!selectedProvince) return
+
+    const provinceStudios = studioList.filter(s => s.studio_id.startsWith(selectedProvince))
+    if (!provinceStudios.length) return
+
+    // Determine step number (province step hidden if only 1 province)
+    const stepNum = activeProvinceCount() > 1 ? 2 : 1
+
     const wrap = document.createElement('div')
     wrap.className = 'mm-section mm-studio-wrap'
-    wrap.innerHTML = `<div class="mm-step-label">Step 1 — Choose your studio</div>`
+    wrap.innerHTML = `<div class="mm-step-label">Step ${stepNum} — Choose your studio</div>`
 
     const select = document.createElement('select')
     select.className = 'mm-studio-select'
@@ -265,7 +352,7 @@
     placeholder.selected = !selectedStudio
     select.appendChild(placeholder)
 
-    for (const studio of studioList) {
+    for (const studio of provinceStudios) {
       const opt = document.createElement('option')
       opt.value = studio.studio_id
       opt.textContent = studio.studio_name
@@ -275,11 +362,8 @@
 
     select.addEventListener('change', () => {
       selectedStudio = select.value || null
-      // Reset date if not available for this studio
-      if (selectedDate && !datesForStudio(selectedStudio).find(d => d.date === selectedDate)) {
-        selectedDate = null
-      }
-      // Auto-select date if only one available
+      selectedDate = null
+      // Auto-select date if only one available for this studio
       const available = datesForStudio(selectedStudio)
       if (available.length === 1) selectedDate = available[0].date
       render()
@@ -290,16 +374,19 @@
     root.appendChild(Object.assign(document.createElement('hr'), { className: 'mm-divider' }))
   }
 
-  // ── Step 2: Date ────────────────────────────────────
+  // ── Step 3: Date ────────────────────────────────────
   function renderDatePicker() {
     if (!selectedStudio) return
 
     const available = datesForStudio(selectedStudio)
     if (!available.length) return
+    if (available.length === 1) return // auto-selected, no need to show
+
+    const stepNum = activeProvinceCount() > 1 ? 3 : 2
 
     const wrap = document.createElement('div')
     wrap.className = 'mm-section'
-    wrap.innerHTML = `<div class="mm-step-label">Step 2 — Choose a date</div>`
+    wrap.innerHTML = `<div class="mm-step-label">Step ${stepNum} — Choose a date</div>`
 
     const chips = document.createElement('div')
     chips.className = 'mm-dates'
@@ -320,10 +407,10 @@
     root.appendChild(Object.assign(document.createElement('hr'), { className: 'mm-divider' }))
   }
 
-  // ── Step 3: Time slots ──────────────────────────────
+  // ── Step 4: Time slots ──────────────────────────────
   function renderSlots() {
     if (!selectedStudio || !selectedDate) {
-      if (selectedStudio) {
+      if (selectedStudio && !selectedDate) {
         root.appendChild(Object.assign(document.createElement('div'), {
           className: 'mm-prompt',
           textContent: 'Choose a date above to see available times.',
@@ -336,9 +423,12 @@
     const studioObj = dateObj?.studios.find(s => s.studio_id === selectedStudio)
     if (!studioObj) return
 
+    const totalSteps = activeProvinceCount() > 1 ? 4 : 3
+    const stepNum = totalSteps
+
     const wrap = document.createElement('div')
     wrap.className = 'mm-section'
-    wrap.innerHTML = `<div class="mm-step-label">Step 3 — Pick a time</div>`
+    wrap.innerHTML = `<div class="mm-step-label">Step ${stepNum} — Pick a time</div>`
 
     const grid = document.createElement('div')
     grid.className = 'mm-slots'
@@ -364,11 +454,15 @@
     root.appendChild(wrap)
   }
 
-  // ── Helper: dates that have sessions for a given studio
+  // ── Helpers ─────────────────────────────────────────
   function datesForStudio(studioId) {
     return allDates
       .filter(d => d.studios.some(s => s.studio_id === studioId))
       .map(d => ({ date: d.date, label: d.label }))
+  }
+
+  function activeProvinceCount() {
+    return PROVINCES.filter(p => studioList.some(s => s.studio_id.startsWith(p.prefix))).length
   }
 
 })()
