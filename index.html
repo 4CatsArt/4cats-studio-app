@@ -446,12 +446,12 @@ function formatDateShort(dateStr) {
   return d.toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })
 }
 
-function getDismissedPartyAlerts() {
-  try {
-    const raw = localStorage.getItem(`4cats_dismissed_parties_${currentStudioId}`)
-    return new Set(raw ? JSON.parse(raw) : [])
-  } catch { return new Set() }
-}
+// Dismissed state is now stored in Supabase (party_alert_dismissed column on bookings).
+// These in-memory sets are used only to suppress realtime duplicates within the same session.
+let _dismissedPartyAlertsCache = new Set()
+let _dismissedPartyCancelsCache = new Set()
+function getDismissedPartyAlerts() { return _dismissedPartyAlertsCache }
+
 
 async function loadPartyAlerts() {
   // Only show on weekdays (Mon–Fri)
@@ -483,24 +483,23 @@ async function loadPartyAlerts() {
   const sessionMap = {}
   partySessions.forEach(s => { sessionMap[s.id] = s })
 
-  // Run both queries in parallel
+  // Run both queries in parallel — filter dismissed at the DB level so it works across all devices
   const [{ data: newBookings }, { data: cancelledBookings }] = await Promise.all([
     sb.from('bookings')
       .select('id, session_id, customer_name, qty, shopify_order_name, booked_at')
       .in('session_id', [...partySessionIds])
-      .gt('qty', 0),
+      .gt('qty', 0)
+      .not('party_alert_dismissed', 'eq', true),
     sb.from('bookings')
       .select('id, session_id, customer_name, qty, shopify_order_name, booked_at')
       .in('session_id', [...partySessionIds])
       .eq('qty', 0)
+      .not('party_alert_dismissed', 'eq', true)
       .gte('booked_at', since90)   // limit to last 90 days to avoid ancient history
   ])
 
-  const dismissedNew = getDismissedPartyAlerts()
-  const dismissedCancels = getDismissedPartyCancels()
-
-  const undismissedNew = (newBookings || []).filter(b => !dismissedNew.has(String(b.id)))
-  const undismissedCancels = (cancelledBookings || []).filter(b => !dismissedCancels.has(String(b.id)))
+  const undismissedNew = newBookings || []
+  const undismissedCancels = cancelledBookings || []
 
   if (!undismissedNew.length && !undismissedCancels.length) return
 
@@ -564,14 +563,14 @@ function buildPartyAlertItem(b, session) {
 }
 
 function dismissPartyAlert(bookingId, btn) {
-  try {
-    const key = `4cats_dismissed_parties_${currentStudioId}`
-    const dismissed = getDismissedPartyAlerts()
-    dismissed.add(String(bookingId))
-    localStorage.setItem(key, JSON.stringify([...dismissed]))
-  } catch {}
+  // Optimistically remove from UI
   btn.closest('.party-alert-item').remove()
   refreshPartyAlertsSection()
+  // Track in-memory so realtime doesn't re-show it this session
+  _dismissedPartyAlertsCache.add(String(bookingId))
+  // Persist to Supabase so all devices see it dismissed
+  sb.from('bookings').update({ party_alert_dismissed: true }).eq('id', bookingId)
+    .then(({ error }) => { if (error) console.warn('Failed to persist dismiss:', error) })
 }
 
 function refreshPartyAlertsSection() {
@@ -619,12 +618,7 @@ function addRealtimePartyAlert(b) {
 }
 
 // ── PARTY CANCELLATION ALERTS ─────────────────────────────────
-function getDismissedPartyCancels() {
-  try {
-    const raw = localStorage.getItem(`4cats_dismissed_party_cancels_${currentStudioId}`)
-    return new Set(raw ? JSON.parse(raw) : [])
-  } catch { return new Set() }
-}
+function getDismissedPartyCancels() { return _dismissedPartyCancelsCache }
 
 function renderPartyCancels(bookings, sessionMap, clearFirst = true) {
   const container = document.getElementById('party-alerts')
@@ -665,14 +659,14 @@ function buildPartyCancelItem(b, session) {
 }
 
 function dismissPartyCancel(bookingId, btn) {
-  try {
-    const key = `4cats_dismissed_party_cancels_${currentStudioId}`
-    const dismissed = getDismissedPartyCancels()
-    dismissed.add(String(bookingId))
-    localStorage.setItem(key, JSON.stringify([...dismissed]))
-  } catch {}
+  // Optimistically remove from UI
   btn.closest('.party-cancel-item').remove()
   refreshPartyCancelSection()
+  // Track in-memory so realtime doesn't re-show it this session
+  _dismissedPartyCancelsCache.add(String(bookingId))
+  // Persist to Supabase so all devices see it dismissed
+  sb.from('bookings').update({ party_alert_dismissed: true }).eq('id', bookingId)
+    .then(({ error }) => { if (error) console.warn('Failed to persist cancel dismiss:', error) })
 }
 
 function refreshPartyCancelSection() {
@@ -1834,9 +1828,6 @@ async function addTask(studioId, date) {
   const url = input.dataset.templateUrl || null
   const notes = input.dataset.templateNotes || null
 
-  const priorityBtn = document.getElementById('new-task-priority-btn')
-  const priority = priorityBtn?.dataset.active === 'true'
-
   const { data } = await sb.from('studio_tasks').insert({
     studio_id: studioId,
     title,
@@ -1846,7 +1837,6 @@ async function addTask(studioId, date) {
     assignee_name: assigneeName,
     assignee_id: assigneeProfile?.id || null,
     due_date: dueDate,
-    priority,
     source: 'studio',
     status: 'pending',
     created_by: currentUser?.id
@@ -1858,19 +1848,7 @@ async function addTask(studioId, date) {
   if (dueDateInput) dueDateInput.value = date
   const sel = document.getElementById('new-task-template')
   if (sel) sel.value = ''
-  // Reset priority button
-  if (priorityBtn) { priorityBtn.dataset.active = 'false'; priorityBtn.style.color = '#bbb'; priorityBtn.style.borderColor = '#e0e0d8'; priorityBtn.style.background = 'white' }
   if (data) appendTaskRow(data)
-}
-
-function toggleNewTaskPriority() {
-  const btn = document.getElementById('new-task-priority-btn')
-  if (!btn) return
-  const active = btn.dataset.active === 'true'
-  btn.dataset.active = active ? 'false' : 'true'
-  btn.style.color = active ? '#bbb' : '#c0392b'
-  btn.style.borderColor = active ? '#e0e0d8' : '#f5c0c0'
-  btn.style.background = active ? 'white' : '#fff5f5'
 }
 
 function appendTaskRow(task) {
@@ -1899,13 +1877,9 @@ function buildTaskRowInner(task) {
   const assigneeTag = task.assignee_name
     ? `<span style="font-size:10px;color:#2e7d32;flex-shrink:0">→ ${task.assignee_name}</span>`
     : ''
-  const priorityTag = task.priority
-    ? `<span style="font-size:11px;color:#c0392b;flex-shrink:0" title="High Priority">⚑</span>`
-    : ''
   return `
     <input type="checkbox" ${done ? 'checked' : ''} onchange="toggleTask('${task.id}', this.checked)"
       style="width:15px;height:15px;cursor:pointer;flex-shrink:0">
-    ${priorityTag}
     <span class="task-title" style="flex:1;font-size:13px;cursor:pointer;${done ? 'text-decoration:line-through;color:#aaa' : ''}"
       onclick="openTaskPopup('${task.id}')">
       ${task.title}
@@ -1926,12 +1900,7 @@ function buildDaySummaryHtml(notes, tasks, studioId, date) {
   const breakVal = notes?.break_schedule || ''
   const existingId = notes?.id || ''
 
-  const sortedTasks = [...tasks].sort((a, b) => {
-    if (a.priority && !b.priority) return -1
-    if (!a.priority && b.priority) return 1
-    return 0
-  })
-  const taskRows = sortedTasks.map(task => {
+  const taskRows = tasks.map(task => {
     const done = task.status === 'complete'
     return `<div id="task-row-${task.id}" style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:0.5px solid #f5f5f0;${done ? 'opacity:0.45' : ''}">
       ${buildTaskRowInner(task)}
@@ -1986,9 +1955,6 @@ function buildDaySummaryHtml(notes, tasks, studioId, date) {
               style="padding:6px 10px;border:0.5px solid #e0e0d8;border-radius:6px;font-size:13px;outline:none">
             <button onclick="addTask('${studioId}','${date}')"
               style="padding:6px 14px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">+</button>
-            <button id="new-task-priority-btn" onclick="toggleNewTaskPriority()"
-              title="Mark as High Priority"
-              style="padding:6px 10px;background:white;color:#bbb;border:0.5px solid #e0e0d8;border-radius:6px;font-size:14px;cursor:pointer;transition:all 0.15s">⚑</button>
           </div>
         </div>
       </div>
@@ -3904,30 +3870,8 @@ function openTaskPopup(taskId) {
     // Delete button (studio-created only)
     document.getElementById('task-popup-delete-btn').style.display = isFullyEditable ? 'inline-block' : 'none'
 
-    // Priority button state
-    const priorityBtn = document.getElementById('task-popup-priority-btn')
-    if (priorityBtn) {
-      const isPriority = !!task.priority
-      priorityBtn.dataset.active = isPriority ? 'true' : 'false'
-      priorityBtn.style.color = isPriority ? '#c0392b' : '#bbb'
-      priorityBtn.style.borderColor = isPriority ? '#f5c0c0' : '#e0e0d8'
-      priorityBtn.style.background = isPriority ? '#fff5f5' : 'white'
-      priorityBtn.style.fontWeight = isPriority ? '600' : 'normal'
-    }
-
     document.getElementById('task-popup').style.display = 'flex'
   })
-}
-
-function togglePopupPriority() {
-  const btn = document.getElementById('task-popup-priority-btn')
-  if (!btn) return
-  const active = btn.dataset.active === 'true'
-  btn.dataset.active = active ? 'false' : 'true'
-  btn.style.color = active ? '#bbb' : '#c0392b'
-  btn.style.borderColor = active ? '#e0e0d8' : '#f5c0c0'
-  btn.style.background = active ? 'white' : '#fff5f5'
-  btn.style.fontWeight = active ? 'normal' : '600'
 }
 
 function closeTaskPopup() {
@@ -3946,13 +3890,9 @@ async function saveTaskPopup() {
   const titleInput = document.getElementById('task-popup-title-input')
   const isFullyEditable = titleInput.style.display !== 'none'
 
-  const popupPriorityBtn = document.getElementById('task-popup-priority-btn')
-  const priority = popupPriorityBtn?.dataset.active === 'true'
-
   let updates = {
     assignee_name: assigneeName,
-    assignee_id: assigneeProfile?.id || null,
-    priority
+    assignee_id: assigneeProfile?.id || null
   }
 
   if (isFullyEditable) {
@@ -4020,14 +3960,6 @@ document.addEventListener('click', e => {
     <!-- URL (read-only, template/HO tasks) -->
     <div id="task-popup-url" style="margin-bottom:0.75rem;display:none">
       <a id="task-popup-link" href="#" target="_blank" style="font-size:13px;color:#5b4fcf;text-decoration:none">📎 Reference doc</a>
-    </div>
-
-    <!-- Priority toggle (all task types) -->
-    <div style="margin-bottom:0.75rem">
-      <button id="task-popup-priority-btn" onclick="togglePopupPriority()"
-        style="padding:5px 12px;border-radius:6px;font-size:13px;cursor:pointer;border:0.5px solid #e0e0d8;background:white;color:#bbb;transition:all 0.15s">
-        ⚑ High Priority
-      </button>
     </div>
 
     <!-- Due date: read-only -->
