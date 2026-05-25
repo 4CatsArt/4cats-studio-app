@@ -2209,15 +2209,27 @@ async function createDiscoveredSessions(newSessions) {
   btn.textContent = 'Creating...'; btn.disabled = true; statusEl.textContent = ''
 
   const selected = checked.map(i => newSessions[i])
-  const { data: studios } = await sb.from('studios').select('id')
-  const allStudioIds = (studios || []).map(s => s.id)
 
-  let created = 0, errors = 0
+  // Use the already-loaded allStudios global instead of a fresh query —
+  // avoids any RLS/permission differences and ensures consistency with the rest of the app
+  const allStudioIds = allStudios.map(s => s.id)
+  if (!allStudioIds.length) {
+    statusEl.style.color = '#c0392b'
+    statusEl.textContent = 'Error: No studios loaded. Please refresh and try again.'
+    btn.textContent = 'Create Selected Sessions'; btn.disabled = false
+    return
+  }
+
+  let created = 0, errors = 0, lastError = ''
   for (const s of selected) {
+    // Normalize session_time to HH:MM:SS (same as saveAddSessions does)
+    const rawTime = s.sessionTime || ''
+    const sessionTime = rawTime.length === 5 ? rawTime + ':00' : rawTime
+
     const rows = allStudioIds.map(studioId => ({
       studio_id: studioId,
       session_date: s.sessionDate,
-      session_time: s.sessionTime,
+      session_time: sessionTime,
       title: s.sessionTitle,
       session_type: s.sessionType,
       capacity: 0,
@@ -2225,9 +2237,12 @@ async function createDiscoveredSessions(newSessions) {
       spaces_left_cache: null
     }))
     const { data: insertedRows, error } = await sb.from('sessions').upsert(rows, { onConflict: 'studio_id,session_date,session_time,title', ignoreDuplicates: true }).select()
-    if (error) { errors++; console.error('Insert error for', s.sessionTitle, error) }
-    else {
-      created += rows.length
+    if (error) {
+      errors++
+      lastError = error.message || JSON.stringify(error)
+      console.error('Insert error for', s.sessionTitle, error)
+    } else {
+      created += (insertedRows || []).length || rows.length
       ;(insertedRows || rows).forEach(r => scheduleData.push({ ...r, reg: 0 }))
     }
     statusEl.textContent = `Creating... ${selected.indexOf(s)+1}/${selected.length}`
@@ -2235,13 +2250,15 @@ async function createDiscoveredSessions(newSessions) {
 
   if (errors) {
     statusEl.style.color = '#c0392b'
-    statusEl.textContent = `✓ ${created} sessions created · ${errors} error${errors!==1?'s':''}`
+    statusEl.textContent = `${created} sessions created · ${errors} error${errors!==1?'s':''}${lastError ? ': ' + lastError : ''}`
+    btn.textContent = 'Done'; btn.disabled = true
+    // Don't auto-close on errors so the message is visible; user can close manually
   } else {
     statusEl.style.color = '#2e7d32'
     statusEl.textContent = `✓ ${created} sessions created across all studios!`
+    btn.textContent = 'Done'; btn.disabled = true
+    setTimeout(() => { document.getElementById('discover-modal').remove(); renderSchedule() }, 1500)
   }
-  btn.textContent = 'Done'; btn.disabled = true
-  setTimeout(() => { document.getElementById('discover-modal').remove(); renderSchedule() }, 1500)
 }
 
 // ═══════════════════════════════════════════════
