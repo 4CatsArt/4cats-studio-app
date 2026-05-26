@@ -257,6 +257,7 @@
 
   <div class="email-banner" id="email-banner"></div>
   <div class="delay-banner" id="delay-banner"></div>
+  <div class="email-banner" id="party-email-banner" style="display:none"></div>
 
   <div class="tbl-wrap">
     <table>
@@ -1251,6 +1252,9 @@ function promptPartyAdvance(id, ticketNumber) {
   document.getElementById('confirm-overlay').classList.add('show')
 }
 
+let pendingPartyEmailTimeout  = null
+let pendingPartyEmailInterval = null
+
 // Override confirmAdvance to handle party tickets too
 const _originalConfirmAdvance = confirmAdvance
 window.confirmAdvance = async function() {
@@ -1259,17 +1263,87 @@ window.confirmAdvance = async function() {
     const btn = document.getElementById('confirm-yes')
     btn.disabled = true; btn.textContent = '...'
     closeConfirm()
+
     const { error } = await sb.from('party_tickets').update({ status: 'ready' }).eq('id', id)
     btn.disabled = false; btn.textContent = 'Confirm'
     if (error) { showToast('Error — try again'); return }
+
     const t = allPartyTickets.find(t => t.id === id)
     if (t) t.status = 'ready'
     renderPartyTable()
     showToast(`${ticketNumber} → Ready for Pickup 🎉`)
+
+    // 15-second countdown then send email
+    if (t?.customer_email) {
+      if (pendingPartyEmailTimeout) {
+        clearTimeout(pendingPartyEmailTimeout)
+        clearInterval(pendingPartyEmailInterval)
+      }
+
+      const b = document.getElementById('party-email-banner')
+      let secondsLeft = 15
+      b.style.display = 'block'
+
+      const updatePartyBanner = () => {
+        b.innerHTML = `📧 Pickup email sending in <strong>0:${String(secondsLeft).padStart(2,'0')}</strong> &nbsp;
+          <button onclick="undoPartyEmail('${id}')" style="padding:3px 10px;border:1px solid #2e7d32;border-radius:5px;background:white;color:#2e7d32;font-size:12px;font-weight:600;cursor:pointer;">✕ Undo</button>`
+      }
+      updatePartyBanner()
+
+      pendingPartyEmailInterval = setInterval(() => {
+        secondsLeft--
+        if (secondsLeft <= 0) { clearInterval(pendingPartyEmailInterval); return }
+        updatePartyBanner()
+      }, 1000)
+
+      pendingPartyEmailTimeout = setTimeout(async () => {
+        clearInterval(pendingPartyEmailInterval)
+        b.style.display = 'none'
+        pendingPartyEmailTimeout = null
+        pendingPartyEmailInterval = null
+
+        fetch(`${SUPABASE_URL}/functions/v1/send-party-pickup-email`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${SUPABASE_KEY}`,
+          },
+          body: JSON.stringify({
+            email:        t.customer_email,
+            customerName: t.customer_name,
+            ticketNumber: t.ticket_number,
+            studioId:     t.studio_id,
+            sessionTitle: t.session_title,
+          }),
+        }).catch(err => console.error('Party pickup email error:', err))
+
+        await sb.from('party_tickets').update({ pickup_email_sent_at: new Date().toISOString() }).eq('id', id)
+        showToast('📧 Pickup email sent!')
+      }, 15000)
+    }
+
     pendingPartyAdvance = null
     return
   }
   _originalConfirmAdvance()
+}
+
+function undoPartyEmail(id) {
+  if (pendingPartyEmailTimeout) {
+    clearTimeout(pendingPartyEmailTimeout)
+    clearInterval(pendingPartyEmailInterval)
+    pendingPartyEmailTimeout = null
+    pendingPartyEmailInterval = null
+  }
+  const b = document.getElementById('party-email-banner')
+  b.style.display = 'none'
+
+  // Revert status back to processing
+  sb.from('party_tickets').update({ status: 'processing' }).eq('id', id)
+  const t = allPartyTickets.find(t => t.id === id)
+  if (t) t.status = 'processing'
+  renderPartyTable()
+  showToast('↩ Undone — status reverted, no email sent')
 }
 
 function showToast(msg, ms=2500) {
