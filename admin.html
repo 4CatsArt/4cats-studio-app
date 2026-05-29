@@ -591,6 +591,7 @@ const { createClient } = supabase
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY)
 
 let currentUser = null, currentStudioId = null, allStudios = [], scheduleData = [], workshopData = [], highlightMode = null, gridStudios = []
+let studioViewVariantMap = {} // sessionId → inventory_item_id, populated by syncStudioInventory
 
 const STUDIO_VARIANT_MAP = {
   'AB-YYC-ING':'AB / CALGARY - INGLEWOOD','AB-STA-STA':'AB / ST ALBERT',
@@ -1195,10 +1196,15 @@ async function loadStudioView() {
   activeSessions.forEach(s => {
     if (s.session_date!==lastDate) { rightHtml+=`<div style="padding:8px 16px;background:#f5f5f0;font-size:11px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.4px">${fmtDate(s.session_date)}</div>`; lastDate=s.session_date }
     const isFull=s.capacity>0&&s.reg>=s.capacity, regColor=s.reg===0?'#bbb':isFull?'#2e7d32':'#1a4fa0', time=s.session_time?s.session_time.substring(0,5):''
-    const spacesLeft = s.capacity > 0 ? s.capacity - s.reg : null
+    const spacesLeft = s.spaces_left_cache !== undefined && s.spaces_left_cache !== null ? s.spaces_left_cache : (s.capacity > 0 ? s.capacity - s.reg : null)
     const spacesColor = spacesLeft === null ? '#bbb' : spacesLeft <= 0 ? '#2e7d32' : spacesLeft <= 3 ? '#f9a825' : '#1a4fa0'
     const spacesLabel = spacesLeft === null ? '—' : spacesLeft <= 0 ? 'Full' : spacesLeft
-    rightHtml += `<div class="split-item"><div><div class="split-item-title">${s.title}</div><div class="split-item-sub">${time}</div></div><div style="display:flex;align-items:center;gap:12px"><div style="text-align:center"><div style="font-size:16px;font-weight:600;color:${regColor}">${s.reg}</div><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.3px">Reg</div></div><div style="text-align:center"><div style="font-size:16px;font-weight:600;color:${spacesColor}">${spacesLabel}</div><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.3px">Left</div></div></div></div>`
+    const invItemId = studioViewVariantMap[s.id]
+    const invInputId = `bs-inv-${s.id}`
+    const invEdit = invItemId
+      ? `<div class="inv-edit" style="margin-left:4px"><input type="number" id="${invInputId}" value="${spacesLeft !== null ? spacesLeft : 0}" min="0" style="width:52px"><button class="inv-save-btn" onclick="setInventoryFromTab(${invItemId},'${invInputId}',this)">Set</button></div>`
+      : ''
+    rightHtml += `<div class="split-item"><div><div class="split-item-title">${s.title}</div><div class="split-item-sub">${time}</div></div><div style="display:flex;align-items:center;gap:12px"><div style="text-align:center"><div style="font-size:16px;font-weight:600;color:${regColor}">${s.reg}</div><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.3px">Reg</div></div><div style="text-align:center"><div style="font-size:16px;font-weight:600;color:${spacesColor}">${spacesLabel}</div><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.3px">Left</div></div>${invEdit}</div></div>`
   })
   if (!rightHtml) rightHtml = '<div class="empty">No visible sessions in this date range.</div>'
   document.getElementById('studio-split-container').innerHTML = `<div class="studio-split"><div class="split-panel"><div class="split-panel-header">Network Catalogue <span style="font-weight:400;color:#888;font-size:11px">(dimmed = not offered by ${studioName})</span></div><div class="split-list">${leftHtml}</div></div><div class="split-panel"><div class="split-panel-header">Active Schedule — ${studioName}</div><div class="split-list">${rightHtml}</div></div></div>`
@@ -1240,6 +1246,7 @@ function sessionInfoFromShopifyTitle(shopifyTitle) {
 }
 
 async function syncStudioInventory() {
+  studioViewVariantMap = {} // reset on each sync
   const btn = document.getElementById('btn-sync-inventory'); btn.textContent = 'Syncing...'; btn.disabled = true
   const studioId = document.getElementById('bs-studio').value, date = document.getElementById('bs-date').value
   const { data: freshSessions } = await sb.from('sessions').select('*').eq('studio_id', studioId).eq('session_date', date)
@@ -1261,7 +1268,7 @@ async function syncStudioInventory() {
         const sid = Object.keys(STUDIO_VARIANT_MAP).find(k => STUDIO_VARIANT_MAP[k] === v.variant_title); if (!sid) continue
         const matchingSessions = activeSessions.filter(s => s.studio_id===sid && s.session_date===item.session_date && s.session_time===item.session_time && buildShopifyTitle(s.session_date, s.session_time||'00:00:00', s.title)===item.shopifyTitle)
         if (matchingSessions.length > 0) {
-          for (const session of matchingSessions) { if (isSeriesClass2Plus(session.title)) continue; const capacity = v.inventory_quantity + session.reg; await sb.from('sessions').update({ capacity, spaces_left_cache: v.inventory_quantity, shopify_status: shopifyStatus }).eq('id', session.id); session.capacity = capacity; session.shopify_status = shopifyStatus }
+          for (const session of matchingSessions) { if (isSeriesClass2Plus(session.title)) continue; const capacity = v.inventory_quantity + session.reg; await sb.from('sessions').update({ capacity, spaces_left_cache: v.inventory_quantity, shopify_status: shopifyStatus }).eq('id', session.id); session.capacity = capacity; session.shopify_status = shopifyStatus; session.spaces_left_cache = v.inventory_quantity; if (sid === studioId && v.inventory_item_id) studioViewVariantMap[session.id] = v.inventory_item_id }
         } else if (v.inventory_quantity > 0) {
           // No session exists for this studio — auto-create it
           const info = sessionInfoFromShopifyTitle(item.shopifyTitle)
