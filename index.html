@@ -2456,7 +2456,8 @@ async function loadDayView() {
 
   const { data: sessions } = await sb.from('sessions')
     .select('*').eq('studio_id', currentStudioId).eq('session_date', today).order('session_time')
-  const filtered = (sessions || []).filter(s => matchesFilters(s, filters))
+  // Initial filter: include all that pass user filters; show=false ones included temporarily so we can check bookings
+  const preFiltered = (sessions || []).filter(s => matchesFilters(s, filters))
 
   // Populate map for realtime alerts (only refresh when viewing today)
   if (today === dateStr(new Date())) {
@@ -2471,13 +2472,13 @@ async function loadDayView() {
   const currentWalkins = walkinData?.walkins || 0
 
   // Party bookings: fetch per session
-  const partySessionIds = filtered.filter(s => s.session_type === 'party').map(s => s.id)
+  const partySessionIds = preFiltered.filter(s => s.session_type === 'party').map(s => s.id)
   let partyBookings = {} // session_id -> [bookings]
   let partyDetails = {}  // booking_id -> party_detail row
 
   const aftercareCounts = {}, earlyArrivalCounts = {}, signinData = {}, parentHelperCounts = {}
-  if (filtered.length) {
-    const ids = filtered.map(s => s.id)
+  if (preFiltered.length) {
+    const ids = preFiltered.map(s => s.id)
     const { data: staff } = await sb.from('session_staff').select('*').in('session_id', ids)
     if (staff) staff.forEach(s => { staffData[s.session_id] = s })
 
@@ -2536,11 +2537,11 @@ async function loadDayView() {
           // Fallback: check estimated_attendance or use default
           if (!guestCount && b.estimated_attendance) guestCount = b.estimated_attendance
           if (!guestCount) {
-            const s = filtered.find(s => s.id === b.session_id)
+            const s = preFiltered.find(s => s.id === b.session_id)
             guestCount = (s?.session_type === 'adult' || s?.title?.toLowerCase().includes('adult')) ? 10 : 8
           }
           // Insert party_details row with expected_guests
-          const insertSession = filtered.find(s => s.id === b.session_id)
+          const insertSession = preFiltered.find(s => s.id === b.session_id)
           const autoMedium = mapProjectTypeToMedium(getProjectTypeFromPayload(b.raw_payload))
           const { data: inserted, error: insErr } = await sb.from('party_details').insert({
             booking_id: b.id,
@@ -2567,12 +2568,15 @@ async function loadDayView() {
       }
     }
 
-    // Apply show/hide logic: hide if 0 reg AND capacity is explicitly set to 0 (synced & closed out)
-    const visibleSessions = filtered.filter(s => (bookingCounts[s.id] || 0) > 0 || s.capacity === null || s.capacity > 0)
-    filtered.length = 0; visibleSessions.forEach(s => filtered.push(s))
+    // Apply show/hide logic: hide if show=false AND 0 reg, OR if 0 reg AND capacity explicitly 0
+    const visibleSessions = preFiltered.filter(s =>
+      (s.show !== false || (bookingCounts[s.id] || 0) > 0) &&
+      ((bookingCounts[s.id] || 0) > 0 || s.capacity === null || s.capacity > 0)
+    )
+    const filtered = visibleSessions
 
     // Series class 2+ — copy booking count from class 1
-    for (const s of filtered) {
+    for (const s of preFiltered) {
       if (isSeriesClass2Plus(s.title) && !bookingCounts[s.id]) {
         const class1Title = getSeriesClass1Title(s.title)
         const class1Id = await findClass1SessionId(currentStudioId, s.session_time, class1Title, s.session_date)
