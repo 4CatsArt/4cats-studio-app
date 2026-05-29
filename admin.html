@@ -119,6 +119,17 @@ select:focus, input:focus { border-color: #888; }
 .studio-split { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 .split-panel { background: white; border: 0.5px solid #e0e0d8; border-radius: 12px; overflow: hidden; }
 .split-panel-header { padding: 12px 16px; border-bottom: 0.5px solid #e0e0d8; font-weight: 600; font-size: 13px; background: #fafaf8; }
+.note-icon { cursor:pointer; font-size:13px; opacity:0.3; transition:opacity 0.15s; user-select:none; margin-left:4px; vertical-align:middle; }
+.note-icon:hover { opacity:0.7; }
+.note-icon.has-note { opacity:1; filter:none; }
+.note-icon.has-note svg { fill:#f9a825; }
+.note-modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.35); z-index:1000; display:flex; align-items:center; justify-content:center; }
+.note-modal { background:#fff; border-radius:10px; padding:24px; width:420px; max-width:94vw; box-shadow:0 8px 32px rgba(0,0,0,0.18); }
+.note-modal h3 { margin:0 0 4px; font-size:15px; }
+.note-modal .note-sub { font-size:12px; color:#888; margin-bottom:14px; }
+.note-modal textarea { width:100%; box-sizing:border-box; border:0.5px solid #d0d0c8; border-radius:6px; padding:10px; font-size:13px; font-family:inherit; resize:vertical; min-height:90px; outline:none; }
+.note-modal textarea:focus { border-color:#1a4fa0; }
+.note-modal-actions { display:flex; gap:8px; margin-top:12px; justify-content:flex-end; }
 .split-list { overflow-y: auto; max-height: 70vh; }
 .split-item { padding: 10px 16px; border-bottom: 0.5px solid #f5f5f0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .split-item:last-child { border-bottom: none; }
@@ -592,6 +603,7 @@ const sb = createClient(SUPABASE_URL, SUPABASE_KEY)
 
 let currentUser = null, currentStudioId = null, allStudios = [], scheduleData = [], workshopData = [], highlightMode = null, gridStudios = []
 let studioViewVariantMap = {} // sessionId → inventory_item_id, populated by syncStudioInventory
+let scheduleNotesCache = {} // 'studioId|date' → note string
 
 const STUDIO_VARIANT_MAP = {
   'AB-YYC-ING':'AB / CALGARY - INGLEWOOD','AB-STA-STA':'AB / ST ALBERT',
@@ -874,7 +886,68 @@ async function loadSchedule() {
   renderSchedule()
 }
 
-function renderSchedule() {
+// ── Schedule Notes ─────────────────────────────────────────────────────────
+async function loadScheduleNotes(studioIds, dates) {
+  if (!studioIds.length || !dates.length) return
+  const { data } = await sb.from('schedule_notes').select('studio_id,date,note')
+    .in('studio_id', studioIds).in('date', dates)
+  scheduleNotesCache = {}
+  if (data) data.forEach(r => { scheduleNotesCache[r.studio_id + '|' + r.date] = r.note })
+}
+
+function noteIconSvg(hasNote) {
+  const col = hasNote ? '#f9a825' : '#aaa'
+  return `<svg width="14" height="14" viewBox="0 0 20 20" fill="${col}" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;display:inline-block"><path d="M4 3h12a1 1 0 0 1 1 1v9.586a1 1 0 0 1-.293.707l-3.414 3.414A1 1 0 0 1 12.586 18H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zm1 2v11h7v-3a1 1 0 0 1 1-1h3V5H5zm9.586 9H14v1.586L14.586 14zM7 8h6v1.5H7V8zm0 3h4v1.5H7V11z"/></svg>`
+}
+
+function openNoteModal(studioId, date, studioName) {
+  const key = studioId + '|' + date
+  const existing = scheduleNotesCache[key] || ''
+  const label = new Date(date + 'T12:00:00').toLocaleDateString('en-CA', { weekday:'long', month:'long', day:'numeric' })
+  const el = document.createElement('div')
+  el.className = 'note-modal-overlay'
+  el.id = 'note-modal-overlay'
+  el.innerHTML = `<div class="note-modal">
+    <h3>${studioName}</h3>
+    <div class="note-sub">${label}</div>
+    <textarea id="note-modal-textarea" placeholder="e.g. Only one staff today — reduced sessions">${existing}</textarea>
+    <div class="note-modal-actions">
+      <button class="btn" onclick="closeNoteModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveNote('${studioId}','${date}')">Save</button>
+    </div>
+  </div>`
+  el.addEventListener('click', e => { if (e.target === el) closeNoteModal() })
+  document.body.appendChild(el)
+  setTimeout(() => document.getElementById('note-modal-textarea').focus(), 50)
+}
+
+function closeNoteModal() {
+  const el = document.getElementById('note-modal-overlay')
+  if (el) el.remove()
+}
+
+async function saveNote(studioId, date) {
+  const note = document.getElementById('note-modal-textarea').value.trim()
+  const key = studioId + '|' + date
+  if (note) {
+    const { error } = await sb.from('schedule_notes').upsert({ studio_id: studioId, date, note, updated_at: new Date().toISOString() }, { onConflict: 'studio_id,date' })
+    if (error) { alert('Error saving note: ' + error.message); return }
+    scheduleNotesCache[key] = note
+  } else {
+    await sb.from('schedule_notes').delete().eq('studio_id', studioId).eq('date', date)
+    delete scheduleNotesCache[key]
+  }
+  closeNoteModal()
+  // Refresh icons without full re-render
+  document.querySelectorAll(`.note-icon[data-key="${key}"]`).forEach(el => {
+    el.classList.toggle('has-note', !!note)
+    el.innerHTML = noteIconSvg(!!note)
+    el.title = note ? `Note: ${note}` : 'Add day note'
+  })
+}
+// ────────────────────────────────────────────────────────────────────────────
+
+async function renderSchedule() {
   if (!scheduleData.length) return
   const search = document.getElementById('sch-search').value.toLowerCase().trim()
   const typeFilter = document.getElementById('sch-type').value
@@ -899,6 +972,8 @@ function renderSchedule() {
     if (!byDate[s.session_date][key]) byDate[s.session_date][key] = { title:s.title, time:s.session_time, type:s.session_type, date:s.session_date, studios:{} }
     byDate[s.session_date][key].studios[s.studio_id] = s
   })
+  // Load notes for all studio/date combos in view
+  await loadScheduleNotes(gridStudios.map(s => s.id), Object.keys(byDate))
   let headHtml = '<tr><th class="session-col">Session</th><th class="total-col">Total</th>'
   gridStudios.forEach(s => { headHtml += `<th title="${s.name}">${getStudioName(s.id)}</th>` })
   headHtml += '</tr>'
@@ -934,7 +1009,11 @@ function renderSchedule() {
       <td class="total-cell">${grandDay > 0 ? `<span class="day-studio-total">${grandDay}</span>` : ''}</td>`
     gridStudios.forEach(studio => {
       const t = studioDateTotals[studio.id]
-      dayRowHtml += `<td style="text-align:center">${t > 0 ? `<span class="day-studio-total">${t}</span>` : ''}</td>`
+      const noteKey = studio.id + '|' + date
+      const noteText = scheduleNotesCache[noteKey] || ''
+      const noteHasNote = !!noteText
+      const safeStudioName = getStudioName(studio.id).replace(/'/g, "\\'")
+      dayRowHtml += `<td style="text-align:center"><div style="display:flex;flex-direction:column;align-items:center;gap:2px">${t > 0 ? `<span class="day-studio-total">${t}</span>` : '<span style="color:#ddd">—</span>'}<span class="note-icon${noteHasNote?' has-note':''}" data-key="${noteKey}" title="${noteHasNote?'Note: '+noteText.replace(/"/g,'&quot;'):'Add day note'}" onclick="openNoteModal('${studio.id}','${date}','${safeStudioName}')">${noteIconSvg(noteHasNote)}</span></div></td>`
     })
     dayRowHtml += '</tr>'
     bodyHtml += dayRowHtml
@@ -1187,6 +1266,9 @@ async function loadStudioView() {
   }
   const activeSessions = studioSessions.map(s=>({...s,reg:counts[s.id]||0})).filter(s=>s.show)
   const studioName = getStudioName(studioId)
+  // Load notes for this studio/date combo
+  const bsDates = [...new Set((sessions||[]).map(s=>s.session_date))]
+  await loadScheduleNotes([studioId], bsDates)
   const byDate = {}
   ;(sessions||[]).forEach(s => {
     if (!byDate[s.session_date]) byDate[s.session_date]={}
@@ -1205,7 +1287,14 @@ async function loadStudioView() {
   if (!leftHtml) leftHtml = '<div class="empty">No sessions in this date range.</div>'
   let rightHtml = '', lastDate = null
   activeSessions.forEach(s => {
-    if (s.session_date!==lastDate) { rightHtml+=`<div style="padding:8px 16px;background:#f5f5f0;font-size:11px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.4px">${fmtDate(s.session_date)}</div>`; lastDate=s.session_date }
+    if (s.session_date!==lastDate) {
+      const bsNoteKey = studioId + '|' + s.session_date
+      const bsNote = scheduleNotesCache[bsNoteKey] || ''
+      const bsHasNote = !!bsNote
+      const bsSafeName = (allStudios.find(st=>st.id===studioId)||{name:studioId}).name.replace(/'/g,"\\'")
+      rightHtml+=`<div style="padding:8px 16px;background:#f5f5f0;font-size:11px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.4px;display:flex;align-items:center;justify-content:space-between">${fmtDate(s.session_date)}<span class="note-icon${bsHasNote?' has-note':''}" data-key="${bsNoteKey}" title="${bsHasNote?'Note: '+bsNote.replace(/"/g,'&quot;'):'Add day note'}" onclick="openNoteModal('${studioId}','${s.session_date}','${bsSafeName}')">${noteIconSvg(bsHasNote)}</span></div>`
+      lastDate=s.session_date
+    }
     const isFull=s.capacity>0&&s.reg>=s.capacity, regColor=s.reg===0?'#bbb':isFull?'#2e7d32':'#1a4fa0', time=s.session_time?s.session_time.substring(0,5):''
     const spacesLeft = s.spaces_left_cache !== undefined && s.spaces_left_cache !== null ? s.spaces_left_cache : (s.capacity > 0 ? s.capacity - s.reg : null)
     const spacesColor = spacesLeft === null ? '#bbb' : spacesLeft <= 0 ? '#2e7d32' : spacesLeft <= 3 ? '#f9a825' : '#1a4fa0'
