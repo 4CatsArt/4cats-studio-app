@@ -889,10 +889,10 @@ async function loadSchedule() {
 // ── Schedule Notes ─────────────────────────────────────────────────────────
 async function loadScheduleNotes(studioIds, dates) {
   if (!studioIds.length || !dates.length) return
-  const { data } = await sb.from('schedule_notes').select('studio_id,date,note')
+  const { data } = await sb.from('schedule_notes').select('studio_id,date,note,created_by,updated_by,created_at,updated_at')
     .in('studio_id', studioIds).in('date', dates)
   scheduleNotesCache = {}
-  if (data) data.forEach(r => { scheduleNotesCache[r.studio_id + '|' + r.date] = r.note })
+  if (data) data.forEach(r => { scheduleNotesCache[r.studio_id + '|' + r.date] = r })
 }
 
 function noteIconSvg(hasNote) {
@@ -902,15 +902,25 @@ function noteIconSvg(hasNote) {
 
 function openNoteModal(studioId, date, studioName) {
   const key = studioId + '|' + date
-  const existing = scheduleNotesCache[key] || ''
+  const rec = scheduleNotesCache[key] || null
+  const existing = rec ? (rec.note || rec) : ''  // handle both object and legacy string
+  const noteText = typeof existing === 'object' ? existing.note || '' : existing
   const label = new Date(date + 'T12:00:00').toLocaleDateString('en-CA', { weekday:'long', month:'long', day:'numeric' })
+  let stampHtml = ''
+  if (rec && typeof rec === 'object' && (rec.updated_by || rec.created_by)) {
+    const byLine = rec.updated_by || rec.created_by || ''
+    const atTs = rec.updated_at || rec.created_at || ''
+    const atLabel = atTs ? new Date(atTs).toLocaleString('en-CA', { month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit' }) : ''
+    stampHtml = `<div style="font-size:11px;color:#aaa;margin-bottom:10px">Last edited by <strong>${byLine}</strong>${atLabel ? ' · ' + atLabel : ''}</div>`
+  }
   const el = document.createElement('div')
   el.className = 'note-modal-overlay'
   el.id = 'note-modal-overlay'
   el.innerHTML = `<div class="note-modal">
     <h3>${studioName}</h3>
     <div class="note-sub">${label}</div>
-    <textarea id="note-modal-textarea" placeholder="e.g. Only one staff today — reduced sessions">${existing}</textarea>
+    ${stampHtml}
+    <textarea id="note-modal-textarea" placeholder="e.g. Only one staff today — reduced sessions">${noteText}</textarea>
     <div class="note-modal-actions">
       <button class="btn" onclick="closeNoteModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveNote('${studioId}','${date}')">Save</button>
@@ -929,10 +939,20 @@ function closeNoteModal() {
 async function saveNote(studioId, date) {
   const note = document.getElementById('note-modal-textarea').value.trim()
   const key = studioId + '|' + date
+  // Prefer display_name from studio_users; fall back to email
+  const suUser = allUsersData?.find(u => u.user_id === currentUser?.id)
+  const userName = suUser?.display_name || currentUser?.email || 'unknown'
+  const now = new Date().toISOString()
   if (note) {
-    const { error } = await sb.from('schedule_notes').upsert({ studio_id: studioId, date, note, updated_at: new Date().toISOString() }, { onConflict: 'studio_id,date' })
+    const existing = scheduleNotesCache[key] || null
+    const upsertRow = {
+      studio_id: studioId, date, note,
+      updated_by: userName, updated_at: now,
+      ...(!existing ? { created_by: userName, created_at: now } : {})
+    }
+    const { error } = await sb.from('schedule_notes').upsert(upsertRow, { onConflict: 'studio_id,date' })
     if (error) { alert('Error saving note: ' + error.message); return }
-    scheduleNotesCache[key] = note
+    scheduleNotesCache[key] = { ...upsertRow, created_by: existing?.created_by || userName, created_at: existing?.created_at || now }
   } else {
     await sb.from('schedule_notes').delete().eq('studio_id', studioId).eq('date', date)
     delete scheduleNotesCache[key]
@@ -1010,7 +1030,7 @@ async function renderSchedule() {
     gridStudios.forEach(studio => {
       const t = studioDateTotals[studio.id]
       const noteKey = studio.id + '|' + date
-      const noteText = scheduleNotesCache[noteKey] || ''
+      const noteText = (scheduleNotesCache[noteKey] || {}).note || ''
       const noteHasNote = !!noteText
       const safeStudioName = getStudioName(studio.id).replace(/'/g, "\\'")
       dayRowHtml += `<td style="text-align:center"><div style="display:flex;flex-direction:column;align-items:center;gap:2px">${t > 0 ? `<span class="day-studio-total">${t}</span>` : '<span style="color:#ddd">—</span>'}<span class="note-icon${noteHasNote?' has-note':''}" data-key="${noteKey}" title="${noteHasNote?'Note: '+noteText.replace(/"/g,'&quot;'):'Add day note'}" onclick="openNoteModal('${studio.id}','${date}','${safeStudioName}')">${noteIconSvg(noteHasNote)}</span></div></td>`
@@ -1289,7 +1309,7 @@ async function loadStudioView() {
   activeSessions.forEach(s => {
     if (s.session_date!==lastDate) {
       const bsNoteKey = studioId + '|' + s.session_date
-      const bsNote = scheduleNotesCache[bsNoteKey] || ''
+      const bsNote = (scheduleNotesCache[bsNoteKey] || {}).note || ''
       const bsHasNote = !!bsNote
       const bsSafeName = (allStudios.find(st=>st.id===studioId)||{name:studioId}).name.replace(/'/g,"\\'")
       rightHtml+=`<div style="padding:8px 16px;background:#f5f5f0;font-size:11px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.4px;display:flex;align-items:center;justify-content:space-between">${fmtDate(s.session_date)}<span class="note-icon${bsHasNote?' has-note':''}" data-key="${bsNoteKey}" title="${bsHasNote?'Note: '+bsNote.replace(/"/g,'&quot;'):'Add day note'}" onclick="openNoteModal('${studioId}','${s.session_date}','${bsSafeName}')">${noteIconSvg(bsHasNote)}</span></div>`
@@ -2617,6 +2637,14 @@ async function loadUsers() {
   const data = await adminUsersRequest('GET')
   if (data.error) { wrap.innerHTML = `<div class="empty" style="color:#c0392b">Error: ${data.error}</div>`; return }
   allUsersData = data.users || []
+  // Fetch display_names from studio_users
+  if (allUsersData.length) {
+    const { data: suRows } = await sb.from('studio_users').select('user_id, display_name')
+    if (suRows) {
+      const nameMap = Object.fromEntries(suRows.map(r => [r.user_id, r.display_name]))
+      allUsersData.forEach(u => { u.display_name = nameMap[u.user_id] || '' })
+    }
+  }
   if (!allUsersData.length) { wrap.innerHTML = '<div class="empty">No users found.</div>'; return }
   // Populate studio filter
   const studioSel = document.getElementById('users-studio-filter')
@@ -2654,17 +2682,30 @@ function renderUsers() {
 
   if (!users.length) { wrap.innerHTML = '<div class="empty">No users match filters.</div>'; return }
 
-  let html = `<table class="users-table"><thead><tr><th>Email</th><th>Role</th><th>Studio</th><th>Status</th><th></th></tr></thead><tbody>`
+  let html = `<table class="users-table"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Studio</th><th>Status</th><th></th></tr></thead><tbody>`
   users.forEach(u => {
     const studioLabel = u.studio_name ? u.studio_name.replace(/4CATS Art Studios\s*-\s*/i,'').replace(/4Cats Art Studios\s*-\s*/i,'').replace(/4CATS\s*-\s*/i,'').trim() : (u.studio_id || '<span style="color:#bbb">—</span>')
     const statusPill = u.confirmed ? `<span style="font-size:11px;padding:2px 8px;border-radius:8px;background:#e8f5e9;color:#2e7d32">Active</span>` : `<span style="font-size:11px;padding:2px 8px;border-radius:8px;background:#fff3e0;color:#e65100">Invite pending</span>`
     const lastSeen = u.last_sign_in ? new Date(u.last_sign_in).toLocaleDateString('en-CA', { month:'short', day:'numeric', year:'numeric' }) : null
-    html += `<tr><td><div class="user-email">${u.email||'<span style="color:#bbb">unknown</span>'}</div>${lastSeen?`<div class="user-meta">Last seen ${lastSeen}</div>`:''}</td><td><span class="role-pill ${u.role}">${u.role}</span></td><td>${studioLabel}</td><td>${statusPill}</td><td style="white-space:nowrap">
+    html += `<tr><td><div style="font-weight:500;font-size:13px">${u.display_name || '<span style="color:#bbb;font-weight:400;font-style:italic">No name</span>'}</div></td><td><div class="user-email">${u.email||'<span style="color:#bbb">unknown</span>'}</div>${lastSeen?`<div class="user-meta">Last seen ${lastSeen}</div>`:''}</td><td><span class="role-pill ${u.role}">${u.role}</span></td><td>${studioLabel}</td><td>${statusPill}</td><td style="white-space:nowrap">
+  <button class="btn" style="font-size:11px;color:#5b4fcf;border-color:#d5cff5;margin-right:4px" onclick="editDisplayName('${u.user_id}','${(u.display_name||'').replace(/'/g,"\\'")}','${(u.email||'').replace(/'/g,"\\'")}')">Edit name</button>
   <button class="btn" style="font-size:11px;color:#1a4fa0;border-color:#c5cfe8;margin-right:4px" onclick="resetPassword('${(u.email||'').replace(/'/g,"\\'")}','${u.user_id}')">Set pw</button>
   <button class="btn" style="font-size:11px;color:#c0392b;border-color:#f5c6cb" onclick="removeUser('${u.user_id}','${(u.email||'').replace(/'/g,"\\'")}')">Remove</button>
 </td></tr>`
   })
   wrap.innerHTML = html + '</tbody></table>'
+}
+
+async function editDisplayName(userId, currentName, email) {
+  const newName = prompt(`Display name for ${email}:`, currentName)
+  if (newName === null) return // cancelled
+  const trimmed = newName.trim()
+  const { error } = await sb.from('studio_users').update({ display_name: trimmed || null }).eq('user_id', userId)
+  if (error) { alert('Error saving name: ' + error.message); return }
+  // Update in-memory cache and re-render
+  const u = allUsersData.find(u => u.user_id === userId)
+  if (u) u.display_name = trimmed
+  renderUsers()
 }
 
 async function removeUser(userId, email) {
