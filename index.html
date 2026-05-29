@@ -381,6 +381,38 @@ let curriculumData = []
 let todaySessionsMap = {} // session_id → {title, time} for today; used by realtime alerts
 let rtBookingChannel = null
 
+// ── ADD DROP-IN ──────────────────────────────────────────────
+async function addDropin(sessionId) {
+  const countEl = document.getElementById(`dropin-count-${sessionId}`)
+  const btn = countEl?.nextElementSibling
+  if (btn) { btn.disabled = true; btn.textContent = '…' }
+
+  const { error } = await sb.from('signin_entries').insert({
+    session_id: sessionId,
+    name: 'Drop-in',
+    mode: 'dropin',
+    signed_in_at: new Date().toISOString()
+  })
+
+  if (error) {
+    console.error('addDropin error:', error)
+    if (btn) { btn.disabled = false; btn.textContent = '+' }
+    return
+  }
+
+  // Update count display immediately without full reload
+  if (countEl) {
+    const current = countEl.textContent === '—' ? 0 : parseInt(countEl.textContent) || 0
+    countEl.textContent = current + 1
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '+' }
+
+  // Update the day banner total
+  const totalEl = document.querySelector('[id^="day-banner-total"]')
+  // Trigger a soft banner refresh by reloading the view
+  await loadCurrentView()
+}
+
 // ── PRINT CHECKINS (portrait) ─────────────────────────────────
 function printCheckins() {
   const style = document.createElement('style')
@@ -2456,6 +2488,7 @@ async function loadDayView() {
       signinData[e.session_id].push({ name: e.name, mode: e.mode, created_at: e.signed_in_at })
     })
 
+
     const { data: bookings } = await sb.from('bookings')
       .select('id, session_id, customer_name, customer_email, customer_phone, shopify_order_name, qty, estimated_attendance, raw_payload, booked_at, aftercare, early_arrival')
       .in('session_id', ids).gt('qty', 0).is('returned_at', null)
@@ -2589,7 +2622,16 @@ async function loadDayView() {
   }
 
   const totalPrepaid = Object.values(staffData).reduce((sum, s) => sum + (parseInt(s.prepaid_participants) || 0), 0)
-  const grandTotal = totalNonParty + totalPartyGuests + totalPrepaid + currentWalkins
+
+  // Per-session drop-in counts (from signin_entries mode='dropin')
+  const dropinCounts = {}
+  Object.entries(signinData).forEach(([sid, entries]) => {
+    const count = entries.filter(e => e.mode === 'dropin').length
+    if (count) dropinCounts[sid] = count
+  })
+  const totalSessionDropins = Object.values(dropinCounts).reduce((sum, n) => sum + n, 0)
+
+  const grandTotal = totalNonParty + totalPartyGuests + totalPrepaid + currentWalkins + totalSessionDropins
 
 
   const STUDIO_GROUP = { 'BC-YVR-MS':'A', 'BC-YYJ-VIC':'A' }
@@ -2609,14 +2651,15 @@ async function loadDayView() {
   const partyNote = totalPartyGuests > 0 ? ` <span style="font-size:12px;opacity:0.8">(incl. ${totalPartyGuests} party guests)</span>` : ''
 
   const prepaidNote = totalPrepaid > 0 ? ` <span style="font-size:12px;opacity:0.8">(incl. ${totalPrepaid} prepaid)</span>` : ''
-  const walkinsNote = currentWalkins > 0 ? ` <span style="font-size:12px;opacity:0.8">(incl. ${currentWalkins} drop-ins)</span>` : ''
+  const sessionDropinsNote = totalSessionDropins > 0 ? ` <span style="font-size:12px;opacity:0.8">(incl. ${totalSessionDropins} drop-in${totalSessionDropins !== 1 ? 's' : ''})</span>` : ''
+  const walkinsNote = currentWalkins > 0 ? ` <span style="font-size:12px;opacity:0.8">(incl. ${currentWalkins} other drop-ins)</span>` : ''
   const bannerHtml = `<div style="background:${t.bg};color:${t.color};border-radius:10px;padding:12px 18px;margin-bottom:1rem;display:flex;align-items:center;justify-content:space-between;font-size:14px;gap:12px;">
-    <span><strong>${grandTotal} participants today</strong>${partyNote}${walkinsNote}${prepaidNote}</span>
+    <span><strong>${grandTotal} participants today</strong>${partyNote}${sessionDropinsNote}${walkinsNote}${prepaidNote}</span>
     <span style="font-weight:500">${t.msg}</span>
     <div style="display:flex;align-items:center;gap:8px;margin-left:auto" class="no-print">
       <button id="print-full-day-btn" onclick="printFullDay()" style="padding:4px 12px;background:white;color:#444;border:0.5px solid #d0d0c8;border-radius:6px;font-size:12px;cursor:pointer;white-space:nowrap">🖨 Print Full Day</button>
       <span style="color:#ddd">|</span>
-      <span style="font-size:12px;white-space:nowrap">Drop-ins:</span>
+      <span style="font-size:12px;white-space:nowrap">Other drop-ins:</span>
       <input type="number" id="walkins-input" value="${currentWalkins}" min="0" style="width:60px;padding:4px 8px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;text-align:center">
       <button onclick="saveWalkins()" style="padding:4px 12px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:12px;cursor:pointer" id="walkins-save-btn">Save</button>
     </div>
@@ -2660,8 +2703,10 @@ async function loadDayView() {
     const reg = bookingCounts[s.id] || 0
     const est = estimatedAtt[s.id] || null
     const isParty = s.session_type === 'party'
+    const isDropinEligible = ['workshop', 'glazing'].includes(s.session_type)
     const badge = getBadgeClass(s.session_type)
     const time = fmtTime(s.session_time)
+    const sessionDropins = dropinCounts[s.id] || 0
 
     // Party-specific rendering
     let partyBlocksHtml = ''
@@ -2709,6 +2754,14 @@ async function loadDayView() {
           <div class="stat-value">${Math.max(0, s.capacity - reg)}</div>
           <div class="stat-label">spaces left</div>
         </div>
+        ${isDropinEligible ? `<div class="stat no-print" style="cursor:default">
+          <div style="display:flex;align-items:center;gap:5px">
+            <span class="stat-value" id="dropin-count-${s.id}" style="color:#2d6a9f">${sessionDropins || '—'}</span>
+            <button onclick="addDropin('${s.id}')" title="Add a drop-in"
+              style="width:20px;height:20px;border-radius:50%;background:#2d6a9f;color:white;border:none;font-size:14px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:0">+</button>
+          </div>
+          <div class="stat-label">drop-ins</div>
+        </div>` : ''}
         ${est ? `<div class="stat"><div class="stat-value">${est}</div><div class="stat-label">expected</div></div>` : ''}
         ${aftercareCounts[s.id] ? `<div class="stat"><div class="stat-value" style="color:#5b4fcf">${aftercareCounts[s.id]}</div><div class="stat-label">aftercare</div></div>` : ''}
         ${earlyArrivalCounts[s.id] ? `<div class="stat"><div class="stat-value" style="color:#e65100">${earlyArrivalCounts[s.id]}</div><div class="stat-label">early arr.</div></div>` : ''}
