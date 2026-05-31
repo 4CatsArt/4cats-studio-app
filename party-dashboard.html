@@ -74,6 +74,17 @@
     .checkin-name { font-size: 14px; color: #1a1a2e; font-weight: 500; }
     .checkin-email { font-size: 12px; color: #888; margin-top: 1px; }
     .checkin-empty { text-align: center; padding: 20px; color: #aaa; font-size: 14px; }
+    .checkin-actions { margin-left: auto; display: -webkit-box; display: -webkit-flex; display: flex; gap: 6px; -webkit-flex-shrink: 0; flex-shrink: 0; }
+    .action-btn { padding: 4px 10px; border-radius: 6px; border: 1px solid #d0d0c8; background: white; font-size: 11px; cursor: pointer; color: #555; font-family: inherit; }
+    .action-btn.remove { border-color: #f0b8cc; color: #99354e; }
+    .action-btn.remove:active { background: #fff0f5; }
+    .action-btn.move { border-color: #b8d0f0; color: #2d6a9f; }
+    .action-btn.move:active { background: #f0f6ff; }
+    .move-dropdown { margin-top: 8px; padding: 8px; background: #f0f6ff; border-radius: 8px; border: 1px solid #b8d0f0; }
+    .move-dropdown select { font-size: 13px; padding: 6px 10px; margin-bottom: 6px; }
+    .move-dropdown-btns { display: -webkit-box; display: -webkit-flex; display: flex; gap: 6px; }
+    .move-confirm-btn { padding: 6px 12px; border-radius: 6px; border: none; background: #2d6a9f; color: white; font-size: 12px; cursor: pointer; font-family: inherit; }
+    .move-cancel-btn { padding: 6px 12px; border-radius: 6px; border: 1px solid #ccc; background: white; color: #666; font-size: 12px; cursor: pointer; font-family: inherit; }
     .refresh-bar { text-align: center; font-size: 12px; color: #aaa; padding: 8px 0 16px; }
   </style>
 </head>
@@ -630,7 +641,7 @@
   // ── Check-in refresh ──────────────────────────────────────────
   function refreshCheckins() {
     if (!currentSessionId) return;
-    restFetch('signin_entries?session_id=eq.' + currentSessionId + '&mode=eq.party&select=name,email')
+    restFetch('signin_entries?session_id=eq.' + currentSessionId + '&mode=eq.party&select=id,name,email')
       .then(function(result) {
         var entries   = (result.ok && result.data) ? result.data : [];
         var checkedIn = entries.length;
@@ -648,8 +659,17 @@
             var name    = e.name || 'Guest';
             var initial = name.trim()[0] ? name.trim()[0].toUpperCase() : '?';
             var emailHtml = e.email ? '<div class="checkin-email">' + esc(e.email) + '</div>' : '';
-            html += '<li class="checkin-item"><div class="checkin-avatar">' + initial + '</div>' +
-              '<div><div class="checkin-name">' + esc(name) + '</div>' + emailHtml + '</div></li>';
+            var safeName  = esc(name).replace(/'/g, "\\'");
+            html += '<li class="checkin-item" id="entry-' + e.id + '">' +
+              '<div class="checkin-avatar">' + initial + '</div>' +
+              '<div style="-webkit-box-flex:1;-webkit-flex:1;flex:1">' +
+                '<div class="checkin-name">' + esc(name) + '</div>' + emailHtml +
+              '</div>' +
+              '<div class="checkin-actions">' +
+                '<button class="action-btn move" onclick="showMoveDropdown(\'' + e.id + '\',\'' + safeName + '\')">&#8594; Move</button>' +
+                '<button class="action-btn remove" onclick="removeCheckin(\'' + e.id + '\',\'' + safeName + '\')">&#10005; Remove</button>' +
+              '</div>' +
+            '</li>';
           }
           list.innerHTML = html;
         }
@@ -661,6 +681,91 @@
         document.getElementById('refresh-bar').textContent =
           'Last updated ' + h12 + ':' + String(m).padStart(2, '0') + ampm + ' · Auto-refreshes every 30 seconds';
       });
+  }
+
+  function removeCheckin(id, name) {
+    if (!confirm('Remove ' + name + ' from this party?')) return;
+    restFetch('signin_entries?id=eq.' + id, { method: 'DELETE' })
+      .then(function(result) {
+        if (result.ok) {
+          var el = document.getElementById('entry-' + id);
+          if (el) el.parentNode.removeChild(el);
+          var count = document.querySelectorAll('#checkin-list .checkin-item').length;
+          document.getElementById('stat-checkedin').textContent = count;
+          document.getElementById('checkin-badge').textContent  = count + ' checked in';
+          if (count === 0) document.getElementById('checkin-list').innerHTML = '<li class="checkin-empty">No one checked in yet.</li>';
+        } else {
+          alert('Could not remove — please try again.');
+        }
+      });
+  }
+
+  function showMoveDropdown(id, name) {
+    var existing = document.querySelector('.move-dropdown');
+    if (existing) existing.parentNode.removeChild(existing);
+
+    var sessions   = window._sessions  || [];
+    var bookedMap  = window._bookedMap || {};
+    var detailMap  = window._detailMap || {};
+    var others = sessions.filter(function(s) { return s.id !== currentSessionId; });
+    if (!others.length) { alert('No other party sessions today to move to.'); return; }
+
+    var opts = others.map(function(s) {
+      var booking = bookedMap[s.id];
+      var detail  = booking ? detailMap[booking.id] : null;
+      var label   = partyLabel(booking, detail, s.title);
+      return '<option value="' + s.id + '">' + fmtTime(s.session_time) + ' · ' + esc(label) + '</option>';
+    }).join('');
+
+    var div = document.createElement('div');
+    div.className = 'move-dropdown';
+    div.id = 'move-dropdown-' + id;
+    div.innerHTML =
+      '<div style="font-size:12px;color:#2d6a9f;margin-bottom:6px">Move <strong>' + esc(name) + '</strong> to:</div>' +
+      '<select id="move-select-' + id + '">' + opts + '</select>' +
+      '<div class="move-dropdown-btns">' +
+        '<button class="move-confirm-btn" onclick="confirmMove(\'' + id + '\',\'' + name.replace(/'/g, "\\'") + '\')">Move</button>' +
+        '<button class="move-cancel-btn" onclick="cancelMove(\'' + id + '\')">Cancel</button>' +
+      '</div>';
+
+    var row = document.getElementById('entry-' + id);
+    if (row) row.insertAdjacentElement('afterend', div);
+  }
+
+  function confirmMove(id, name) {
+    var sel = document.getElementById('move-select-' + id);
+    if (!sel || !sel.value) return;
+    var newSessionId = sel.value;
+
+    restFetch('signin_entries?id=eq.' + id, {
+      method: 'PATCH',
+      headers: { 'Prefer': 'return=minimal' },
+      body: JSON.stringify({ session_id: newSessionId })
+    }).then(function(result) {
+      if (result.ok) {
+        cancelMove(id);
+        var row = document.getElementById('entry-' + id);
+        if (row) row.parentNode.removeChild(row);
+        var count = document.querySelectorAll('#checkin-list .checkin-item').length;
+        document.getElementById('stat-checkedin').textContent = count;
+        document.getElementById('checkin-badge').textContent  = count + ' checked in';
+        if (count === 0) document.getElementById('checkin-list').innerHTML = '<li class="checkin-empty">No one checked in yet.</li>';
+        var sessions = window._sessions || [];
+        var target = null;
+        var i;
+        for (i = 0; i < sessions.length; i++) {
+          if (sessions[i].id === newSessionId) { target = sessions[i]; break; }
+        }
+        showToast(name + ' moved to ' + (target ? fmtTime(target.session_time) + ' session' : 'other session'));
+      } else {
+        alert('Could not move — please try again.');
+      }
+    });
+  }
+
+  function cancelMove(id) {
+    var el = document.getElementById('move-dropdown-' + id);
+    if (el) el.parentNode.removeChild(el);
   }
 
   init();
