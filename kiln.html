@@ -105,6 +105,19 @@
   .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:#1a1a2e; color:white; padding:10px 20px; border-radius:8px; font-size:13px; z-index:200; opacity:0; transition:opacity 0.3s; pointer-events:none; }
   .toast.show { opacity:1; }
 
+  /* Hospital warning modal */
+  .hospital-card { background:white; border-radius:14px; padding:24px; max-width:420px; width:100%; }
+  .hospital-header { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+  .hospital-icon { font-size:28px; line-height:1; }
+  .hospital-title { font-size:16px; font-weight:700; color:#b7700a; }
+  .hospital-body { font-size:13px; color:#444; line-height:1.6; margin-bottom:14px; }
+  .hospital-tickets { background:#fef3e2; border:1px solid #f0c040; border-radius:8px; padding:10px 14px; margin-bottom:14px; font-size:13px; color:#7a4f00; }
+  .hospital-ticket-list { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .hospital-ticket-pill { background:#f0c040; color:#1a1a2e; font-weight:800; font-size:13px; padding:3px 10px; border-radius:8px; letter-spacing:0.5px; }
+  .hospital-btns { display:flex; gap:10px; justify-content:flex-end; margin-top:4px; }
+  .hospital-cancel { padding:9px 20px; border:1px solid #d0d0c8; border-radius:8px; background:none; font-size:14px; cursor:pointer; color:#555; }
+  .hospital-proceed { padding:9px 20px; background:#b7700a; color:white; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; }
+
   .tab-bar { background:white; border-bottom:2px solid #e0e0d8; padding:0 16px; display:flex; gap:0; }
   .tab-btn { padding:10px 20px; border:none; background:none; font-size:13px; font-weight:600; color:#888; cursor:pointer; border-bottom:3px solid transparent; margin-bottom:-2px; transition:all 0.15s; }
   .tab-btn.active { color:#1a1a2e; border-bottom-color:#f0c040; }
@@ -378,6 +391,27 @@
       </table>
     </div>
   </div><!-- end party-tab-content -->
+
+<!-- HOSPITAL WARNING -->
+<div class="overlay" id="hospital-overlay">
+  <div class="hospital-card">
+    <div class="hospital-header">
+      <span class="hospital-icon">🏥</span>
+      <span class="hospital-title">Check the Artwork Hospital</span>
+    </div>
+    <div class="hospital-body">
+      Before sending this batch email, double-check that none of these customers are still waiting on a kiln delay. They were previously notified of a delay — make sure their artwork is actually ready before the pickup email goes out.
+    </div>
+    <div class="hospital-tickets">
+      <strong>Delay notification was sent for:</strong>
+      <div class="hospital-ticket-list" id="hospital-ticket-list"></div>
+    </div>
+    <div class="hospital-btns">
+      <button class="hospital-cancel" onclick="closeHospitalWarning()">Cancel</button>
+      <button class="hospital-proceed" onclick="proceedAfterHospital()">Confirmed — Send Email</button>
+    </div>
+  </div>
+</div>
 
 <!-- CONFIRM -->
 <div class="overlay" id="confirm-overlay">
@@ -766,6 +800,40 @@ function updateBulkBar() {
   }
 }
 
+// ── ARTWORK HOSPITAL WARNING ───────────────
+// Called before showing the confirm overlay when a bulk email-triggering advance
+// includes tickets that previously received a kiln delay notification.
+let _hospitalProceedCallback = null
+
+function checkHospitalWarning(selected, nextStage, proceedFn) {
+  const emailStages = ['bisque_ready', 'ready_pickup']
+  if (!emailStages.includes(nextStage)) { proceedFn(); return }
+
+  const delayed = selected.filter(t => t.kiln_delay_sent_at)
+  if (!delayed.length) { proceedFn(); return }
+
+  // Show warning with pill for each delayed ticket number
+  const list = document.getElementById('hospital-ticket-list')
+  list.innerHTML = delayed.map(t =>
+    `<span class="hospital-ticket-pill">#${t.ticket_number}</span>`
+  ).join('')
+
+  _hospitalProceedCallback = proceedFn
+  document.getElementById('hospital-overlay').classList.add('show')
+}
+
+function closeHospitalWarning() {
+  document.getElementById('hospital-overlay').classList.remove('show')
+  _hospitalProceedCallback = null
+}
+
+function proceedAfterHospital() {
+  document.getElementById('hospital-overlay').classList.remove('show')
+  const cb = _hospitalProceedCallback
+  _hospitalProceedCallback = null
+  if (cb) cb()
+}
+
 function promptBulkAdvance() {
   const selected = [...selectedIds].map(id => allTickets.find(t => t.id === id)).filter(Boolean)
   const stages   = [...new Set(selected.map(t => t.stage))]
@@ -779,21 +847,40 @@ function promptBulkAdvance() {
 
   const nextLabel = allOBC ? '→ Ready for Pickup 🎉' : STAGES[stages[0]].nextLabel
   const nums = selected.map(t => t.ticket_number).join(', ')
-  pendingAdvance = { bulk: true, ids: [...selectedIds], nextStage }
-  document.getElementById('confirm-num').textContent = `${selectedIds.size} ticket${selectedIds.size > 1 ? 's' : ''}`
-  document.getElementById('confirm-sub').textContent = `#${nums}`
-  document.getElementById('confirm-stage').textContent = nextLabel
-  document.getElementById('confirm-overlay').classList.add('show')
+
+  const showConfirm = () => {
+    pendingAdvance = { bulk: true, ids: [...selectedIds], nextStage }
+    document.getElementById('confirm-num').textContent = `${selectedIds.size} ticket${selectedIds.size > 1 ? 's' : ''}`
+    document.getElementById('confirm-sub').textContent = `#${nums}`
+    document.getElementById('confirm-stage').textContent = nextLabel
+    document.getElementById('confirm-overlay').classList.add('show')
+  }
+
+  // Only warn for bulk (multi-ticket) email-triggering advances
+  if (selectedIds.size > 1 && STAGES[nextStage]?.emailTrigger) {
+    checkHospitalWarning(selected, nextStage, showConfirm)
+  } else {
+    showConfirm()
+  }
 }
 
 function promptBulkSkipToPickup() {
   const selected = [...selectedIds].map(id => allTickets.find(t => t.id === id)).filter(Boolean)
   const nums = selected.map(t => t.ticket_number).join(', ')
-  pendingAdvance = { bulk: true, ids: [...selectedIds], nextStage: 'ready_pickup' }
-  document.getElementById('confirm-num').textContent = `${selectedIds.size} ticket${selectedIds.size > 1 ? 's' : ''}`
-  document.getElementById('confirm-sub').textContent = `#${nums}`
-  document.getElementById('confirm-stage').textContent = '⏩ Skip to Ready for Pickup 🎉'
-  document.getElementById('confirm-overlay').classList.add('show')
+
+  const showConfirm = () => {
+    pendingAdvance = { bulk: true, ids: [...selectedIds], nextStage: 'ready_pickup' }
+    document.getElementById('confirm-num').textContent = `${selectedIds.size} ticket${selectedIds.size > 1 ? 's' : ''}`
+    document.getElementById('confirm-sub').textContent = `#${nums}`
+    document.getElementById('confirm-stage').textContent = '⏩ Skip to Ready for Pickup 🎉'
+    document.getElementById('confirm-overlay').classList.add('show')
+  }
+
+  if (selectedIds.size > 1) {
+    checkHospitalWarning(selected, 'ready_pickup', showConfirm)
+  } else {
+    showConfirm()
+  }
 }
 
 function promptAdvance(id, num, nextStage, nextLabel) {
