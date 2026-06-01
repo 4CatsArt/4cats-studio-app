@@ -321,24 +321,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
       <div class="view-toggle">
         <button class="view-btn active" id="btn-day" onclick="setView('day')">Day</button>
         <button class="view-btn" id="btn-table" onclick="setView('table')">Week</button>
-        <button class="view-btn" id="btn-training" onclick="setView('training')">Training</button>
         <button class="view-btn" id="btn-info" onclick="setView('info')">Info</button>
       </div>
     </div>
-  </div>
-
-  <div id="training-view" style="display:none;padding:1.5rem">
-    <div style="display:flex;gap:8px;margin-bottom:1rem;flex-wrap:wrap;align-items:center">
-      <select id="training-view-unit" onchange="loadStudioTraining()" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none;background:white">
-        <option value="">All units</option>
-      </select>
-      <select id="training-view-type" onchange="loadStudioTraining()" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none;background:white">
-        <option value="">All staff types</option>
-        <option value="regular">Regular</option>
-        <option value="camp">Camp</option>
-      </select>
-    </div>
-    <div id="studio-training-container"><div class="loading">Loading...</div></div>
   </div>
 
   <!-- INFO VIEW -->
@@ -2019,147 +2004,7 @@ function buildDaySummaryHtml(notes, tasks, studioId, date) {
 }
 
 
-// ── Studio Training View ─────────────────────────────────────
 
-
-async function toggleStudioTrainingItem(userId, itemId, isDone) {
-  if (isDone) {
-    await sb.from('staff_training_progress').delete().eq('user_id', userId).eq('item_id', itemId)
-  } else {
-    await sb.from('staff_training_progress').insert({ user_id: userId, item_id: itemId, completed_at: new Date().toISOString() })
-  }
-  loadStudioTraining()
-}
-
-async function loadStudioTraining() {
-  const container = document.getElementById('studio-training-container')
-  container.innerHTML = '<div class="loading">Loading...</div>'
-
-  const unitFilter = document.getElementById('training-view-unit')?.value
-  const typeFilter = document.getElementById('training-view-type')?.value
-
-  // Load units + items
-  const { data: units } = await sb.from('training_units').select('*').order('sort_order')
-  const { data: items } = await sb.from('training_items').select('*').order('sort_order')
-
-  // Populate unit filter
-  const unitSel = document.getElementById('training-view-unit')
-  if (unitSel && unitSel.options.length === 1) {
-    ;(units || []).forEach(u => {
-      const o = document.createElement('option'); o.value = u.id; o.textContent = u.name; unitSel.appendChild(o)
-    })
-  }
-
-  // Load active staff at this studio
-  const { data: allStaff } = await sb.from('staff_profiles')
-    .select('*').eq('is_active', true).order('display_name')
-  let staff = (allStaff || []).filter(s => s.studio_ids?.includes(currentStudioId))
-  if (typeFilter) staff = staff.filter(s => s.employment_type === typeFilter)
-
-  if (!staff.length) {
-    container.innerHTML = '<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No active staff found for this studio.</div>'
-    return
-  }
-
-  // Helper: unit applies to staff member
-  function unitAppliesTo(unit, s) {
-    if (s.training_unit_ids?.length) return s.training_unit_ids.includes(unit.id)
-    if (unit.applies_to === 'all') return true
-    if (unit.applies_to === 'manager') return s.role === 'manager' || s.role === 'admin'
-    if (unit.applies_to === 'camp') return s.employment_type === 'camp'
-    if (unit.applies_to === 'base') return s.employment_type === 'regular' || s.role === 'manager' || s.role === 'admin'
-    return true
-  }
-
-  // Load progress + due dates
-  const staffUserIds = staff.filter(s => s.user_id).map(s => s.user_id)
-  let progress = [], dueDates = []
-  if (staffUserIds.length) {
-    const [progRes, ddRes] = await Promise.all([
-      sb.from('staff_training_progress').select('*').in('user_id', staffUserIds),
-      sb.from('staff_training_due_dates').select('*').in('user_id', staffUserIds)
-    ])
-    progress = progRes.data || []
-    dueDates = ddRes.data || []
-  }
-  const progressMap = {}
-  progress.forEach(p => { progressMap[p.user_id + '_' + p.item_id] = p })
-  const dueDateMap = {}
-  dueDates.forEach(d => { dueDateMap[d.user_id + '_' + d.unit_id] = d.due_date })
-  const today = new Date().toISOString().slice(0,10)
-
-  let visibleUnits = units || []
-  if (unitFilter) visibleUnits = visibleUnits.filter(u => u.id === unitFilter)
-
-  let html = ''
-  for (const unit of visibleUnits) {
-    const unitItems = (items || []).filter(i => i.unit_id === unit.id)
-    if (!unitItems.length) continue
-
-    const staffHeaders = staff.map(s => {
-      const dueDate = s.user_id ? dueDateMap[s.user_id + '_' + unit.id] : null
-      const unitItems = (items||[]).filter(i => i.unit_id === unit.id)
-      const unitDone = s.user_id && unitItems.every(i => progressMap[s.user_id + '_' + i.id])
-      const isOverdue = dueDate && dueDate < today && !unitDone
-      const dueBadge = dueDate
-        ? `<div style="font-size:10px;color:${isOverdue ? '#c0392b' : '#aaa'};margin-top:3px;font-weight:400">${isOverdue ? '⚠ ' : ''}${dueDate}</div>`
-        : ''
-      return `<th style="padding:8px 6px;font-size:12px;font-weight:600;color:#333;text-align:center;min-width:80px;max-width:100px;word-break:break-word;line-height:1.3;border-left:0.5px solid #f0f0e8;vertical-align:top">
-        ${s.nickname || s.display_name}
-        ${dueBadge}
-      </th>`
-    }).join('')
-
-    const itemRows = unitItems.map(item => {
-      const cells = staff.map(s => {
-        if (!unitAppliesTo(unit, s)) return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px;background:#f8f8f8"><span style="color:#ddd;font-size:13px">╌</span></td>`
-        if (!s.user_id) return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px"><span style="color:#ddd">–</span></td>`
-        const done = progressMap[s.user_id + '_' + item.id]
-        return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px;background:${done ? '#f0faf0' : ''}" onclick="toggleStudioTrainingItem('${s.user_id}','${item.id}',${!!done})" style="cursor:pointer">
-          ${done ? '✅' : '⬜'}
-        </td>`
-      }).join('')
-      return `<tr style="border-bottom:0.5px solid #f5f5f0">
-        <td style="padding:8px 14px;font-size:12px">${item.title}${item.description ? `<div style="font-size:11px;color:#888;margin-top:1px">${item.description}</div>` : ''}</td>
-        ${cells}
-      </tr>`
-    }).join('')
-
-    // Per-staff completion %
-    const completionRow = `<tr style="background:#fafaf8;border-top:0.5px solid #e0e0d8">
-      <td style="padding:6px 14px;font-size:11px;color:#888;font-style:italic">Completion</td>
-      ${staff.map(s => {
-        if (!s.user_id) return '<td style="border-left:0.5px solid #f0f0e8"></td>'
-        const done = unitItems.filter(i => progressMap[s.user_id + '_' + i.id]).length
-        const pct = Math.round(done / unitItems.length * 100)
-        const dueDate = dueDateMap[s.user_id + '_' + unit.id]
-        const isOverdue = dueDate && dueDate < today && pct < 100
-        const color = pct === 100 ? '#2e7d32' : isOverdue ? '#c0392b' : pct >= 50 ? '#e65100' : '#888'
-        const bg = isOverdue ? 'background:#fff8f8;' : ''
-        return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px;font-size:11px;font-weight:600;color:${color};${bg}">${pct}%</td>`
-      }).join('')}
-    </tr>`
-
-    html += `
-      <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden;margin-bottom:1.25rem">
-        <div style="padding:12px 16px;background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
-          <strong style="font-size:13px">${unit.name}</strong>
-          <span style="font-size:11px;color:#888;margin-left:8px">${unitItems.length} items · ${staff.length} staff</span>
-        </div>
-        <div style="overflow-x:auto">
-          <table style="border-collapse:collapse;font-size:12px;width:100%">
-            <thead><tr style="border-bottom:0.5px solid #e0e0d8">
-              <th style="padding:8px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase;min-width:200px">Item</th>
-              ${staffHeaders}
-            </tr></thead>
-            <tbody>${itemRows}${completionRow}</tbody>
-          </table>
-        </div>
-      </div>`
-  }
-
-  container.innerHTML = html || '<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No training units found.</div>'
-}
 
 async function loadAnnouncements(studioId, date) {
   // Fetch all active announcements then filter client-side:
@@ -2361,27 +2206,15 @@ function shiftDate(n) { currentDate = addDays(currentDate, n); syncDatePicker();
 function pickDate(val) { currentDate = new Date(val + 'T12:00:00'); syncDatePicker(); loadCurrentView() }
 function goToday() { currentDate = new Date(); syncDatePicker(); loadCurrentView() }
 function setView(v) {
-  if (v === 'training') {
-    document.getElementById('day-view').style.display = 'none'
-    document.getElementById('table-view')?.style && (document.getElementById('table-view').style.display = 'none')
-    document.getElementById('training-view').style.display = 'block'
-    document.getElementById('info-view').style.display = 'none'
-    document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'))
-    document.getElementById('btn-training').classList.add('active')
-    loadStudioTraining()
-    return
-  }
   if (v === 'info') {
     document.getElementById('day-view').style.display = 'none'
     document.getElementById('table-view')?.style && (document.getElementById('table-view').style.display = 'none')
-    document.getElementById('training-view').style.display = 'none'
     document.getElementById('info-view').style.display = 'block'
     document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'))
     document.getElementById('btn-info').classList.add('active')
     loadInfoView()
     return
   }
-  document.getElementById('training-view').style.display = 'none'
   document.getElementById('info-view').style.display = 'none'
   // Original setView continues below
 
