@@ -1502,11 +1502,12 @@ function quickToggle(uid) {
 function renderBadgesTab() {
   var el = document.getElementById('badges-content')
   if (!el) return
-  var today = dateStr(currentDate)
-  var html = '<div style="margin-bottom:12px;font-size:13px;color:#888">Showing all registered kids. Grey = not yet checked in.</div>'
+  var html = ''
+  // Top save all button
+  html += '<button id="save-all-badges-btn" onclick="saveAllBadges()" style="width:100%;padding:14px;background:#1a1a1a;color:white;border:none;border-radius:12px;font-size:16px;font-weight:500;cursor:pointer;margin-bottom:14px">Save All Badges</button>'
+  html += '<div style="margin-bottom:12px;font-size:13px;color:#888">Grey rows = not yet checked in.</div>'
   html += '<table class="badge-table">'
-  html += '<thead><tr><th>Child</th><th>Session</th><th>Badge</th><th></th></tr></thead><tbody>'
-
+  html += '<thead><tr><th>Child</th><th>Session</th><th>Badge</th></tr></thead><tbody>'
   var list = allChildren.slice().sort(function(a,b){ return a.name.localeCompare(b.name) })
   html += list.map(function(c) {
     var uid = c._uid
@@ -1523,15 +1524,69 @@ function renderBadgesTab() {
       opts += '<option value="' + b + '"' + sel + '>' + label + '</option>'
     })
     return '<tr class="' + (c.attendanceChecked ? '' : 'not-checked-in') + '">' +
-      '<td>'+'<input class="field-input-text" style="font-size:13px;padding:4px 8px" type="text" value="' + (c.name || '') + '" placeholder="Enter name..." onchange="updateName(&quot;' + uid + '&quot;,this.value)">'+(c.table ? '<div style="font-size:12px;color:#888">Table ' + c.table + '</div>' : '') +'</td>' +
+      '<td><div style="font-weight:500;font-size:14px">' + (c.name || '') + '</div>' + (c.table ? '<div style="font-size:12px;color:#888">Table ' + c.table + '</div>' : '') + '</td>' +
       '<td>' + groupTag + '</td>' +
       '<td><select class="badge-select-sm" id="bdg-' + uid + '" onchange="updateBadge(&quot;' + uid + '&quot;,this.value)">' + opts + '</select></td>' +
-      '<td><button class="badge-save-btn" id="bsave-' + uid + '" onclick="saveBadge(&quot;' + uid + '&quot;)">Save</button></td>' +
     '</tr>'
   }).join('')
-
   html += '</tbody></table>'
   el.innerHTML = html
+}
+
+function saveAllBadges() {
+  var btn = document.getElementById('save-all-badges-btn')
+  if (btn) { btn.textContent = 'Saving...'; btn.disabled = true }
+  var today = dateStr(currentDate)
+  var promises = []
+
+  allChildren.forEach(function(c) {
+    if (!c.badge || !c.name) return
+    var badgeKey = c.orderName + '|' + c.name.toLowerCase().trim()
+    var bHist = badgeHistory[badgeKey] || []
+    var todayEntry = null
+    bHist.forEach(function(bh) { if (bh.date === today) todayEntry = bh })
+
+    var p
+    if (todayEntry && todayEntry.badge !== c.badge) {
+      p = sbPatch('camp_daily_badges?order_name=eq.' + encodeURIComponent(c.orderName) + '&camper_name=eq.' + encodeURIComponent(c.name) + '&session_date=eq.' + today, { badge_name: c.badge })
+    } else if (!todayEntry) {
+      p = sbPost('camp_daily_badges', { session_date: today, studio_id: currentStudioId, camper_name: c.name, order_name: c.orderName, badge_name: c.badge })
+    } else {
+      return // already saved, skip
+    }
+
+    if (!badgeHistory[badgeKey]) badgeHistory[badgeKey] = []
+    var idx = -1
+    badgeHistory[badgeKey].forEach(function(bh, i) { if (bh.date === today) idx = i })
+    if (idx >= 0) badgeHistory[badgeKey][idx].badge = c.badge
+    else badgeHistory[badgeKey].push({ badge: c.badge, date: today })
+    if (c.awardedBadges.indexOf(c.badge) < 0) c.awardedBadges.push(c.badge)
+
+    promises.push(p)
+  })
+
+  if (!promises.length) {
+    if (btn) { btn.textContent = 'Save All Badges'; btn.disabled = false }
+    showToast('No new badges to save')
+    return
+  }
+
+  Promise.all(promises).then(function() {
+    if (btn) {
+      btn.textContent = 'All Saved! ✓'
+      btn.style.background = '#3B6D11'
+      setTimeout(function() {
+        btn.textContent = 'Save All Badges'
+        btn.style.background = '#1a1a1a'
+        btn.disabled = false
+      }, 2500)
+    }
+    showToast('All badges saved!')
+    updateCeremonyWarnings()
+  }).catch(function() {
+    if (btn) { btn.textContent = 'Save All Badges'; btn.disabled = false }
+    showToast('Error saving - try again')
+  })
 }
 
 function saveBadge(uid) {
