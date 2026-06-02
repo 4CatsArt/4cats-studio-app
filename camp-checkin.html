@@ -320,6 +320,7 @@ canvas{border-radius:50%;display:block}
         <div class="mode-switcher">
           <button class="mode-btn active" id="mode-wheel-am" onclick="setMode('am','wheel')">🎡 Wheel</button>
           <button class="mode-btn" id="mode-bubble-am" onclick="setMode('am','bubble')">🫧 Bubbles</button>
+          <button class="mode-btn" id="mode-lightning-am" onclick="setMode('am','lightning')">⚡ Lightning</button>
         </div>
         <div id="picker-am">
           <div class="wheel-wrap" id="wheel-section-am">
@@ -328,6 +329,9 @@ canvas{border-radius:50%;display:block}
           </div>
           <div class="bubble-wrap" id="bubble-section-am" style="display:none">
             <canvas class="bubble-canvas" id="bubble-canvas-am" width="460" height="460"></canvas>
+          </div>
+          <div class="bubble-wrap" id="lightning-section-am" style="display:none">
+            <canvas class="bubble-canvas" id="lightning-canvas-am" width="460" height="460"></canvas>
           </div>
           <button class="spin-btn" id="spin-am" onclick="activatePicker('am')">Spin the Wheel!</button>
         </div>
@@ -347,6 +351,7 @@ canvas{border-radius:50%;display:block}
         <div class="mode-switcher">
           <button class="mode-btn active" id="mode-wheel-pm" onclick="setMode('pm','wheel')">🎡 Wheel</button>
           <button class="mode-btn" id="mode-bubble-pm" onclick="setMode('pm','bubble')">🫧 Bubbles</button>
+          <button class="mode-btn" id="mode-lightning-pm" onclick="setMode('pm','lightning')">⚡ Lightning</button>
         </div>
         <div id="picker-pm">
           <div class="wheel-wrap" id="wheel-section-pm">
@@ -355,6 +360,9 @@ canvas{border-radius:50%;display:block}
           </div>
           <div class="bubble-wrap" id="bubble-section-pm" style="display:none">
             <canvas class="bubble-canvas" id="bubble-canvas-pm" width="460" height="460"></canvas>
+          </div>
+          <div class="bubble-wrap" id="lightning-section-pm" style="display:none">
+            <canvas class="bubble-canvas" id="lightning-canvas-pm" width="460" height="460"></canvas>
           </div>
           <button class="spin-btn" id="spin-pm" onclick="activatePicker('pm')">Spin the Wheel!</button>
         </div>
@@ -1265,6 +1273,7 @@ function switchTab(tab, btn) {
     updateCeremonyWarnings()
     var g = tab === 'ceremony-am' ? 'am' : 'pm'
     if (ceremonyMode[g] === 'bubble' && !bubbleAnimId[g]) initBubbles(g)
+    if (ceremonyMode[g] === 'lightning' && !lightningAnimId[g]) initLightning(g)
   }
 }
 
@@ -1830,6 +1839,8 @@ function renderWheels() {
   updateCeremonyWarnings()
   if (ceremonyMode.am === 'bubble' && !bubbleAnimId.am) initBubbles('am')
   if (ceremonyMode.pm === 'bubble' && !bubbleAnimId.pm) initBubbles('pm')
+  if (ceremonyMode.am === 'lightning' && !lightningAnimId.am) initLightning('am')
+  if (ceremonyMode.pm === 'lightning' && !lightningAnimId.pm) initLightning('pm')
 }
 
 function renderCeremonyRosters() {
@@ -1977,6 +1988,333 @@ function closeFinale() {
   document.getElementById('finale-overlay').className = 'finale-overlay'
 }
 
+// lightning state
+var lightningAnimId = { am: null, pm: null }
+var lightningState = { am: null, pm: null }
+
+function initLightning(group) {
+  var canvas = document.getElementById('lightning-canvas-' + group)
+  if (!canvas) return
+  var W = canvas.offsetWidth || 700
+  var H = canvas.offsetHeight || 700
+  canvas.width = W * 2
+  canvas.height = H * 2
+  canvas.style.width = W + 'px'
+  canvas.style.height = H + 'px'
+  W = W * 2; H = H * 2
+
+  var kids = wheelKids(group)
+  var done = ceremonyDone[group]
+  var available = kids.filter(function(k) { return done.indexOf(k._uid) < 0 })
+  if (!available.length) return
+
+  // Lay out clouds in a grid
+  var cols = Math.ceil(Math.sqrt(available.length))
+  var rows = Math.ceil(available.length / cols)
+  var padX = W * 0.06, padY = H * 0.08
+  var cellW = (W - padX * 2) / cols
+  var cellH = (H - padY * 2) / rows
+  var cloudW = cellW * 0.82
+  var cloudH = cellH * 0.58
+
+  var clouds = available.map(function(k, i) {
+    var col = i % cols
+    var row = Math.floor(i / cols)
+    var cx = padX + col * cellW + cellW / 2
+    var cy = padY + row * cellH + cellH / 2
+    return {
+      uid: k._uid,
+      name: k.name,
+      cx: cx, cy: cy,
+      w: cloudW, h: cloudH,
+      done: done.indexOf(k._uid) >= 0,
+      flash: 0,        // 0-1 flash intensity
+      rumble: 0,       // shake offset
+      revealed: false, // name shown
+      revealAlpha: 0
+    }
+  })
+
+  lightningState[group] = { clouds: clouds, W: W, H: H, strikingUid: null, bgFlash: 0 }
+
+  // tap/click handler
+  canvas.ontouchstart = function(e) {
+    e.preventDefault()
+    var rect = canvas.getBoundingClientRect()
+    var scaleX = canvas.width / rect.width
+    var scaleY = canvas.height / rect.height
+    var touch = e.touches[0]
+    checkCloudTap(group, (touch.clientX - rect.left) * scaleX, (touch.clientY - rect.top) * scaleY)
+  }
+  canvas.onclick = function(e) {
+    var rect = canvas.getBoundingClientRect()
+    checkCloudTap(group, (e.clientX - rect.left) * canvas.width / rect.width, (e.clientY - rect.top) * canvas.height / rect.height)
+  }
+
+  if (lightningAnimId[group]) cancelAnimationFrame(lightningAnimId[group])
+  // Ambient rumble loop
+  ambientRumble(group)
+  animateLightning(group)
+}
+
+function ambientRumble(group) {
+  var state = lightningState[group]
+  if (!state || ceremonyMode[group] !== 'lightning') return
+  // Random cloud gets a little flash
+  var available = state.clouds.filter(function(c) { return !c.done && !c.revealed })
+  if (available.length) {
+    var target = available[Math.floor(Math.random() * available.length)]
+    target.flash = 0.3 + Math.random() * 0.4
+    target.rumble = (Math.random() - 0.5) * 8
+  }
+  setTimeout(function() { ambientRumble(group) }, 600 + Math.random() * 1400)
+}
+
+function animateLightning(group) {
+  var state = lightningState[group]
+  if (!state || ceremonyMode[group] !== 'lightning') return
+  var canvas = document.getElementById('lightning-canvas-' + group)
+  if (!canvas) return
+  var ctx = canvas.getContext('2d')
+  var W = state.W, H = state.H
+
+  // Stormy background
+  ctx.fillStyle = 'rgb(' + Math.floor(15 + state.bgFlash * 60) + ',' + Math.floor(15 + state.bgFlash * 60) + ',' + Math.floor(30 + state.bgFlash * 80) + ')'
+  ctx.fillRect(0, 0, W, H)
+
+  // Fade background flash
+  state.bgFlash = Math.max(0, state.bgFlash - 0.04)
+
+  // Draw rain streaks
+  ctx.strokeStyle = 'rgba(150,180,255,0.15)'
+  ctx.lineWidth = 1
+  for (var r = 0; r < 40; r++) {
+    var rx = ((r * 173 + Date.now() * 0.05) % W)
+    var ry = ((r * 97 + Date.now() * 0.12) % H)
+    ctx.beginPath(); ctx.moveTo(rx, ry); ctx.lineTo(rx - 4, ry + 18); ctx.stroke()
+  }
+
+  // Draw each cloud
+  state.clouds.forEach(function(cloud) {
+    if (cloud.flash > 0) { cloud.flash = Math.max(0, cloud.flash - 0.035) }
+    if (cloud.rumble !== 0) { cloud.rumble *= 0.85 }
+
+    var ox = cloud.rumble, oy = 0
+    var alpha = cloud.done ? 0.25 : 1
+    ctx.save()
+    ctx.globalAlpha = alpha
+    ctx.translate(cloud.cx + ox, cloud.cy + oy)
+    drawCloud(ctx, 0, 0, cloud.w, cloud.h, cloud.flash, cloud.revealed)
+
+    // Show ? or revealed name
+    if (!cloud.revealed && !cloud.done) {
+      ctx.fillStyle = 'rgba(180,200,255,' + (0.5 + cloud.flash * 0.5) + ')'
+      var fs = Math.max(20, Math.floor(cloud.h * 0.45))
+      ctx.font = '700 ' + fs + 'px -apple-system, sans-serif'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText('?', 0, 0)
+    }
+
+    if (cloud.revealed) {
+      cloud.revealAlpha = Math.min(1, cloud.revealAlpha + 0.06)
+      ctx.globalAlpha = cloud.revealAlpha * alpha
+      ctx.fillStyle = '#FFE500'
+      var fs2 = Math.max(16, Math.min(32, Math.floor(cloud.w * 0.18)))
+      ctx.font = '700 ' + fs2 + 'px -apple-system, sans-serif'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      // Wrap name if needed
+      var firstName = cloud.name.split(' ')[0]
+      ctx.fillText(firstName, 0, 0)
+    }
+
+    ctx.restore()
+  })
+
+  lightningAnimId[group] = requestAnimationFrame(function() { animateLightning(group) })
+}
+
+function drawCloud(ctx, x, y, w, h, flash, revealed) {
+  var color1 = revealed ? '#4A3800' : (flash > 0.3 ? 'rgb(' + Math.floor(180 + flash*60) + ',' + Math.floor(180 + flash*60) + ',255)' : '#3a3a5c')
+  var color2 = revealed ? '#FFE500' : (flash > 0.3 ? 'rgba(255,255,255,0.95)' : '#4a4a70')
+
+  ctx.save()
+  ctx.translate(x, y)
+
+  // Cloud shape using overlapping circles
+  var grad = ctx.createRadialGradient(0, -h*0.1, h*0.1, 0, 0, h*0.8)
+  grad.addColorStop(0, color2)
+  grad.addColorStop(1, color1)
+
+  ctx.beginPath()
+  // Main body
+  ctx.ellipse(0, h*0.1, w*0.42, h*0.38, 0, 0, 2*Math.PI)
+  ctx.fillStyle = grad
+  ctx.fill()
+  // Left bump
+  ctx.beginPath()
+  ctx.ellipse(-w*0.22, -h*0.05, w*0.26, h*0.30, 0, 0, 2*Math.PI)
+  ctx.fill()
+  // Right bump
+  ctx.beginPath()
+  ctx.ellipse(w*0.22, -h*0.05, w*0.26, h*0.30, 0, 0, 2*Math.PI)
+  ctx.fill()
+  // Top bump
+  ctx.beginPath()
+  ctx.ellipse(0, -h*0.22, w*0.22, h*0.28, 0, 0, 2*Math.PI)
+  ctx.fill()
+
+  // Glow when flashing
+  if (flash > 0.2) {
+    ctx.shadowColor = 'rgba(200,220,255,' + flash + ')'
+    ctx.shadowBlur = 30 * flash
+    ctx.beginPath()
+    ctx.ellipse(0, 0, w*0.42, h*0.38, 0, 0, 2*Math.PI)
+    ctx.fillStyle = 'rgba(255,255,255,' + flash*0.4 + ')'
+    ctx.fill()
+    ctx.shadowBlur = 0
+  }
+  ctx.restore()
+}
+
+function drawLightningBolt(ctx, x1, y1, x2, y2, branches, alpha) {
+  ctx.save()
+  ctx.globalAlpha = alpha
+  ctx.strokeStyle = '#FFFFFF'
+  ctx.lineWidth = 3
+  ctx.shadowColor = '#8888FF'
+  ctx.shadowBlur = 12
+
+  function bolt(ax, ay, bx, by, depth) {
+    if (depth <= 0) {
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke()
+      return
+    }
+    var mx = (ax + bx) / 2 + (Math.random() - 0.5) * (bx - ax) * 0.5
+    var my = (ay + by) / 2 + (Math.random() - 0.5) * (by - ay) * 0.5
+    bolt(ax, ay, mx, my, depth - 1)
+    bolt(mx, my, bx, by, depth - 1)
+    if (branches && depth === 2 && Math.random() > 0.5) {
+      var bx2 = mx + (Math.random() - 0.5) * 60
+      var by2 = my + Math.random() * 40
+      ctx.lineWidth = 1.5
+      bolt(mx, my, bx2, by2, depth - 2)
+      ctx.lineWidth = 3
+    }
+  }
+  bolt(x1, y1, x2, y2, 4)
+  ctx.restore()
+}
+
+function strikeLightning(group) {
+  var state = lightningState[group]
+  if (!state) return
+  var done = ceremonyDone[group]
+  var available = state.clouds.filter(function(c) { return !c.done && !c.revealed })
+  if (!available.length) return
+
+  // Pick random available cloud
+  var target = available[Math.floor(Math.random() * available.length)]
+  strikeCloud(group, target.uid)
+}
+
+function checkCloudTap(group, x, y) {
+  var state = lightningState[group]
+  if (!state) return
+  var tapped = null
+  state.clouds.forEach(function(c) {
+    if (c.done || c.revealed) return
+    var dx = x - c.cx, dy = y - c.cy
+    if (Math.abs(dx) < c.w * 0.55 && Math.abs(dy) < c.h * 0.6) tapped = c
+  })
+  if (tapped) strikeCloud(group, tapped.uid)
+}
+
+function strikeCloud(group, uid) {
+  var state = lightningState[group]
+  if (!state || state.strikingUid) return
+  state.strikingUid = uid
+
+  var cloud = null
+  state.clouds.forEach(function(c) { if (c.uid === uid) cloud = c })
+  if (!cloud) return
+
+  // Play thunder
+  playThunder()
+
+  // Flash effect - rapid sequence
+  var flashes = [1, 0.3, 0.9, 0.2, 1]
+  var delay = 0
+  flashes.forEach(function(f, i) {
+    setTimeout(function() {
+      if (cloud) { cloud.flash = f; state.bgFlash = f * 0.6 }
+      // Draw lightning bolt on canvas
+      var canvas = document.getElementById('lightning-canvas-' + group)
+      if (canvas) {
+        var ctx = canvas.getContext('2d')
+        var boltX = cloud.cx + (Math.random() - 0.5) * cloud.w * 0.3
+        drawLightningBolt(ctx, cloud.cx, 0, boltX, cloud.cy - cloud.h * 0.3, true, f)
+      }
+    }, delay)
+    delay += 80 + i * 40
+  })
+
+  // After strikes - reveal name
+  setTimeout(function() {
+    cloud.revealed = true
+    cloud.flash = 0.8
+    state.strikingUid = null
+    // Find winner
+    var winner = null
+    allChildren.forEach(function(c) { if (c._uid === uid) winner = c })
+    if (winner) {
+      if (ceremonyDone[group].indexOf(uid) < 0) ceremonyDone[group].push(uid)
+      cloud.done = false // keep visible but revealed
+      renderCeremonyRosters()
+      var remaining = wheelKids(group).filter(function(k) { return ceremonyDone[group].indexOf(k._uid) < 0 })
+      setTimeout(function() {
+        showReveal(group, winner)
+        revealIsLast = remaining.length === 0
+        revealLastGroup = group
+      }, 600)
+    }
+  }, delay + 200)
+}
+
+function playThunder() {
+  try {
+    var actx = new (window.AudioContext || window.webkitAudioContext)()
+    var duration = 2.5
+    var bufferSize = actx.sampleRate * duration
+    var buffer = actx.createBuffer(1, bufferSize, actx.sampleRate)
+    var data = buffer.getChannelData(0)
+    for (var i = 0; i < bufferSize; i++) {
+      var t = i / actx.sampleRate
+      var crack = t < 0.05 ? Math.random() * (1 - t/0.05) : 0
+      var rumble = Math.random() * Math.exp(-t * 1.8) * 0.6
+      data[i] = (crack + rumble) * (Math.random() * 2 - 1)
+    }
+    var source = actx.createBufferSource()
+    source.buffer = buffer
+    var filter = actx.createBiquadFilter()
+    filter.type = 'lowpass'
+    filter.frequency.value = 400
+    var gain = actx.createGain()
+    gain.gain.value = 1.2
+    source.connect(filter)
+    filter.connect(gain)
+    gain.connect(actx.destination)
+    source.start()
+  } catch(e) {}
+}
+
+function resetCeremonyLightning(group) {
+  if (lightningAnimId[group]) { cancelAnimationFrame(lightningAnimId[group]); lightningAnimId[group] = null }
+  lightningState[group] = null
+  if (ceremonyMode[group] === 'lightning') initLightning(group)
+}
+
 // ceremony mode state
 var ceremonyMode = { am: 'wheel', pm: 'wheel' }
 var bubbleState = { am: null, pm: null }  // holds bubble animation state per group
@@ -1987,18 +2325,26 @@ function setMode(group, mode) {
   // update buttons
   document.getElementById('mode-wheel-' + group).className = 'mode-btn' + (mode === 'wheel' ? ' active' : '')
   document.getElementById('mode-bubble-' + group).className = 'mode-btn' + (mode === 'bubble' ? ' active' : '')
+  var lbtn = document.getElementById('mode-lightning-' + group)
+  if (lbtn) lbtn.className = 'mode-btn' + (mode === 'lightning' ? ' active' : '')
   // show/hide sections
   document.getElementById('wheel-section-' + group).style.display = mode === 'wheel' ? 'block' : 'none'
   document.getElementById('bubble-section-' + group).style.display = mode === 'bubble' ? 'block' : 'none'
+  var ls = document.getElementById('lightning-section-' + group)
+  if (ls) ls.style.display = mode === 'lightning' ? 'block' : 'none'
   // update spin button label
   var btn = document.getElementById('spin-' + group)
-  if (btn) btn.textContent = mode === 'wheel' ? 'Spin the Wheel!' : 'Release the Bubbles!'
+  if (btn) btn.textContent = mode === 'wheel' ? 'Spin the Wheel!' : mode === 'bubble' ? 'Release the Bubbles!' : 'Call the Storm!'
+  // stop bubble anim if switching away
+  if (mode !== 'bubble' && bubbleAnimId[group]) { cancelAnimationFrame(bubbleAnimId[group]); bubbleAnimId[group] = null }
+  if (mode !== 'lightning' && lightningAnimId[group]) { cancelAnimationFrame(lightningAnimId[group]); lightningAnimId[group] = null }
   if (mode === 'bubble') initBubbles(group)
-  else if (bubbleAnimId[group]) { cancelAnimationFrame(bubbleAnimId[group]); bubbleAnimId[group] = null }
+  if (mode === 'lightning') initLightning(group)
 }
 
 function activatePicker(group) {
   if (ceremonyMode[group] === 'bubble') popBubble(group)
+  else if (ceremonyMode[group] === 'lightning') strikeLightning(group)
   else spin(group)
 }
 
@@ -2490,6 +2836,7 @@ function resetCeremony(group) {
   renderCeremonyRosters()
   drawWheel(group, -1, 0)
   resetCeremonyBubbles(group)
+  resetCeremonyLightning(group)
 }
 
 // -- HELPERS -
