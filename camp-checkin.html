@@ -1574,8 +1574,46 @@ function saveAllBadges() {
   var btn = document.getElementById('save-all-badges-btn')
   if (btn) { btn.textContent = 'Saving...'; btn.disabled = true }
   var today = dateStr(currentDate)
-  var promises = []
+  var badgedKids = allChildren.filter(function(c) { return c.badge && c.name })
+  if (!badgedKids.length) {
+    showToast('No badges assigned yet!')
+    if (btn) { btn.textContent = 'Save All Badges'; btn.disabled = false }
+    return
+  }
 
+  // Save one at a time sequentially so we can catch errors
+  var promises = []
+  badgedKids.forEach(function(c) {
+    var body = { session_date: today, studio_id: currentStudioId, camper_name: c.name, order_name: c.orderName, badge_name: c.badge }
+    var p = fetch(SUPABASE_URL + '/rest/v1/camp_daily_badges?on_conflict=order_name,camper_name,session_date', {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': 'Bearer ' + (accessToken || SUPABASE_KEY),
+        'Content-Type': 'application/json',
+        'Prefer': 'resolution=merge-duplicates,return=minimal'
+      },
+      body: JSON.stringify(body)
+    }).then(function(r) {
+      if (!r.ok) {
+        return r.text().then(function(txt) {
+          showToast('Error ' + r.status + ': ' + txt.substring(0, 80))
+          return null
+        })
+      }
+      var badgeKey = c.orderName + '|' + c.name.toLowerCase().trim()
+      if (!badgeHistory[badgeKey]) badgeHistory[badgeKey] = []
+      var idx = -1
+      badgeHistory[badgeKey].forEach(function(bh, i) { if (bh.date === today) idx = i })
+      if (idx >= 0) badgeHistory[badgeKey][idx].badge = c.badge
+      else badgeHistory[badgeKey].push({ badge: c.badge, date: today })
+      if (c.awardedBadges.indexOf(c.badge) < 0) c.awardedBadges.push(c.badge)
+      return true
+    })
+    promises.push(p)
+  })
+
+  // dummy forEach to satisfy original structure
   allChildren.forEach(function(c) {
     if (!c.badge || !c.name) return
     var badgeKey = c.orderName + '|' + c.name.toLowerCase().trim()
@@ -1584,22 +1622,6 @@ function saveAllBadges() {
     bHist.forEach(function(bh) { if (bh.date === today) todayEntry = bh })
 
     // Use upsert - always write, let Supabase handle insert vs update
-    var p = sbUpsert('camp_daily_badges', {
-      session_date: today,
-      studio_id: currentStudioId,
-      camper_name: c.name,
-      order_name: c.orderName,
-      badge_name: c.badge
-    }, 'order_name,camper_name,session_date')
-
-    if (!badgeHistory[badgeKey]) badgeHistory[badgeKey] = []
-    var idx = -1
-    badgeHistory[badgeKey].forEach(function(bh, i) { if (bh.date === today) idx = i })
-    if (idx >= 0) badgeHistory[badgeKey][idx].badge = c.badge
-    else badgeHistory[badgeKey].push({ badge: c.badge, date: today })
-    if (c.awardedBadges.indexOf(c.badge) < 0) c.awardedBadges.push(c.badge)
-
-    promises.push(p)
   })
 
   if (!promises.length) {
