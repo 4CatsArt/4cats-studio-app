@@ -236,10 +236,9 @@ canvas{border-radius:50%;display:block}
 <script>
 const SUPABASE_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co'
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA'
-const { createClient } = supabase
-const sb = createClient(SUPABASE_URL, SUPABASE_KEY)
+var sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY)
 
-const BADGES = [
+var BADGES = [
   'Artist Eyes','Ball of Energy','Best Friend Tip','Brave','Caring',
   'Colour Master','Concentration','Curiosity','Drawing Champ','Etiquette',
   'Friendship','Happiness','Helping Hand','Historian','Imagination',
@@ -247,60 +246,96 @@ const BADGES = [
   'Patience','Purr-fect','Safety','Squeaky Clean','Storyteller',
   'Superstar','The Thinker','Zen'
 ]
+var WHEEL_FILLS   = ['#EEEDFE','#E1F5EE','#FAECE7','#E6F1FB','#EAF3DE','#FAEEDA','#FBEAF0','#EDF8FF','#FEF3C7','#FCE7F3']
+var WHEEL_STROKES = ['#7F77DD','#1D9E75','#D85A30','#378ADD','#639922','#BA7517','#D4537E','#185FA5','#D97706','#DB2777']
 
-const WHEEL_FILLS = ['#EEEDFE','#E1F5EE','#FAECE7','#E6F1FB','#EAF3DE','#FAEEDA','#FBEAF0','#EDF8FF','#FEF3C7','#FCE7F3']
-const WHEEL_STROKES = ['#7F77DD','#1D9E75','#D85A30','#378ADD','#639922','#BA7517','#D4537E','#185FA5','#D97706','#DB2777']
+var currentUser = null
+var currentStudioId = null
+var currentDate = new Date()
+var curriculumData = []
+var allChildren = []
+var badgeHistory = {}
+var spinAngles = { am: 0, pm: 0 }
+var spinning = { am: false, pm: false }
+var ceremonyDone = { am: [], pm: [] }
+var sortKey = 'name', sortDir = 1
+var loginBusy = false
 
-let currentUser = null
-let currentStudioId = null
-let currentDate = new Date()
-let curriculumData = []
-let allChildren = []      // [{name, orderName, sessionId, sessionTitle, sessionGroup, dob, age, walkHome, medical, aftercare, earlyArrival, phone, emergency, tallyId, attendanceChecked, table, badge, awardedBadges}]
-let badgeHistory = {}     // keyed by orderName|camperName -> array of badge names
-let spinAngles = { am: 0, pm: 0 }
-let spinning = { am: false, pm: false }
-let ceremonyDone = { am: [], pm: [] }
-let sortKey = 'name', sortDir = 1
+// safe helper to replace ?.
+function g(obj, key) { return obj && obj[key] !== undefined ? obj[key] : null }
 
 // ── AUTH ──────────────────────────────────────────────────────────
-async function doLogin() {
-  const email = document.getElementById('login-email').value.trim()
-  const pass  = document.getElementById('login-password').value
-  const errEl = document.getElementById('login-error')
+function doLogin() {
+  if (loginBusy) return
+  var email = document.getElementById('login-email').value.trim()
+  var pass  = document.getElementById('login-password').value
+  var errEl = document.getElementById('login-error')
+  var btn   = document.querySelector('.login-card button')
   errEl.style.display = 'none'
-  const { data, error } = await sb.auth.signInWithPassword({ email, password: pass })
-  if (error) { errEl.textContent = error.message; errEl.style.display = 'block'; return }
-  currentUser = data.user
-  await initApp()
+  if (!email || !pass) { errEl.textContent = 'Please enter email and password.'; errEl.style.display = 'block'; return }
+  loginBusy = true
+  btn.textContent = 'Signing in…'
+  sb.auth.signInWithPassword({ email: email, password: pass }).then(function(result) {
+    loginBusy = false
+    btn.textContent = 'Sign In'
+    if (result.error) { errEl.textContent = result.error.message; errEl.style.display = 'block'; return }
+    currentUser = result.data.user
+    initApp()
+  }).catch(function(e) {
+    loginBusy = false
+    btn.textContent = 'Sign In'
+    errEl.textContent = 'Login failed. Please try again.'
+    errEl.style.display = 'block'
+  })
 }
 
-async function doSignOut() {
-  await sb.auth.signOut()
-  document.getElementById('login-screen').style.display = 'flex'
-  document.getElementById('app-screen').style.display = 'none'
-  currentUser = null; currentStudioId = null; allChildren = []
-}
-
-sb.auth.onAuthStateChange(async (event, session) => {
-  if (session?.user && !currentUser) { currentUser = session.user; await initApp() }
+// allow Enter key to submit
+document.addEventListener('DOMContentLoaded', function() {
+  document.getElementById('login-password').addEventListener('keydown', function(e) {
+    if (e.keyCode === 13) doLogin()
+  })
+  document.getElementById('login-email').addEventListener('keydown', function(e) {
+    if (e.keyCode === 13) doLogin()
+  })
+  // Check for existing session on load
+  sb.auth.getSession().then(function(result) {
+    var session = result.data && result.data.session
+    if (session && session.user && !currentUser) {
+      currentUser = session.user
+      initApp()
+    }
+  })
 })
 
-async function initApp() {
-  const { data: mapping } = await sb.from('studio_users').select('studio_id').eq('user_id', currentUser.id).single()
-  if (!mapping) { alert('No studio linked. Contact home office.'); return }
-  const { data: studio } = await sb.from('studios').select('name, city, province').eq('id', mapping.studio_id).single()
-  currentStudioId = mapping.studio_id
-  document.getElementById('studio-label').textContent = (studio?.name || '') + (studio?.city ? ' · ' + studio.city : '')
-  document.getElementById('login-screen').style.display = 'none'
-  document.getElementById('app-screen').style.display = 'block'
-  await loadCurriculumData()
-  syncDatePicker()
-  await loadDay()
+function doSignOut() {
+  sb.auth.signOut().then(function() {
+    document.getElementById('login-screen').style.display = 'flex'
+    document.getElementById('app-screen').style.display = 'none'
+    currentUser = null; currentStudioId = null; allChildren = []
+  })
+}
+
+function initApp() {
+  sb.from('studio_users').select('studio_id').eq('user_id', currentUser.id).single().then(function(r1) {
+    if (!r1.data) { alert('No studio linked. Contact home office.'); return }
+    currentStudioId = r1.data.studio_id
+    sb.from('studios').select('name, city, province').eq('id', currentStudioId).single().then(function(r2) {
+      var studio = r2.data || {}
+      var label = (studio.name || '') + (studio.city ? ' \u00b7 ' + studio.city : '')
+      document.getElementById('studio-label').textContent = label
+      document.getElementById('login-screen').style.display = 'none'
+      document.getElementById('app-screen').style.display = 'block'
+      loadCurriculumData().then(function() {
+        syncDatePicker()
+        loadDay()
+      })
+    })
+  })
 }
 
 // ── DATE NAV ─────────────────────────────────────────────────────
 function dateStr(d) { return d.toLocaleDateString('en-CA') }
-function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); return r }
+function addDays(d, n) { var r = new Date(d); r.setDate(r.getDate() + n); return r }
 function shiftDate(n) { currentDate = addDays(currentDate, n); syncDatePicker(); loadDay() }
 function pickDate(v) { currentDate = new Date(v + 'T12:00:00'); syncDatePicker(); loadDay() }
 function goToday() { currentDate = new Date(); syncDatePicker(); loadDay() }
@@ -308,196 +343,203 @@ function syncDatePicker() { document.getElementById('date-picker').value = dateS
 
 // ── SESSION GROUP ─────────────────────────────────────────────────
 function sessionGroup(title) {
-  const t = (title || '').toLowerCase()
-  if (t.includes('half day morning') || t.includes('half-day morning')) return 'am'
-  if (t.includes('half day afternoon') || t.includes('half-day afternoon')) return 'pm'
-  if (t.includes('full day') || t.includes('full-day')) return 'fd'  // fd goes to PM ceremony
+  var t = (title || '').toLowerCase()
+  if (t.indexOf('half day morning') >= 0 || t.indexOf('half-day morning') >= 0) return 'am'
+  if (t.indexOf('half day afternoon') >= 0 || t.indexOf('half-day afternoon') >= 0) return 'pm'
   return 'fd'
 }
-function ceremonyFor(group) { return group === 'am' ? 'am' : 'pm' }
 
 // ── CURRICULUM ────────────────────────────────────────────────────
-async function loadCurriculumData() {
-  const { data } = await sb.from('curriculum_weeks').select('*')
-  curriculumData = data || []
+function loadCurriculumData() {
+  return sb.from('curriculum_weeks').select('*').then(function(r) {
+    curriculumData = r.data || []
+  })
 }
 
 function getCurriculumLinks(sessionTitle, sessionDate) {
-  const titleLower = (sessionTitle || '').toLowerCase()
-  const fixed = curriculumData.find(r =>
-    r.session_type_key && !r.week_start &&
-    titleLower.includes(r.session_type_key.toLowerCase())
-  )
-  if (fixed && (fixed.website_url || fixed.curriculum_url)) return fixed
-  const weekly = curriculumData.find(r =>
-    r.week_start && r.week_end &&
-    sessionDate >= r.week_start && sessionDate <= r.week_end
-  )
-  return weekly || null
+  var titleLower = (sessionTitle || '').toLowerCase()
+  var fixed = null
+  for (var i = 0; i < curriculumData.length; i++) {
+    var r = curriculumData[i]
+    if (r.session_type_key && !r.week_start && titleLower.indexOf(r.session_type_key.toLowerCase()) >= 0) {
+      if (r.website_url || r.curriculum_url) { fixed = r; break }
+    }
+  }
+  if (fixed) return fixed
+  var today = sessionDate
+  for (var j = 0; j < curriculumData.length; j++) {
+    var w = curriculumData[j]
+    if (w.week_start && w.week_end && today >= w.week_start && today <= w.week_end) return w
+  }
+  return null
 }
 
 // ── LOAD DAY ──────────────────────────────────────────────────────
-async function loadDay() {
-  document.getElementById('checkin-content').innerHTML = '<div class="loading">Loading…</div>'
+function loadDay() {
+  document.getElementById('checkin-content').innerHTML = '<div class="loading">Loading\u2026</div>'
   allChildren = []
+  var today = dateStr(currentDate)
 
-  const today = dateStr(currentDate)
-
-  // 1. Load camp sessions for this studio + date
-  const { data: sessions } = await sb.from('sessions')
+  sb.from('sessions')
     .select('id, title, session_time, session_notes, spaces_left_cache')
     .eq('studio_id', currentStudioId)
     .eq('session_date', today)
     .order('session_time')
-
-  const campSessions = (sessions || []).filter(s => {
-    const t = (s.title || '').toLowerCase()
-    return t.includes('camp') || t.includes('pa day') || t.includes('pd day') || t.includes('no school')
-  })
-
-  if (!campSessions.length) {
-    document.getElementById('checkin-content').innerHTML = '<div class="empty">No camp sessions found for this date.</div>'
-    renderWheels()
-    return
-  }
-
-  const sessionIds = campSessions.map(s => s.id)
-
-  // 2. Load bookings
-  const { data: bookings } = await sb.from('bookings')
-    .select('id, session_id, customer_name, customer_email, customer_phone, shopify_order_name, qty, raw_payload, event_date, order_note, aftercare, early_arrival, returned_at')
-    .in('session_id', sessionIds)
-
-  const activeBookings = (bookings || []).filter(b => !(b.returned_at && (b.qty || 0) === 0))
-  const orderNames = [...new Set(activeBookings.map(b => b.shopify_order_name).filter(Boolean))]
-
-  // 3. Load tally registrations
-  let tallyMap = {}
-  if (orderNames.length) {
-    const { data: tally } = await sb.from('tally_registrations').select('*').in('shopify_order_name', orderNames)
-    ;(tally || []).forEach(t => {
-      const k = t.shopify_order_name
-      if (!tallyMap[k]) tallyMap[k] = []
-      tallyMap[k].push(t)
-    })
-  }
-
-  // 4. Load attendance
-  let attendanceMap = {}
-  if (sessionIds.length) {
-    const { data: att } = await sb.from('attendance')
-      .select('session_id, shopify_order_name, camper_name, attended')
-      .in('session_id', sessionIds)
-    ;(att || []).forEach(a => {
-      attendanceMap[`${a.shopify_order_name}|${(a.camper_name||'').toLowerCase().trim()}`] = a
-    })
-  }
-
-  // 5. Load badge history for all order names
-  badgeHistory = {}
-  if (orderNames.length) {
-    const { data: badges } = await sb.from('camp_daily_badges')
-      .select('order_name, camper_name, badge_name, session_date')
-      .in('order_name', orderNames)
-    ;(badges || []).forEach(b => {
-      const k = `${b.order_name}|${(b.camper_name||'').toLowerCase().trim()}`
-      if (!badgeHistory[k]) badgeHistory[k] = []
-      badgeHistory[k].push({ badge: b.badge_name, date: b.session_date })
-    })
-  }
-
-  // 6. Build allChildren from bookings + tally
-  campSessions.forEach(session => {
-    const group = sessionGroup(session.title)
-    const sessionBookings = activeBookings.filter(b => b.session_id === session.id)
-
-    sessionBookings.forEach(b => {
-      const props = parseLineItemProps(b.raw_payload, b.event_date)
-      let participants = props
-        .filter(p => p.name?.toLowerCase().startsWith('participant'))
-        .sort((a, z) => a.name.localeCompare(z.name))
-        .map(p => {
-          const name = p.value.split('|')[0]?.trim() || p.value
-          const dobMatch = p.value.match(/DOB:\s*(\d{4}-\d{2}-\d{2})/)
-          const dob = dobMatch ? dobMatch[1] : null
-          const tRows = (tallyMap[b.shopify_order_name] || [])
-          const tally = tRows.find(t => t.camper_name?.toLowerCase().trim() === name.toLowerCase().trim())
-          return { name, dob, tally }
-        })
-
-      if (!participants.length) {
-        const tRows = (tallyMap[b.shopify_order_name] || [])
-        participants = tRows.map(t => ({ name: t.camper_name, dob: null, tally: t }))
-      }
-
-      if (!participants.length) {
-        participants = [{ name: '', dob: null, tally: null }]
-      }
-
-      participants.forEach(p => {
-        const t = p.tally
-        const camperName = p.name || ''
-        const attKey = `${b.shopify_order_name}|${camperName.toLowerCase().trim()}`
-        const att = attendanceMap[attKey]
-        const badgeKey = `${b.shopify_order_name}|${camperName.toLowerCase().trim()}`
-        const todayBadge = (badgeHistory[badgeKey] || []).find(bh => bh.date === today)
-
-        allChildren.push({
-          _uid: `${b.shopify_order_name}-${camperName.replace(/\s/g,'_')}`,
-          name: camperName,
-          dob: p.dob || null,
-          age: t?.camper_age || null,
-          sessionId: session.id,
-          sessionTitle: session.title,
-          sessionGroup: group,
-          sessionNotes: session.session_notes || '',
-          orderName: b.shopify_order_name,
-          registeredBy: b.customer_name || '',
-          phone: t?.parent_phone || b.customer_phone || getPayloadPhone(b.raw_payload) || '',
-          emergency: (t?.emergency_contact_name || '') + (t?.emergency_contact_phone ? ' ' + t.emergency_contact_phone : ''),
-          walkHome: t?.walk_home || false,
-          medical: t?.medical_notes || '',
-          aftercare: t?.aftercare || b.aftercare || false,
-          earlyArrival: b.early_arrival || false,
-          tallyId: t?.id || null,
-          attendanceChecked: att?.attended || false,
-          table: '',        // we'll store locally
-          badge: todayBadge?.badge || '',
-          awardedBadges: (badgeHistory[badgeKey] || []).map(bh => bh.badge),
-        })
+    .then(function(r) {
+      var sessions = r.data || []
+      var campSessions = sessions.filter(function(s) {
+        var t = (s.title || '').toLowerCase()
+        return t.indexOf('camp') >= 0 || t.indexOf('pa day') >= 0 || t.indexOf('pd day') >= 0 || t.indexOf('no school') >= 0
       })
+      if (!campSessions.length) {
+        document.getElementById('checkin-content').innerHTML = '<div class="empty">No camp sessions found for this date.</div>'
+        renderWheels()
+        return
+      }
+      var sessionIds = campSessions.map(function(s) { return s.id })
+
+      sb.from('bookings')
+        .select('id, session_id, customer_name, customer_email, customer_phone, shopify_order_name, qty, raw_payload, event_date, order_note, aftercare, early_arrival, returned_at')
+        .in('session_id', sessionIds)
+        .then(function(r2) {
+          var bookings = r2.data || []
+          var activeBookings = bookings.filter(function(b) {
+            return !(b.returned_at && (b.qty || 0) === 0)
+          })
+          var orderNames = []
+          activeBookings.forEach(function(b) {
+            if (b.shopify_order_name && orderNames.indexOf(b.shopify_order_name) < 0) {
+              orderNames.push(b.shopify_order_name)
+            }
+          })
+
+          var tallyPromise = orderNames.length
+            ? sb.from('tally_registrations').select('*').in('shopify_order_name', orderNames)
+            : Promise.resolve({ data: [] })
+
+          var attPromise = sb.from('attendance')
+            .select('session_id, shopify_order_name, camper_name, attended')
+            .in('session_id', sessionIds)
+
+          var badgePromise = orderNames.length
+            ? sb.from('camp_daily_badges').select('order_name, camper_name, badge_name, session_date').in('order_name', orderNames)
+            : Promise.resolve({ data: [] })
+
+          Promise.all([tallyPromise, attPromise, badgePromise]).then(function(results) {
+            var tallyMap = {}
+            ;(results[0].data || []).forEach(function(t) {
+              if (!tallyMap[t.shopify_order_name]) tallyMap[t.shopify_order_name] = []
+              tallyMap[t.shopify_order_name].push(t)
+            })
+
+            var attendanceMap = {}
+            ;(results[1].data || []).forEach(function(a) {
+              var k = a.shopify_order_name + '|' + (a.camper_name || '').toLowerCase().trim()
+              attendanceMap[k] = a
+            })
+
+            badgeHistory = {}
+            ;(results[2].data || []).forEach(function(b) {
+              var k = b.order_name + '|' + (b.camper_name || '').toLowerCase().trim()
+              if (!badgeHistory[k]) badgeHistory[k] = []
+              badgeHistory[k].push({ badge: b.badge_name, date: b.session_date })
+            })
+
+            campSessions.forEach(function(session) {
+              var group = sessionGroup(session.title)
+              var sessionBookings = activeBookings.filter(function(b) { return b.session_id === session.id })
+              sessionBookings.forEach(function(b) {
+                var props = parseLineItemProps(b.raw_payload, b.event_date)
+                var participants = props
+                  .filter(function(p) { return p.name && p.name.toLowerCase().indexOf('participant') === 0 })
+                  .sort(function(a, z) { return a.name.localeCompare(z.name) })
+                  .map(function(p) {
+                    var name = p.value.split('|')[0].trim() || p.value
+                    var dobMatch = p.value.match(/DOB:\s*(\d{4}-\d{2}-\d{2})/)
+                    var dob = dobMatch ? dobMatch[1] : null
+                    var tRows = tallyMap[b.shopify_order_name] || []
+                    var tally = null
+                    for (var ti = 0; ti < tRows.length; ti++) {
+                      if ((tRows[ti].camper_name || '').toLowerCase().trim() === name.toLowerCase().trim()) { tally = tRows[ti]; break }
+                    }
+                    return { name: name, dob: dob, tally: tally }
+                  })
+
+                if (!participants.length) {
+                  var tRows2 = tallyMap[b.shopify_order_name] || []
+                  var seen2 = []
+                  tRows2.forEach(function(t) {
+                    var n = (t.camper_name || '').toLowerCase().trim()
+                    if (seen2.indexOf(n) < 0) { seen2.push(n); participants.push({ name: t.camper_name, dob: null, tally: t }) }
+                  })
+                }
+                if (!participants.length) participants = [{ name: '', dob: null, tally: null }]
+
+                participants.forEach(function(p) {
+                  var t = p.tally || {}
+                  var camperName = p.name || ''
+                  var attKey = b.shopify_order_name + '|' + camperName.toLowerCase().trim()
+                  var att = attendanceMap[attKey] || null
+                  var badgeKey = b.shopify_order_name + '|' + camperName.toLowerCase().trim()
+                  var bHistory = badgeHistory[badgeKey] || []
+                  var todayBadge = null
+                  for (var bi = 0; bi < bHistory.length; bi++) {
+                    if (bHistory[bi].date === today) { todayBadge = bHistory[bi]; break }
+                  }
+                  var uid = (b.shopify_order_name + '-' + camperName).replace(/[^a-zA-Z0-9\-_]/g, '_')
+                  allChildren.push({
+                    _uid: uid,
+                    name: camperName,
+                    dob: p.dob || null,
+                    age: t.camper_age || null,
+                    sessionId: session.id,
+                    sessionTitle: session.title,
+                    sessionGroup: group,
+                    sessionNotes: session.session_notes || '',
+                    orderName: b.shopify_order_name,
+                    registeredBy: b.customer_name || '',
+                    phone: t.parent_phone || b.customer_phone || getPayloadPhone(b.raw_payload) || '',
+                    emergency: (t.emergency_contact_name || '') + (t.emergency_contact_phone ? ' ' + t.emergency_contact_phone : ''),
+                    walkHome: t.walk_home || false,
+                    medical: t.medical_notes || '',
+                    aftercare: t.aftercare || b.aftercare || false,
+                    earlyArrival: b.early_arrival || false,
+                    tallyId: t.id || null,
+                    attendanceChecked: att ? att.attended : false,
+                    table: '',
+                    badge: todayBadge ? todayBadge.badge : '',
+                    awardedBadges: bHistory.map(function(bh) { return bh.badge }),
+                  })
+                })
+              })
+            })
+
+            // Deduplicate
+            var seen = []
+            allChildren = allChildren.filter(function(c) {
+              var k = c.orderName + '|' + c.name.toLowerCase().trim()
+              if (seen.indexOf(k) >= 0) return false
+              seen.push(k); return true
+            })
+
+            var dayPlanText = campSessions.map(function(s) { return s.session_notes || '' }).filter(Boolean).join(' \u00b7 ')
+            renderCheckin(dayPlanText, campSessions)
+            renderWheels()
+          })
+        })
     })
-  })
-
-  // Deduplicate by orderName+name (same child in multiple sessions is rare but possible)
-  const seen = new Set()
-  allChildren = allChildren.filter(c => {
-    const k = `${c.orderName}|${c.name.toLowerCase().trim()}`
-    if (seen.has(k)) return false
-    seen.add(k)
-    return true
-  })
-
-  // Build day plan info from sessions
-  const dayPlanText = campSessions.map(s => s.session_notes).filter(Boolean).join(' · ') || ''
-
-  renderCheckin(dayPlanText, campSessions)
-  renderWheels()
 }
 
 // ── RENDER CHECK-IN ───────────────────────────────────────────────
 function getSorted() {
-  const q = (document.getElementById('search-input')?.value || '').toLowerCase()
-  let list = allChildren.filter(c =>
-    !q || c.name.toLowerCase().includes(q) || c.registeredBy.toLowerCase().includes(q)
-  )
-  list.sort((a, b) => {
-    let av = sortKey === 'name' ? a.name :
-             sortKey === 'parent' ? a.registeredBy :
-             sortKey === 'table' ? (parseInt(a.table) || 999) : a.name
-    let bv = sortKey === 'name' ? b.name :
-             sortKey === 'parent' ? b.registeredBy :
-             sortKey === 'table' ? (parseInt(b.table) || 999) : b.name
+  var searchEl = document.getElementById('search-input')
+  var q = searchEl ? searchEl.value.toLowerCase() : ''
+  var list = allChildren.filter(function(c) {
+    return !q || c.name.toLowerCase().indexOf(q) >= 0 || c.registeredBy.toLowerCase().indexOf(q) >= 0
+  })
+  list.sort(function(a, b) {
+    var av = sortKey === 'name' ? a.name : sortKey === 'parent' ? a.registeredBy : (parseInt(a.table) || 999)
+    var bv = sortKey === 'name' ? b.name : sortKey === 'parent' ? b.registeredBy : (parseInt(b.table) || 999)
     if (av < bv) return -1 * sortDir
     if (av > bv) return 1 * sortDir
     return 0
@@ -511,131 +553,119 @@ function setSort(key) {
 }
 
 function renderCheckin(dayPlanText, campSessions) {
-  const checkedIn = allChildren.filter(c => c.attendanceChecked).length
-  const total = allChildren.length
-  const aftercareCount = allChildren.filter(c => c.aftercare).length
-  const badgedCount = allChildren.filter(c => c.badge).length
+  var checkedIn = allChildren.filter(function(c) { return c.attendanceChecked }).length
+  var total = allChildren.length
+  var aftercareCount = allChildren.filter(function(c) { return c.aftercare }).length
+  var badgedCount = allChildren.filter(function(c) { return c.badge }).length
+  var today = dateStr(currentDate)
 
-  let html = ''
+  var html = ''
+  html += '<div class="stats-bar">'
+  html += '<div class="stat-card"><div class="stat-num">' + total + '</div><div class="stat-label">Registered</div></div>'
+  html += '<div class="stat-card"><div class="stat-num" style="color:#3B6D11">' + checkedIn + '</div><div class="stat-label">Checked In</div></div>'
+  html += '<div class="stat-card"><div class="stat-num" style="color:#92400E">' + aftercareCount + '</div><div class="stat-label">Aftercare</div></div>'
+  html += '<div class="stat-card"><div class="stat-num" style="color:#533AB7">' + badgedCount + '</div><div class="stat-label">Badged</div></div>'
+  html += '</div>'
 
-  // Stats
-  html += `<div class="stats-bar">
-    <div class="stat-card"><div class="stat-num">${total}</div><div class="stat-label">Registered</div></div>
-    <div class="stat-card"><div class="stat-num" style="color:#3B6D11">${checkedIn}</div><div class="stat-label">Checked In</div></div>
-    <div class="stat-card"><div class="stat-num" style="color:#92400E">${aftercareCount}</div><div class="stat-label">Aftercare</div></div>
-    <div class="stat-card"><div class="stat-num" style="color:#533AB7">${badgedCount}</div><div class="stat-label">Badged</div></div>
-  </div>`
-
-  // Day plan
-  if (dayPlanText || campSessions?.length) {
-    const today = dateStr(currentDate)
-    // Gather unique curriculum links across all camp sessions
-    const links = []
-    ;(campSessions || []).forEach(s => {
-      const cl = getCurriculumLinks(s.title, today)
-      if (cl?.curriculum_url && !links.find(l => l.url === cl.curriculum_url)) {
-        links.push({ url: cl.curriculum_url, label: '📋 Curriculum' })
-      }
-      if (cl?.website_url && !links.find(l => l.url === cl.website_url)) {
-        links.push({ url: cl.website_url, label: '🌐 Website' })
-      }
-    })
-    const linkHtml = links.map(l =>
-      `<a href="${l.url}" target="_blank" style="font-size:13px;color:#2e7d32;text-decoration:none;padding:5px 12px;border:0.5px solid #a5d6a7;border-radius:8px;background:#e8f5e9;white-space:nowrap">${l.label}</a>`
-    ).join('')
-    html += `<div class="day-plan-banner">
-      <div style="flex:1">
-        <div class="day-plan-label">Today's Plan</div>
-        <div class="day-plan-text">${dayPlanText || 'Camp day'}</div>
-      </div>
-      ${linkHtml ? `<div style="display:flex;gap:6px;flex-wrap:wrap">${linkHtml}</div>` : ''}
-    </div>`
+  // Day plan + curriculum links
+  var links = []
+  campSessions.forEach(function(s) {
+    var cl = getCurriculumLinks(s.title, today)
+    if (cl && cl.curriculum_url) {
+      var already = false
+      links.forEach(function(l) { if (l.url === cl.curriculum_url) already = true })
+      if (!already) links.push({ url: cl.curriculum_url, label: '\uD83D\uDCCB Curriculum' })
+    }
+    if (cl && cl.website_url) {
+      var already2 = false
+      links.forEach(function(l) { if (l.url === cl.website_url) already2 = true })
+      if (!already2) links.push({ url: cl.website_url, label: '\uD83C\uDF10 Website' })
+    }
+  })
+  if (dayPlanText || campSessions.length) {
+    var linkHtml = links.map(function(l) {
+      return '<a href="' + l.url + '" target="_blank" style="font-size:13px;color:#2e7d32;text-decoration:none;padding:5px 12px;border:0.5px solid #a5d6a7;border-radius:8px;background:#e8f5e9;white-space:nowrap">' + l.label + '</a>'
+    }).join('')
+    html += '<div class="day-plan-banner"><div style="flex:1"><div class="day-plan-label">Today\'s Plan</div><div class="day-plan-text">' + (dayPlanText || 'Camp day') + '</div></div>'
+    if (linkHtml) html += '<div style="display:flex;gap:6px;flex-wrap:wrap">' + linkHtml + '</div>'
+    html += '</div>'
   }
 
-  // Controls
-  html += `<div class="controls-row">
-    <input class="search-input" id="search-input" type="search" placeholder="Search child or parent…" oninput="renderCheckinList()">
-    <div class="sort-group">
-      <button class="sort-btn ${sortKey==='name'?'active':''}" onclick="setSort('name')">Name</button>
-      <button class="sort-btn ${sortKey==='parent'?'active':''}" onclick="setSort('parent')">Parent</button>
-      <button class="sort-btn ${sortKey==='table'?'active':''}" onclick="setSort('table')">Table</button>
-    </div>
-  </div>`
-
-  html += `<div class="roster-list" id="roster-list"></div>`
+  html += '<div class="controls-row">'
+  html += '<input class="search-input" id="search-input" type="search" placeholder="Search child or parent\u2026" oninput="renderCheckinList()">'
+  html += '<div class="sort-group">'
+  html += '<button class="sort-btn' + (sortKey==='name'?' active':'') + '" onclick="setSort(\'name\')">Name</button>'
+  html += '<button class="sort-btn' + (sortKey==='parent'?' active':'') + '" onclick="setSort(\'parent\')">Parent</button>'
+  html += '<button class="sort-btn' + (sortKey==='table'?' active':'') + '" onclick="setSort(\'table\')">Table</button>'
+  html += '</div></div>'
+  html += '<div class="roster-list" id="roster-list"></div>'
 
   document.getElementById('checkin-content').innerHTML = html
   renderCheckinList()
 }
 
 function renderCheckinList() {
-  const list = getSorted()
-  const el = document.getElementById('roster-list')
+  var list = getSorted()
+  var el = document.getElementById('roster-list')
   if (!el) return
   if (!list.length) { el.innerHTML = '<div class="empty">No children found.</div>'; return }
 
-  el.innerHTML = list.map(c => {
-    const uid = c._uid
-    const groupTag = c.sessionGroup === 'am'
-      ? `<span class="session-tag am">AM</span>`
-      : c.sessionGroup === 'fd'
-      ? `<span class="session-tag fd">Full Day</span>`
-      : `<span class="session-tag pm">PM</span>`
-    const aftercareTag = c.aftercare ? `<span class="aftercare-tag">Aftercare</span>` : ''
-    const walkTag = c.walkHome ? `<span class="walkhome-tag">Walk Home</span>` : ''
-    const medIcon = c.medical ? `<span class="medical-icon" onclick="showMedical('${uid}')" title="Medical info">⚕️</span>` : ''
-    const ageDisplay = c.dob ? formatDOB(c.dob, dateStr(currentDate)) : (c.age ? `Age ${c.age}` : '')
+  var rows = list.map(function(c) {
+    var uid = c._uid
+    var groupTag = c.sessionGroup === 'am'
+      ? '<span class="session-tag am">AM</span>'
+      : c.sessionGroup === 'fd' ? '<span class="session-tag fd">Full Day</span>'
+      : '<span class="session-tag pm">PM</span>'
+    var aftercareTag = c.aftercare ? '<span class="aftercare-tag">Aftercare</span>' : ''
+    var walkTag = c.walkHome ? '<span class="walkhome-tag">Walk Home</span>' : ''
+    var medIcon = c.medical ? '<span class="medical-icon" onclick="showMedical(\'' + uid + '\')">\u2695\uFE0F</span>' : ''
+    var ageDisplay = c.dob ? formatDOB(c.dob, dateStr(currentDate)) : (c.age ? 'Age ' + c.age : '')
+    var metaParts = []
+    if (ageDisplay) metaParts.push(ageDisplay)
+    if (c.registeredBy) metaParts.push(c.registeredBy)
 
-    const badgeOpts = BADGES.map(b => {
-      const prev = c.awardedBadges.includes(b)
-      const sel = c.badge === b ? 'selected' : ''
-      const cls = prev && c.badge !== b ? 'class="previously-awarded"' : ''
-      const label = prev && c.badge !== b ? `${b} ✓` : b
-      return `<option value="${b}" ${sel} ${cls}>${label}</option>`
-    }).join('')
+    var badgeOpts = '<option value="">— No badge yet —</option>'
+    BADGES.forEach(function(b) {
+      var prev = c.awardedBadges.indexOf(b) >= 0
+      var sel = c.badge === b ? ' selected' : ''
+      var cls = (prev && c.badge !== b) ? ' class="previously-awarded"' : ''
+      var label = (prev && c.badge !== b) ? b + ' \u2713' : b
+      badgeOpts += '<option value="' + b + '"' + sel + cls + '>' + label + '</option>'
+    })
 
-    return `<div class="roster-card${c.attendanceChecked?' checked-in':''}${c.medical?' has-medical':''}" id="card-${uid}">
-      <div class="roster-card-header">
-        <button class="check-btn${c.attendanceChecked?' checked':''}" onclick="toggleCheck('${uid}')">${c.attendanceChecked?'✓':''}</button>
-        <div class="child-info">
-          <div class="child-name">${c.name || '<em style="color:#bbb">No name yet</em>'}</div>
-          <div class="child-meta">${ageDisplay}${ageDisplay && c.registeredBy?' · ':''}${c.registeredBy}</div>
-        </div>
-        <div class="card-badges">${groupTag}${aftercareTag}${walkTag}${medIcon}</div>
-      </div>
-      <div class="roster-card-body">
-        <div class="field-group">
-          <div class="field-label">Table #</div>
-          <input class="field-input table-input" id="table-${uid}" type="number" min="1" max="30" value="${c.table||''}" placeholder="—" onchange="updateTable('${uid}',this.value)">
-        </div>
-        <div class="field-group" style="flex:1;min-width:150px">
-          <div class="field-label">Today's Badge</div>
-          <select class="field-input badge-select" id="badge-${uid}" onchange="updateBadge('${uid}',this.value)">
-            <option value="">— No badge yet —</option>
-            ${badgeOpts}
-          </select>
-        </div>
-        <div class="field-group" style="align-self:flex-end">
-          <button class="save-row-btn" id="savebtn-${uid}" onclick="saveRow('${uid}')">Save</button>
-        </div>
-      </div>
-    </div>`
-  }).join('')
-
-  // Update sort button styles
-  document.querySelectorAll('.sort-btn').forEach(b => {
-    b.classList.toggle('active', b.textContent.toLowerCase().startsWith(sortKey))
+    return '<div class="roster-card' + (c.attendanceChecked ? ' checked-in' : '') + (c.medical ? ' has-medical' : '') + '" id="card-' + uid + '">' +
+      '<div class="roster-card-header">' +
+        '<button class="check-btn' + (c.attendanceChecked ? ' checked' : '') + '" onclick="toggleCheck(\'' + uid + '\')">' + (c.attendanceChecked ? '\u2713' : '') + '</button>' +
+        '<div class="child-info">' +
+          '<div class="child-name">' + (c.name || '<em style="color:#bbb">No name yet</em>') + '</div>' +
+          '<div class="child-meta">' + metaParts.join(' \u00b7 ') + '</div>' +
+        '</div>' +
+        '<div class="card-badges">' + groupTag + aftercareTag + walkTag + medIcon + '</div>' +
+      '</div>' +
+      '<div class="roster-card-body">' +
+        '<div class="field-group">' +
+          '<div class="field-label">Table #</div>' +
+          '<input class="field-input table-input" id="table-' + uid + '" type="number" min="1" max="30" value="' + (c.table || '') + '" placeholder="\u2014" onchange="updateTable(\'' + uid + '\',this.value)">' +
+        '</div>' +
+        '<div class="field-group" style="flex:1;min-width:150px">' +
+          '<div class="field-label">Today\'s Badge</div>' +
+          '<select class="field-input badge-select" id="badge-' + uid + '" onchange="updateBadge(\'' + uid + '\',this.value)">' + badgeOpts + '</select>' +
+        '</div>' +
+        '<div class="field-group" style="align-self:flex-end">' +
+          '<button class="save-row-btn" id="savebtn-' + uid + '" onclick="saveRow(\'' + uid + '\')">Save</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>'
   })
+  el.innerHTML = rows.join('')
 }
 
 function updateStatsBar() {
-  const checkedIn = allChildren.filter(c => c.attendanceChecked).length
-  const total = allChildren.length
-  const aftercareCount = allChildren.filter(c => c.aftercare).length
-  const badgedCount = allChildren.filter(c => c.badge).length
-  const bar = document.querySelector('.stats-bar')
-  if (!bar) return
-  const nums = bar.querySelectorAll('.stat-num')
+  var checkedIn = allChildren.filter(function(c) { return c.attendanceChecked }).length
+  var total = allChildren.length
+  var aftercareCount = allChildren.filter(function(c) { return c.aftercare }).length
+  var badgedCount = allChildren.filter(function(c) { return c.badge }).length
+  var nums = document.querySelectorAll('.stats-bar .stat-num')
   if (nums[0]) nums[0].textContent = total
   if (nums[1]) nums[1].textContent = checkedIn
   if (nums[2]) nums[2].textContent = aftercareCount
@@ -643,134 +673,115 @@ function updateStatsBar() {
 }
 
 // ── INTERACTIONS ──────────────────────────────────────────────────
-async function toggleCheck(uid) {
-  const c = allChildren.find(x => x._uid === uid)
+function toggleCheck(uid) {
+  var c = null
+  allChildren.forEach(function(x) { if (x._uid === uid) c = x })
   if (!c) return
   c.attendanceChecked = !c.attendanceChecked
-  const card = document.getElementById(`card-${uid}`)
-  const btn = card?.querySelector('.check-btn')
-  if (card) card.classList.toggle('checked-in', c.attendanceChecked)
-  if (btn) { btn.classList.toggle('checked', c.attendanceChecked); btn.textContent = c.attendanceChecked ? '✓' : '' }
+  var card = document.getElementById('card-' + uid)
+  var btn = card ? card.querySelector('.check-btn') : null
+  if (card) card.className = 'roster-card' + (c.attendanceChecked ? ' checked-in' : '') + (c.medical ? ' has-medical' : '')
+  if (btn) { btn.className = 'check-btn' + (c.attendanceChecked ? ' checked' : ''); btn.textContent = c.attendanceChecked ? '\u2713' : '' }
   updateStatsBar()
   renderWheels()
-  // Save to attendance table
-  const today = dateStr(currentDate)
-  const { data: existing } = await sb.from('attendance').select('id')
-    .eq('session_id', c.sessionId)
-    .eq('shopify_order_name', c.orderName)
-    .eq('camper_name', c.name)
-    .single()
-  if (existing) {
-    await sb.from('attendance').update({ attended: c.attendanceChecked, attended_date: today }).eq('id', existing.id)
-  } else {
-    await sb.from('attendance').insert({ session_id: c.sessionId, shopify_order_name: c.orderName, camper_name: c.name, attended: c.attendanceChecked, attended_date: today })
-  }
+  var today = dateStr(currentDate)
+  sb.from('attendance').select('id').eq('session_id', c.sessionId).eq('shopify_order_name', c.orderName).eq('camper_name', c.name).single().then(function(r) {
+    if (r.data) {
+      sb.from('attendance').update({ attended: c.attendanceChecked, attended_date: today }).eq('id', r.data.id)
+    } else {
+      sb.from('attendance').insert({ session_id: c.sessionId, shopify_order_name: c.orderName, camper_name: c.name, attended: c.attendanceChecked, attended_date: today })
+    }
+  })
 }
 
 function updateTable(uid, val) {
-  const c = allChildren.find(x => x._uid === uid)
-  if (c) c.table = val
+  allChildren.forEach(function(c) { if (c._uid === uid) c.table = val })
 }
 
 function updateBadge(uid, val) {
-  const c = allChildren.find(x => x._uid === uid)
-  if (c) c.badge = val
+  allChildren.forEach(function(c) { if (c._uid === uid) c.badge = val })
 }
 
-async function saveRow(uid) {
-  const c = allChildren.find(x => x._uid === uid)
+function saveRow(uid) {
+  var c = null
+  allChildren.forEach(function(x) { if (x._uid === uid) c = x })
   if (!c) return
-  const btn = document.getElementById(`savebtn-${uid}`)
-  if (btn) { btn.textContent = 'Saving…'; btn.disabled = true }
+  var btn = document.getElementById('savebtn-' + uid)
+  if (btn) { btn.textContent = 'Saving\u2026'; btn.disabled = true }
+  var today = dateStr(currentDate)
 
-  const today = dateStr(currentDate)
-
-  // Save badge if set
+  var badgePromise = Promise.resolve()
   if (c.badge && c.name) {
-    const badgeKey = `${c.orderName}|${c.name.toLowerCase().trim()}`
-    const todayEntry = (badgeHistory[badgeKey] || []).find(bh => bh.date === today)
+    var badgeKey = c.orderName + '|' + c.name.toLowerCase().trim()
+    var bHist = badgeHistory[badgeKey] || []
+    var todayEntry = null
+    bHist.forEach(function(bh) { if (bh.date === today) todayEntry = bh })
 
     if (todayEntry && todayEntry.badge !== c.badge) {
-      // Update today's badge
-      await sb.from('camp_daily_badges')
-        .update({ badge_name: c.badge })
-        .eq('order_name', c.orderName)
-        .eq('camper_name', c.name)
-        .eq('session_date', today)
+      badgePromise = sb.from('camp_daily_badges').update({ badge_name: c.badge }).eq('order_name', c.orderName).eq('camper_name', c.name).eq('session_date', today)
     } else if (!todayEntry) {
-      // Insert new
-      await sb.from('camp_daily_badges').insert({
-        session_date: today,
-        studio_id: currentStudioId,
-        camper_name: c.name,
-        order_name: c.orderName,
-        badge_name: c.badge
-      })
+      badgePromise = sb.from('camp_daily_badges').insert({ session_date: today, studio_id: currentStudioId, camper_name: c.name, order_name: c.orderName, badge_name: c.badge })
     }
 
-    // Update local history
     if (!badgeHistory[badgeKey]) badgeHistory[badgeKey] = []
-    const idx = badgeHistory[badgeKey].findIndex(bh => bh.date === today)
+    var idx = -1
+    badgeHistory[badgeKey].forEach(function(bh, i) { if (bh.date === today) idx = i })
     if (idx >= 0) badgeHistory[badgeKey][idx].badge = c.badge
     else badgeHistory[badgeKey].push({ badge: c.badge, date: today })
-
-    // Update awardedBadges
-    if (!c.awardedBadges.includes(c.badge)) c.awardedBadges.push(c.badge)
+    if (c.awardedBadges.indexOf(c.badge) < 0) c.awardedBadges.push(c.badge)
   }
 
-  // Save tally row (name, table in medical_notes supplement, etc.)
+  var tallyPromise = Promise.resolve()
   if (c.name) {
-    const payload = {
-      shopify_order_name: c.orderName,
-      camper_name: c.name,
-      walk_home: c.walkHome,
-      medical_notes: c.medical || null,
-      aftercare: c.aftercare,
-      parent_phone: c.phone || null,
-    }
+    var payload = { shopify_order_name: c.orderName, camper_name: c.name, walk_home: c.walkHome, medical_notes: c.medical || null, aftercare: c.aftercare, parent_phone: c.phone || null }
     if (c.tallyId) {
-      await sb.from('tally_registrations').update(payload).eq('id', c.tallyId)
+      tallyPromise = sb.from('tally_registrations').update(payload).eq('id', c.tallyId)
     } else {
-      const { data: newRow } = await sb.from('tally_registrations').insert(payload).select('id').single()
-      if (newRow) c.tallyId = newRow.id
+      tallyPromise = sb.from('tally_registrations').insert(payload).select('id').single().then(function(r) {
+        if (r.data) c.tallyId = r.data.id
+      })
     }
   }
 
-  showToast('Saved ✓')
-  if (btn) {
-    btn.textContent = 'Saved ✓'; btn.classList.add('saved')
-    setTimeout(() => { btn.textContent = 'Save'; btn.classList.remove('saved'); btn.disabled = false }, 2000)
-  }
-
-  updateStatsBar()
-  renderWheels()
+  Promise.all([badgePromise, tallyPromise]).then(function() {
+    showToast('Saved \u2713')
+    if (btn) {
+      btn.textContent = 'Saved \u2713'; btn.classList.add('saved')
+      setTimeout(function() { btn.textContent = 'Save'; btn.classList.remove('saved'); btn.disabled = false }, 2000)
+    }
+    updateStatsBar()
+    renderWheels()
+  })
 }
 
 // ── MEDICAL MODAL ─────────────────────────────────────────────────
 function showMedical(uid) {
-  const c = allChildren.find(x => x._uid === uid)
+  var c = null
+  allChildren.forEach(function(x) { if (x._uid === uid) c = x })
   if (!c) return
   document.getElementById('modal-child-name').textContent = c.name || 'Child'
-  const ageDisplay = c.dob ? formatDOB(c.dob, dateStr(currentDate)) : (c.age ? `Age ${c.age}` : '')
-  document.getElementById('modal-body').innerHTML = `
-    ${c.medical ? `<div class="modal-row"><div class="modal-label">⚕️ Medical / Allergies</div><div class="modal-value" style="color:#c0392b;font-weight:500">${c.medical}</div></div>` : ''}
-    ${ageDisplay ? `<div class="modal-row"><div class="modal-label">Age / DOB</div><div class="modal-value">${ageDisplay}</div></div>` : ''}
-    ${c.phone ? `<div class="modal-row"><div class="modal-label">Parent Phone</div><div class="modal-value">${c.phone}</div></div>` : ''}
-    ${c.emergency ? `<div class="modal-row"><div class="modal-label">Emergency Contact</div><div class="modal-value">${c.emergency}</div></div>` : ''}
-    ${c.walkHome ? `<div class="modal-row"><div class="modal-value" style="color:#991B1B;font-weight:500">🚶 Authorized to walk home</div></div>` : ''}
-    ${c.aftercare ? `<div class="modal-row"><div class="modal-value" style="color:#92400E;font-weight:500">⏰ Registered for aftercare</div></div>` : ''}
-    ${c.earlyArrival ? `<div class="modal-row"><div class="modal-value" style="color:#1D4ED8;font-weight:500">🌅 Early arrival</div></div>` : ''}
-    ${c.registeredBy ? `<div class="modal-row"><div class="modal-label">Registered By</div><div class="modal-value">${c.registeredBy}</div></div>` : ''}
-    ${c.orderName ? `<div class="modal-row"><div class="modal-label">Order</div><div class="modal-value">${c.orderName}</div></div>` : ''}
-  `
-  document.getElementById('medical-modal').classList.add('open')
+  var ageDisplay = c.dob ? formatDOB(c.dob, dateStr(currentDate)) : (c.age ? 'Age ' + c.age : '')
+  var body = ''
+  if (c.medical) body += '<div class="modal-row"><div class="modal-label">\u2695\uFE0F Medical / Allergies</div><div class="modal-value" style="color:#c0392b;font-weight:500">' + c.medical + '</div></div>'
+  if (ageDisplay) body += '<div class="modal-row"><div class="modal-label">Age / DOB</div><div class="modal-value">' + ageDisplay + '</div></div>'
+  if (c.phone) body += '<div class="modal-row"><div class="modal-label">Parent Phone</div><div class="modal-value">' + c.phone + '</div></div>'
+  if (c.emergency) body += '<div class="modal-row"><div class="modal-label">Emergency Contact</div><div class="modal-value">' + c.emergency + '</div></div>'
+  if (c.walkHome) body += '<div class="modal-row"><div class="modal-value" style="color:#991B1B;font-weight:500">\uD83D\uDEB6 Authorized to walk home</div></div>'
+  if (c.aftercare) body += '<div class="modal-row"><div class="modal-value" style="color:#92400E;font-weight:500">\u23F0 Registered for aftercare</div></div>'
+  if (c.earlyArrival) body += '<div class="modal-row"><div class="modal-value" style="color:#1D4ED8;font-weight:500">\uD83C\uDF05 Early arrival</div></div>'
+  if (c.registeredBy) body += '<div class="modal-row"><div class="modal-label">Registered By</div><div class="modal-value">' + c.registeredBy + '</div></div>'
+  if (c.orderName) body += '<div class="modal-row"><div class="modal-label">Order</div><div class="modal-value">' + c.orderName + '</div></div>'
+  document.getElementById('modal-body').innerHTML = body
+  document.getElementById('medical-modal').className = 'modal-overlay open'
 }
-function closeMedical() { document.getElementById('medical-modal').classList.remove('open') }
+function closeMedical() { document.getElementById('medical-modal').className = 'modal-overlay' }
 
 // ── TAB SWITCHING ─────────────────────────────────────────────────
 function switchTab(tab, btn) {
-  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'))
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'))
+  var contents = document.querySelectorAll('.tab-content')
+  for (var i = 0; i < contents.length; i++) contents[i].classList.remove('active')
+  var btns = document.querySelectorAll('.tab-btn')
+  for (var j = 0; j < btns.length; j++) btns[j].classList.remove('active')
   document.getElementById('tab-' + tab).classList.add('active')
   if (btn) btn.classList.add('active')
   if (tab === 'ceremony-am') drawWheel('am')
@@ -779,24 +790,23 @@ function switchTab(tab, btn) {
 
 // ── WHEEL ─────────────────────────────────────────────────────────
 function wheelKids(group) {
-  // AM wheel: only AM kids who are checked in
-  // PM wheel: Full Day + PM kids who are checked in
-  return allChildren.filter(c => {
-    if (!c.attendanceChecked) return false
-    if (!c.name) return false
+  return allChildren.filter(function(c) {
+    if (!c.attendanceChecked || !c.name) return false
     if (group === 'am') return c.sessionGroup === 'am'
     return c.sessionGroup === 'fd' || c.sessionGroup === 'pm'
   })
 }
 
-function drawWheel(group, highlightIdx = -1, angle = 0) {
-  const canvas = document.getElementById(`canvas-${group}`)
+function drawWheel(group, highlightIdx, angle) {
+  if (highlightIdx === undefined) highlightIdx = -1
+  if (angle === undefined) angle = spinAngles[group] || 0
+  var canvas = document.getElementById('canvas-' + group)
   if (!canvas) return
-  const ctx = canvas.getContext('2d')
-  const kids = wheelKids(group)
-  const done = ceremonyDone[group]
+  var ctx = canvas.getContext('2d')
+  var kids = wheelKids(group)
+  var done = ceremonyDone[group]
   ctx.clearRect(0, 0, 320, 320)
-  const cx = 160, cy = 160, r = 150
+  var cx = 160, cy = 160, r = 150
 
   if (!kids.length) {
     ctx.fillStyle = '#bbb'
@@ -807,12 +817,12 @@ function drawWheel(group, highlightIdx = -1, angle = 0) {
     return
   }
 
-  const n = kids.length
-  const arc = (2 * Math.PI) / n
-  kids.forEach((k, i) => {
-    const isGreyed = done.includes(k._uid)
-    const start = angle + i * arc - Math.PI / 2
-    const end = start + arc
+  var n = kids.length
+  var arc = (2 * Math.PI) / n
+  kids.forEach(function(k, i) {
+    var isGreyed = done.indexOf(k._uid) >= 0
+    var start = angle + i * arc - Math.PI / 2
+    var end = start + arc
     ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, r, start, end); ctx.closePath()
     ctx.fillStyle = isGreyed ? '#e8e8e2' : (highlightIdx === i ? WHEEL_STROKES[i % WHEEL_STROKES.length] : WHEEL_FILLS[i % WHEEL_FILLS.length])
     ctx.fill()
@@ -822,14 +832,13 @@ function drawWheel(group, highlightIdx = -1, angle = 0) {
     ctx.translate(cx, cy)
     ctx.rotate(start + arc / 2)
     ctx.textAlign = 'right'
-    const firstName = (k.name || '?').split(' ')[0]
+    var firstName = (k.name || '?').split(' ')[0]
     ctx.fillStyle = isGreyed ? '#aaa' : (highlightIdx === i ? 'white' : '#2C2C2A')
-    ctx.font = `${highlightIdx === i ? '600 ' : ''}13px -apple-system, sans-serif`
+    ctx.font = (highlightIdx === i ? '600 ' : '') + '13px -apple-system, sans-serif'
     ctx.fillText(firstName, r - 10, 5)
     ctx.restore()
   })
 
-  // Center circle
   ctx.beginPath(); ctx.arc(cx, cy, 16, 0, 2 * Math.PI)
   ctx.fillStyle = 'white'; ctx.fill()
   ctx.strokeStyle = '#e0e0d8'; ctx.lineWidth = 1; ctx.stroke()
@@ -842,58 +851,60 @@ function renderWheels() {
 }
 
 function renderCeremonyRosters() {
-  ;['am', 'pm'].forEach(group => {
-    const el = document.getElementById(`roster-${group}`)
+  ['am', 'pm'].forEach(function(group) {
+    var el = document.getElementById('roster-' + group)
     if (!el) return
-    const kids = wheelKids(group)
-    const done = ceremonyDone[group]
+    var kids = wheelKids(group)
+    var done = ceremonyDone[group]
     if (!kids.length) { el.innerHTML = '<div class="empty" style="font-size:13px">No checked-in kids yet.</div>'; return }
-    el.innerHTML = kids.map(k => {
-      const isDone = done.includes(k._uid)
-      const todayBadge = k.badge ? `<span style="font-size:11px;color:#533AB7">🏅 ${k.badge}</span>` : ''
-      return `<div class="ceremony-kid${isDone ? ' done' : ''}">
-        <span style="font-size:18px">${isDone ? '✅' : '⭕'}</span>
-        <div class="ceremony-kid-name">${k.name}</div>
-        ${isDone ? todayBadge : '<span class="ceremony-kid-badge">Waiting…</span>'}
-        ${isDone ? `<span class="ceremony-reset" style="font-size:11px;margin-top:0" onclick="undoCeremony('${group}','${k._uid}')">undo</span>` : ''}
-      </div>`
+    el.innerHTML = kids.map(function(k) {
+      var isDone = done.indexOf(k._uid) >= 0
+      var todayBadge = k.badge ? '<span style="font-size:11px;color:#533AB7">\uD83C\uDFC5 ' + k.badge + '</span>' : ''
+      return '<div class="ceremony-kid' + (isDone ? ' done' : '') + '">' +
+        '<span style="font-size:18px">' + (isDone ? '\u2705' : '\u2B55') + '</span>' +
+        '<div class="ceremony-kid-name">' + k.name + '</div>' +
+        (isDone ? todayBadge : '<span class="ceremony-kid-badge">Waiting\u2026</span>') +
+        (isDone ? '<span class="ceremony-reset" style="font-size:11px;margin-top:0" onclick="undoCeremony(\'' + group + '\',\'' + k._uid + '\')">undo</span>' : '') +
+        '</div>'
     }).join('')
   })
 }
 
 function spin(group) {
-  const kids = wheelKids(group)
-  const remaining = kids.filter(k => !ceremonyDone[group].includes(k._uid))
+  var kids = wheelKids(group)
+  var remaining = kids.filter(function(k) { return ceremonyDone[group].indexOf(k._uid) < 0 })
   if (!kids.length || spinning[group]) return
   if (!remaining.length) {
-    document.getElementById(`winner-${group}`).innerHTML = '<div style="font-size:14px;color:#888">🎉 Everyone has been celebrated!</div>'
+    document.getElementById('winner-' + group).innerHTML = '<div style="font-size:14px;color:#888">\uD83C\uDF89 Everyone has been celebrated!</div>'
     return
   }
   spinning[group] = true
-  document.getElementById(`spin-${group}`).disabled = true
+  document.getElementById('spin-' + group).disabled = true
 
-  const totalSpin = 6 * 2 * Math.PI + Math.random() * 2 * Math.PI
-  const duration = 3500
-  const start = performance.now()
-  const startAngle = spinAngles[group]
+  var totalSpin = 6 * 2 * Math.PI + Math.random() * 2 * Math.PI
+  var duration = 3500
+  var start = performance.now()
+  var startAngle = spinAngles[group]
 
   function animate(now) {
-    const t = Math.min((now - start) / duration, 1)
-    const ease = 1 - Math.pow(1 - t, 4)
+    var t = Math.min((now - start) / duration, 1)
+    var ease = 1 - Math.pow(1 - t, 4)
     spinAngles[group] = startAngle + totalSpin * ease
-    const n = kids.length
-    const arc = (2 * Math.PI) / n
-    const normalized = ((-spinAngles[group] % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)
-    const idx = Math.floor(normalized / arc)
+    var n = kids.length
+    var arc = (2 * Math.PI) / n
+    var normalized = ((-spinAngles[group] % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)
+    var idx = Math.floor(normalized / arc)
     drawWheel(group, idx, spinAngles[group])
-    if (t < 1) { requestAnimationFrame(animate) } else {
+    if (t < 1) {
+      requestAnimationFrame(animate)
+    } else {
       spinning[group] = false
-      document.getElementById(`spin-${group}`).disabled = false
-      const winner = kids[idx]
+      document.getElementById('spin-' + group).disabled = false
+      var winner = kids[idx]
       if (winner) {
-        if (!ceremonyDone[group].includes(winner._uid)) ceremonyDone[group].push(winner._uid)
-        const badgeDisplay = winner.badge ? `<div class="winner-badge-name">🏅 ${winner.badge}</div>` : '<div class="winner-badge-name">Amazing work today!</div>'
-        document.getElementById(`winner-${group}`).innerHTML = `<div class="winner-name">${winner.name}</div>${badgeDisplay}`
+        if (ceremonyDone[group].indexOf(winner._uid) < 0) ceremonyDone[group].push(winner._uid)
+        var badgeDisplay = winner.badge ? '<div class="winner-badge-name">\uD83C\uDFC5 ' + winner.badge + '</div>' : '<div class="winner-badge-name">Amazing work today!</div>'
+        document.getElementById('winner-' + group).innerHTML = '<div class="winner-name">' + winner.name + '</div>' + badgeDisplay
       }
       renderCeremonyRosters()
       drawWheel(group, -1, spinAngles[group])
@@ -903,7 +914,7 @@ function spin(group) {
 }
 
 function undoCeremony(group, uid) {
-  ceremonyDone[group] = ceremonyDone[group].filter(x => x !== uid)
+  ceremonyDone[group] = ceremonyDone[group].filter(function(x) { return x !== uid })
   renderCeremonyRosters()
   drawWheel(group, -1, spinAngles[group])
 }
@@ -912,7 +923,7 @@ function resetCeremony(group) {
   if (!confirm('Reset this wheel? All spun names will become available again.')) return
   ceremonyDone[group] = []
   spinAngles[group] = 0
-  document.getElementById(`winner-${group}`).innerHTML = ''
+  document.getElementById('winner-' + group).innerHTML = ''
   renderCeremonyRosters()
   drawWheel(group, -1, 0)
 }
@@ -920,49 +931,49 @@ function resetCeremony(group) {
 // ── HELPERS ───────────────────────────────────────────────────────
 function parseLineItemProps(rawPayload, sessionDate) {
   try {
-    const payload = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload
-    if (!payload?.line_items) return []
-    const items = payload.line_items
-    let match = items.find(li => {
-      const t = (li.title || li.name || '').toLowerCase()
-      if (sessionDate) {
-        const d = new Date(sessionDate + 'T12:00:00')
-        const monthDay = d.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }).replace('.', '').toLowerCase()
-        if (t.includes(monthDay)) return true
-        const day = d.getDate()
-        const suffix = day===1||day===21||day===31?'st':day===2||day===22?'nd':day===3||day===23?'rd':'th'
-        if (t.includes(`${monthDay}${suffix}`)) return true
+    var payload = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload
+    if (!payload || !payload.line_items) return []
+    var items = payload.line_items
+    var match = null
+    if (sessionDate) {
+      var d = new Date(sessionDate + 'T12:00:00')
+      var monthDay = d.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }).replace('.', '').toLowerCase()
+      var day = d.getDate()
+      var suffix = (day===1||day===21||day===31)?'st':(day===2||day===22)?'nd':(day===3||day===23)?'rd':'th'
+      for (var i = 0; i < items.length; i++) {
+        var t = (items[i].title || items[i].name || '').toLowerCase()
+        if (t.indexOf(monthDay) >= 0 || t.indexOf(monthDay + suffix) >= 0) { match = items[i]; break }
       }
-      return false
-    })
+    }
     if (!match) match = items[0]
-    return match?.properties || []
+    return (match && match.properties) ? match.properties : []
   } catch(e) { return [] }
 }
 
 function formatDOB(dobStr, refDateStr) {
   try {
-    const dob = new Date(dobStr + 'T12:00:00')
-    const ref = refDateStr ? new Date(refDateStr + 'T12:00:00') : new Date()
-    let age = ref.getFullYear() - dob.getFullYear()
-    const m = ref.getMonth() - dob.getMonth()
+    var dob = new Date(dobStr + 'T12:00:00')
+    var ref = refDateStr ? new Date(refDateStr + 'T12:00:00') : new Date()
+    var age = ref.getFullYear() - dob.getFullYear()
+    var m = ref.getMonth() - dob.getMonth()
     if (m < 0 || (m === 0 && ref.getDate() < dob.getDate())) age--
-    const formatted = dob.toLocaleDateString('en-CA', { year: 'numeric', month: 'short', day: 'numeric' })
-    return `Age ${age} · b. ${formatted}`
+    var formatted = dob.toLocaleDateString('en-CA', { year: 'numeric', month: 'short', day: 'numeric' })
+    return 'Age ' + age + ' \u00b7 b. ' + formatted
   } catch(e) { return dobStr }
 }
 
 function getPayloadPhone(rawPayload) {
   try {
-    const p = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload
-    return p?.billing_address?.phone || p?.shipping_address?.phone || p?.customer?.phone || p?.phone || ''
-  } catch { return '' }
+    var p = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload
+    if (!p) return ''
+    return (p.billing_address && p.billing_address.phone) || (p.shipping_address && p.shipping_address.phone) || (p.customer && p.customer.phone) || p.phone || ''
+  } catch(e) { return '' }
 }
 
 function showToast(msg) {
-  const t = document.getElementById('toast')
+  var t = document.getElementById('toast')
   t.textContent = msg; t.classList.add('show')
-  setTimeout(() => t.classList.remove('show'), 2000)
+  setTimeout(function() { t.classList.remove('show') }, 2000)
 }
 </script>
 </body>
