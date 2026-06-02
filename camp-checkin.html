@@ -468,7 +468,7 @@ function loadDay() {
   var sessionsUrl = 'sessions?select=id,title,session_time&studio_id=eq.' + currentStudioId + '&session_date=eq.' + today + '&order=session_time'
   sbGet(sessionsUrl).then(function(sessions) {
     if (!sessions || sessions.code || sessions.error) {
-      document.getElementById('checkin-content').innerHTML = '<div class="empty" style="color:#c0392b;font-size:13px">Load error: ' + JSON.stringify(sessions) + '</div>'
+      document.getElementById('checkin-content').textContent = 'Load error: ' + JSON.stringify(sessions)
       return
     }
     sessions = sessions || []
@@ -487,6 +487,7 @@ function loadDay() {
     var bookingsPromise = sbGet('bookings?select=id,session_id,customer_name,customer_email,customer_phone,shopify_order_name,qty,raw_payload,event_date,order_note,aftercare,early_arrival,returned_at&' + sessionIdFilter)
 
     bookingsPromise.then(function(bookings) {
+      if (!bookings || bookings.code) { document.getElementById('checkin-content').textContent = 'Bookings error: ' + JSON.stringify(bookings); return }
       bookings = bookings || []
       var activeBookings = bookings.filter(function(b) {
         return !(b.returned_at && (b.qty || 0) === 0)
@@ -507,6 +508,7 @@ function loadDay() {
         : Promise.resolve([])
 
       Promise.all([tallyPromise, attPromise, badgePromise]).then(function(results) {
+        if (!results) { document.getElementById('checkin-content').textContent = 'Promise.all failed'; return }
         var tallyRows  = (results[0] && !results[0].error) ? results[0] : []
         var attRows    = (results[1] && !results[1].error) ? results[1] : []
         var badgeRows  = (results[2] && !results[2].error) ? results[2] : []
@@ -540,8 +542,9 @@ function loadDay() {
               .sort(function(a, z) { return a.name.localeCompare(z.name) })
               .map(function(p) {
                 var name = p.value.split('|')[0].trim() || p.value
-                var dobMatch = p.value.match(/DOB:\s*(\d{4}-\d{2}-\d{2})/)
-                var dob = dobMatch ? dobMatch[1] : null
+                var dob = null
+                var dobIdx = p.value.indexOf('DOB:')
+                if (dobIdx >= 0) { var dobStr = p.value.substring(dobIdx + 4).trim(); if (dobStr.length >= 10) dob = dobStr.substring(0, 10) }
                 var tRows = tallyMap[b.shopify_order_name] || []
                 var tally = null
                 for (var ti = 0; ti < tRows.length; ti++) {
@@ -569,7 +572,7 @@ function loadDay() {
               var bHist = badgeHistory[badgeKey] || []
               var todayBadge = null
               for (var bi = 0; bi < bHist.length; bi++) { if (bHist[bi].date === today) { todayBadge = bHist[bi]; break } }
-              var uid = (b.shopify_order_name + '-' + camperName).replace(/[^a-zA-Z0-9\-_]/g, '_')
+              var uid = makeUid(b.shopify_order_name + '-' + camperName)
               allChildren.push({
                 _uid: uid,
                 name: camperName,
@@ -608,10 +611,14 @@ function loadDay() {
         var dayPlanText = ''
         renderCheckin(dayPlanText, campSessions)
         renderWheels()
+      }).catch(function(e) {
+        document.getElementById('checkin-content').textContent = 'Inner error: ' + (e.message || String(e))
       })
+    }).catch(function(e) {
+      document.getElementById('checkin-content').textContent = 'Bookings error: ' + (e.message || String(e))
     })
   }).catch(function(e) {
-    document.getElementById('checkin-content').innerHTML = '<div class="empty" style="color:#c0392b;font-size:13px">Network error: ' + (e.message || e) + '<br>URL: ' + SUPABASE_URL + '<br>Studio: ' + currentStudioId + '</div>'
+    document.getElementById('checkin-content').textContent = 'Error: ' + (e.message || String(e))
   })
 }
 
@@ -1018,7 +1025,22 @@ function resetCeremony(group) {
   drawWheel(group, -1, 0)
 }
 
-// ── HELPERS ───────────────────────────────────────────────────────
+// ── HELPERS ─
+function makeUid(str) {
+  var result = ''
+  for (var i = 0; i < str.length; i++) {
+    var c = str[i]
+    var code = str.charCodeAt(i)
+    if ((code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || c === '-' || c === '_') {
+      result += c
+    } else {
+      result += '_'
+    }
+  }
+  return result
+}
+
+// ──────────────────────────────────────────────────────
 function parseLineItemProps(rawPayload, sessionDate) {
   try {
     var payload = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload
