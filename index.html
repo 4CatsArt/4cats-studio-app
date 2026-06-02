@@ -2550,6 +2550,7 @@ async function loadDayView() {
     const reg = bookingCounts[s.id] || 0
     const est = estimatedAtt[s.id] || null
     const isParty = s.session_type === 'party'
+    const isCamp = s.session_type === 'camp'
     const isDropinEligible = ['workshop', 'glazing'].includes(s.session_type)
     const badge = getBadgeClass(s.session_type)
     const time = fmtTime(s.session_time)
@@ -2647,6 +2648,13 @@ async function loadDayView() {
             <div class="field-label">Session Notes</div>
             <input type="text" id="notes-session-${s.id}" value="${(staff.notes || '').replace(/"/g,'&quot;')}" placeholder="Add notes...">
           </div>
+          ${isCamp ? `<div class="field-group">
+            <div class="field-label">Camp Day</div>
+            <select id="camp-day-${s.id}" style="padding:6px 10px;border:0.5px solid #d0d0c8;border-radius:8px;font-size:13px;background:white">
+              <option value="">-- Not set --</option>
+              ${[1,2,3,4,5,6,7,8,9,10].map(d => `<option value="Day ${d}" ${staff.camp_day === 'Day '+d ? 'selected' : ''}>Day ${d}</option>`).join('')}
+            </select>
+          </div>` : ''}
         </div>
         <button class="save-btn" onclick="saveSession('${s.id}')">Save</button>
         <div style="clear:both"></div>
@@ -2920,6 +2928,10 @@ function getOrderNote(booking) {
     const p = typeof booking.raw_payload === 'string' ? JSON.parse(booking.raw_payload) : booking.raw_payload
     return p?.note || ''
   } catch { return '' }
+}
+
+function editTableNum(id, value) {
+  return `<input type="number" id="${id}" value="${value||''}" min="1" max="30" placeholder="—" style="width:48px;padding:4px 6px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;text-align:center">`
 }
 
 function editInput(id, value, placeholder, cls) {
@@ -3246,6 +3258,13 @@ async function showBookings(sessionId, title, dateLabel, sessionType, sessionTim
 
   const listType = getListType(sessionType, title)
   const attendanceSessionId = listType === 'series' ? sessionId : bookingSessionId
+
+  // Load camp day from session_staff for camp sessions
+  let campDayLabel = ''
+  if (listType === 'camp') {
+    const { data: staffRow } = await sb.from('session_staff').select('camp_day').eq('session_id', sessionId).single()
+    if (staffRow?.camp_day) campDayLabel = staffRow.camp_day
+  }
   let attendanceData = {}
   if (orderNames.length) {
     const { data: att } = await sb.from('attendance').select('*').eq('session_id', attendanceSessionId).in('shopify_order_name', orderNames)
@@ -3286,7 +3305,7 @@ async function showBookings(sessionId, title, dateLabel, sessionType, sessionTim
       <div class="overlay-header">
         <div>
           <div class="overlay-title">${title}</div>
-          <div class="overlay-sub">${sessionTime ? fmtTime(sessionTime) + ' — ' : ''}${dateLabel} &mdash; ${total} registered</div>
+          <div class="overlay-sub">${sessionTime ? fmtTime(sessionTime) + ' — ' : ''}${dateLabel} &mdash; ${total} registered${campDayLabel ? ' &mdash; <strong>' + campDayLabel + '</strong>' : ''}</div>
         </div>
         <div style="display:flex;gap:8px;align-items:center">
           <button class="print-btn no-print" onclick="window.print()">🖨 Print</button>
@@ -3394,6 +3413,7 @@ function buildCampTable(bookings, tallyData, attendanceData, sessionId, dateLabe
       campTableRows.push({ name:'', age:'', registeredBy: b.customer_name||'', html: `<tr${cancelStyle}>
         <td style="text-align:center"><input type="checkbox" class="attended-check" ${att?.attended?'checked':''} onchange="saveAttendance('${sessionId}','${b.shopify_order_name}','',this.checked)"></td>
         <td>${editInput('cn-'+uid,'','Child name')}</td><td>${editInput('ca-'+uid,'','Age','short')}</td>
+        <td>${editTableNum('tn-'+uid,'')}</td>
         <td>${editCheck('wh-'+uid,false)}</td><td>${editInput('mn-'+uid,'','Medical notes')}</td>
         <td>${editCheck('ac-'+uid,b.aftercare||false)}</td><td>${editInput('pp-'+uid,b.customer_phone||getPayloadPhone(b.raw_payload),'Phone')}</td>
         <td>${editInput('ec-'+uid,'','Emergency contact')}</td>
@@ -3417,6 +3437,7 @@ function buildCampTable(bookings, tallyData, attendanceData, sessionId, dateLabe
       campTableRows.push({ name: camperName, age: ageSortVal, registeredBy: i===0?(b.customer_name||''):'', html: `<tr${cancelStyle}>
         <td style="text-align:center"><input type="checkbox" class="attended-check" ${att?.attended?'checked':''} onchange="saveAttendance('${sessionId}','${b.shopify_order_name}','${camperName.replace(/'/g,"\\'")}',this.checked)"></td>
         <td>${editInput('cn-'+uid,camperName,'Child name')}</td><td style="font-size:12px;color:#666">${ageDisplay}</td>
+        <td>${editTableNum('tn-'+uid,t?.table_num||'')}</td>
         <td>${editCheck('wh-'+uid,t?.walk_home||false)}</td><td>${editInput('mn-'+uid,t?.medical_notes||'','Medical notes')}</td>
         <td>${editCheck('ac-'+uid,t?.aftercare||b.aftercare||false)}</td><td>${editInput('pp-'+uid,t?.parent_phone||b.customer_phone||getPayloadPhone(b.raw_payload)||'','Phone')}</td>
         <td>${editInput('ec-'+uid,t?(t.emergency_contact_name||'')+(t.emergency_contact_phone?' '+t.emergency_contact_phone:''):'','Emergency contact')}</td>
@@ -3436,6 +3457,7 @@ function buildCampTable(bookings, tallyData, attendanceData, sessionId, dateLabe
       campTableRows.push({ name: existing?.child_name||'', age: existing?.child_age||'', registeredBy: b.customer_name||'', html: `<tr style="background:#fafaf8${isCancelled ? ';opacity:0.4;text-decoration:line-through;color:#888' : ''}">
         <td style="text-align:center"><input type="checkbox" class="attended-check" ${att?.attended?'checked':''} onchange="saveAttendance('${sessionId}','${b.shopify_order_name}','${(existing?.child_name||'').replace(/'/g,"\\'")}',this.checked)"></td>
         <td>${editInput('cn-'+cid,existing?.child_name||'','Child name')}</td><td>${editInput('ca-'+cid,existing?.child_age||'','Age','short')}</td>
+        <td>${editTableNum('tn-'+cid,existing?.table_num||'')}</td>
         <td>${editCheck('wh-'+cid,existing?.walk_home||false)}</td><td>${editInput('mn-'+cid,existing?.medical||'','Medical notes')}</td>
         <td>${editCheck('ac-'+cid,false)}</td><td>${editInput('pp-'+cid,existing?.parent_phone||'','Phone')}</td>
         <td>${editInput('ec-'+cid,existing?.emergency_contact||'','Emergency contact')}</td>
@@ -3446,7 +3468,7 @@ function buildCampTable(bookings, tallyData, attendanceData, sessionId, dateLabe
     }
   })
   const sortBtn = col => `<button class="camp-sort-btn no-print" data-col="${col}" onclick="sortCampTable('${col}')" style="background:none;border:none;cursor:pointer;font-size:10px;color:#888;padding:0;margin-left:2px;opacity:0.3"> ⇅</button>`
-  return `<table class="booking-table"><thead><tr><th>✓</th><th>Participant${sortBtn('name')}</th><th>Age / DOB${sortBtn('age')}</th><th>Walk home?</th><th>Medical</th><th>Aftercare</th><th>Parent phone</th><th>Emergency contact</th><th>Registered by${sortBtn('registeredBy')}</th><th style="text-align:center">Qty</th><th>Order</th><th>Notes</th><th class="no-print"></th></tr></thead><tbody id="camp-table-body">${campTableRows.map(r=>r.html).join('')}</tbody></table>`
+  return `<table class="booking-table"><thead><tr><th>✓</th><th>Participant${sortBtn('name')}</th><th>Age / DOB${sortBtn('age')}</th><th>Table</th><th>Walk home?</th><th>Medical</th><th>Aftercare</th><th>Parent phone</th><th>Emergency contact</th><th>Registered by${sortBtn('registeredBy')}</th><th style="text-align:center">Qty</th><th>Order</th><th>Notes</th><th class="no-print"></th></tr></thead><tbody id="camp-table-body">${campTableRows.map(r=>r.html).join('')}</tbody></table>`
 }
 
 // ── SERIES TABLE ───────────────────────────────────────────────
@@ -3579,7 +3601,7 @@ async function saveCampRow(tallyId, orderName, uid, sessionId) {
   const lastPart = ecParts[ecParts.length-1]||''
   const ecPhone = lastPart.match(/[\d\+\-\(\)]{7,}/) ? lastPart : null
   const ecName = ecPhone ? ecParts.slice(0,-1).join(' ') : ecRaw
-  const payload = { shopify_order_name: orderName, camper_name, camper_age: document.getElementById(`ca-${uid}`)?.value?.trim()||null, walk_home: document.getElementById(`wh-${uid}`)?.checked||false, medical_notes: document.getElementById(`mn-${uid}`)?.value?.trim()||null, aftercare: document.getElementById(`ac-${uid}`)?.checked||false, parent_phone: document.getElementById(`pp-${uid}`)?.value?.trim()||null, emergency_contact_name: ecName||null, emergency_contact_phone: ecPhone||null }
+  const payload = { shopify_order_name: orderName, camper_name, camper_age: document.getElementById(`ca-${uid}`)?.value?.trim()||null, walk_home: document.getElementById(`wh-${uid}`)?.checked||false, medical_notes: document.getElementById(`mn-${uid}`)?.value?.trim()||null, aftercare: document.getElementById(`ac-${uid}`)?.checked||false, parent_phone: document.getElementById(`pp-${uid}`)?.value?.trim()||null, emergency_contact_name: ecName||null, emergency_contact_phone: ecPhone||null, table_num: document.getElementById(`tn-${uid}`)?.value?.trim()||null }
   let error
   if (tallyId && tallyId !== 'null') { ;({ error } = await sb.from('tally_registrations').update(payload).eq('id', tallyId)) }
   else { ;({ error } = await sb.from('tally_registrations').insert(payload)) }
@@ -3619,8 +3641,9 @@ async function saveSession(sessionId) {
   const director = document.getElementById(`director-${sessionId}`)?.value || ''
   const prepDone = document.getElementById(`prep-${sessionId}`)?.value || '-'
   const notes = document.getElementById(`notes-session-${sessionId}`)?.value || ''
+  const campDay = document.getElementById(`camp-day-${sessionId}`)?.value || null
   const btn = document.querySelector(`#card-${sessionId} .save-btn`)
-  const payload = { session_id: sessionId, studio_id: currentStudioId, teacher, circler, director, prep_done: prepDone, notes, updated_at: new Date().toISOString() }
+  const payload = { session_id: sessionId, studio_id: currentStudioId, teacher, circler, director, prep_done: prepDone, notes, camp_day: campDay || null, updated_at: new Date().toISOString() }
   const { data: existing } = await sb.from('session_staff').select('id').eq('session_id', sessionId).single()
   if (existing) { await sb.from('session_staff').update(payload).eq('session_id', sessionId) }
   else { await sb.from('session_staff').insert(payload) }
