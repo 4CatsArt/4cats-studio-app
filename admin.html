@@ -236,6 +236,7 @@ select:focus, input:focus { border-color: #888; }
     <button class="tab-btn" onclick="switchTab('guide')">📋 Guide</button>
     <button class="tab-btn" onclick="switchTab('setup')">🏠 Studio Setup</button>
     <button class="tab-btn" onclick="switchTab('camps')">🏕 Camp Forms<span id="camps-badge" class="tab-badge" style="display:none"></span></button>
+    <button class="tab-btn" onclick="switchTab('referrals')">📊 Referrals</button>
     <div class="top-bar-right"><button class="signout-btn" onclick="signOut()">Sign out</button></div>
   </div>
   <div class="tab-content active" id="tab-schedule">
@@ -743,7 +744,7 @@ async function initApp() {
 }
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','training','staff','parties','users','clay','reviews','guide','setup','camps'][i] === tab))
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','training','staff','parties','users','clay','reviews','guide','setup','camps','referrals'][i] === tab))
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'))
   document.getElementById(`tab-${tab}`).classList.add('active')
   if (tab === 'curriculum') loadCurriculum()
@@ -6662,6 +6663,169 @@ async function loadCampFormsBadge() {
 
   const badge = document.getElementById('camps-badge')
   if (missingCount > 0 && badge) { badge.textContent = missingCount; badge.style.display = 'inline-block' }
+}
+</script>
+
+
+<div class="tab-content" id="tab-referrals" style="max-width:900px">
+  <div class="toolbar">
+    <div class="toolbar-group">
+      <label>From</label>
+      <input type="date" id="ref-date-from" onchange="loadReferrals()">
+      <label>To</label>
+      <input type="date" id="ref-date-to" onchange="loadReferrals()">
+    </div>
+    <div class="toolbar-sep"></div>
+    <div class="toolbar-group">
+      <button class="btn btn-primary" onclick="loadReferrals()">↺ Refresh</button>
+    </div>
+  </div>
+
+  <div id="ref-chart-wrap" style="display:none;margin:1.5rem 0 2rem;display:flex;align-items:center;gap:2.5rem;flex-wrap:wrap">
+    <canvas id="ref-donut" width="220" height="220" style="flex-shrink:0"></canvas>
+    <div id="ref-legend" style="display:flex;flex-direction:column;gap:8px;font-size:13px"></div>
+  </div>
+
+  <div id="ref-table-wrap"></div>
+</div>
+
+<script>
+// ── REFERRALS TAB ─────────────────────────────────────────────────────────────
+
+const REFERRAL_COLOURS = [
+  '#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f','#edc948','#b07aa1','#ff9da7','#9c755f','#bab0ac'
+]
+
+function initReferralDates() {
+  const to = new Date()
+  const from = new Date()
+  from.setMonth(from.getMonth() - 3)
+  document.getElementById('ref-date-from').value = dateStr(from)
+  document.getElementById('ref-date-to').value = dateStr(to)
+}
+
+async function loadReferrals() {
+  const wrap = document.getElementById('ref-table-wrap')
+  const chartWrap = document.getElementById('ref-chart-wrap')
+  wrap.innerHTML = '<div class="loading">Loading referral data…</div>'
+  chartWrap.style.display = 'none'
+
+  const from = document.getElementById('ref-date-from').value
+  const to = document.getElementById('ref-date-to').value
+
+  let query = sb.from('bookings')
+    .select('referral_source')
+    .not('referral_source', 'is', null)
+    .gt('qty', 0)
+    .is('returned_at', null)
+
+  if (from) query = query.gte('booked_at', from)
+  if (to)   query = query.lte('booked_at', to + 'T23:59:59')
+
+  const { data, error } = await query
+
+  if (error) { wrap.innerHTML = '<div class="empty">Error: ' + error.message + '</div>'; return }
+  if (!data?.length) { wrap.innerHTML = '<div class="empty">No referral data found for this period.</div>'; return }
+
+  // Tally
+  const counts = {}
+  for (const row of data) {
+    const src = row.referral_source?.trim() || 'Unknown'
+    counts[src] = (counts[src] || 0) + 1
+  }
+  const total = data.length
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1])
+
+  // Draw donut
+  drawReferralDonut(sorted, total)
+  chartWrap.style.display = 'flex'
+
+  // Table
+  const rows = sorted.map(([src, count], i) => {
+    const pct = ((count / total) * 100).toFixed(1)
+    return `<tr>
+      <td style="display:flex;align-items:center;gap:8px">
+        <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${REFERRAL_COLOURS[i % REFERRAL_COLOURS.length]};flex-shrink:0"></span>
+        ${escHtml(src)}
+      </td>
+      <td style="text-align:right;font-weight:600">${count}</td>
+      <td style="text-align:right;color:#888">${pct}%</td>
+    </tr>`
+  }).join('')
+
+  wrap.innerHTML = `
+    <table class="grid-table" style="max-width:520px">
+      <thead><tr>
+        <th style="text-align:left">Source</th>
+        <th style="text-align:right">Bookings</th>
+        <th style="text-align:right">Share</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot><tr style="font-weight:600;border-top:1px solid #333">
+        <td>Total</td>
+        <td style="text-align:right">${total}</td>
+        <td style="text-align:right">100%</td>
+      </tr></tfoot>
+    </table>`
+}
+
+function drawReferralDonut(sorted, total) {
+  const canvas = document.getElementById('ref-donut')
+  const ctx = canvas.getContext('2d')
+  const cx = 110, cy = 110, r = 90, inner = 54
+  ctx.clearRect(0, 0, 220, 220)
+
+  let startAngle = -Math.PI / 2
+  const legend = document.getElementById('ref-legend')
+  legend.innerHTML = ''
+
+  sorted.forEach(([src, count], i) => {
+    const slice = (count / total) * 2 * Math.PI
+    const colour = REFERRAL_COLOURS[i % REFERRAL_COLOURS.length]
+
+    ctx.beginPath()
+    ctx.moveTo(cx, cy)
+    ctx.arc(cx, cy, r, startAngle, startAngle + slice)
+    ctx.closePath()
+    ctx.fillStyle = colour
+    ctx.fill()
+
+    // inner hole
+    ctx.beginPath()
+    ctx.arc(cx, cy, inner, 0, 2 * Math.PI)
+    ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--bg') || '#111'
+    ctx.fill()
+
+    startAngle += slice
+
+    // legend entry
+    const pct = ((count / total) * 100).toFixed(1)
+    legend.innerHTML += `<div style="display:flex;align-items:center;gap:7px">
+      <span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:${colour};flex-shrink:0"></span>
+      <span style="color:#ccc">${escHtml(src)}</span>
+      <span style="color:#888;margin-left:auto;padding-left:16px">${count} <span style="font-size:11px">(${pct}%)</span></span>
+    </div>`
+  })
+
+  // centre label
+  ctx.fillStyle = '#ccc'
+  ctx.font = 'bold 22px sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(total, cx, cy - 8)
+  ctx.font = '11px sans-serif'
+  ctx.fillStyle = '#888'
+  ctx.fillText('bookings', cx, cy + 12)
+}
+
+// Init dates and load when tab is first opened
+const _origSwitchTab = switchTab
+function switchTab(tab) {
+  _origSwitchTab(tab)
+  if (tab === 'referrals') {
+    if (!document.getElementById('ref-date-from').value) initReferralDates()
+    loadReferrals()
+  }
 }
 </script>
 
