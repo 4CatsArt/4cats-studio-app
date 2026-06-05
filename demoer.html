@@ -328,18 +328,42 @@
     const el = document.getElementById('schedule-content');
     el.innerHTML = '<div class="loading-msg">Loading sessions...</div>';
     try {
-      const data = await sbGet('sessions', {
-        select: 'id,session_time,title,spaces_left_cache,capacity',
+      const sessions = await sbGet('sessions', {
+        select: 'id,session_time,title,spaces_left_cache,capacity,show,session_type',
         studio_id: 'eq.' + studioId,
         session_date: 'eq.' + isoDate(currentDate),
         order: 'session_time.asc'
       });
-      if (!data || !data.length) {
+      if (!sessions || !sessions.length) {
         el.innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/></svg>No sessions on this day.</div>';
         return;
       }
-      const rows = data.map(s => {
-        const booked = Math.max(0, (s.capacity || 0) - (s.spaces_left_cache || 0));
+      // Fetch real booking counts (same as index.html)
+      const ids = sessions.map(s => s.id);
+      const bookingRows = await sbGet('bookings', {
+        select: 'session_id,qty',
+        session_id: 'in.(' + ids.join(',') + ')',
+        qty: 'gt.0',
+        returned_at: 'is.null'
+      });
+      const bookingCounts = {};
+      (bookingRows || []).forEach(b => {
+        bookingCounts[b.session_id] = (bookingCounts[b.session_id] || 0) + (b.qty || 0);
+      });
+      // Apply same show/hide filter as index.html
+      const filtered = sessions.filter(s => {
+        if (s.session_type === 'party_time_slot') return false;
+        const count = bookingCounts[s.id] || 0;
+        if (s.show === false && count === 0) return false;
+        if (count === 0 && s.capacity !== null && s.capacity === 0) return false;
+        return true;
+      });
+      if (!filtered.length) {
+        el.innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/></svg>No sessions on this day.</div>';
+        return;
+      }
+      const rows = filtered.map(s => {
+        const booked = bookingCounts[s.id] || 0;
         const cap = s.capacity || 0;
         const pct = cap > 0 ? Math.min(100, Math.round(booked / cap * 100)) : 0;
         const fillCls = pct >= 100 ? 'full' : pct >= 75 ? 'warn' : '';
