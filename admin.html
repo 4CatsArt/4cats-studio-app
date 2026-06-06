@@ -21,6 +21,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .top-bar-title { font-size: 14px; font-weight: 600; margin-right: 1rem; }
 .top-bar-title span { color: #888; font-weight: 400; }
 .tab-btn { background: none; border: none; color: #888; font-size: 13px; cursor: pointer; padding: 0 4px; height: 48px; border-bottom: 2px solid transparent; }
+.feat-menu-item { padding: 6px 16px; cursor: pointer; color: #333; }
+.feat-menu-item:hover { background: #f5f5f0; }
+.feat-menu-remove { color: #c00; }
 .tab-btn:hover { color: #ccc; }
 .tab-btn.active { color: white; border-bottom-color: white; }
 .top-bar-right { margin-left: auto; }
@@ -7524,6 +7527,7 @@ let studioRooms = []
 let editingRoomId = null
 let draggedTableId = null
 let dragSourceCell = null  // {x, y, roomName}
+let cellFeatures = []  // all features for current studio
 
 // Table visual dimensions in cells (each cell = CELL_W x CELL_H)
 function getTableDims(t) {
@@ -7535,11 +7539,18 @@ function getTableDims(t) {
 async function loadRooms() {
   if (!tablesStudioId) return
   try {
-    const res = await fetch(SUPABASE_URL + '/rest/v1/studio_rooms?studio_id=eq.' + tablesStudioId + '&order=sort_order.asc', {
-      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
-    })
-    const json = await res.json()
-    studioRooms = Array.isArray(json) ? json : []
+    const [roomsRes, featuresRes] = await Promise.all([
+      fetch(SUPABASE_URL + '/rest/v1/studio_rooms?studio_id=eq.' + tablesStudioId + '&order=sort_order.asc', {
+        headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+      }),
+      fetch(SUPABASE_URL + '/rest/v1/studio_cell_features?studio_id=eq.' + tablesStudioId, {
+        headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+      })
+    ])
+    const roomsJson = await roomsRes.json()
+    const featuresJson = await featuresRes.json()
+    studioRooms = Array.isArray(roomsJson) ? roomsJson : []
+    cellFeatures = Array.isArray(featuresJson) ? featuresJson : []
     renderRoomEditor()
   } catch(e) { console.error('loadRooms:', e) }
 }
@@ -7601,13 +7612,20 @@ function renderRoomEditor() {
       for (let col = 0; col < grid.cols; col++) {
         const x = col * CELL_W
         const y = row * CELL_H
+        // Get features for this cell
+        const cellFeats = cellFeatures.filter(function(f) {
+          return f.room_name === room.name && f.cell_x === col && f.cell_y === row
+        })
+        const featureSvg = buildFeatureSvg(cellFeats)
         html += '<div '
           + 'data-cell-x="' + col + '" data-cell-y="' + row + '" data-cell-room="' + room.name.replace(/'/g,'&apos;') + '" '
           + 'ondragover="cellDragOver(event)" ondragleave="cellDragLeave(event)" ondrop="cellDrop(event,' + col + ',' + row + ',\'' + room.name.replace(/'/g,"\\'") + '\')" '
+          + 'oncontextmenu="showFeatureMenu(event,' + col + ',' + row + ',\'' + room.name.replace(/'/g,"\\'") + '\')" '
           + 'style="position:absolute;left:' + x + 'px;top:' + y + 'px;'
           + 'width:' + CELL_W + 'px;height:' + CELL_H + 'px;'
           + 'border:1px dashed #d8d8d0;box-sizing:border-box;'
           + 'background:transparent">'
+          + featureSvg
           + '</div>'
       }
     }
@@ -7623,7 +7641,7 @@ function renderRoomEditor() {
 
     // Legend hint
     html += '<div style="padding:6px 16px 10px;font-size:11px;color:#bbb">'
-    html += 'Drag tables to reposition · Click ↻ to rotate · Landscape = wide, Portrait = tall'
+    html += 'Drag tables to reposition · Click ↻ to rotate · Right-click any cell to add door/window'
     html += '</div>'
 
     html += '</div>'
@@ -7844,7 +7862,200 @@ async function expandRoom(roomId, direction) {
   } catch(e) { alert('Expand failed: ' + e.message) }
 }
 
-// ── ROOM CRUD ─────────────────────────────────────────────────────
+// ── CELL FEATURES (doors & windows) ──────────────────────────────
+
+function buildFeatureSvg(feats) {
+  if (!feats || !feats.length) return ''
+  const W = CELL_W, H = CELL_H
+  const THICK = 4
+  const DOOR_COLOR = '#333'
+  const WIN_COLOR = '#4285f4'
+  const TICK_COLOR = '#4285f4'
+
+  let svgParts = ''
+
+  feats.forEach(function(f) {
+    const edge = f.edge
+    const type = f.feature_type
+
+    if (type === 'door') {
+      // Bold dark line on the edge with a small gap in the middle (door opening)
+      const GAP = W * 0.25
+      if (edge === 'top') {
+        svgParts += '<line x1="0" y1="1" x2="' + (W/2 - GAP/2) + '" y2="1" stroke="' + DOOR_COLOR + '" stroke-width="' + THICK + '"/>'
+        svgParts += '<line x1="' + (W/2 + GAP/2) + '" y1="1" x2="' + W + '" y2="1" stroke="' + DOOR_COLOR + '" stroke-width="' + THICK + '"/>'
+        // Arc hint for door swing
+        svgParts += '<path d="M ' + (W/2 - GAP/2) + ' 1 Q ' + (W/2) + ' ' + (GAP*0.8) + ' ' + (W/2 + GAP/2) + ' 1" stroke="' + DOOR_COLOR + '" stroke-width="1" fill="none" stroke-dasharray="2,2"/>'
+      } else if (edge === 'bottom') {
+        const y = H - 1
+        svgParts += '<line x1="0" y1="' + y + '" x2="' + (W/2 - GAP/2) + '" y2="' + y + '" stroke="' + DOOR_COLOR + '" stroke-width="' + THICK + '"/>'
+        svgParts += '<line x1="' + (W/2 + GAP/2) + '" y1="' + y + '" x2="' + W + '" y2="' + y + '" stroke="' + DOOR_COLOR + '" stroke-width="' + THICK + '"/>'
+        svgParts += '<path d="M ' + (W/2 - GAP/2) + ' ' + y + ' Q ' + (W/2) + ' ' + (H - 1 - GAP*0.8) + ' ' + (W/2 + GAP/2) + ' ' + y + '" stroke="' + DOOR_COLOR + '" stroke-width="1" fill="none" stroke-dasharray="2,2"/>'
+      } else if (edge === 'left') {
+        const GAPV = H * 0.3
+        svgParts += '<line x1="1" y1="0" x2="1" y2="' + (H/2 - GAPV/2) + '" stroke="' + DOOR_COLOR + '" stroke-width="' + THICK + '"/>'
+        svgParts += '<line x1="1" y1="' + (H/2 + GAPV/2) + '" x2="1" y2="' + H + '" stroke="' + DOOR_COLOR + '" stroke-width="' + THICK + '"/>'
+        svgParts += '<path d="M 1 ' + (H/2 - GAPV/2) + ' Q ' + (GAPV*0.8) + ' ' + (H/2) + ' 1 ' + (H/2 + GAPV/2) + '" stroke="' + DOOR_COLOR + '" stroke-width="1" fill="none" stroke-dasharray="2,2"/>'
+      } else if (edge === 'right') {
+        const GAPV = H * 0.3
+        const x = W - 1
+        svgParts += '<line x1="' + x + '" y1="0" x2="' + x + '" y2="' + (H/2 - GAPV/2) + '" stroke="' + DOOR_COLOR + '" stroke-width="' + THICK + '"/>'
+        svgParts += '<line x1="' + x + '" y1="' + (H/2 + GAPV/2) + '" x2="' + x + '" y2="' + H + '" stroke="' + DOOR_COLOR + '" stroke-width="' + THICK + '"/>'
+        svgParts += '<path d="M ' + x + ' ' + (H/2 - GAPV/2) + ' Q ' + (W - 1 - GAPV*0.8) + ' ' + (H/2) + ' ' + x + ' ' + (H/2 + GAPV/2) + '" stroke="' + DOOR_COLOR + '" stroke-width="1" fill="none" stroke-dasharray="2,2"/>'
+      }
+
+    } else if (type === 'window') {
+      // Bold blue line on the edge with 3 small perpendicular ticks
+      const TICK = 5
+      const N = 3
+      if (edge === 'top') {
+        svgParts += '<line x1="0" y1="1" x2="' + W + '" y2="1" stroke="' + WIN_COLOR + '" stroke-width="' + THICK + '"/>'
+        for (let i = 1; i <= N; i++) {
+          const tx = (W / (N+1)) * i
+          svgParts += '<line x1="' + tx + '" y1="1" x2="' + tx + '" y2="' + (1+TICK) + '" stroke="' + TICK_COLOR + '" stroke-width="1.5"/>'
+        }
+      } else if (edge === 'bottom') {
+        const y = H - 1
+        svgParts += '<line x1="0" y1="' + y + '" x2="' + W + '" y2="' + y + '" stroke="' + WIN_COLOR + '" stroke-width="' + THICK + '"/>'
+        for (let i = 1; i <= N; i++) {
+          const tx = (W / (N+1)) * i
+          svgParts += '<line x1="' + tx + '" y1="' + y + '" x2="' + tx + '" y2="' + (y-TICK) + '" stroke="' + TICK_COLOR + '" stroke-width="1.5"/>'
+        }
+      } else if (edge === 'left') {
+        svgParts += '<line x1="1" y1="0" x2="1" y2="' + H + '" stroke="' + WIN_COLOR + '" stroke-width="' + THICK + '"/>'
+        for (let i = 1; i <= N; i++) {
+          const ty = (H / (N+1)) * i
+          svgParts += '<line x1="1" y1="' + ty + '" x2="' + (1+TICK) + '" y2="' + ty + '" stroke="' + TICK_COLOR + '" stroke-width="1.5"/>'
+        }
+      } else if (edge === 'right') {
+        const x = W - 1
+        svgParts += '<line x1="' + x + '" y1="0" x2="' + x + '" y2="' + H + '" stroke="' + WIN_COLOR + '" stroke-width="' + THICK + '"/>'
+        for (let i = 1; i <= N; i++) {
+          const ty = (H / (N+1)) * i
+          svgParts += '<line x1="' + x + '" y1="' + ty + '" x2="' + (x-TICK) + '" y2="' + ty + '" stroke="' + TICK_COLOR + '" stroke-width="1.5"/>'
+        }
+      }
+    }
+  })
+
+  return '<svg style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible" viewBox="0 0 ' + W + ' ' + H + '">' + svgParts + '</svg>'
+}
+
+// ── CONTEXT MENU ──────────────────────────────────────────────────
+
+let featureMenuState = null  // {x, y, roomName}
+
+function showFeatureMenu(event, col, row, roomName) {
+  event.preventDefault()
+  event.stopPropagation()
+  closeFeatureMenu()
+
+  featureMenuState = { col, row, roomName }
+
+  // Current features on this cell
+  const existing = cellFeatures.filter(function(f) {
+    return f.room_name === roomName && f.cell_x === col && f.cell_y === row
+  })
+  const hasTop = existing.find(function(f){ return f.edge === 'top' })
+  const hasBottom = existing.find(function(f){ return f.edge === 'bottom' })
+  const hasLeft = existing.find(function(f){ return f.edge === 'left' })
+  const hasRight = existing.find(function(f){ return f.edge === 'right' })
+
+  function edgeLabel(edge, feat) {
+    const icons = { door: '🚪', window: '🪟' }
+    if (feat) return edge.charAt(0).toUpperCase() + edge.slice(1) + ': ' + icons[feat.feature_type] + ' ' + feat.feature_type + ' (change/remove)'
+    return edge.charAt(0).toUpperCase() + edge.slice(1) + ' edge…'
+  }
+
+  function edgeItems(edge, feat) {
+    const items = []
+    if (feat) {
+      const other = feat.feature_type === 'door' ? 'window' : 'door'
+      const otherIcon = other === 'door' ? '🚪' : '🪟'
+      items.push('<div class="feat-menu-item" onclick="setFeature(\'' + edge + '\',\'' + other + '\',\'' + roomName.replace(/'/g,"\\'") + '\',' + col + ',' + row + ')">' + otherIcon + ' Change to ' + other + '</div>')
+      items.push('<div class="feat-menu-item feat-menu-remove" onclick="removeFeature(\'' + edge + '\',\'' + roomName.replace(/'/g,"\\'") + '\',' + col + ',' + row + ')">✕ Remove</div>')
+    } else {
+      items.push('<div class="feat-menu-item" onclick="setFeature(\'' + edge + '\',\'door\',\'' + roomName.replace(/'/g,"\\'") + '\',' + col + ',' + row + ')">🚪 Add door</div>')
+      items.push('<div class="feat-menu-item" onclick="setFeature(\'' + edge + '\',\'window\',\'' + roomName.replace(/'/g,"\\'") + '\',' + col + ',' + row + ')">🪟 Add window</div>')
+    }
+    return items.join('')
+  }
+
+  const menu = document.createElement('div')
+  menu.id = 'feature-ctx-menu'
+  menu.style.cssText = 'position:fixed;left:' + event.clientX + 'px;top:' + event.clientY + 'px;'
+    + 'background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.15);'
+    + 'z-index:9999;min-width:200px;padding:6px 0;font-size:13px'
+
+  const edges = ['top','bottom','left','right']
+  const feats = [hasTop, hasBottom, hasLeft, hasRight]
+
+  let html = '<div style="padding:6px 14px 4px;font-size:11px;font-weight:600;color:#aaa;text-transform:uppercase;letter-spacing:0.5px">Cell (' + col + ',' + row + ')</div>'
+  edges.forEach(function(edge, i) {
+    html += '<div style="padding:3px 14px 2px;font-size:11px;color:#bbb;margin-top:4px">'
+      + edge.charAt(0).toUpperCase() + edge.slice(1) + (feats[i] ? ' — ' + feats[i].feature_type : '') + '</div>'
+    html += edgeItems(edge, feats[i])
+  })
+
+  menu.innerHTML = html
+  document.body.appendChild(menu)
+
+  // Close on next click anywhere
+  setTimeout(function() {
+    document.addEventListener('click', closeFeatureMenu, { once: true })
+    document.addEventListener('contextmenu', closeFeatureMenu, { once: true })
+  }, 0)
+}
+
+function closeFeatureMenu() {
+  const m = document.getElementById('feature-ctx-menu')
+  if (m) m.remove()
+}
+
+async function setFeature(edge, type, roomName, col, row) {
+  closeFeatureMenu()
+  // Upsert
+  const existing = cellFeatures.find(function(f) {
+    return f.room_name === roomName && f.cell_x === col && f.cell_y === row && f.edge === edge
+  })
+  try {
+    if (existing) {
+      await fetch(SUPABASE_URL + '/rest/v1/studio_cell_features?id=eq.' + existing.id, {
+        method: 'PATCH',
+        headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ feature_type: type })
+      })
+      existing.feature_type = type
+    } else {
+      const res = await fetch(SUPABASE_URL + '/rest/v1/studio_cell_features', {
+        method: 'POST',
+        headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=representation' },
+        body: JSON.stringify({ studio_id: tablesStudioId, room_name: roomName, cell_x: col, cell_y: row, edge: edge, feature_type: type })
+      })
+      const inserted = await res.json()
+      if (Array.isArray(inserted) && inserted[0]) cellFeatures.push(inserted[0])
+    }
+    renderRoomEditor()
+  } catch(e) { alert('Save failed: ' + e.message) }
+}
+
+async function removeFeature(edge, roomName, col, row) {
+  closeFeatureMenu()
+  const existing = cellFeatures.find(function(f) {
+    return f.room_name === roomName && f.cell_x === col && f.cell_y === row && f.edge === edge
+  })
+  if (!existing) return
+  try {
+    await fetch(SUPABASE_URL + '/rest/v1/studio_cell_features?id=eq.' + existing.id, {
+      method: 'DELETE',
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+    })
+    cellFeatures = cellFeatures.filter(function(f){ return f.id !== existing.id })
+    renderRoomEditor()
+  } catch(e) { alert('Remove failed: ' + e.message) }
+}
+
+
 
 function openAddRoomModal() {
   editingRoomId = null
