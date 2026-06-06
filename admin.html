@@ -6858,6 +6858,19 @@ function drawReferralDonut(sorted, total) {
     <div id="tables-groups-list"></div>
   </div>
 
+  <!-- Room Layout section -->
+  <div id="tables-rooms-section" style="display:none;margin-top:2rem;padding-top:1.5rem;border-top:1px solid #eee">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:0.5rem;flex-wrap:wrap">
+      <h3 style="margin:0;font-size:15px;font-weight:600">Room Layout</h3>
+      <button class="btn btn-primary" onclick="openAddRoomModal()" style="font-size:12px;padding:4px 12px">+ Add Room</button>
+      <span style="font-size:12px;color:#aaa;margin-left:auto">Drag tables into position within each room</span>
+    </div>
+    <div style="font-size:12px;color:#aaa;margin-bottom:1.2rem;line-height:1.6">
+      Set up the rooms in this studio and drag tables into position. The floor plan view in the day dashboard will reflect this layout.
+    </div>
+    <div id="tables-rooms-editor"></div>
+  </div>
+
 </div>
 
 <!-- Add/Edit Table Modal -->
@@ -6886,7 +6899,7 @@ function drawReferralDonut(sorted, total) {
           style="width:100%;box-sizing:border-box;height:34px;border:1px solid #ddd;border-radius:6px;padding:0 10px;font-size:14px">
       </div>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.9rem">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.9rem">
         <div>
           <label style="font-size:12px;color:#666;display:block;margin-bottom:6px">Shape</label>
           <select id="tbl-shape"
@@ -6894,6 +6907,14 @@ function drawReferralDonut(sorted, total) {
             <option value="rect">Rectangle</option>
             <option value="square">Square</option>
             <option value="round">Round</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:12px;color:#666;display:block;margin-bottom:6px">Orientation</label>
+          <select id="tbl-orientation"
+            style="width:100%;height:34px;border:1px solid #ddd;border-radius:6px;padding:0 8px;font-size:14px;background:white">
+            <option value="landscape">▬ Landscape</option>
+            <option value="portrait">▮ Portrait</option>
           </select>
         </div>
         <div>
@@ -7466,6 +7487,357 @@ console.log('[Tables tab] Ensure columns exist: is_wheel_preferred (boolean), an
     </div>
   </div>
 </div>
+
+<!-- Add/Edit Room Modal -->
+<div id="room-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9200;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:12px;padding:1.8rem;width:380px;max-width:95vw;box-shadow:0 8px 40px rgba(0,0,0,0.18)">
+    <h3 id="room-modal-title" style="margin:0 0 1.2rem;font-size:16px;font-weight:600">Add Room</h3>
+    <div style="display:grid;gap:0.9rem">
+      <div>
+        <label style="font-size:12px;color:#666;display:block;margin-bottom:4px">Room Name *</label>
+        <input id="room-name" type="text" placeholder="e.g. Main Room, Back Studio, Splatter Room"
+          style="width:100%;box-sizing:border-box;height:34px;border:1px solid #ddd;border-radius:6px;padding:0 10px;font-size:14px">
+      </div>
+      <div>
+        <label style="font-size:12px;color:#666;display:block;margin-bottom:4px">Sort Order <span style="color:#bbb">(1 = first room shown)</span></label>
+        <input id="room-sort" type="number" min="1" max="10" value="1"
+          style="width:100%;box-sizing:border-box;height:34px;border:1px solid #ddd;border-radius:6px;padding:0 10px;font-size:14px">
+      </div>
+    </div>
+    <div id="room-modal-err" style="color:#c0392b;font-size:12px;margin-top:0.8rem;display:none"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:1.4rem">
+      <button class="btn" onclick="closeRoomModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveRoomModal()" id="room-modal-save-btn">Save Room</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── ROOMS + DRAG-AND-DROP LAYOUT EDITOR ───────────────────────────────────────
+
+let studioRooms = []
+let editingRoomId = null
+let draggedTableId = null
+
+async function loadRooms() {
+  if (!tablesStudioId) return
+  try {
+    const res = await fetch(SUPABASE_URL + '/rest/v1/studio_rooms?studio_id=eq.' + tablesStudioId + '&order=sort_order.asc', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+    })
+    const json = await res.json()
+    studioRooms = Array.isArray(json) ? json : []
+    renderRoomEditor()
+  } catch(e) { console.error('loadRooms:', e) }
+}
+
+function renderRoomEditor() {
+  const el = document.getElementById('tables-rooms-editor')
+  if (!el) return
+
+  if (!studioRooms.length) {
+    el.innerHTML = '<div style="color:#bbb;font-size:13px;padding:0.5rem 0">No rooms configured yet. Click "+ Add Room" to create your first room.</div>'
+    return
+  }
+
+  // Unassigned tables (no room_name or room not in studioRooms list)
+  const roomNames = studioRooms.map(r => r.name)
+  const unassigned = tblData.filter(t => t.is_active && (!t.room_name || !roomNames.includes(t.room_name)))
+
+  let html = ''
+
+  studioRooms.forEach(function(room) {
+    const roomTables = tblData.filter(t => t.is_active && t.room_name === room.name)
+      .sort(function(a,b) { return (a.position_y - b.position_y) || (a.position_x - b.position_x) })
+
+    html += '<div class="room-section" style="margin-bottom:1.5rem;border:1.5px solid #e0e0d8;border-radius:10px;overflow:hidden">'
+    html += '<div style="background:#f5f5f0;padding:10px 14px;display:flex;align-items:center;gap:10px;border-bottom:1px solid #e0e0d8">'
+    html += '<span style="font-weight:600;font-size:14px">🏠 ' + room.name + '</span>'
+    html += '<span style="font-size:12px;color:#aaa">' + roomTables.length + ' table' + (roomTables.length !== 1 ? 's' : '') + '</span>'
+    html += '<div style="margin-left:auto;display:flex;gap:6px">'
+    html += '<button class="btn" style="font-size:11px;padding:2px 8px" onclick="openEditRoomModal(\'' + room.id + '\')">Rename</button>'
+    html += '<button class="btn" style="font-size:11px;padding:2px 8px;color:#c00" onclick="deleteRoom(\'' + room.id + '\',\'' + room.name.replace(/'/g,"\\'") + '\')">✕</button>'
+    html += '</div></div>'
+
+    // Drop zone grid
+    html += '<div class="room-drop-zone" data-room="' + room.name + '" '
+    html += 'ondragover="event.preventDefault()" '
+    html += 'ondrop="dropTableInRoom(event,\'' + room.name.replace(/'/g,"\\'") + '\')" '
+    html += 'style="padding:12px;min-height:80px;display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start">'
+
+    if (!roomTables.length) {
+      html += '<div style="color:#ccc;font-size:12px;padding:8px;pointer-events:none">Drop tables here…</div>'
+    } else {
+      roomTables.forEach(function(t) {
+        html += buildDraggableTableChip(t)
+      })
+    }
+    html += '</div></div>'
+  })
+
+  // Unassigned pool
+  if (unassigned.length) {
+    html += '<div style="margin-top:1rem;padding:12px;border:1.5px dashed #ddd;border-radius:8px">'
+    html += '<div style="font-size:12px;color:#aaa;margin-bottom:8px;font-weight:600">Unassigned tables — drag into a room:</div>'
+    html += '<div style="display:flex;flex-wrap:wrap;gap:8px">'
+    unassigned.forEach(function(t) { html += buildDraggableTableChip(t) })
+    html += '</div></div>'
+  }
+
+  el.innerHTML = html
+}
+
+function buildDraggableTableChip(t) {
+  const isPortrait = t.orientation === 'portrait'
+  const isRound = t.shape === 'round'
+  const w = isRound ? '54px' : isPortrait ? '44px' : '72px'
+  const h = isRound ? '54px' : isPortrait ? '64px' : '44px'
+  const radius = isRound ? '50%' : '6px'
+  const flags = []
+  if (t.is_kids_party_preferred) flags.push('🎂')
+  if (t.is_glazing_preferred) flags.push('🎨')
+  if (t.is_minimake_preferred) flags.push('⭐')
+  if (t.is_wheel_preferred) flags.push('🏺')
+
+  return '<div draggable="true" '
+    + 'data-table-id="' + t.id + '" '
+    + 'ondragstart="dragTableStart(event,\'' + t.id + '\')" '
+    + 'ondragend="dragTableEnd(event)" '
+    + 'title="T' + t.table_number + (t.label ? ' – ' + t.label : '') + ' | Cap: ' + t.capacity + (flags.length ? ' | ' + flags.join('') : '') + '" '
+    + 'style="width:' + w + ';height:' + h + ';border-radius:' + radius + ';'
+    + 'background:#fff;border:1.5px solid #bbb;cursor:grab;'
+    + 'display:flex;flex-direction:column;align-items:center;justify-content:center;'
+    + 'user-select:none;flex-shrink:0;transition:box-shadow 0.15s">'
+    + '<div style="font-weight:700;font-size:13px;color:#333;line-height:1">' + t.table_number + '</div>'
+    + (flags.length ? '<div style="font-size:9px;line-height:1;margin-top:2px">' + flags.join('') + '</div>' : '')
+    + '</div>'
+}
+
+function dragTableStart(event, tableId) {
+  draggedTableId = tableId
+  event.dataTransfer.effectAllowed = 'move'
+  event.target.style.opacity = '0.4'
+  event.target.style.boxShadow = '0 4px 16px rgba(0,0,0,0.2)'
+}
+
+function dragTableEnd(event) {
+  event.target.style.opacity = '1'
+  event.target.style.boxShadow = ''
+  draggedTableId = null
+}
+
+async function dropTableInRoom(event, roomName) {
+  event.preventDefault()
+  if (!draggedTableId) return
+  const t = tblData.find(function(x){ return x.id === draggedTableId })
+  if (!t) return
+  if (t.room_name === roomName) return // already here
+
+  try {
+    const res = await fetch(SUPABASE_URL + '/rest/v1/studio_tables?id=eq.' + draggedTableId, {
+      method: 'PATCH',
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ room_name: roomName })
+    })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    // Update local data
+    t.room_name = roomName
+    renderRoomEditor()
+    document.getElementById('tables-save-status').textContent = 'T' + t.table_number + ' → ' + roomName
+    setTimeout(function(){ document.getElementById('tables-save-status').textContent = '' }, 2000)
+  } catch(e) {
+    alert('Move failed: ' + e.message)
+  }
+}
+
+// Room CRUD
+function openAddRoomModal() {
+  editingRoomId = null
+  document.getElementById('room-modal-title').textContent = 'Add Room'
+  document.getElementById('room-name').value = ''
+  document.getElementById('room-sort').value = studioRooms.length + 1
+  document.getElementById('room-modal-err').style.display = 'none'
+  document.getElementById('room-modal').style.display = 'flex'
+}
+
+function openEditRoomModal(id) {
+  const r = studioRooms.find(function(x){ return x.id === id })
+  if (!r) return
+  editingRoomId = id
+  document.getElementById('room-modal-title').textContent = 'Rename Room'
+  document.getElementById('room-name').value = r.name
+  document.getElementById('room-sort').value = r.sort_order
+  document.getElementById('room-modal-err').style.display = 'none'
+  document.getElementById('room-modal').style.display = 'flex'
+}
+
+function closeRoomModal() {
+  document.getElementById('room-modal').style.display = 'none'
+}
+
+async function saveRoomModal() {
+  const errEl = document.getElementById('room-modal-err')
+  errEl.style.display = 'none'
+  const name = document.getElementById('room-name').value.trim()
+  const sort = parseInt(document.getElementById('room-sort').value) || 1
+  if (!name) { errEl.textContent = 'Room name is required.'; errEl.style.display = 'block'; return }
+
+  const btn = document.getElementById('room-modal-save-btn')
+  btn.disabled = true; btn.textContent = 'Saving…'
+
+  try {
+    let res
+    if (editingRoomId) {
+      const oldRoom = studioRooms.find(function(r){ return r.id === editingRoomId })
+      res = await fetch(SUPABASE_URL + '/rest/v1/studio_rooms?id=eq.' + editingRoomId, {
+        method: 'PATCH',
+        headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ name: name, sort_order: sort })
+      })
+      if (!res.ok) throw new Error('HTTP ' + res.status)
+      // Update room_name on any tables in old room
+      if (oldRoom && oldRoom.name !== name) {
+        const affectedTables = tblData.filter(function(t){ return t.room_name === oldRoom.name })
+        for (const t of affectedTables) {
+          await fetch(SUPABASE_URL + '/rest/v1/studio_tables?id=eq.' + t.id, {
+            method: 'PATCH',
+            headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+            body: JSON.stringify({ room_name: name })
+          })
+          t.room_name = name
+        }
+      }
+    } else {
+      res = await fetch(SUPABASE_URL + '/rest/v1/studio_rooms', {
+        method: 'POST',
+        headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ studio_id: tablesStudioId, name: name, sort_order: sort })
+      })
+      if (!res.ok) throw new Error('HTTP ' + res.status)
+    }
+    closeRoomModal()
+    await loadRooms()
+  } catch(e) {
+    errEl.textContent = 'Save failed: ' + e.message; errEl.style.display = 'block'
+  } finally {
+    btn.disabled = false; btn.textContent = 'Save Room'
+  }
+}
+
+async function deleteRoom(id, name) {
+  const roomTables = tblData.filter(function(t){ return t.room_name === name })
+  const msg = roomTables.length
+    ? 'Delete room "' + name + '"? The ' + roomTables.length + ' table(s) in it will become unassigned.'
+    : 'Delete room "' + name + '"?'
+  if (!confirm(msg)) return
+  try {
+    const res = await fetch(SUPABASE_URL + '/rest/v1/studio_rooms?id=eq.' + id, {
+      method: 'DELETE',
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+    })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    // Clear room_name on affected tables locally
+    roomTables.forEach(function(t){ t.room_name = null })
+    await loadRooms()
+  } catch(e) { alert('Delete failed: ' + e.message) }
+}
+
+// Patch loadTablesTab to also load rooms
+const _origLoadTablesTabForRooms = loadTablesTab
+loadTablesTab = async function() {
+  await _origLoadTablesTabForRooms()
+  const roomsSection = document.getElementById('tables-rooms-section')
+  if (tablesStudioId) {
+    roomsSection.style.display = 'block'
+    await loadRooms()
+  } else {
+    roomsSection.style.display = 'none'
+  }
+}
+
+// ── ORIENTATION IN SAVE MODAL ─────────────────────────────────────
+// Patch saveTableModal to include orientation and room_name
+
+const _origSaveTableModalForOrientation = saveTableModal
+saveTableModal = async function() {
+  const errEl = document.getElementById('table-modal-err')
+  errEl.style.display = 'none'
+  const num = parseInt(document.getElementById('tbl-number').value)
+  const cap = parseInt(document.getElementById('tbl-capacity').value)
+  if (!num || num < 1) { errEl.textContent = 'Table number is required.'; errEl.style.display = 'block'; return }
+  if (!cap || cap < 1) { errEl.textContent = 'Capacity must be at least 1.'; errEl.style.display = 'block'; return }
+  const dup = tblData.find(function(t){ return t.table_number === num && t.id !== editingTableId })
+  if (dup) { errEl.textContent = 'Table ' + num + ' already exists for this studio.'; errEl.style.display = 'block'; return }
+
+  // Preserve existing room_name when editing
+  let existingRoomName = null
+  if (editingTableId) {
+    const existing = tblData.find(function(t){ return t.id === editingTableId })
+    existingRoomName = existing ? existing.room_name : null
+  }
+
+  const payload = {
+    studio_id: tablesStudioId,
+    table_number: num,
+    capacity: cap,
+    label: document.getElementById('tbl-label').value.trim() || null,
+    shape: document.getElementById('tbl-shape').value,
+    orientation: document.getElementById('tbl-orientation').value,
+    is_active: document.getElementById('tbl-active').value === 'true',
+    is_kids_party_preferred: document.getElementById('tbl-party-pref').checked,
+    is_glazing_preferred: document.getElementById('tbl-glazing-pref').checked,
+    is_minimake_preferred: document.getElementById('tbl-minimake-pref').checked,
+    is_wheel_preferred: document.getElementById('tbl-wheel-pref').checked,
+    position_x: parseInt(document.getElementById('tbl-pos-x').value) || 0,
+    position_y: parseInt(document.getElementById('tbl-pos-y').value) || 0
+  }
+  if (existingRoomName) payload.room_name = existingRoomName
+
+  const btn = document.getElementById('table-modal-save-btn')
+  btn.disabled = true; btn.textContent = 'Saving…'
+  try {
+    let res
+    if (editingTableId) {
+      res = await fetch(SUPABASE_URL + '/rest/v1/studio_tables?id=eq.' + editingTableId, {
+        method: 'PATCH',
+        headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify(payload)
+      })
+    } else {
+      res = await fetch(SUPABASE_URL + '/rest/v1/studio_tables', {
+        method: 'POST',
+        headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify(payload)
+      })
+    }
+    if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.message || 'HTTP ' + res.status) }
+    closeTableModal()
+    await loadTablesTab()
+    document.getElementById('tables-save-status').textContent = 'Saved!'
+    setTimeout(function(){ document.getElementById('tables-save-status').textContent = '' }, 2000)
+  } catch(e) {
+    errEl.textContent = 'Save failed: ' + e.message; errEl.style.display = 'block'
+  } finally {
+    btn.disabled = false; btn.textContent = 'Save Table'
+  }
+}
+
+// Patch openAddTableModal to reset orientation
+const _origOpenAddForOrientation = openAddTableModal
+openAddTableModal = function() {
+  _origOpenAddForOrientation()
+  document.getElementById('tbl-orientation').value = 'landscape'
+}
+
+// Patch openEditTableModal to load orientation
+const _origOpenEditForOrientation = openEditTableModal
+openEditTableModal = function(id) {
+  _origOpenEditForOrientation(id)
+  const t = tblData.find(function(x){ return x.id === id })
+  if (t) document.getElementById('tbl-orientation').value = t.orientation || 'landscape'
+}
+
+</script>
 
 </body>
 </html>
