@@ -2670,17 +2670,20 @@ async function printFullDay() {
     .select('*').eq('studio_id', currentStudioId).eq('session_date', today).order('session_time')
 
   const regularSessions = (sessions || []).filter(s => s.session_type !== 'party')
+  const partySessions = (sessions || []).filter(s => s.session_type === 'party')
 
-  if (!regularSessions.length) {
-    alert('No regular sessions found for today.')
+  if (!regularSessions.length && !partySessions.length) {
+    alert('No sessions found for today.')
     if (btn) { btn.textContent = '🖨 Print Full Day'; btn.disabled = false }
     return
   }
 
   const ids = regularSessions.map(s => s.id)
-  const { data: bookings } = await sb.from('bookings')
-    .select('id, session_id, customer_name, qty, shopify_order_name, raw_payload, order_note, booked_at')
-    .in('session_id', ids).gt('qty', 0).order('booked_at')
+  const { data: bookings } = ids.length
+    ? await sb.from('bookings')
+        .select('id, session_id, customer_name, qty, shopify_order_name, raw_payload, order_note, booked_at')
+        .in('session_id', ids).gt('qty', 0).order('booked_at')
+    : { data: [] }
 
   const bookingsBySession = {}
   ;(bookings || []).forEach(b => {
@@ -2698,10 +2701,85 @@ async function printFullDay() {
     })
   })
 
+  // Fetch party bookings + party_details
+  let partyRows = []
+  if (partySessions.length) {
+    const partyIds = partySessions.map(s => s.id)
+    const { data: partyBookings } = await sb.from('bookings')
+      .select('id, session_id, customer_name, qty, shopify_order_name, raw_payload, booked_at')
+      .in('session_id', partyIds).gt('qty', 0).is('returned_at', null).order('booked_at')
+
+    const partyBookingList = partyBookings || []
+    let partyDetailsMap = {}
+    if (partyBookingList.length) {
+      const { data: pds } = await sb.from('party_details')
+        .select('booking_id, party_reason, actual_art_time, actual_party_time')
+        .in('booking_id', partyBookingList.map(b => b.id))
+      ;(pds || []).forEach(pd => { partyDetailsMap[pd.booking_id] = pd })
+    }
+
+    // Helper: parse duration string like "45 min" → minutes as number
+    function parseMins(str) {
+      if (!str || str === 'none') return 0
+      const m = (str + '').match(/(\d+)/)
+      return m ? parseInt(m[1]) : 0
+    }
+
+    // Helper: add minutes to HH:MM:SS time string → formatted time like "12:45pm"
+    function addMinsToTime(timeStr, mins) {
+      if (!timeStr) return ''
+      const [h, m] = timeStr.split(':').map(Number)
+      const total = h * 60 + m + mins
+      const rh = total % (24 * 60)
+      const nh = Math.floor(rh / 60)
+      const nm = rh % 60
+      const hour = nh === 0 ? 12 : nh > 12 ? nh - 12 : nh
+      const ampm = nh < 12 ? 'am' : 'pm'
+      return nm === 0 ? `${hour}${ampm}` : `${hour}:${String(nm).padStart(2,'0')}${ampm}`
+    }
+
+    for (const s of partySessions) {
+      // Find the primary booking for this session (first non-returned)
+      const booking = partyBookingList.find(b => b.session_id === s.id)
+      if (!booking) continue
+      const pd = partyDetailsMap[booking.id] || {}
+      const subtype = getPartySubtype(s.title)
+
+      // Determine art + party minutes: prefer actual (post-party), fall back to paid addon
+      let artMins = 0, partyMins = 0
+      if (pd.actual_art_time) {
+        artMins = parseMins(pd.actual_art_time)
+        partyMins = parseMins(pd.actual_party_time)
+      } else {
+        // Parse from raw_payload addons
+        try {
+          const addons = getAddons(booking.raw_payload)
+          const addonDetails = parseAddonDetails(addons, subtype)
+          artMins = parseMins(addonDetails.artTime || '60 min')
+          partyMins = parseMins(addonDetails.partyTime)
+        } catch(e) {
+          artMins = 60
+        }
+      }
+
+      const totalMins = artMins + partyMins
+      const startLabel = fmtTime(s.session_time)
+      const endLabel = addMinsToTime(s.session_time, totalMins)
+      const timeRange = endLabel ? `${startLabel}–${endLabel}` : startLabel
+      const reason = pd.party_reason || '—'
+      const customerName = booking.customer_name || '—'
+
+      partyRows.push({ timeRange, reason, customerName, sessionTitle: s.title })
+    }
+
+    // Sort by session time order (already ordered)
+    partyRows.sort((a, b) => a.timeRange.localeCompare(b.timeRange))
+  }
+
   const dateLabel = formatDate(currentDate)
   const totalAll = Object.values(bookingsBySession).flat().reduce((sum, b) => sum + (b.qty || 0), 0)
 
-  const sections = regularSessions.map(s => {
+  const sections = (regularSessions.length ? regularSessions : []).map(s => {
     const sb2 = bookingsBySession[s.id] || []
     const total = sb2.reduce((sum, b) => sum + (b.qty || 0), 0)
     if (!total && !sb2.length) return ''
@@ -2743,11 +2821,19 @@ async function printFullDay() {
   td.muted { color: #888; }
   td.note { color: #666; font-style: italic; }
   .empty { font-size: 11px; color: #aaa; font-style: italic; padding: 4px 0; }
+  .party-row { display: flex; align-items: baseline; gap: 12px; padding: 6px 8px; border-bottom: 0.5px solid #f0f0e8; }
+  .party-time { font-weight: 600; font-size: 12px; white-space: nowrap; min-width: 110px; }
+  .party-reason { flex: 1; font-size: 12px; }
+  .party-host { font-size: 11px; color: #888; white-space: nowrap; }
   @page { size: portrait; }
   @media print { body { padding: 12px; } }
 </style></head><body>
   <h1>Full Day — ${dateLabel}</h1>
-  <div class="subtitle">${regularSessions.length} sessions &middot; ${totalAll} registered</div>
+  <div class="subtitle">${regularSessions.length} session${regularSessions.length !== 1 ? 's' : ''} &middot; ${totalAll} registered${partyRows.length ? ` &middot; ${partyRows.length} part${partyRows.length !== 1 ? 'ies' : 'y'}` : ''}</div>
+  ${partyRows.length ? `<div class="section">
+    <div class="section-header"><span class="section-title">Parties</span><span class="section-meta">${partyRows.length} booked</span></div>
+    ${partyRows.map(p => `<div class="party-row"><span class="party-time">${p.timeRange}</span><span class="party-reason">${p.reason}</span><span class="party-host">${p.customerName}</span></div>`).join('')}
+  </div>` : ''}
   ${sections}
 
 <!-- Task Detail Popup -->
