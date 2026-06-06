@@ -4751,37 +4751,41 @@ async function assignTablesForDay() {
           const allFree = candidateTables.every(t => isTableFree(t.id, startMins, endMins))
           if (!allFree) continue
 
-          // Assign all bookings spread across party tables
           candidateTables.forEach(t => { holdTable(t.id, startMins, endMins) })
-          // Split bookings across tables evenly
           sessionBookings.forEach((b, idx) => {
             const t = candidateTables[idx % candidateTables.length]
-            newAssignments.push({
-              studio_id: currentStudioId,
-              session_id: session.id,
-              table_id: t.id,
-              booking_id: b.id,
-              customer_name: b.customer_name,
-              assigned_by: 'auto'
-            })
+            newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: t.id, booking_id: b.id, customer_name: b.customer_name, assigned_by: 'auto' })
           })
           assigned = true
           break
         }
 
-        // Fallback: pick any free party-preferred tables
+        // Fallback tiered by preference — never use wheel/glazing/minimake/kids-class tables if avoidable
         if (!assigned) {
-          const preferred = tables.filter(t => t.is_kids_party_preferred && isTableFree(t.id, startMins, endMins))
-          const picked = preferred.slice(0, tablesNeeded)
-          if (picked.length < tablesNeeded) {
-            // Take whatever's free
-            const free = tables.filter(t => isTableFree(t.id, startMins, endMins))
-            while (picked.length < tablesNeeded && picked.length < free.length) {
-              const next = free.find(t => !picked.includes(t))
-              if (next) picked.push(next)
-              else break
-            }
-          }
+          // Tier 1: party-preferred tables
+          const partyPreferred = tables.filter(t => t.is_kids_party_preferred && isTableFree(t.id, startMins, endMins))
+          // Tier 2: truly neutral tables (no preference flags)
+          const neutralFreeParty = tables.filter(t =>
+            isTableFree(t.id, startMins, endMins) &&
+            !t.is_kids_party_preferred &&
+            !t.is_glazing_preferred && !t.is_glazing_only &&
+            !t.is_minimake_preferred && !t.is_wheel_preferred &&
+            !t.is_kids_class_preferred
+          )
+          // Tier 3: other-preferred tables (last resort, excluding glazing-only)
+          const otherFreeParty = tables.filter(t =>
+            isTableFree(t.id, startMins, endMins) &&
+            !t.is_kids_party_preferred &&
+            !t.is_glazing_only
+          )
+
+          const pool = []
+          const addP = t => { if (!pool.find(x => x.id === t.id)) pool.push(t) }
+          partyPreferred.forEach(addP)
+          neutralFreeParty.forEach(addP)
+          otherFreeParty.forEach(addP)
+
+          const picked = pool.slice(0, tablesNeeded)
           picked.forEach(t => { holdTable(t.id, startMins, endMins) })
           sessionBookings.forEach((b, idx) => {
             const t = picked[idx % Math.max(picked.length, 1)]
@@ -4868,17 +4872,8 @@ async function assignTablesForDay() {
         neutralFree.forEach(add)
         // Tier 3: tables preferred for other types (avoid but use if needed)
         otherPreferredFree.forEach(add)
-
-        if (isWheel) {
-          console.log('[Assign] Wheel session:', session.title, '@', session.session_time)
-          console.log('  preferredFree:', preferredFree.map(t => 'T'+t.table_number))
-          console.log('  neutralFree:', neutralFree.map(t => 'T'+t.table_number))
-          console.log('  candidates:', candidates.map(t => 'T'+t.table_number))
-          const wheelTables = tables.filter(t => t.is_wheel_preferred)
-          wheelTables.forEach(t => {
-            console.log('  T'+t.table_number+' holds:', tableHold[t.id], 'free?', isTableFree(t.id, startMins, startMins+120))
-          })
-        }
+        // Tier 4: glazing-only tables (absolute last resort for non-glazing)
+        glazingOnlyFree.forEach(add)
         // Tier 4: glazing-only tables (absolute last resort for non-glazing)
         glazingOnlyFree.forEach(add)
 
