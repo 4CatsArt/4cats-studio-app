@@ -4283,6 +4283,8 @@ async function loadInfoView() {
 // ══════════════════════════════════════════════════════════════════
 
 // Session-type colour palette (by time slot index, cycles)
+let fpTableSlotMap = {}  // tableId → {table, slots} — populated during renderFloorView
+
 const FLOOR_COLOURS = [
   { bg: '#e8f0fe', border: '#4285f4', text: '#1a56db' },
   { bg: '#fce8d8', border: '#f4845f', text: '#c2410c' },
@@ -4482,7 +4484,7 @@ async function loadFloorView() {
     const borderColor = isOver ? '#f43f5e' : isEmpty ? '#ccc' : '#888'
     const bg = isEmpty ? '#f8f8f6' : '#fff'
 
-    // Build slot content — compact for grid view
+    // Compact slot badges — click table for full detail
     let slotContent = ''
     if (isEmpty) {
       slotContent = `<div style="font-size:9px;color:#ccc;margin-top:2px">empty</div>`
@@ -4498,17 +4500,14 @@ async function loadFloorView() {
       })
     }
 
-    // Move buttons for each booking (shown on hover via title attr for now — full modal on click)
-    const moveButtons = slots.flatMap(sl => sl.sessionBookings).map(b =>
-      `<button onclick="openReassignModal('${b.assignmentId}','${b.bookingId}','${(b.name||'').replace(/'/g,"\\'")}','${t.id}')" style="font-size:9px;padding:1px 4px;border:1px solid #ddd;border-radius:3px;background:white;cursor:pointer;color:#666;margin-top:1px;display:block;width:100%;text-align:left">Move ${b.name}${b.qty > 1 ? ' ×' + b.qty : ''}</button>`
-    ).join('')
+    // Encode table data for popup — store in a global map keyed by table id
+    fpTableSlotMap[t.id] = { table: t, slots: slots }
 
     return `<div style="position:absolute;left:${px}px;top:${py}px;width:${spanW}px;height:${spanH}px;display:flex;align-items:center;justify-content:center;z-index:2;box-sizing:border-box">
-      <div style="width:${cardW}px;height:${cardH}px;border-radius:${radius};border:2px solid ${borderColor};background:${bg};box-shadow:0 2px 6px rgba(0,0,0,0.07);position:relative;overflow:hidden;display:flex;flex-direction:column;align-items:center;padding:4px 4px 2px;box-sizing:border-box">
+      <div onclick="showTablePopup('${t.id}')" style="width:${cardW}px;height:${cardH}px;border-radius:${radius};border:2px solid ${borderColor};background:${bg};box-shadow:0 2px 6px rgba(0,0,0,0.07);position:relative;overflow:hidden;display:flex;flex-direction:column;align-items:center;padding:4px 4px 2px;box-sizing:border-box;cursor:pointer;transition:box-shadow 0.15s" onmouseover="this.style.boxShadow='0 4px 14px rgba(0,0,0,0.15)'" onmouseout="this.style.boxShadow='0 2px 6px rgba(0,0,0,0.07)'">
         <div style="font-weight:700;font-size:${isPortrait ? 11 : 12}px;color:${isEmpty ? '#bbb' : '#222'};line-height:1;white-space:nowrap">T${t.table_number}${t.label ? ' <span style="font-weight:400;color:#aaa;font-size:9px">' + t.label + '</span>' : ''}</div>
         <div style="font-size:9px;color:${isOver ? '#f43f5e' : '#aaa'}">${totalSeated}/${t.capacity}${isOver ? ' ⚠' : ''}</div>
         <div style="width:100%;overflow:hidden;flex:1">${slotContent}</div>
-        ${moveButtons ? '<div style="width:100%;margin-top:2px">' + moveButtons + '</div>' : ''}
       </div>
     </div>`
   }
@@ -4923,6 +4922,66 @@ async function clearDayAssignments() {
     headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
   })
   await loadFloorView()
+}
+
+function showTablePopup(tableId) {
+  const entry = fpTableSlotMap[tableId]
+  if (!entry) return
+  const { table: t, slots } = entry
+  const totalSeated = slots.reduce((s, sl) => s + sl.totalGuests, 0)
+  const isOver = totalSeated > t.capacity
+
+  const existing = document.getElementById('table-detail-popup')
+  if (existing) existing.remove()
+
+  const prefFlags = []
+  if (t.is_kids_party_preferred) prefFlags.push('🎂 Party preferred')
+  if (t.is_glazing_preferred) prefFlags.push('🎨 Glazing preferred')
+  if (t.is_minimake_preferred) prefFlags.push('⭐ Mini Make preferred')
+  if (t.is_wheel_preferred) prefFlags.push('🏺 Wheel preferred')
+
+  let slotsHtml = ''
+  if (!slots.length) {
+    slotsHtml = '<div style="color:#bbb;font-size:13px;padding:0.5rem 0">No sessions assigned to this table today.</div>'
+  } else {
+    slots.forEach(sl => {
+      const c = getFloorColour(sl.session.session_time)
+      slotsHtml += `<div style="margin-bottom:1rem">`
+      slotsHtml += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">`
+      slotsHtml += `<span style="background:${c.bg};color:${c.text};border:1px solid ${c.border};padding:2px 10px;border-radius:10px;font-size:12px;font-weight:600">${fmtTime(sl.session.session_time)}</span>`
+      slotsHtml += `<span style="font-size:13px;font-weight:600;color:#222">${sl.session.title}</span>`
+      slotsHtml += `<span style="font-size:12px;color:#aaa;margin-left:auto">${sl.totalGuests} guest${sl.totalGuests !== 1 ? 's' : ''}</span>`
+      slotsHtml += `</div>`
+      slotsHtml += `<div style="border:1px solid #f0f0e8;border-radius:6px;overflow:hidden">`
+      sl.sessionBookings.forEach((b, idx) => {
+        const rowBg = idx % 2 === 0 ? '#fff' : '#fafaf8'
+        slotsHtml += `<div style="display:flex;align-items:center;gap:10px;padding:7px 12px;background:${rowBg};border-bottom:${idx < sl.sessionBookings.length-1 ? '1px solid #f0f0e8' : 'none'}">`
+        slotsHtml += `<span style="font-size:13px;color:#333;flex:1">${b.name}</span>`
+        if (b.qty > 1) slotsHtml += `<span style="font-size:12px;color:#888;background:#f5f5f0;padding:1px 8px;border-radius:10px">×${b.qty}</span>`
+        slotsHtml += `<button onclick="openReassignModal('${b.assignmentId}','${b.bookingId}','${(b.name||'').replace(/'/g,"\\'")}','${t.id}')" style="font-size:11px;padding:3px 10px;border:1px solid #ddd;border-radius:5px;background:white;cursor:pointer;color:#555">Move</button>`
+        slotsHtml += `</div>`
+      })
+      slotsHtml += `</div></div>`
+    })
+  }
+
+  const modal = document.createElement('div')
+  modal.id = 'table-detail-popup'
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9000;display:flex;align-items:center;justify-content:center;padding:1rem'
+  modal.innerHTML = `
+    <div style="background:#fff;border-radius:12px;width:100%;max-width:480px;max-height:85vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,0.2)">
+      <div style="padding:1.2rem 1.4rem;border-bottom:1px solid #f0f0e8;display:flex;align-items:flex-start;gap:12px">
+        <div style="flex:1">
+          <div style="font-weight:700;font-size:17px">Table ${t.table_number}${t.label ? ' <span style="font-weight:400;font-size:13px;color:#aaa">— ' + t.label + '</span>' : ''}</div>
+          <div style="font-size:12px;color:${isOver ? '#f43f5e' : '#888'};margin-top:2px">${totalSeated}/${t.capacity} seated${isOver ? ' ⚠ Over capacity' : ''}${t.room_name ? ' · ' + t.room_name : ''}</div>
+          ${prefFlags.length ? '<div style="font-size:11px;color:#aaa;margin-top:3px">' + prefFlags.join(' · ') + '</div>' : ''}
+        </div>
+        <button onclick="document.getElementById('table-detail-popup').remove()" style="font-size:20px;border:none;background:none;cursor:pointer;color:#aaa;padding:0;line-height:1">×</button>
+      </div>
+      <div style="padding:1.2rem 1.4rem">${slotsHtml}</div>
+    </div>`
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove() })
+  document.body.appendChild(modal)
 }
 
 async function saveReassign(assignmentId, bookingId) {
