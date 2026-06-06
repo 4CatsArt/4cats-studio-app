@@ -148,6 +148,7 @@
         <div class="card-header"><div class="card-title">&#127881; Party Details</div></div>
         <div id="party-card-body"></div>
       </div>
+      <div id="extra-bookings"></div>
 
       <!-- Checked-in card -->
       <div class="card">
@@ -490,8 +491,11 @@
         .then(function(bResult) {
           var bookings = (bResult.ok && bResult.data) ? bResult.data : [];
           var bookedMap = {};
-          bookings.forEach(function(b) { bookedMap[b.session_id] = b; });
-          var withBookings = sessions.filter(function(s) { return bookedMap[s.id]; });
+          bookings.forEach(function(b) {
+            if (!bookedMap[b.session_id]) bookedMap[b.session_id] = [];
+            bookedMap[b.session_id].push(b);
+          });
+          var withBookings = sessions.filter(function(s) { return bookedMap[s.id] && bookedMap[s.id].length; });
           if (!withBookings.length) {
             document.getElementById('no-party').style.display = 'block';
             document.getElementById('placeholder').style.display = 'none';
@@ -499,19 +503,23 @@
             return;
           }
           var bookingIds = bookings.map(function(b) { return b.id; }).join(',');
+          // Store first booking per session for backwards compat, but also store all
+          var bookedMapFirst = {};
+          withBookings.forEach(function(s) { bookedMapFirst[s.id] = bookedMap[s.id][0]; });
           restFetch('party_details?booking_id=in.(' + bookingIds + ')&select=booking_id,party_reason,occasion,notes,medium,project,colour_choice,school_name,grade_age_group,expected_guests,contact_name,contacted,additional_charges_planned,party_notes')
             .then(function(pdResult) {
               var partyDetails = (pdResult.ok && pdResult.data) ? pdResult.data : [];
               var detailMap = {};
               partyDetails.forEach(function(pd) { detailMap[pd.booking_id] = pd; });
-              window._sessions  = withBookings;
-              window._bookedMap = bookedMap;
-              window._detailMap = detailMap;
+              window._sessions     = withBookings;
+              window._bookedMap    = bookedMapFirst;
+              window._bookedMapAll = bookedMap;
+              window._detailMap    = detailMap;
 
               var sel = document.getElementById('session-select');
               sel.innerHTML = '<option value="">- Select a party -</option>';
               withBookings.forEach(function(s) {
-                var booking = bookedMap[s.id];
+                var booking = bookedMapFirst[s.id];
                 var detail  = booking ? detailMap[booking.id] : null;
                 var opt = document.createElement('option');
                 opt.value = s.id;
@@ -634,6 +642,36 @@
     }
 
     document.getElementById('party-card-body').innerHTML = html;
+
+    // Render additional bookings for the same session
+    var allBookings = (window._bookedMapAll || {})[currentSessionId] || [];
+    var extraContainer = document.getElementById('extra-bookings');
+    if (extraContainer) {
+      var extraHtml = '';
+      for (var ei = 1; ei < allBookings.length; ei++) {
+        var eb = allBookings[ei];
+        var ed = detailMap[eb.id] || {};
+        var eSubtype = getSubtype(session.title);
+        var eAddons = parsePartyAddons(eb.raw_payload, eSubtype);
+        var eAddonDetails = parseAddonDetails(eAddons, eSubtype);
+        var ePaidPill = buildPaidPill(eAddonDetails, eSubtype);
+        var ePhone = getPhoneFromPayload(eb.raw_payload);
+        extraHtml += '<div class="card" style="margin-top:16px">';
+        extraHtml += '<div style="font-size:11px;font-weight:700;color:#c0392b;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">Booking ' + (ei+1) + '</div>';
+        extraHtml += '<div style="font-weight:600;font-size:15px">' + esc(eb.customer_name||'') + '</div>';
+        if (eb.customer_email) extraHtml += '<div style="font-size:13px;color:#555">' + esc(eb.customer_email) + '</div>';
+        var ePhone2 = eb.customer_phone || ePhone;
+        if (ePhone2) extraHtml += '<div style="font-size:13px;color:#555">' + esc(ePhone2) + '</div>';
+        if (ePaidPill) extraHtml += '<div style="margin-top:8px">' + ePaidPill + '</div>';
+        if (ed.party_reason) extraHtml += '<div style="font-size:13px;margin-top:6px;color:#444">Reason: ' + esc(ed.party_reason) + '</div>';
+        if (ed.expected_guests) extraHtml += '<div style="font-size:13px;color:#444">Expected guests: ' + esc(String(ed.expected_guests)) + '</div>';
+        if (ed.medium) extraHtml += '<div style="font-size:13px;color:#444">Medium: ' + esc(ed.medium) + '</div>';
+        if (ed.contact_name) extraHtml += '<div style="font-size:13px;color:#444">Contact: ' + esc(ed.contact_name) + '</div>';
+        if (ed.notes || ed.party_notes) extraHtml += '<div style="font-size:13px;color:#888;margin-top:4px">' + esc(ed.notes||ed.party_notes||'') + '</div>';
+        extraHtml += '</div>';
+      }
+      extraContainer.innerHTML = extraHtml;
+    }
 
     refreshCheckins();
   }
