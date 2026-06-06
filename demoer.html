@@ -41,6 +41,9 @@
     .schedule-table td { padding: 14px; border-bottom: 1px solid rgba(0,0,0,0.06); font-size: 14px; vertical-align: middle; }
     .schedule-table tr:last-child td { border-bottom: none; }
     .time-cell { color: #888; white-space: nowrap; font-variant-numeric: tabular-nums; font-size: 13px; }
+    .schedule-table tr.is-demoer td { background: #fff8e1; }
+    .schedule-table tr.is-demoer .session-title::after { content: ' \2605'; color: #c0392b; font-size: 12px; }
+    .demoer-tag { font-size: 11px; font-weight: 600; color: #c0392b; background: #fdecea; padding: 2px 7px; border-radius: 20px; margin-left: 6px; vertical-align: middle; }
     .session-title { font-weight: 500; }
     .reg-btn { background: #e8f0fc; color: #1a56a8; border: none; border-radius: 10px; padding: 7px 13px; font-size: 13px; font-weight: 600; cursor: pointer; min-width: 44px; min-height: 40px; }
     .cap-bar { height: 5px; border-radius: 3px; background: #eee; margin-top: 5px; overflow: hidden; }
@@ -275,7 +278,9 @@
   var allKilnData = [];
   var kilnFilter = 'all';
   var selectedKilnIds = [];
+  var sessionStaffMap = {};
   var selectedKilnIds = [];
+  var sessionStaffMap = {};
   var accessToken = null;
 
   // ── REST helpers ───────────────────────────────────────────
@@ -403,7 +408,7 @@
         var o = document.createElement('option');
         o.value = u.id; o.textContent = name; sel.appendChild(o);
       });
-      sel.onchange = function() { staffId = sel.value; loadTasks(); };
+      sel.onchange = function() { staffId = sel.value; loadTasks(); renderSchedule(); };
     } catch(e) { console.warn('loadStaff error', e); }
   }
 
@@ -437,6 +442,12 @@
       });
       var counts = {};
       (bookingRows||[]).forEach(function(b){ counts[b.session_id]=(counts[b.session_id]||0)+(b.qty||0); });
+      // Fetch session_staff assignments for today
+      try {
+        var staffRows = await sbGet('session_staff', { select: 'session_id,teacher,circler', session_id: 'in.('+ids.join(',')+')'  });
+        sessionStaffMap = {};
+        (staffRows||[]).forEach(function(r){ sessionStaffMap[r.session_id] = r; });
+      } catch(e) { sessionStaffMap = {}; }
       var filtered = sessions.filter(function(s) {
         if (s.session_type==='party_time_slot') return false;
         var c = counts[s.id]||0;
@@ -457,9 +468,42 @@
           (cap?'<div class="cap-bar"><div class="cap-fill '+fillCls+'" style="width:'+pct+'%"></div></div>':'')+
           '</td></tr>';
       }).join('');
-      el.innerHTML = '<div class="schedule-wrap"><table class="schedule-table"><thead><tr><th>Time</th><th>Session</th><th style="text-align:center">Reg</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+      lastScheduleSessions = filtered;
+      lastScheduleCounts = counts;
+      renderSchedule();
     } catch(e) { el.innerHTML = '<div class="error-msg">Error: '+e.message+'</div>'; }
   }
+
+  var lastScheduleSessions = [];
+  var lastScheduleCounts = {};
+
+  function renderSchedule() {
+    var el = document.getElementById('schedule-content');
+    if (!lastScheduleSessions.length) return;
+    var sLabel = {drying:'Drying'};
+    var nStageMap = {drying:'bisque_ready'};
+    var nLabel = {drying:'Bisque ready'};
+    var sel = document.getElementById('staff-select');
+    var selectedName = sel && sel.selectedIndex > 0 ? sel.options[sel.selectedIndex].text : '';
+    var rows = lastScheduleSessions.map(function(s) {
+      var booked = lastScheduleCounts[s.id]||0, cap = s.capacity||0;
+      var pct = cap>0?Math.min(100,Math.round(booked/cap*100)):0;
+      var fillCls = pct>=100?'full':pct>=75?'warn':'';
+      var titleSafe = (s.title||'Untitled').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+      var staffEntry = sessionStaffMap[s.id]||{};
+      var isDemoer = !!(selectedName && staffEntry.teacher && staffEntry.teacher.toLowerCase().indexOf(selectedName.toLowerCase()) !== -1);
+      var demoerTag = isDemoer ? '<span class="demoer-tag">Your session</span>' : '';
+      return '<tr class="'+(isDemoer?'is-demoer':'')+'">' +
+        '<td class="time-cell">'+fmtTime(s.session_time)+'</td>' +
+        '<td><span class="session-title">'+(s.title||'Untitled')+'</span>'+demoerTag+'</td>' +
+        '<td style="text-align:center;white-space:nowrap">' +
+        '<button class="reg-btn" onclick="openClassList(\''+s.id+'\',\''+titleSafe+'\','+booked+')">'+booked+(cap?'/'+cap:'')+'</button>' +
+        (cap?'<div class="cap-bar"><div class="cap-fill '+fillCls+'" style="width:'+pct+'%"></div></div>':'')+
+        '</td></tr>';
+    }).join('');
+    el.innerHTML = '<div class="schedule-wrap"><table class="schedule-table"><thead><tr><th>Time</th><th>Session</th><th style="text-align:center">Reg</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+  }
+
 
   async function openClassList(sessionId, title, count) {
     document.getElementById('modal-title').textContent = title + ' — ' + count + ' registered';
