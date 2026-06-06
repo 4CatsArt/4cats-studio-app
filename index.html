@@ -4506,7 +4506,7 @@ async function loadFloorView() {
     return `<div style="position:absolute;left:${px}px;top:${py}px;width:${spanW}px;height:${spanH}px;display:flex;align-items:center;justify-content:center;z-index:2;box-sizing:border-box">
       <div onclick="showTablePopup('${t.id}')" style="width:${cardW}px;height:${cardH}px;border-radius:${radius};border:2px solid ${borderColor};background:${bg};box-shadow:0 2px 6px rgba(0,0,0,0.07);position:relative;overflow:hidden;display:flex;flex-direction:column;align-items:center;padding:4px 4px 2px;box-sizing:border-box;cursor:pointer;transition:box-shadow 0.15s" onmouseover="this.style.boxShadow='0 4px 14px rgba(0,0,0,0.15)'" onmouseout="this.style.boxShadow='0 2px 6px rgba(0,0,0,0.07)'">
         <div style="font-weight:700;font-size:${isPortrait ? 11 : 12}px;color:${isEmpty ? '#bbb' : '#222'};line-height:1;white-space:nowrap">T${t.table_number}${t.label ? ' <span style="font-weight:400;color:#aaa;font-size:9px">' + t.label + '</span>' : ''}</div>
-        <div style="font-size:9px;color:${isOver ? '#f43f5e' : '#aaa'}">${totalSeated}/${t.capacity}${isOver ? ' ⚠' : ''}</div>
+        <div style="font-size:9px;color:${isOver ? '#f43f5e' : '#aaa'}">${maxConcurrent}/${t.capacity}${isOver ? ' ⚠' : ''}</div>
         <div style="width:100%;overflow:hidden;flex:1">${slotContent}</div>
       </div>
     </div>`
@@ -4785,8 +4785,15 @@ async function assignTablesForDay() {
 
       } else {
         // Workshop / glazing / mini make / wheel / kids class
-        // Preferred tables for this session type
-        let preferred = tables.filter(t => {
+        // Determine if this session has a preferred table type
+        const hasPreference = isGlazing || isMiniMake || isWheel || isKidsClass
+
+        // Free tables helper
+        const isFreeAndAvailable = t => isTableFree(t.id, startMins, endMins)
+
+        // Tables preferred for this session type
+        const preferredFree = tables.filter(t => {
+          if (!isFreeAndAvailable(t)) return false
           if (isGlazing && t.is_glazing_preferred) return true
           if (isMiniMake && t.is_minimake_preferred) return true
           if (isWheel && t.is_wheel_preferred) return true
@@ -4794,8 +4801,9 @@ async function assignTablesForDay() {
           return false
         })
 
-        // Also include tables that held the same session type earlier today (soft reuse)
-        const reuseTables = tables.filter(t => {
+        // Tables that held the same session type earlier (same-type reuse, soft)
+        const reuseFree = tables.filter(t => {
+          if (!isFreeAndAvailable(t)) return false
           return (tableHold[t.id] || []).some(h => {
             const prevSession = sessions.find(s => timeToMins(s.session_time) + getHoldMinutes(s) === h.end)
             if (!prevSession) return false
@@ -4805,24 +4813,56 @@ async function assignTablesForDay() {
             const prevIsKidsClass = /class\s+\d+\s+of\s+\d+/i.test(prevSession.title || '')
             return (isGlazing && prevIsGlazing) || (isMiniMake && prevIsMiniMake) || (isWheel && prevIsWheel) || (isKidsClass && prevIsKidsClass)
           })
-        }).filter(t => isTableFree(t.id, startMins, endMins))
+        })
 
-        // Build ordered candidate list:
-        // 1. Reuse same-type tables from earlier
-        // 2. Preferred tables for this type
-        // 3. Non-glazing-only free tables (main pool)
-        // 4. Glazing-only tables as last resort (only if non-glazing session)
-        const allFree = tables.filter(t => isTableFree(t.id, startMins, endMins))
-        const freeNonRestricted = allFree.filter(t => !t.is_glazing_only || isGlazing)
-        const freeGlazingOnly = allFree.filter(t => t.is_glazing_only && !isGlazing)
+        // Tables with NO preference flags — truly neutral tables
+        const neutralFree = tables.filter(t => {
+          if (!isFreeAndAvailable(t)) return false
+          if (t.is_glazing_only && !isGlazing) return false  // glazing-only: skip for non-glazing
+          // Skip tables that are preferred for OTHER session types
+          const isPreferredForOther = (
+            (t.is_glazing_preferred && !isGlazing) ||
+            (t.is_minimake_preferred && !isMiniMake) ||
+            (t.is_wheel_preferred && !isWheel) ||
+            (t.is_kids_class_preferred && !isKidsClass) ||
+            (t.is_kids_party_preferred)  // always skip party tables for non-party
+          )
+          if (isPreferredForOther) return false
+          return true
+        })
 
+        // Tables preferred for OTHER types — use only if nothing else available
+        const otherPreferredFree = tables.filter(t => {
+          if (!isFreeAndAvailable(t)) return false
+          if (t.is_glazing_only && !isGlazing) return false
+          if (t.is_kids_party_preferred) return false  // never use party tables for non-party
+          const isPreferredForOther = (
+            (t.is_glazing_preferred && !isGlazing) ||
+            (t.is_minimake_preferred && !isMiniMake) ||
+            (t.is_wheel_preferred && !isWheel) ||
+            (t.is_kids_class_preferred && !isKidsClass)
+          )
+          return isPreferredForOther
+        })
+
+        // Glazing-only tables — absolute last resort for non-glazing
+        const glazingOnlyFree = tables.filter(t =>
+          isFreeAndAvailable(t) && t.is_glazing_only && !isGlazing
+        )
+
+        // Build strictly tiered candidate list
         const candidates = []
-        reuseTables.forEach(t => { if (!candidates.find(c => c.id === t.id)) candidates.push(t) })
-        preferred.filter(t => isTableFree(t.id, startMins, endMins) && (!t.is_glazing_only || isGlazing))
-          .forEach(t => { if (!candidates.find(c => c.id === t.id)) candidates.push(t) })
-        freeNonRestricted.forEach(t => { if (!candidates.find(c => c.id === t.id)) candidates.push(t) })
-        // Glazing-only tables as last resort for non-glazing sessions
-        freeGlazingOnly.forEach(t => { if (!candidates.find(c => c.id === t.id)) candidates.push(t) })
+        const add = t => { if (!candidates.find(c => c.id === t.id)) candidates.push(t) }
+
+        // Tier 1: reuse same-type + preferred for this type
+        reuseFree.forEach(add)
+        preferredFree.forEach(add)
+        // Tier 2: neutral tables (no preference flags, not glazing-only)
+        neutralFree.forEach(add)
+        // Tier 3: tables preferred for other types (avoid but use if needed)
+        otherPreferredFree.forEach(add)
+        // Tier 4: glazing-only tables (absolute last resort for non-glazing)
+        glazingOnlyFree.forEach(add)
 
         // Fill tables: pack bookings into seats, move to next table when full
         let tableIdx = 0
@@ -4941,7 +4981,8 @@ function showTablePopup(tableId) {
   if (!entry) return
   const { table: t, slots } = entry
   const totalSeated = slots.reduce((s, sl) => s + sl.totalGuests, 0)
-  const isOver = totalSeated > t.capacity
+  const maxConcurrent = slots.reduce((max, sl) => Math.max(max, sl.totalGuests), 0)
+  const isOver = maxConcurrent > t.capacity
 
   const existing = document.getElementById('table-detail-popup')
   if (existing) existing.remove()
@@ -4987,7 +5028,7 @@ function showTablePopup(tableId) {
       <div style="padding:1.2rem 1.4rem;border-bottom:1px solid #f0f0e8;display:flex;align-items:flex-start;gap:12px">
         <div style="flex:1">
           <div style="font-weight:700;font-size:17px">Table ${t.table_number}${t.label ? ' <span style="font-weight:400;font-size:13px;color:#aaa">— ' + t.label + '</span>' : ''}</div>
-          <div style="font-size:12px;color:${isOver ? '#f43f5e' : '#888'};margin-top:2px">${totalSeated}/${t.capacity} seated${isOver ? ' ⚠ Over capacity' : ''}${t.room_name ? ' · ' + t.room_name : ''}</div>
+          <div style="font-size:12px;color:${isOver ? '#f43f5e' : '#888'};margin-top:2px">${maxConcurrent}/${t.capacity} peak${isOver ? ' ⚠ Over capacity' : ''}${t.room_name ? ' · ' + t.room_name : ''}</div>
           ${prefFlags.length ? '<div style="font-size:11px;color:#aaa;margin-top:3px">' + prefFlags.join(' · ') + '</div>' : ''}
         </div>
         <button onclick="document.getElementById('table-detail-popup').remove()" style="font-size:20px;border:none;background:none;cursor:pointer;color:#aaa;padding:0;line-height:1">×</button>
