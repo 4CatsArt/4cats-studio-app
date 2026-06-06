@@ -1233,7 +1233,7 @@ function buildPaidPill(addonDetails, subtype) {
   return `<span class="party-paid-pill">💳 Paid: ${parts.join(' · ')}</span>`
 }
 
-function buildPartyBookingBlock(booking, partyDetail, subtype, blockIdx, sessionTitle, sessionDate, sessionTime) {
+function buildPartyBookingBlock(booking, partyDetail, subtype, blockIdx, sessionTitle, sessionDate, sessionTime, sessionSignins) {
   const uid = `pb-${booking.id.replace(/-/g,'').slice(0,8)}`
   const addons = parsePartyAddons(booking.raw_payload, subtype)
   const addonDetails = parseAddonDetails(addons, subtype)
@@ -1431,6 +1431,14 @@ function buildPartyBookingBlock(booking, partyDetail, subtype, blockIdx, session
     ${booking.customer_email ? `<button class="party-email-btn no-print${pd.thank_you_sent_at ? ' sent' : ''}" id="${uid}-email-btn" onclick="sendPartyThankYou('${booking.id}','${uid}','${subtype}','${(booking.customer_email||'').replace(/'/g,"\\'")}','${(booking.customer_name||'').replace(/'/g,"\\'")}','${(sessionTitle||'').replace(/'/g,"\\'")}','${sessionDate||''}')">` + (pd.thank_you_sent_at ? '✉️ Resend Thank You' : '✉️ Send Thank You') + `</button>` : ''}
     <div style="clear:both"></div>
     ${pd.thank_you_sent_at ? `<div class="party-ticket-display" id="${uid}-ticket-display">✉️ Thank you sent · ${pd.party_ticket_number || 'ticket assigned'}</div>` : `<div class="party-ticket-display" id="${uid}-ticket-display" style="display:none"></div>`}
+    ${(() => {
+      const allSignins = sessionSignins || []
+      // Count entries matching this booking_id, OR (no booking_id on entry = legacy)
+      const count = allSignins.filter(e => e.mode === 'party' && (e.booking_id === booking.id || !e.booking_id)).length
+      return count > 0
+        ? `<div style="margin-top:10px;border-top:0.5px solid #f0b8cc;padding-top:10px"><button onclick="showSignins('${booking.session_id}','${sessionTitle?.replace(/'/g,"\'")||''}','${booking.id}')" style="padding:7px 18px;background:#fff0f5;border:0.5px solid #f0b8cc;border-radius:8px;font-size:13px;color:#99354e;font-weight:600;cursor:pointer">✅ Checked In (${count})</button></div>`
+        : ''
+    })()}
   </div>`
 }
 
@@ -2327,10 +2335,10 @@ async function loadDayView() {
     if (staff) staff.forEach(s => { staffData[s.session_id] = s })
 
     // Sign-in entries for today
-    const { data: signins } = await sb.from('signin_entries').select('session_id, name, mode, signed_in_at').in('session_id', ids)
+    const { data: signins } = await sb.from('signin_entries').select('session_id, booking_id, name, mode, signed_in_at').in('session_id', ids)
     if (signins) signins.forEach(e => {
       if (!signinData[e.session_id]) signinData[e.session_id] = []
-      signinData[e.session_id].push({ name: e.name, mode: e.mode, created_at: e.signed_in_at })
+      signinData[e.session_id].push({ name: e.name, mode: e.mode, created_at: e.signed_in_at, booking_id: e.booking_id })
     })
 
 
@@ -2563,22 +2571,12 @@ async function loadDayView() {
       const baseInfo = getPartyBase(subtype)
       const sessionPartyBookings = partyBookings[s.id] || []
       const partyBlocksList = sessionPartyBookings.map((b, idx) =>
-        buildPartyBookingBlock(b, partyDetails[b.id] || null, subtype, idx, s.title, dateStr(currentDate), s.session_time)
+        buildPartyBookingBlock(b, partyDetails[b.id] || null, subtype, idx, s.title, dateStr(currentDate), s.session_time, signinData[s.id] || [])
       ).join('')
-
-      // Check-in list — shown as a button that opens the sign-ins overlay
-      const partyCheckinCount = (signinData[s.id] || []).filter(e => e.mode === 'party').length
-      const checkinBtnHtml = `<div style="margin-top:14px;border-top:0.5px solid #f0b8cc;padding-top:12px">
-        <button onclick="showSignins('${s.id}', '${s.title.replace(/'/g, "\\'")}')"
-          style="padding:7px 18px;background:#fff0f5;border:0.5px solid #f0b8cc;border-radius:8px;font-size:13px;color:#99354e;font-weight:600;cursor:pointer">
-          ✅ Checked In (${partyCheckinCount})
-        </button>
-      </div>`
 
       partyBlocksHtml = `
         <div class="party-base-pill">📋 Base: ${baseInfo}</div>
         ${sessionPartyBookings.length > 0 ? partyBlocksList : '<p style="font-size:13px;color:#aaa;padding:8px 0">No bookings yet for this party slot.</p>'}
-        ${checkinBtnHtml}
       `
     }
 
@@ -3026,11 +3024,16 @@ function editCheck(id, checked) {
 
 let todaySessionsCache = []  // cached for reassign dropdown
 
-async function showSignins(sessionId, title) {
-  const { data, error } = await sb.from('signin_entries')
-    .select('id, name, email, phone, mode, signed_in_at, clay_ticket_id, clay_tickets(ticket_number)')
+async function showSignins(sessionId, title, bookingId) {
+  let query = sb.from('signin_entries')
+    .select('id, name, email, phone, mode, signed_in_at, booking_id, clay_ticket_id, clay_tickets(ticket_number)')
     .eq('session_id', sessionId)
     .order('signed_in_at')
+  // If called from a specific party booking, filter by booking_id (or legacy null)
+  if (bookingId) {
+    query = query.or('booking_id.eq.' + bookingId + ',booking_id.is.null')
+  }
+  const { data, error } = await query
 
   // Load today's sessions for reassign dropdown (cached)
   if (!todaySessionsCache.length) {
