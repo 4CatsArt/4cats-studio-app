@@ -4301,21 +4301,34 @@ function getFloorColour(timeStr) {
 }
 
 // ── LOAD FLOOR VIEW ───────────────────────────────────────────────
+// Floor plan grid constants (must match admin.html)
+const FP_CELL_W = 100
+const FP_CELL_H = 80
+const FP_THICK = 4
+
 async function loadFloorView() {
   floorTimeColours = {}
   const el = document.getElementById('floor-view-content')
   el.innerHTML = '<div class="loading">Loading floor plan…</div>'
   const today = dateStr(currentDate)
 
-  // Load tables, sessions, assignments in parallel
-  const [tablesRes, sessionsRes] = await Promise.all([
+  // Load everything in parallel
+  const [tablesRes, roomsRes, featuresRes, sessionsRes] = await Promise.all([
     fetch(SUPABASE_URL + '/rest/v1/studio_tables?studio_id=eq.' + currentStudioId + '&is_active=eq.true&order=table_number.asc', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+    }),
+    fetch(SUPABASE_URL + '/rest/v1/studio_rooms?studio_id=eq.' + currentStudioId + '&order=sort_order.asc', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+    }),
+    fetch(SUPABASE_URL + '/rest/v1/studio_cell_features?studio_id=eq.' + currentStudioId, {
       headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
     }),
     sb.from('sessions').select('id, title, session_time, session_type, capacity').eq('studio_id', currentStudioId).eq('session_date', today).order('session_time')
   ])
 
   const tables = await tablesRes.json()
+  const rooms = await roomsRes.json()
+  const features = await featuresRes.json()
   const sessions = sessionsRes.data || []
 
   if (!Array.isArray(tables) || !tables.length) {
@@ -4323,7 +4336,7 @@ async function loadFloorView() {
     return
   }
 
-  // Load seating assignments for today's sessions
+  // Load seating assignments
   const sessionIds = sessions.map(s => s.id)
   let assignments = []
   if (sessionIds.length) {
@@ -4334,7 +4347,7 @@ async function loadFloorView() {
     assignments = Array.isArray(aJson) ? aJson : []
   }
 
-  // Load bookings for guest counts
+  // Load bookings
   let bookings = []
   if (sessionIds.length) {
     const { data: bData } = await sb.from('bookings')
@@ -4343,34 +4356,32 @@ async function loadFloorView() {
     bookings = bData || []
   }
 
-  // Build lookup: tableId → [{session, bookings, colour, assignedBy}]
-  const tableMap = {} // tableId → array of slot objects
+  // Build tableMap: tableId → array of slot objects
+  const tableMap = {}
   tables.forEach(t => { tableMap[t.id] = [] })
 
-  // Group assignments by table+session
   const assignByTableSession = {}
   assignments.forEach(a => {
     const key = a.table_id + '|' + a.session_id
     if (!assignByTableSession[key]) assignByTableSession[key] = []
     assignByTableSession[key].push(a)
   })
-
   Object.entries(assignByTableSession).forEach(([key, aList]) => {
     const [tableId, sessionId] = key.split('|')
     const session = sessions.find(s => s.id === sessionId)
     if (!session || !tableMap[tableId]) return
     const colour = getFloorColour(session.session_time)
     const sessionBookings = aList.map(a => {
-        const b = bookings.find(bk => bk.id === a.booking_id)
-        return { name: a.customer_name || (b ? b.customer_name : '?'), qty: b ? b.qty : 1, bookingId: a.booking_id, assignmentId: a.id, assignedBy: a.assigned_by }
-      })
+      const b = bookings.find(bk => bk.id === a.booking_id)
+      return { name: a.customer_name || (b ? b.customer_name : '?'), qty: b ? b.qty : 1, bookingId: a.booking_id, assignmentId: a.id, assignedBy: a.assigned_by }
+    })
     const totalGuests = sessionBookings.reduce((s, b) => s + (b.qty || 1), 0)
     tableMap[tableId].push({ session, sessionBookings, totalGuests, colour, hasManual: aList.some(a => a.assigned_by === 'manual') })
   })
 
-  // Render legend
+  // ── LEGEND ────────────────────────────────────────────────────────
   const usedTimes = [...new Set(sessions.map(s => s.session_time))].sort()
-  let legendHtml = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:1rem;align-items:center">'
+  let legendHtml = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:1.2rem;align-items:center">'
   legendHtml += '<span style="font-size:12px;color:#888">Time slots:</span>'
   usedTimes.forEach(t => {
     const c = getFloorColour(t)
@@ -4380,57 +4391,202 @@ async function loadFloorView() {
   if (unassignedSessions.length) {
     legendHtml += `<span style="font-size:12px;color:#e65100;margin-left:8px">⚠ ${unassignedSessions.length} session${unassignedSessions.length > 1 ? 's' : ''} not yet assigned</span>`
   }
+  legendHtml += '<span style="font-size:12px;color:#aaa;margin-left:4px">· 🚪 door &nbsp; <span style="color:#4285f4">🪟 window</span></span>'
   legendHtml += '</div>'
 
-  // Render table grid
-  let gridHtml = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px">'
-  tables.forEach(t => {
+  // ── ROOM LAYOUT ───────────────────────────────────────────────────
+  const roomList = Array.isArray(rooms) ? rooms : []
+  const roomNames = roomList.map(r => r.name)
+  const featList = Array.isArray(features) ? features : []
+
+  // Tables with no room or unknown room
+  const unroomed = tables.filter(t => !t.room_name || !roomNames.includes(t.room_name))
+
+  let roomsHtml = ''
+
+  // Helper: build feature SVG for a cell
+  function fpFeatureSvg(cellFeats) {
+    if (!cellFeats || !cellFeats.length) return ''
+    const W = FP_CELL_W, H = FP_CELL_H
+    const DOOR_COLOR = '#444'
+    const WIN_COLOR = '#4285f4'
+    let parts = ''
+    cellFeats.forEach(function(f) {
+      const edge = f.edge, type = f.feature_type
+      if (type === 'door') {
+        const GAP = W * 0.28
+        const GAPV = H * 0.32
+        if (edge === 'top') {
+          parts += `<line x1="0" y1="1" x2="${W/2-GAP/2}" y2="1" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<line x1="${W/2+GAP/2}" y1="1" x2="${W}" y2="1" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<path d="M ${W/2-GAP/2} 1 Q ${W/2} ${GAP*0.8} ${W/2+GAP/2} 1" stroke="${DOOR_COLOR}" stroke-width="1" fill="none" stroke-dasharray="2,2"/>`
+        } else if (edge === 'bottom') {
+          const y = H-1
+          parts += `<line x1="0" y1="${y}" x2="${W/2-GAP/2}" y2="${y}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<line x1="${W/2+GAP/2}" y1="${y}" x2="${W}" y2="${y}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<path d="M ${W/2-GAP/2} ${y} Q ${W/2} ${H-1-GAP*0.8} ${W/2+GAP/2} ${y}" stroke="${DOOR_COLOR}" stroke-width="1" fill="none" stroke-dasharray="2,2"/>`
+        } else if (edge === 'left') {
+          parts += `<line x1="1" y1="0" x2="1" y2="${H/2-GAPV/2}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<line x1="1" y1="${H/2+GAPV/2}" x2="1" y2="${H}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<path d="M 1 ${H/2-GAPV/2} Q ${GAPV*0.8} ${H/2} 1 ${H/2+GAPV/2}" stroke="${DOOR_COLOR}" stroke-width="1" fill="none" stroke-dasharray="2,2"/>`
+        } else if (edge === 'right') {
+          const x = W-1
+          parts += `<line x1="${x}" y1="0" x2="${x}" y2="${H/2-GAPV/2}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<line x1="${x}" y1="${H/2+GAPV/2}" x2="${x}" y2="${H}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<path d="M ${x} ${H/2-GAPV/2} Q ${W-1-GAPV*0.8} ${H/2} ${x} ${H/2+GAPV/2}" stroke="${DOOR_COLOR}" stroke-width="1" fill="none" stroke-dasharray="2,2"/>`
+        }
+      } else if (type === 'window') {
+        const TICK = 5, N = 3
+        if (edge === 'top') {
+          parts += `<line x1="0" y1="1" x2="${W}" y2="1" stroke="${WIN_COLOR}" stroke-width="${FP_THICK}"/>`
+          for (let i=1;i<=N;i++) { const tx=(W/(N+1))*i; parts += `<line x1="${tx}" y1="1" x2="${tx}" y2="${1+TICK}" stroke="${WIN_COLOR}" stroke-width="1.5"/>` }
+        } else if (edge === 'bottom') {
+          const y=H-1
+          parts += `<line x1="0" y1="${y}" x2="${W}" y2="${y}" stroke="${WIN_COLOR}" stroke-width="${FP_THICK}"/>`
+          for (let i=1;i<=N;i++) { const tx=(W/(N+1))*i; parts += `<line x1="${tx}" y1="${y}" x2="${tx}" y2="${y-TICK}" stroke="${WIN_COLOR}" stroke-width="1.5"/>` }
+        } else if (edge === 'left') {
+          parts += `<line x1="1" y1="0" x2="1" y2="${H}" stroke="${WIN_COLOR}" stroke-width="${FP_THICK}"/>`
+          for (let i=1;i<=N;i++) { const ty=(H/(N+1))*i; parts += `<line x1="1" y1="${ty}" x2="${1+TICK}" y2="${ty}" stroke="${WIN_COLOR}" stroke-width="1.5"/>` }
+        } else if (edge === 'right') {
+          const x=W-1
+          parts += `<line x1="${x}" y1="0" x2="${x}" y2="${H}" stroke="${WIN_COLOR}" stroke-width="${FP_THICK}"/>`
+          for (let i=1;i<=N;i++) { const ty=(H/(N+1))*i; parts += `<line x1="${x}" y1="${ty}" x2="${x-TICK}" y2="${ty}" stroke="${WIN_COLOR}" stroke-width="1.5"/>` }
+        }
+      }
+    })
+    return `<svg style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible" viewBox="0 0 ${W} ${H}">${parts}</svg>`
+  }
+
+  // Helper: build a positioned table card on the grid
+  function fpTableCard(t) {
     const slots = tableMap[t.id] || []
     const totalSeated = slots.reduce((s, sl) => s + sl.totalGuests, 0)
     const isOver = totalSeated > t.capacity
     const isEmpty = slots.length === 0
-    const shapeStyle = t.shape === 'round'
-      ? 'border-radius:50%;min-height:140px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center'
-      : t.shape === 'square' ? 'border-radius:6px;aspect-ratio:1' : 'border-radius:6px'
+    const isPortrait = t.orientation === 'portrait'
+    const isRound = t.shape === 'round'
 
-    const prefFlags = []
-    if (t.is_kids_party_preferred) prefFlags.push('🎂')
-    if (t.is_glazing_preferred) prefFlags.push('🎨')
-    if (t.is_minimake_preferred) prefFlags.push('⭐')
-    if (t.is_wheel_preferred) prefFlags.push('🏺')
+    const px = (t.position_x || 0) * FP_CELL_W
+    const py = (t.position_y || 0) * FP_CELL_H
+    const PAD = 6
+    const cardW = isRound ? FP_CELL_H - PAD*2 : isPortrait ? FP_CELL_W * 0.55 : FP_CELL_W * 2 - PAD*2
+    const cardH = isRound ? FP_CELL_H - PAD*2 : isPortrait ? FP_CELL_H * 2 - PAD*2 : FP_CELL_H * 0.55
+    const spanW = isPortrait ? FP_CELL_W : isRound ? FP_CELL_W : FP_CELL_W * 2
+    const spanH = isPortrait ? FP_CELL_H * 2 : FP_CELL_H
+    const radius = isRound ? '50%' : '6px'
+    const borderColor = isOver ? '#f43f5e' : isEmpty ? '#ccc' : '#888'
+    const bg = isEmpty ? '#f8f8f6' : '#fff'
 
-    let slotsHtml = ''
-    slots.forEach(sl => {
-      const c = sl.colour
-      const label = sl.session.title.length > 28 ? sl.session.title.substring(0, 26) + '…' : sl.session.title
-      const guestList = sl.sessionBookings.map(b =>
-        `<div style="display:flex;align-items:center;justify-content:space-between;gap:4px;margin-top:2px">
-          <span style="color:#555;font-size:11px">${b.name}${b.qty > 1 ? ' ×' + b.qty : ''}</span>
-          <button onclick="openReassignModal('${b.assignmentId}','${b.bookingId}','${(b.name||'').replace(/'/g,"\\'")}','${t.id}')" style="font-size:10px;padding:1px 6px;border:1px solid #ddd;border-radius:4px;background:white;cursor:pointer;color:#666;flex-shrink:0">Move</button>
+    // Build slot content — compact for grid view
+    let slotContent = ''
+    if (isEmpty) {
+      slotContent = `<div style="font-size:9px;color:#ccc;margin-top:2px">empty</div>`
+    } else {
+      slots.forEach(sl => {
+        const c = sl.colour
+        const timeLabel = fmtTime(sl.session.session_time)
+        const shortTitle = sl.session.title.length > 16 ? sl.session.title.substring(0,14) + '…' : sl.session.title
+        slotContent += `<div style="background:${c.bg};border:1px solid ${c.border};border-radius:3px;padding:2px 4px;margin-top:2px;font-size:9px;line-height:1.3">
+          <div style="font-weight:600;color:${c.text}">${timeLabel}</div>
+          <div style="color:#555">${shortTitle}</div>
+          <div style="color:#777">${sl.totalGuests} guest${sl.totalGuests !== 1 ? 's' : ''}</div>
         </div>`
-      ).join('')
-      slotsHtml += `<div style="background:${c.bg};border:1px solid ${c.border};border-radius:5px;padding:5px 8px;margin-top:5px;font-size:11px">
-        <div style="font-weight:600;color:${c.text}">${fmtTime(sl.session.session_time)} · ${label}</div>
-        <div style="margin-top:2px;line-height:1.4">${guestList || '<span style="color:#aaa">—</span>'}</div>
-        ${sl.hasManual ? '<div style="font-size:10px;color:#888;margin-top:2px">✏ manual</div>' : ''}
+      })
+    }
+
+    // Move buttons for each booking (shown on hover via title attr for now — full modal on click)
+    const moveButtons = slots.flatMap(sl => sl.sessionBookings).map(b =>
+      `<button onclick="openReassignModal('${b.assignmentId}','${b.bookingId}','${(b.name||'').replace(/'/g,"\\'")}','${t.id}')" style="font-size:9px;padding:1px 4px;border:1px solid #ddd;border-radius:3px;background:white;cursor:pointer;color:#666;margin-top:1px;display:block;width:100%">Move ${b.name}</button>`
+    ).join('')
+
+    return `<div style="position:absolute;left:${px}px;top:${py}px;width:${spanW}px;height:${spanH}px;display:flex;align-items:center;justify-content:center;z-index:2;box-sizing:border-box">
+      <div style="width:${cardW}px;height:${cardH}px;border-radius:${radius};border:2px solid ${borderColor};background:${bg};box-shadow:0 2px 6px rgba(0,0,0,0.07);position:relative;overflow:hidden;display:flex;flex-direction:column;align-items:center;padding:4px 4px 2px;box-sizing:border-box">
+        <div style="font-weight:700;font-size:${isPortrait ? 11 : 12}px;color:${isEmpty ? '#bbb' : '#222'};line-height:1;white-space:nowrap">T${t.table_number}${t.label ? ' <span style="font-weight:400;color:#aaa;font-size:9px">' + t.label + '</span>' : ''}</div>
+        <div style="font-size:9px;color:${isOver ? '#f43f5e' : '#aaa'}">${totalSeated}/${t.capacity}${isOver ? ' ⚠' : ''}</div>
+        <div style="width:100%;overflow:hidden;flex:1">${slotContent}</div>
+        ${moveButtons ? '<div style="width:100%;margin-top:2px">' + moveButtons + '</div>' : ''}
+      </div>
+    </div>`
+  }
+
+  // Render each room as a section
+  if (roomList.length) {
+    roomList.forEach(function(room, rIdx) {
+      const cols = room.grid_cols || 8
+      const rows = room.grid_rows || 2
+      const roomTables = tables.filter(t => t.room_name === room.name)
+      const canvasW = cols * FP_CELL_W
+      const canvasH = rows * FP_CELL_H
+
+      roomsHtml += `<div style="margin-bottom:1.5rem">`
+      // Room header
+      roomsHtml += `<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <span style="font-weight:600;font-size:14px">🏠 ${room.name}</span>
+        <span style="font-size:12px;color:#aaa">${roomTables.length} table${roomTables.length !== 1 ? 's' : ''}</span>
+      </div>`
+
+      // Grid canvas
+      roomsHtml += `<div style="overflow-x:auto;background:#fafafa;border:1.5px solid #e0e0d8;border-radius:8px;padding:8px">`
+      roomsHtml += `<div style="position:relative;width:${canvasW}px;height:${canvasH}px">`
+
+      // Draw cells with features
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const x = col * FP_CELL_W
+          const y = row * FP_CELL_H
+          const cellFeats = featList.filter(f => f.room_name === room.name && f.cell_x === col && f.cell_y === row)
+          roomsHtml += `<div style="position:absolute;left:${x}px;top:${y}px;width:${FP_CELL_W}px;height:${FP_CELL_H}px;border:1px dashed #e0e0d8;box-sizing:border-box">${fpFeatureSvg(cellFeats)}</div>`
+        }
+      }
+
+      // Draw tables
+      roomTables.forEach(t => { roomsHtml += fpTableCard(t) })
+
+      roomsHtml += `</div></div>`
+
+      // Divider between rooms (not after last)
+      if (rIdx < roomList.length - 1) {
+        roomsHtml += `<div style="display:flex;align-items:center;gap:10px;margin:1rem 0 0.5rem">
+          <div style="flex:1;height:2px;background:linear-gradient(to right,#e0e0d8,transparent)"></div>
+          <span style="font-size:11px;color:#ccc">▼</span>
+          <div style="flex:1;height:2px;background:linear-gradient(to left,#e0e0d8,transparent)"></div>
+        </div>`
+      }
+
+      roomsHtml += `</div>`
+    })
+  }
+
+  // Unroomed tables fallback
+  if (unroomed.length) {
+    roomsHtml += `<div style="margin-top:1rem;padding:12px;border:1.5px dashed #ddd;border-radius:8px">
+      <div style="font-size:12px;color:#aaa;margin-bottom:8px">Unassigned to a room:</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px">`
+    unroomed.forEach(t => {
+      const slots = tableMap[t.id] || []
+      const totalSeated = slots.reduce((s, sl) => s + sl.totalGuests, 0)
+      const isOver = totalSeated > t.capacity
+      const isEmpty = slots.length === 0
+      let slotsHtml = ''
+      slots.forEach(sl => {
+        const c = sl.colour
+        slotsHtml += `<div style="background:${c.bg};border:1px solid ${c.border};border-radius:4px;padding:3px 6px;margin-top:4px;font-size:11px">
+          <div style="font-weight:600;color:${c.text}">${fmtTime(sl.session.session_time)}</div>
+          <div style="color:#555">${sl.totalGuests} guests</div>
+        </div>`
+      })
+      roomsHtml += `<div style="border:1.5px solid ${isOver ? '#f43f5e' : isEmpty ? '#e8e8e0' : '#c8c8c0'};border-radius:8px;padding:10px;background:${isEmpty ? '#fafafa' : '#fff'}">
+        <div style="font-weight:700;font-size:14px;color:${isEmpty ? '#ccc' : '#222'}">T${t.table_number}</div>
+        <div style="font-size:11px;color:#aaa">${totalSeated}/${t.capacity}</div>
+        ${isEmpty ? '<div style="font-size:11px;color:#ccc">Empty</div>' : slotsHtml}
       </div>`
     })
+    roomsHtml += `</div></div>`
+  }
 
-    gridHtml += `<div style="border:1.5px solid ${isOver ? '#f43f5e' : isEmpty ? '#e8e8e0' : '#c8c8c0'};border-radius:8px;padding:12px;background:${isEmpty ? '#fafafa' : '#fff'};${shapeStyle}">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-        <div style="font-weight:700;font-size:16px;color:${isEmpty ? '#ccc' : '#222'}">T${t.table_number}${t.label ? '<span style="font-size:11px;font-weight:400;color:#aaa;margin-left:4px">' + t.label + '</span>' : ''}</div>
-        <div style="font-size:11px;color:${isOver ? '#f43f5e' : '#aaa'}">${totalSeated}/${t.capacity}${prefFlags.length ? ' ' + prefFlags.join('') : ''}</div>
-      </div>
-      ${isOver ? '<div style="font-size:11px;color:#f43f5e;font-weight:600;margin-bottom:4px">⚠ Over capacity</div>' : ''}
-      ${isEmpty ? '<div style="font-size:12px;color:#ccc;padding:8px 0">Empty</div>' : slotsHtml}
-    </div>`
-  })
-  gridHtml += '</div>'
-
-  // Reassign dropdown modal placeholder
-  el.innerHTML = legendHtml + gridHtml + `
+  el.innerHTML = legendHtml + roomsHtml + `
     <div style="margin-top:1.5rem;padding-top:1rem;border-top:1px solid #eee;display:flex;align-items:center;gap:12px">
-      <span style="font-size:12px;color:#aaa">Use the Move button on each booking to reassign. Over-seating allowed with confirmation.</span>
+      <span style="font-size:12px;color:#aaa">Use Move buttons to reassign. Over-seating allowed with confirmation.</span>
       <button onclick="clearDayAssignments()" style="margin-left:auto;font-size:12px;padding:4px 12px;border:0.5px solid #f0c0c0;border-radius:6px;background:white;color:#c00;cursor:pointer">🗑 Clear All & Reassign</button>
     </div>`
 }
