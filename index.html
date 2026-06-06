@@ -4728,6 +4728,7 @@ async function assignTablesForDay() {
       const isGlazing = session.session_type === 'glazing'
       const isMiniMake = (session.title || '').toLowerCase().includes('mini make')
       const isWheel = (session.title || '').toLowerCase().includes('wheel')
+      const isKidsClass = /class\s+\d+\s+of\s+\d+/i.test(session.title || '')
 
       if (isParty) {
         // Party: figure out total guests, pick group tables
@@ -4783,34 +4784,45 @@ async function assignTablesForDay() {
         }
 
       } else {
-        // Workshop / glazing / mini make / wheel: assign bookings to tables, fill before starting new
+        // Workshop / glazing / mini make / wheel / kids class
         // Preferred tables for this session type
         let preferred = tables.filter(t => {
           if (isGlazing && t.is_glazing_preferred) return true
           if (isMiniMake && t.is_minimake_preferred) return true
           if (isWheel && t.is_wheel_preferred) return true
+          if (isKidsClass && t.is_kids_class_preferred) return true
           return false
         })
 
         // Also include tables that held the same session type earlier today (soft reuse)
         const reuseTables = tables.filter(t => {
           return (tableHold[t.id] || []).some(h => {
-            // Table was used earlier; find which session that was
             const prevSession = sessions.find(s => timeToMins(s.session_time) + getHoldMinutes(s) === h.end)
             if (!prevSession) return false
             const prevIsGlazing = prevSession.session_type === 'glazing'
             const prevIsMiniMake = (prevSession.title || '').toLowerCase().includes('mini make')
             const prevIsWheel = (prevSession.title || '').toLowerCase().includes('wheel')
-            return (isGlazing && prevIsGlazing) || (isMiniMake && prevIsMiniMake) || (isWheel && prevIsWheel)
+            const prevIsKidsClass = /class\s+\d+\s+of\s+\d+/i.test(prevSession.title || '')
+            return (isGlazing && prevIsGlazing) || (isMiniMake && prevIsMiniMake) || (isWheel && prevIsWheel) || (isKidsClass && prevIsKidsClass)
           })
         }).filter(t => isTableFree(t.id, startMins, endMins))
 
-        // Build ordered candidate list: reuse → preferred → all free
+        // Build ordered candidate list:
+        // 1. Reuse same-type tables from earlier
+        // 2. Preferred tables for this type
+        // 3. Non-glazing-only free tables (main pool)
+        // 4. Glazing-only tables as last resort (only if non-glazing session)
         const allFree = tables.filter(t => isTableFree(t.id, startMins, endMins))
+        const freeNonRestricted = allFree.filter(t => !t.is_glazing_only || isGlazing)
+        const freeGlazingOnly = allFree.filter(t => t.is_glazing_only && !isGlazing)
+
         const candidates = []
         reuseTables.forEach(t => { if (!candidates.find(c => c.id === t.id)) candidates.push(t) })
-        preferred.filter(t => isTableFree(t.id, startMins, endMins)).forEach(t => { if (!candidates.find(c => c.id === t.id)) candidates.push(t) })
-        allFree.forEach(t => { if (!candidates.find(c => c.id === t.id)) candidates.push(t) })
+        preferred.filter(t => isTableFree(t.id, startMins, endMins) && (!t.is_glazing_only || isGlazing))
+          .forEach(t => { if (!candidates.find(c => c.id === t.id)) candidates.push(t) })
+        freeNonRestricted.forEach(t => { if (!candidates.find(c => c.id === t.id)) candidates.push(t) })
+        // Glazing-only tables as last resort for non-glazing sessions
+        freeGlazingOnly.forEach(t => { if (!candidates.find(c => c.id === t.id)) candidates.push(t) })
 
         // Fill tables: pack bookings into seats, move to next table when full
         let tableIdx = 0
@@ -4939,6 +4951,8 @@ function showTablePopup(tableId) {
   if (t.is_glazing_preferred) prefFlags.push('🎨 Glazing preferred')
   if (t.is_minimake_preferred) prefFlags.push('⭐ Mini Make preferred')
   if (t.is_wheel_preferred) prefFlags.push('🏺 Wheel preferred')
+  if (t.is_kids_class_preferred) prefFlags.push('👶 Kids Class preferred')
+  if (t.is_glazing_only) prefFlags.push('🔒 Glazing only')
 
   let slotsHtml = ''
   if (!slots.length) {
