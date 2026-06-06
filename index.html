@@ -321,6 +321,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
       <div class="view-toggle">
         <button class="view-btn active" id="btn-day" onclick="setView('day')">Day</button>
         <button class="view-btn" id="btn-table" onclick="setView('table')">Week</button>
+        <button class="view-btn" id="btn-floor" onclick="setView('floor')">🪑 Floor Plan</button>
         <button class="view-btn" id="btn-info" onclick="setView('info')">Info</button>
       </div>
     </div>
@@ -329,6 +330,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
   <!-- INFO VIEW -->
   <div id="info-view" style="display:none;padding:1.5rem;max-width:680px">
     <div id="info-view-content"><div class="loading">Loading…</div></div>
+  </div>
+
+  <div id="floor-view" style="display:none;padding:1rem 0">
+    <div id="floor-view-content"><div class="loading">Loading…</div></div>
   </div>
 
   <div id="day-view">
@@ -2217,6 +2222,7 @@ function setView(v) {
   if (v === 'info') {
     document.getElementById('day-view').style.display = 'none'
     document.getElementById('table-view')?.style && (document.getElementById('table-view').style.display = 'none')
+    document.getElementById('floor-view')?.style && (document.getElementById('floor-view').style.display = 'none')
     document.getElementById('info-view').style.display = 'block'
     document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'))
     document.getElementById('btn-info').classList.add('active')
@@ -2229,8 +2235,10 @@ function setView(v) {
   currentView = v
   document.getElementById('day-view').style.display = v === 'day' ? 'block' : 'none'
   document.getElementById('table-view').style.display = v === 'table' ? 'block' : 'none'
+  document.getElementById('floor-view').style.display = v === 'floor' ? 'block' : 'none'
   document.getElementById('btn-day').classList.toggle('active', v === 'day')
   document.getElementById('btn-table').classList.toggle('active', v === 'table')
+  document.getElementById('btn-floor').classList.toggle('active', v === 'floor')
   loadCurrentView()
 }
 function applyFilters() { loadCurrentView() }
@@ -2245,7 +2253,9 @@ function matchesFilters(session, filters) {
   return true
 }
 async function loadCurrentView() {
-  if (currentView === 'day') await loadDayView(); else await loadTableView()
+  if (currentView === 'day') await loadDayView()
+  else if (currentView === 'table') await loadTableView()
+  else if (currentView === 'floor') await loadFloorView()
 }
 
 function applyDayDefaults() {
@@ -2513,6 +2523,7 @@ async function loadDayView() {
     <span style="font-weight:500">${t.msg}</span>
     <div style="display:flex;align-items:center;gap:8px;margin-left:auto" class="no-print">
       <button id="print-full-day-btn" onclick="printFullDay()" style="padding:4px 12px;background:white;color:#444;border:0.5px solid #d0d0c8;border-radius:6px;font-size:12px;cursor:pointer;white-space:nowrap">🖨 Print Full Day</button>
+      <button id="assign-tables-btn" onclick="assignTablesForDay()" style="padding:4px 12px;background:white;color:#444;border:0.5px solid #d0d0c8;border-radius:6px;font-size:12px;cursor:pointer;white-space:nowrap">🪑 Assign Tables</button>
       <span style="color:#ddd">|</span>
       <span style="font-size:12px;white-space:nowrap">Other drop-ins:</span>
       <input type="number" id="walkins-input" value="${currentWalkins}" min="0" style="width:60px;padding:4px 8px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;text-align:center">
@@ -4256,9 +4267,523 @@ async function loadInfoView() {
     </div>`
   }
 
-  el.innerHTML = html || '<p style="color:#bbb;font-size:13px">No info fields are currently set to show here.</p>'
+
+// ══════════════════════════════════════════════════════════════════
+// FLOOR PLAN VIEW + AUTO-ASSIGN ENGINE
+// ══════════════════════════════════════════════════════════════════
+
+// Session-type colour palette (by time slot index, cycles)
+const FLOOR_COLOURS = [
+  { bg: '#e8f0fe', border: '#4285f4', text: '#1a56db' },
+  { bg: '#fce8d8', border: '#f4845f', text: '#c2410c' },
+  { bg: '#e6f4ea', border: '#34a853', text: '#166534' },
+  { bg: '#fef3c7', border: '#f59e0b', text: '#92400e' },
+  { bg: '#fce7f3', border: '#ec4899', text: '#9d174d' },
+  { bg: '#ede9fe', border: '#8b5cf6', text: '#5b21b6' },
+  { bg: '#ccfbf1', border: '#14b8a6', text: '#0f766e' },
+  { bg: '#fff1f2', border: '#f43f5e', text: '#9f1239' },
+]
+
+// Time slot → colour index (stable across reloads)
+let floorTimeColours = {}
+
+function getFloorColour(timeStr) {
+  if (!floorTimeColours[timeStr]) {
+    const idx = Object.keys(floorTimeColours).length % FLOOR_COLOURS.length
+    floorTimeColours[timeStr] = FLOOR_COLOURS[idx]
+  }
+  return floorTimeColours[timeStr]
 }
-</script>
+
+// ── LOAD FLOOR VIEW ───────────────────────────────────────────────
+async function loadFloorView() {
+  floorTimeColours = {}
+  const el = document.getElementById('floor-view-content')
+  el.innerHTML = '<div class="loading">Loading floor plan…</div>'
+  const today = dateStr(currentDate)
+
+  // Load tables, sessions, assignments in parallel
+  const [tablesRes, sessionsRes] = await Promise.all([
+    fetch(SUPABASE_URL + '/rest/v1/studio_tables?studio_id=eq.' + currentStudioId + '&is_active=eq.true&order=table_number.asc', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+    }),
+    sb.from('sessions').select('id, title, session_time, session_type, capacity').eq('studio_id', currentStudioId).eq('session_date', today).order('session_time')
+  ])
+
+  const tables = await tablesRes.json()
+  const sessions = sessionsRes.data || []
+
+  if (!Array.isArray(tables) || !tables.length) {
+    el.innerHTML = '<div style="color:#aaa;font-size:13px;padding:2rem 0">No tables configured for this studio yet. Set them up in the admin 🪑 Tables tab.</div>'
+    return
+  }
+
+  // Load seating assignments for today's sessions
+  const sessionIds = sessions.map(s => s.id)
+  let assignments = []
+  if (sessionIds.length) {
+    const aRes = await fetch(SUPABASE_URL + '/rest/v1/seating_assignments?session_id=in.(' + sessionIds.join(',') + ')', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+    })
+    const aJson = await aRes.json()
+    assignments = Array.isArray(aJson) ? aJson : []
+  }
+
+  // Load bookings for guest counts
+  let bookings = []
+  if (sessionIds.length) {
+    const { data: bData } = await sb.from('bookings')
+      .select('id, session_id, customer_name, qty, shopify_order_name')
+      .in('session_id', sessionIds).gt('qty', 0).is('returned_at', null)
+    bookings = bData || []
+  }
+
+  // Build lookup: tableId → [{session, bookings, colour, assignedBy}]
+  const tableMap = {} // tableId → array of slot objects
+  tables.forEach(t => { tableMap[t.id] = [] })
+
+  // Group assignments by table+session
+  const assignByTableSession = {}
+  assignments.forEach(a => {
+    const key = a.table_id + '|' + a.session_id
+    if (!assignByTableSession[key]) assignByTableSession[key] = []
+    assignByTableSession[key].push(a)
+  })
+
+  Object.entries(assignByTableSession).forEach(([key, aList]) => {
+    const [tableId, sessionId] = key.split('|')
+    const session = sessions.find(s => s.id === sessionId)
+    if (!session || !tableMap[tableId]) return
+    const colour = getFloorColour(session.session_time)
+    const sessionBookings = aList.map(a => {
+        const b = bookings.find(bk => bk.id === a.booking_id)
+        return { name: a.customer_name || (b ? b.customer_name : '?'), qty: b ? b.qty : 1, bookingId: a.booking_id, assignmentId: a.id, assignedBy: a.assigned_by }
+      })
+    const totalGuests = sessionBookings.reduce((s, b) => s + (b.qty || 1), 0)
+    tableMap[tableId].push({ session, sessionBookings, totalGuests, colour, hasManual: aList.some(a => a.assigned_by === 'manual') })
+  })
+
+  // Render legend
+  const usedTimes = [...new Set(sessions.map(s => s.session_time))].sort()
+  let legendHtml = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:1rem;align-items:center">'
+  legendHtml += '<span style="font-size:12px;color:#888">Time slots:</span>'
+  usedTimes.forEach(t => {
+    const c = getFloorColour(t)
+    legendHtml += `<span style="font-size:12px;padding:2px 10px;border-radius:10px;background:${c.bg};color:${c.text};border:1px solid ${c.border}">${fmtTime(t)}</span>`
+  })
+  const unassignedSessions = sessions.filter(s => !assignments.some(a => a.session_id === s.id))
+  if (unassignedSessions.length) {
+    legendHtml += `<span style="font-size:12px;color:#e65100;margin-left:8px">⚠ ${unassignedSessions.length} session${unassignedSessions.length > 1 ? 's' : ''} not yet assigned</span>`
+  }
+  legendHtml += '</div>'
+
+  // Render table grid
+  let gridHtml = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px">'
+  tables.forEach(t => {
+    const slots = tableMap[t.id] || []
+    const totalSeated = slots.reduce((s, sl) => s + sl.totalGuests, 0)
+    const isOver = totalSeated > t.capacity
+    const isEmpty = slots.length === 0
+    const shapeStyle = t.shape === 'round'
+      ? 'border-radius:50%;min-height:140px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center'
+      : t.shape === 'square' ? 'border-radius:6px;aspect-ratio:1' : 'border-radius:6px'
+
+    const prefFlags = []
+    if (t.is_kids_party_preferred) prefFlags.push('🎂')
+    if (t.is_glazing_preferred) prefFlags.push('🎨')
+    if (t.is_minimake_preferred) prefFlags.push('⭐')
+    if (t.is_wheel_preferred) prefFlags.push('🏺')
+
+    let slotsHtml = ''
+    slots.forEach(sl => {
+      const c = sl.colour
+      const label = sl.session.title.length > 28 ? sl.session.title.substring(0, 26) + '…' : sl.session.title
+      const guestList = sl.sessionBookings.map(b =>
+        `<div style="display:flex;align-items:center;justify-content:space-between;gap:4px;margin-top:2px">
+          <span style="color:#555;font-size:11px">${b.name}${b.qty > 1 ? ' ×' + b.qty : ''}</span>
+          <button onclick="openReassignModal('${b.assignmentId}','${b.bookingId}','${(b.name||'').replace(/'/g,"\\'")}','${t.id}')" style="font-size:10px;padding:1px 6px;border:1px solid #ddd;border-radius:4px;background:white;cursor:pointer;color:#666;flex-shrink:0">Move</button>
+        </div>`
+      ).join('')
+      slotsHtml += `<div style="background:${c.bg};border:1px solid ${c.border};border-radius:5px;padding:5px 8px;margin-top:5px;font-size:11px">
+        <div style="font-weight:600;color:${c.text}">${fmtTime(sl.session.session_time)} · ${label}</div>
+        <div style="margin-top:2px;line-height:1.4">${guestList || '<span style="color:#aaa">—</span>'}</div>
+        ${sl.hasManual ? '<div style="font-size:10px;color:#888;margin-top:2px">✏ manual</div>' : ''}
+      </div>`
+    })
+
+    gridHtml += `<div style="border:1.5px solid ${isOver ? '#f43f5e' : isEmpty ? '#e8e8e0' : '#c8c8c0'};border-radius:8px;padding:12px;background:${isEmpty ? '#fafafa' : '#fff'};${shapeStyle}">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+        <div style="font-weight:700;font-size:16px;color:${isEmpty ? '#ccc' : '#222'}">T${t.table_number}${t.label ? '<span style="font-size:11px;font-weight:400;color:#aaa;margin-left:4px">' + t.label + '</span>' : ''}</div>
+        <div style="font-size:11px;color:${isOver ? '#f43f5e' : '#aaa'}">${totalSeated}/${t.capacity}${prefFlags.length ? ' ' + prefFlags.join('') : ''}</div>
+      </div>
+      ${isOver ? '<div style="font-size:11px;color:#f43f5e;font-weight:600;margin-bottom:4px">⚠ Over capacity</div>' : ''}
+      ${isEmpty ? '<div style="font-size:12px;color:#ccc;padding:8px 0">Empty</div>' : slotsHtml}
+    </div>`
+  })
+  gridHtml += '</div>'
+
+  // Reassign dropdown modal placeholder
+  el.innerHTML = legendHtml + gridHtml + `
+    <div style="margin-top:1.5rem;padding-top:1rem;border-top:1px solid #eee;display:flex;align-items:center;gap:12px">
+      <span style="font-size:12px;color:#aaa">Use the Move button on each booking to reassign. Over-seating allowed with confirmation.</span>
+      <button onclick="clearDayAssignments()" style="margin-left:auto;font-size:12px;padding:4px 12px;border:0.5px solid #f0c0c0;border-radius:6px;background:white;color:#c00;cursor:pointer">🗑 Clear All & Reassign</button>
+    </div>`
+}
+
+// ── AUTO-ASSIGN ENGINE ────────────────────────────────────────────
+
+async function assignTablesForDay() {
+  const btn = document.getElementById('assign-tables-btn')
+  btn.disabled = true
+  btn.textContent = '⏳ Assigning…'
+
+  const today = dateStr(currentDate)
+
+  try {
+    // 1. Load tables for this studio
+    const tablesRes = await fetch(SUPABASE_URL + '/rest/v1/studio_tables?studio_id=eq.' + currentStudioId + '&is_active=eq.true&order=table_number.asc', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+    })
+    const tables = await tablesRes.json()
+    if (!Array.isArray(tables) || !tables.length) {
+      alert('No tables configured for this studio. Set them up in admin → 🪑 Tables first.')
+      return
+    }
+
+    // 2. Load table groups
+    const groupsRes = await fetch(SUPABASE_URL + '/rest/v1/studio_table_groups?studio_id=eq.' + currentStudioId, {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+    })
+    const groups = await groupsRes.json()
+    const tableGroups = Array.isArray(groups) ? groups : []
+
+    // 3. Load today's sessions
+    const { data: sessions } = await sb.from('sessions')
+      .select('id, title, session_time, session_type, capacity, duration_minutes')
+      .eq('studio_id', currentStudioId).eq('session_date', today).order('session_time')
+    if (!sessions || !sessions.length) { alert('No sessions today.'); return }
+
+    // 4. Load bookings
+    const sessionIds = sessions.map(s => s.id)
+    const { data: bookings } = await sb.from('bookings')
+      .select('id, session_id, customer_name, qty, shopify_order_name, raw_payload')
+      .in('session_id', sessionIds).gt('qty', 0).is('returned_at', null)
+
+    // 5. Load existing assignments — skip any session that already has manual assignments
+    const aRes = await fetch(SUPABASE_URL + '/rest/v1/seating_assignments?session_id=in.(' + sessionIds.join(',') + ')', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+    })
+    const existingAssignments = await aRes.json()
+    const manualSessionIds = new Set(
+      (Array.isArray(existingAssignments) ? existingAssignments : [])
+        .filter(a => a.assigned_by === 'manual')
+        .map(a => a.session_id)
+    )
+    // Also skip fully auto-assigned sessions (don't overwrite)
+    const autoAssignedSessionIds = new Set(
+      (Array.isArray(existingAssignments) ? existingAssignments : [])
+        .map(a => a.session_id)
+    )
+
+    // 6. Build table availability tracker
+    // tableHold[tableId] = array of {startMinutes, endMinutes}
+    const tableHold = {}
+    tables.forEach(t => { tableHold[t.id] = [] })
+
+    // Pre-populate holds from existing manual assignments
+    if (existingAssignments && existingAssignments.length) {
+      existingAssignments.forEach(a => {
+        const session = sessions.find(s => s.id === a.session_id)
+        if (!session) return
+        const startMins = timeToMins(session.session_time)
+        const holdMins = getHoldMinutes(session)
+        if (tableHold[a.table_id]) {
+          tableHold[a.table_id].push({ start: startMins, end: startMins + holdMins })
+        }
+      })
+    }
+
+    // Helpers
+    function timeToMins(timeStr) {
+      if (!timeStr) return 0
+      const parts = timeStr.split(':')
+      return parseInt(parts[0]) * 60 + parseInt(parts[1])
+    }
+
+    function getHoldMinutes(session) {
+      if (session.session_type === 'party') return (session.duration_minutes || 90) + 15
+      return 120 // 2-hour hold for all other types
+    }
+
+    function isTableFree(tableId, startMins, endMins) {
+      return (tableHold[tableId] || []).every(h => endMins <= h.start || startMins >= h.end)
+    }
+
+    function holdTable(tableId, startMins, endMins) {
+      if (tableHold[tableId]) tableHold[tableId].push({ start: startMins, end: endMins })
+    }
+
+    // 7. Sort sessions by time then by type (parties first within same time)
+    const sessionsToAssign = sessions
+      .filter(s => !manualSessionIds.has(s.id) && !autoAssignedSessionIds.has(s.id))
+      .sort((a, b) => {
+        const tA = timeToMins(a.session_time), tB = timeToMins(b.session_time)
+        if (tA !== tB) return tA - tB
+        if (a.session_type === 'party' && b.session_type !== 'party') return -1
+        if (b.session_type === 'party' && a.session_type !== 'party') return 1
+        return 0
+      })
+
+    const newAssignments = []
+
+    for (const session of sessionsToAssign) {
+      const sessionBookings = (bookings || []).filter(b => b.session_id === session.id)
+      if (!sessionBookings.length) continue
+
+      const startMins = timeToMins(session.session_time)
+      const holdMins = getHoldMinutes(session)
+      const endMins = startMins + holdMins
+
+      const isParty = session.session_type === 'party'
+      const isGlazing = session.session_type === 'glazing'
+      const isMiniMake = (session.title || '').toLowerCase().includes('mini make')
+      const isWheel = (session.title || '').toLowerCase().includes('wheel')
+
+      if (isParty) {
+        // Party: figure out total guests, pick group tables
+        const totalGuests = sessionBookings.reduce((sum, b) => sum + (b.qty || 0), 0)
+        const tablesNeeded = totalGuests <= 16 ? 2 : totalGuests <= 24 ? 3 : 4
+
+        // Find a group with enough tables all free
+        let assigned = false
+        for (const group of tableGroups) {
+          const groupTables = (group.table_ids || []).map(id => tables.find(t => t.id === id)).filter(Boolean)
+          if (groupTables.length < tablesNeeded) continue
+          const candidateTables = groupTables.slice(0, tablesNeeded)
+          const allFree = candidateTables.every(t => isTableFree(t.id, startMins, endMins))
+          if (!allFree) continue
+
+          // Assign all bookings spread across party tables
+          candidateTables.forEach(t => { holdTable(t.id, startMins, endMins) })
+          // Split bookings across tables evenly
+          sessionBookings.forEach((b, idx) => {
+            const t = candidateTables[idx % candidateTables.length]
+            newAssignments.push({
+              studio_id: currentStudioId,
+              session_id: session.id,
+              table_id: t.id,
+              booking_id: b.id,
+              customer_name: b.customer_name,
+              assigned_by: 'auto'
+            })
+          })
+          assigned = true
+          break
+        }
+
+        // Fallback: pick any free party-preferred tables
+        if (!assigned) {
+          const preferred = tables.filter(t => t.is_kids_party_preferred && isTableFree(t.id, startMins, endMins))
+          const picked = preferred.slice(0, tablesNeeded)
+          if (picked.length < tablesNeeded) {
+            // Take whatever's free
+            const free = tables.filter(t => isTableFree(t.id, startMins, endMins))
+            while (picked.length < tablesNeeded && picked.length < free.length) {
+              const next = free.find(t => !picked.includes(t))
+              if (next) picked.push(next)
+              else break
+            }
+          }
+          picked.forEach(t => { holdTable(t.id, startMins, endMins) })
+          sessionBookings.forEach((b, idx) => {
+            const t = picked[idx % Math.max(picked.length, 1)]
+            if (!t) return
+            newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: t.id, booking_id: b.id, customer_name: b.customer_name, assigned_by: 'auto' })
+          })
+        }
+
+      } else {
+        // Workshop / glazing / mini make / wheel: assign bookings to tables, fill before starting new
+        // Preferred tables for this session type
+        let preferred = tables.filter(t => {
+          if (isGlazing && t.is_glazing_preferred) return true
+          if (isMiniMake && t.is_minimake_preferred) return true
+          if (isWheel && t.is_wheel_preferred) return true
+          return false
+        })
+
+        // Also include tables that held the same session type earlier today (soft reuse)
+        const reuseTables = tables.filter(t => {
+          return (tableHold[t.id] || []).some(h => {
+            // Table was used earlier; find which session that was
+            const prevSession = sessions.find(s => timeToMins(s.session_time) + getHoldMinutes(s) === h.end)
+            if (!prevSession) return false
+            const prevIsGlazing = prevSession.session_type === 'glazing'
+            const prevIsMiniMake = (prevSession.title || '').toLowerCase().includes('mini make')
+            const prevIsWheel = (prevSession.title || '').toLowerCase().includes('wheel')
+            return (isGlazing && prevIsGlazing) || (isMiniMake && prevIsMiniMake) || (isWheel && prevIsWheel)
+          })
+        }).filter(t => isTableFree(t.id, startMins, endMins))
+
+        // Build ordered candidate list: reuse → preferred → all free
+        const allFree = tables.filter(t => isTableFree(t.id, startMins, endMins))
+        const candidates = []
+        reuseTables.forEach(t => { if (!candidates.find(c => c.id === t.id)) candidates.push(t) })
+        preferred.filter(t => isTableFree(t.id, startMins, endMins)).forEach(t => { if (!candidates.find(c => c.id === t.id)) candidates.push(t) })
+        allFree.forEach(t => { if (!candidates.find(c => c.id === t.id)) candidates.push(t) })
+
+        // Fill tables: pack bookings into seats, move to next table when full
+        let tableIdx = 0
+        let seatsUsedOnCurrentTable = 0
+
+        for (const b of sessionBookings) {
+          if (tableIdx >= candidates.length) break // no more tables
+          const t = candidates[tableIdx]
+          // Will this booking fit?
+          if (seatsUsedOnCurrentTable + (b.qty || 1) > t.capacity && seatsUsedOnCurrentTable > 0) {
+            holdTable(t.id, startMins, endMins)
+            tableIdx++
+            seatsUsedOnCurrentTable = 0
+            if (tableIdx >= candidates.length) break
+          }
+          const currentTable = candidates[tableIdx]
+          if (seatsUsedOnCurrentTable === 0) {
+            // Starting a new table — check it's still free (might have been taken by previous booking)
+            if (!isTableFree(currentTable.id, startMins, endMins)) {
+              tableIdx++
+              seatsUsedOnCurrentTable = 0
+              if (tableIdx >= candidates.length) break
+            }
+          }
+          newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: candidates[tableIdx].id, booking_id: b.id, customer_name: b.customer_name, assigned_by: 'auto' })
+          seatsUsedOnCurrentTable += (b.qty || 1)
+        }
+        // Hold all tables used
+        const usedTableIds = [...new Set(newAssignments.filter(a => a.session_id === session.id).map(a => a.table_id))]
+        usedTableIds.forEach(tid => { if (isTableFree(tid, startMins, endMins)) holdTable(tid, startMins, endMins) })
+      }
+    }
+
+    // 8. Write new assignments to Supabase
+    if (!newAssignments.length) {
+      alert('All sessions are already assigned or have no bookings.')
+      return
+    }
+
+    const insertRes = await fetch(SUPABASE_URL + '/rest/v1/seating_assignments', {
+      method: 'POST',
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify(newAssignments)
+    })
+
+    if (!insertRes.ok) {
+      const err = await insertRes.json().catch(() => ({}))
+      throw new Error(err.message || 'HTTP ' + insertRes.status)
+    }
+
+    btn.textContent = '✓ Assigned!'
+    setTimeout(() => { btn.textContent = '🪑 Assign Tables'; btn.disabled = false }, 2500)
+
+    // Switch to floor view to show result
+    setView('floor')
+
+  } catch(e) {
+    alert('Assignment failed: ' + e.message)
+    btn.textContent = '🪑 Assign Tables'
+    btn.disabled = false
+  }
+}
+
+// ── REASSIGN MODAL (from floor plan) ─────────────────────────────
+
+async function openReassignModal(assignmentId, bookingId, customerName, currentTableId) {
+  // Load all tables for this studio
+  const res = await fetch(SUPABASE_URL + '/rest/v1/studio_tables?studio_id=eq.' + currentStudioId + '&is_active=eq.true&order=table_number.asc', {
+    headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+  })
+  const tables = await res.json()
+  if (!Array.isArray(tables)) return
+
+  const existing = document.getElementById('reassign-modal')
+  if (existing) existing.remove()
+
+  const opts = tables.map(t => `<option value="${t.id}" ${t.id === currentTableId ? 'selected' : ''}>Table ${t.table_number}${t.label ? ' – ' + t.label : ''} (cap ${t.capacity})</option>`).join('')
+
+  const modal = document.createElement('div')
+  modal.id = 'reassign-modal'
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center'
+  modal.innerHTML = `
+    <div style="background:#fff;border-radius:12px;padding:1.8rem;width:360px;max-width:95vw;box-shadow:0 8px 40px rgba(0,0,0,0.2)">
+      <h3 style="margin:0 0 1rem;font-size:15px;font-weight:600">Move ${customerName}</h3>
+      <label style="font-size:12px;color:#666;display:block;margin-bottom:6px">Move to table</label>
+      <select id="reassign-table-sel" style="width:100%;height:36px;border:1px solid #ddd;border-radius:6px;padding:0 10px;font-size:14px;background:white;margin-bottom:0.8rem">${opts}</select>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:1rem">
+        <input type="checkbox" id="reassign-overseat"> Allow over-seating (ignore capacity)
+      </label>
+      <div id="reassign-err" style="color:#c00;font-size:12px;display:none;margin-bottom:0.8rem"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn" onclick="document.getElementById('reassign-modal').remove()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveReassign('${assignmentId}','${bookingId}')">Move</button>
+      </div>
+    </div>`
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove() })
+  document.body.appendChild(modal)
+}
+
+async function clearDayAssignments() {
+  if (!confirm('This will delete ALL table assignments for today (including manual ones) so you can re-run auto-assign. Continue?')) return
+  const today = dateStr(currentDate)
+  const { data: sessions } = await sb.from('sessions').select('id').eq('studio_id', currentStudioId).eq('session_date', today)
+  const sIds = (sessions || []).map(s => s.id)
+  if (!sIds.length) return
+  await fetch(SUPABASE_URL + '/rest/v1/seating_assignments?session_id=in.(' + sIds.join(',') + ')', {
+    method: 'DELETE',
+    headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+  })
+  await loadFloorView()
+}
+
+
+  const tableId = document.getElementById('reassign-table-sel').value
+  const allowOver = document.getElementById('reassign-overseat').checked
+  const errEl = document.getElementById('reassign-err')
+  errEl.style.display = 'none'
+
+  if (!allowOver) {
+    // Check capacity for target table on this day
+    const today = dateStr(currentDate)
+    const { data: sessions } = await sb.from('sessions').select('id').eq('studio_id', currentStudioId).eq('session_date', today)
+    const sIds = (sessions || []).map(s => s.id)
+    const aRes = await fetch(SUPABASE_URL + '/rest/v1/seating_assignments?table_id=eq.' + tableId + (sIds.length ? '&session_id=in.(' + sIds.join(',') + ')' : ''), {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+    })
+    const aList = await aRes.json()
+    const tRes = await fetch(SUPABASE_URL + '/rest/v1/studio_tables?id=eq.' + tableId, {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+    })
+    const tList = await tRes.json()
+    const table = tList[0]
+    const { data: bData } = await sb.from('bookings').select('qty').in('id', (Array.isArray(aList) ? aList : []).map(a => a.booking_id).filter(Boolean))
+    const seated = (bData || []).reduce((s, b) => s + (b.qty || 1), 0)
+    if (table && seated >= table.capacity) {
+      errEl.textContent = 'Table ' + table.table_number + ' is at capacity (' + table.capacity + '). Check "Allow over-seating" to proceed.'
+      errEl.style.display = 'block'
+      return
+    }
+  }
+
+  const res = await fetch(SUPABASE_URL + '/rest/v1/seating_assignments?id=eq.' + assignmentId, {
+    method: 'PATCH',
+    headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+    body: JSON.stringify({ table_id: tableId, assigned_by: 'manual' })
+  })
+
+  if (!res.ok) { errEl.textContent = 'Save failed. Try again.'; errEl.style.display = 'block'; return }
+  document.getElementById('reassign-modal').remove()
+  await loadFloorView()
+}
+
+
 
 </body>
 </html>
