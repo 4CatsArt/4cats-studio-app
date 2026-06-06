@@ -7513,11 +7513,538 @@ console.log('[Tables tab] Ensure columns exist: is_wheel_preferred (boolean), an
 </div>
 
 <script>
-// ── ROOMS + DRAG-AND-DROP LAYOUT EDITOR ───────────────────────────────────────
+// ── ROOMS + GRID FLOOR PLAN EDITOR ────────────────────────────────────────────
+
+const GRID_COLS = 8   // default columns per room
+const GRID_ROWS = 2   // default rows per room
+const CELL_W = 90     // px per cell
+const CELL_H = 70     // px per cell
 
 let studioRooms = []
 let editingRoomId = null
 let draggedTableId = null
+let dragSourceCell = null  // {x, y, roomName}
+
+// Table visual dimensions in cells (each cell = CELL_W x CELL_H)
+function getTableDims(t) {
+  if (t.shape === 'round') return { w: 1, h: 1 }
+  if (t.orientation === 'portrait') return { w: 1, h: 1 }  // tall = 1 wide, spans full cell height
+  return { w: 2, h: 1 }  // landscape = 2 wide, 1 tall
+}
+
+async function loadRooms() {
+  if (!tablesStudioId) return
+  try {
+    const res = await fetch(SUPABASE_URL + '/rest/v1/studio_rooms?studio_id=eq.' + tablesStudioId + '&order=sort_order.asc', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+    })
+    const json = await res.json()
+    studioRooms = Array.isArray(json) ? json : []
+    renderRoomEditor()
+  } catch(e) { console.error('loadRooms:', e) }
+}
+
+function getRoomGridSize(room) {
+  return {
+    cols: room.grid_cols || GRID_COLS,
+    rows: room.grid_rows || GRID_ROWS
+  }
+}
+
+function renderRoomEditor() {
+  const el = document.getElementById('tables-rooms-editor')
+  if (!el) return
+
+  if (!studioRooms.length) {
+    el.innerHTML = '<div style="color:#bbb;font-size:13px;padding:0.5rem 0">No rooms configured yet. Click "+ Add Room" to create your first room.</div>'
+    return
+  }
+
+  const roomNames = studioRooms.map(r => r.name)
+  const unassigned = tblData.filter(t => t.is_active && (!t.room_name || !roomNames.includes(t.room_name)))
+
+  let html = ''
+
+  studioRooms.forEach(function(room) {
+    const roomTables = tblData.filter(t => t.is_active && t.room_name === room.name)
+    const grid = getRoomGridSize(room)
+
+    // Auto-spread unpositioned tables in this room (all at 0,0)
+    // Assign sequential positions to tables that share the same cell
+    const positioned = {}
+    roomTables.forEach(function(t) {
+      const key = t.position_x + ',' + t.position_y
+      if (!positioned[key]) positioned[key] = []
+      positioned[key].push(t)
+    })
+
+    html += '<div style="margin-bottom:2rem;border:1.5px solid #e0e0d8;border-radius:10px;overflow:hidden">'
+
+    // Room header
+    html += '<div style="background:#f5f5f0;padding:10px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid #e0e0d8">'
+    html += '<span style="font-weight:600;font-size:14px">🏠 ' + room.name + '</span>'
+    html += '<span style="font-size:12px;color:#aaa">' + roomTables.length + ' table' + (roomTables.length !== 1 ? 's' : '') + '</span>'
+    html += '<div style="margin-left:auto;display:flex;gap:6px;align-items:center">'
+    html += '<button class="btn" style="font-size:11px;padding:2px 8px" onclick="expandRoom(\'' + room.id + '\',\'col\')">+ Col</button>'
+    html += '<button class="btn" style="font-size:11px;padding:2px 8px" onclick="expandRoom(\'' + room.id + '\',\'row\')">+ Row</button>'
+    html += '<button class="btn" style="font-size:11px;padding:2px 8px" onclick="openEditRoomModal(\'' + room.id + '\')">Rename</button>'
+    html += '<button class="btn" style="font-size:11px;padding:2px 8px;color:#c00" onclick="deleteRoom(\'' + room.id + '\',\'' + room.name.replace(/'/g,"\\'") + '\')">✕</button>'
+    html += '</div></div>'
+
+    // Grid canvas
+    const canvasW = grid.cols * CELL_W
+    html += '<div style="padding:12px;background:#fafafa;overflow-x:auto">'
+    html += '<div style="position:relative;width:' + canvasW + 'px;height:' + (grid.rows * CELL_H) + 'px;flex-shrink:0">'
+
+    // Draw grid cells
+    for (let row = 0; row < grid.rows; row++) {
+      for (let col = 0; col < grid.cols; col++) {
+        const x = col * CELL_W
+        const y = row * CELL_H
+        html += '<div '
+          + 'data-cell-x="' + col + '" data-cell-y="' + row + '" data-cell-room="' + room.name.replace(/'/g,'&apos;') + '" '
+          + 'ondragover="cellDragOver(event)" ondragleave="cellDragLeave(event)" ondrop="cellDrop(event,' + col + ',' + row + ',\'' + room.name.replace(/'/g,"\\'") + '\')" '
+          + 'style="position:absolute;left:' + x + 'px;top:' + y + 'px;'
+          + 'width:' + CELL_W + 'px;height:' + CELL_H + 'px;'
+          + 'border:1px dashed #d8d8d0;box-sizing:border-box;'
+          + 'background:transparent">'
+          + '</div>'
+      }
+    }
+
+    // Draw tables on grid
+    roomTables.forEach(function(t) {
+      const px = (t.position_x || 0) * CELL_W
+      const py = (t.position_y || 0) * CELL_H
+      html += buildGridTable(t, px, py, room.name)
+    })
+
+    html += '</div></div>'
+
+    // Legend hint
+    html += '<div style="padding:6px 16px 10px;font-size:11px;color:#bbb">'
+    html += 'Drag tables to reposition · Click ↻ to rotate · Landscape = wide, Portrait = tall'
+    html += '</div>'
+
+    html += '</div>'
+  })
+
+  // Unassigned pool
+  if (unassigned.length) {
+    html += '<div style="margin-top:1rem;padding:14px;border:1.5px dashed #ddd;border-radius:8px;background:#fafafa">'
+    html += '<div style="font-size:12px;color:#888;margin-bottom:10px;font-weight:600">Unassigned tables — drag into a room above:</div>'
+    html += '<div style="display:flex;flex-wrap:wrap;gap:8px">'
+    unassigned.forEach(function(t) { html += buildUnassignedChip(t) })
+    html += '</div></div>'
+  }
+
+  el.innerHTML = html
+}
+
+function buildGridTable(t, px, py, roomName) {
+  const isPortrait = t.orientation === 'portrait'
+  const isRound = t.shape === 'round'
+
+  // Visual size within the cell
+  const PAD = 8
+  const w = isRound
+    ? Math.min(CELL_W, CELL_H) - PAD * 2
+    : isPortrait
+      ? CELL_W - PAD * 2
+      : CELL_W * 2 - PAD * 2
+  const h = isRound
+    ? Math.min(CELL_W, CELL_H) - PAD * 2
+    : isPortrait
+      ? CELL_H - PAD * 2
+      : CELL_H - PAD * 2
+
+  const radius = isRound ? '50%' : '6px'
+
+  const flags = []
+  if (t.is_kids_party_preferred) flags.push('🎂')
+  if (t.is_glazing_preferred) flags.push('🎨')
+  if (t.is_minimake_preferred) flags.push('⭐')
+  if (t.is_wheel_preferred) flags.push('🏺')
+
+  const cellSpanW = isPortrait || isRound ? CELL_W : CELL_W * 2
+
+  return '<div draggable="true" '
+    + 'id="gtbl-' + t.id + '" '
+    + 'data-table-id="' + t.id + '" '
+    + 'data-room="' + roomName.replace(/'/g,'&apos;') + '" '
+    + 'ondragstart="gridTableDragStart(event,\'' + t.id + '\',' + (t.position_x||0) + ',' + (t.position_y||0) + ',\'' + roomName.replace(/'/g,"\\'") + '\')" '
+    + 'ondragend="gridTableDragEnd(event)" '
+    + 'style="position:absolute;left:' + px + 'px;top:' + py + 'px;'
+    + 'width:' + cellSpanW + 'px;height:' + CELL_H + 'px;'
+    + 'display:flex;align-items:center;justify-content:center;'
+    + 'cursor:grab;z-index:2;box-sizing:border-box">'
+
+    // The actual table shape
+    + '<div style="width:' + w + 'px;height:' + h + 'px;border-radius:' + radius + ';'
+    + 'background:#fff;border:2px solid #888;'
+    + 'display:flex;flex-direction:column;align-items:center;justify-content:center;'
+    + 'box-shadow:0 2px 6px rgba(0,0,0,0.08);position:relative">'
+
+    // Table number
+    + '<div style="font-weight:700;font-size:' + (isPortrait ? '13' : '14') + 'px;color:#222;line-height:1">' + t.table_number + '</div>'
+
+    // Label if exists
+    + (t.label ? '<div style="font-size:9px;color:#aaa;margin-top:1px;max-width:' + (w-4) + 'px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center">' + t.label + '</div>' : '')
+
+    // Flags
+    + (flags.length ? '<div style="font-size:9px;line-height:1;margin-top:2px">' + flags.join('') + '</div>' : '')
+
+    // Rotate button
+    + '<button onclick="rotateTable(\'' + t.id + '\')" '
+    + 'title="Rotate" '
+    + 'style="position:absolute;top:2px;right:2px;width:16px;height:16px;border:none;background:none;'
+    + 'cursor:pointer;font-size:11px;color:#aaa;padding:0;line-height:1;display:flex;align-items:center;justify-content:center">↻</button>'
+
+    + '</div>'
+    + '</div>'
+}
+
+function buildUnassignedChip(t) {
+  const isPortrait = t.orientation === 'portrait'
+  const isRound = t.shape === 'round'
+  const w = isRound ? '44px' : isPortrait ? '38px' : '70px'
+  const h = isRound ? '44px' : isPortrait ? '54px' : '38px'
+  const radius = isRound ? '50%' : '5px'
+  const flags = []
+  if (t.is_kids_party_preferred) flags.push('🎂')
+  if (t.is_glazing_preferred) flags.push('🎨')
+  if (t.is_minimake_preferred) flags.push('⭐')
+  if (t.is_wheel_preferred) flags.push('🏺')
+
+  return '<div draggable="true" '
+    + 'data-table-id="' + t.id + '" '
+    + 'ondragstart="unassignedDragStart(event,\'' + t.id + '\')" '
+    + 'ondragend="gridTableDragEnd(event)" '
+    + 'style="width:' + w + ';height:' + h + ';border-radius:' + radius + ';'
+    + 'background:#fff;border:1.5px solid #bbb;cursor:grab;'
+    + 'display:flex;flex-direction:column;align-items:center;justify-content:center;'
+    + 'user-select:none;flex-shrink:0">'
+    + '<div style="font-weight:700;font-size:12px;color:#555">' + t.table_number + '</div>'
+    + (flags.length ? '<div style="font-size:9px">' + flags.join('') + '</div>' : '')
+    + '</div>'
+}
+
+// ── DRAG HANDLERS ─────────────────────────────────────────────────
+
+function gridTableDragStart(event, tableId, fromX, fromY, fromRoom) {
+  draggedTableId = tableId
+  dragSourceCell = { x: fromX, y: fromY, roomName: fromRoom }
+  event.dataTransfer.effectAllowed = 'move'
+  setTimeout(function() {
+    const el = document.getElementById('gtbl-' + tableId)
+    if (el) el.style.opacity = '0.3'
+  }, 0)
+}
+
+function unassignedDragStart(event, tableId) {
+  draggedTableId = tableId
+  dragSourceCell = null
+  event.dataTransfer.effectAllowed = 'move'
+  setTimeout(function() { event.target.style.opacity = '0.3' }, 0)
+}
+
+function gridTableDragEnd(event) {
+  if (draggedTableId) {
+    const el = document.getElementById('gtbl-' + draggedTableId)
+    if (el) el.style.opacity = '1'
+    event.target.style.opacity = '1'
+  }
+  draggedTableId = null
+  dragSourceCell = null
+  // Clear cell highlights
+  document.querySelectorAll('[data-cell-x]').forEach(function(c) {
+    c.style.background = 'transparent'
+    c.style.border = '1px dashed #d8d8d0'
+  })
+}
+
+function cellDragOver(event) {
+  event.preventDefault()
+  event.target.style.background = 'rgba(66,133,244,0.08)'
+  event.target.style.border = '1.5px dashed #4285f4'
+}
+
+function cellDragLeave(event) {
+  event.target.style.background = 'transparent'
+  event.target.style.border = '1px dashed #d8d8d0'
+}
+
+async function cellDrop(event, col, row, roomName) {
+  event.preventDefault()
+  event.stopPropagation()
+  event.target.style.background = 'transparent'
+  event.target.style.border = '1px dashed #d8d8d0'
+
+  if (!draggedTableId) return
+  const t = tblData.find(function(x){ return x.id === draggedTableId })
+  if (!t) return
+
+  // Same position, same room — no-op
+  if (t.room_name === roomName && t.position_x === col && t.position_y === row) return
+
+  try {
+    const res = await fetch(SUPABASE_URL + '/rest/v1/studio_tables?id=eq.' + draggedTableId, {
+      method: 'PATCH',
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ room_name: roomName, position_x: col, position_y: row })
+    })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    t.room_name = roomName
+    t.position_x = col
+    t.position_y = row
+    renderRoomEditor()
+    document.getElementById('tables-save-status').textContent = 'T' + t.table_number + ' → ' + roomName + ' (' + col + ',' + row + ')'
+    setTimeout(function(){ document.getElementById('tables-save-status').textContent = '' }, 2000)
+  } catch(e) {
+    alert('Move failed: ' + e.message)
+  }
+}
+
+async function rotateTable(tableId) {
+  const t = tblData.find(function(x){ return x.id === tableId })
+  if (!t || t.shape === 'round') return
+  const newOrientation = (t.orientation === 'portrait') ? 'landscape' : 'portrait'
+  try {
+    const res = await fetch(SUPABASE_URL + '/rest/v1/studio_tables?id=eq.' + tableId, {
+      method: 'PATCH',
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ orientation: newOrientation })
+    })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    t.orientation = newOrientation
+    renderRoomEditor()
+  } catch(e) { alert('Rotate failed: ' + e.message) }
+}
+
+async function expandRoom(roomId, direction) {
+  const room = studioRooms.find(function(r){ return r.id === roomId })
+  if (!room) return
+  const grid = getRoomGridSize(room)
+  const newCols = direction === 'col' ? grid.cols + 1 : grid.cols
+  const newRows = direction === 'row' ? grid.rows + 1 : grid.rows
+  try {
+    const res = await fetch(SUPABASE_URL + '/rest/v1/studio_rooms?id=eq.' + roomId, {
+      method: 'PATCH',
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ grid_cols: newCols, grid_rows: newRows })
+    })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    room.grid_cols = newCols
+    room.grid_rows = newRows
+    renderRoomEditor()
+  } catch(e) { alert('Expand failed: ' + e.message) }
+}
+
+// ── ROOM CRUD ─────────────────────────────────────────────────────
+
+function openAddRoomModal() {
+  editingRoomId = null
+  document.getElementById('room-modal-title').textContent = 'Add Room'
+  document.getElementById('room-name').value = ''
+  document.getElementById('room-sort').value = studioRooms.length + 1
+  document.getElementById('room-modal-err').style.display = 'none'
+  document.getElementById('room-modal').style.display = 'flex'
+}
+
+function openEditRoomModal(id) {
+  const r = studioRooms.find(function(x){ return x.id === id })
+  if (!r) return
+  editingRoomId = id
+  document.getElementById('room-modal-title').textContent = 'Rename Room'
+  document.getElementById('room-name').value = r.name
+  document.getElementById('room-sort').value = r.sort_order
+  document.getElementById('room-modal-err').style.display = 'none'
+  document.getElementById('room-modal').style.display = 'flex'
+}
+
+function closeRoomModal() {
+  document.getElementById('room-modal').style.display = 'none'
+}
+
+async function saveRoomModal() {
+  const errEl = document.getElementById('room-modal-err')
+  errEl.style.display = 'none'
+  const name = document.getElementById('room-name').value.trim()
+  const sort = parseInt(document.getElementById('room-sort').value) || 1
+  if (!name) { errEl.textContent = 'Room name is required.'; errEl.style.display = 'block'; return }
+  const btn = document.getElementById('room-modal-save-btn')
+  btn.disabled = true; btn.textContent = 'Saving…'
+  try {
+    let res
+    if (editingRoomId) {
+      const oldRoom = studioRooms.find(function(r){ return r.id === editingRoomId })
+      res = await fetch(SUPABASE_URL + '/rest/v1/studio_rooms?id=eq.' + editingRoomId, {
+        method: 'PATCH',
+        headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ name: name, sort_order: sort })
+      })
+      if (!res.ok) throw new Error('HTTP ' + res.status)
+      if (oldRoom && oldRoom.name !== name) {
+        const affected = tblData.filter(function(t){ return t.room_name === oldRoom.name })
+        for (const t of affected) {
+          await fetch(SUPABASE_URL + '/rest/v1/studio_tables?id=eq.' + t.id, {
+            method: 'PATCH',
+            headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+            body: JSON.stringify({ room_name: name })
+          })
+          t.room_name = name
+        }
+      }
+    } else {
+      res = await fetch(SUPABASE_URL + '/rest/v1/studio_rooms', {
+        method: 'POST',
+        headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ studio_id: tablesStudioId, name: name, sort_order: sort })
+      })
+      if (!res.ok) throw new Error('HTTP ' + res.status)
+    }
+    closeRoomModal()
+    await loadRooms()
+  } catch(e) {
+    errEl.textContent = 'Save failed: ' + e.message; errEl.style.display = 'block'
+  } finally {
+    btn.disabled = false; btn.textContent = 'Save Room'
+  }
+}
+
+async function deleteRoom(id, name) {
+  const roomTables = tblData.filter(function(t){ return t.room_name === name })
+  const msg = roomTables.length
+    ? 'Delete room "' + name + '"? The ' + roomTables.length + ' table(s) will become unassigned.'
+    : 'Delete room "' + name + '"?'
+  if (!confirm(msg)) return
+  try {
+    const res = await fetch(SUPABASE_URL + '/rest/v1/studio_rooms?id=eq.' + id, {
+      method: 'DELETE',
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
+    })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    roomTables.forEach(function(t){ t.room_name = null })
+    await loadRooms()
+  } catch(e) { alert('Delete failed: ' + e.message) }
+}
+
+// ── PATCH loadTablesTab ───────────────────────────────────────────
+
+const _origLoadTablesTabForRooms = loadTablesTab
+loadTablesTab = async function() {
+  await _origLoadTablesTabForRooms()
+  const roomsSection = document.getElementById('tables-rooms-section')
+  if (tablesStudioId) {
+    roomsSection.style.display = 'block'
+    await loadRooms()
+  } else {
+    roomsSection.style.display = 'none'
+  }
+}
+
+// ── ORIENTATION IN SAVE MODAL ─────────────────────────────────────
+
+saveTableModal = async function() {
+  const errEl = document.getElementById('table-modal-err')
+  errEl.style.display = 'none'
+  const num = parseInt(document.getElementById('tbl-number').value)
+  const cap = parseInt(document.getElementById('tbl-capacity').value)
+  if (!num || num < 1) { errEl.textContent = 'Table number is required.'; errEl.style.display = 'block'; return }
+  if (!cap || cap < 1) { errEl.textContent = 'Capacity must be at least 1.'; errEl.style.display = 'block'; return }
+  const dup = tblData.find(function(t){ return t.table_number === num && t.id !== editingTableId })
+  if (dup) { errEl.textContent = 'Table ' + num + ' already exists.'; errEl.style.display = 'block'; return }
+  let existingRoomName = null
+  if (editingTableId) {
+    const ex = tblData.find(function(t){ return t.id === editingTableId })
+    existingRoomName = ex ? ex.room_name : null
+  }
+  const payload = {
+    studio_id: tablesStudioId,
+    table_number: num, capacity: cap,
+    label: document.getElementById('tbl-label').value.trim() || null,
+    shape: document.getElementById('tbl-shape').value,
+    orientation: document.getElementById('tbl-orientation').value,
+    is_active: document.getElementById('tbl-active').value === 'true',
+    is_kids_party_preferred: document.getElementById('tbl-party-pref').checked,
+    is_glazing_preferred: document.getElementById('tbl-glazing-pref').checked,
+    is_minimake_preferred: document.getElementById('tbl-minimake-pref').checked,
+    is_wheel_preferred: document.getElementById('tbl-wheel-pref').checked,
+    position_x: parseInt(document.getElementById('tbl-pos-x').value) || 0,
+    position_y: parseInt(document.getElementById('tbl-pos-y').value) || 0
+  }
+  if (existingRoomName) payload.room_name = existingRoomName
+  const btn = document.getElementById('table-modal-save-btn')
+  btn.disabled = true; btn.textContent = 'Saving…'
+  try {
+    let res
+    if (editingTableId) {
+      res = await fetch(SUPABASE_URL + '/rest/v1/studio_tables?id=eq.' + editingTableId, {
+        method: 'PATCH',
+        headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify(payload)
+      })
+    } else {
+      res = await fetch(SUPABASE_URL + '/rest/v1/studio_tables', {
+        method: 'POST',
+        headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify(payload)
+      })
+    }
+    if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.message || 'HTTP ' + res.status) }
+    closeTableModal()
+    await loadTablesTab()
+    document.getElementById('tables-save-status').textContent = 'Saved!'
+    setTimeout(function(){ document.getElementById('tables-save-status').textContent = '' }, 2000)
+  } catch(e) {
+    errEl.textContent = 'Save failed: ' + e.message; errEl.style.display = 'block'
+  } finally {
+    btn.disabled = false; btn.textContent = 'Save Table'
+  }
+}
+
+openAddTableModal = function() {
+  editingTableId = null
+  document.getElementById('table-modal-title').textContent = 'Add Table'
+  document.getElementById('tbl-number').value = ''
+  document.getElementById('tbl-capacity').value = 6
+  document.getElementById('tbl-label').value = ''
+  document.getElementById('tbl-shape').value = 'rect'
+  document.getElementById('tbl-orientation').value = 'landscape'
+  document.getElementById('tbl-active').value = 'true'
+  document.getElementById('tbl-party-pref').checked = false
+  document.getElementById('tbl-glazing-pref').checked = false
+  document.getElementById('tbl-minimake-pref').checked = false
+  document.getElementById('tbl-wheel-pref').checked = false
+  document.getElementById('tbl-pos-x').value = 0
+  document.getElementById('tbl-pos-y').value = 0
+  document.getElementById('table-modal-err').style.display = 'none'
+  document.getElementById('table-modal').style.display = 'flex'
+}
+
+openEditTableModal = function(id) {
+  const t = tblData.find(function(x){ return x.id === id })
+  if (!t) return
+  editingTableId = id
+  document.getElementById('table-modal-title').textContent = 'Edit Table ' + t.table_number
+  document.getElementById('tbl-number').value = t.table_number
+  document.getElementById('tbl-capacity').value = t.capacity
+  document.getElementById('tbl-label').value = t.label || ''
+  document.getElementById('tbl-shape').value = t.shape || 'rect'
+  document.getElementById('tbl-orientation').value = t.orientation || 'landscape'
+  document.getElementById('tbl-active').value = t.is_active ? 'true' : 'false'
+  document.getElementById('tbl-party-pref').checked = !!t.is_kids_party_preferred
+  document.getElementById('tbl-glazing-pref').checked = !!t.is_glazing_preferred
+  document.getElementById('tbl-minimake-pref').checked = !!t.is_minimake_preferred
+  document.getElementById('tbl-wheel-pref').checked = !!t.is_wheel_preferred
+  document.getElementById('tbl-pos-x').value = t.position_x || 0
+  document.getElementById('tbl-pos-y').value = t.position_y || 0
+  document.getElementById('table-modal-err').style.display = 'none'
+  document.getElementById('table-modal').style.display = 'flex'
+}
+
+</script>
+
 
 async function loadRooms() {
   if (!tablesStudioId) return
