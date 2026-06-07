@@ -421,10 +421,16 @@ function shiftDate(n) {
 // ── staff dropdown ─────────────────────────────────────────────
 async function loadStaff() {
   try {
-    var data = await sbGet('staff_profiles',{select:'id,display_name,nickname,studio_ids',is_active:'eq.true',order:'display_name.asc'});
+    var staffUrl = new URL(SUPABASE_URL+'/rest/v1/staff_profiles');
+    staffUrl.searchParams.set('select','id,display_name,nickname,studio_ids');
+    staffUrl.searchParams.set('is_active','eq.true');
+    staffUrl.searchParams.set('studio_ids','cs.{"'+studioId+'"}');
+    staffUrl.searchParams.set('order','display_name.asc');
+    var staffRes = await fetch(staffUrl.toString(),{headers:authHeaders()});
+    var data = await staffRes.json();
     var sel = document.getElementById('staff-select');
     sel.innerHTML = '<option value="">— select name —</option>';
-    (data||[]).filter(function(u){ return u.studio_ids && u.studio_ids.indexOf(studioId)!==-1; })
+    (data||[]).filter(function(u){ return true; })
     .forEach(function(u){
       var name = u.nickname||u.display_name||u.id;
       var o = document.createElement('option');
@@ -907,7 +913,11 @@ async function loadFloor() {
     var roomsRes=await fetch(SUPABASE_URL+'/rest/v1/studio_rooms?studio_id=eq.'+studioId+'&order=sort_order.asc',{headers:authHeaders()});
     var rooms=await roomsRes.json();
     var sessionsRes=await sbGet('sessions',{select:'id,title,session_time,session_type',studio_id:'eq.'+studioId,session_date:'eq.'+today,order:'session_time.asc'});
-    var sessions=sessionsRes||[];
+    var allSessions=sessionsRes||[];
+    // Only show sessions that have seating assignments (reduces legend noise)
+    var sessions=allSessions.filter(function(s){
+      return s.session_type!=='party_time_slot';
+    });
     if(!Array.isArray(tables)||!tables.length){
       el.innerHTML='<div class="empty-state">No tables configured for this studio yet.</div>'; return;
     }
@@ -944,13 +954,20 @@ async function loadFloor() {
     });
 
     var html='';
-    // Legend
-    html+='<div class="floor-legend">';
-    sessions.forEach(function(s,i){
-      html+='<span><span class="legend-dot" style="background:'+TIME_COLOURS[i%TIME_COLOURS.length]+'"></span>'+fmtTime(s.session_time)+' '+s.title+'</span>';
-    });
-    html+='<span><span class="legend-dot" style="background:#f0f0ec;border:1px solid #ccc"></span>Empty</span>';
-    html+='</div>';
+    // Legend - only sessions that actually have assignments
+    var assignedSessionIds={};
+    assignments.forEach(function(a){ assignedSessionIds[a.session_id]=true; });
+    var legendSessions=sessions.filter(function(s){ return assignedSessionIds[s.id]; });
+    if(legendSessions.length){
+      html+='<div class="floor-legend">';
+      legendSessions.forEach(function(s,i){
+        html+='<span><span class="legend-dot" style="background:'+TIME_COLOURS[i%TIME_COLOURS.length]+'"></span>'+fmtTime(s.session_time)+' '+s.title+'</span>';
+      });
+      html+='<span><span class="legend-dot" style="background:#f0f0ec;border:1px solid #ccc"></span>Empty</span>';
+      html+='</div>';
+    }
+    // Rebuild sessionColours based on legendSessions order
+    legendSessions.forEach(function(s,i){ sessionColours[s.id]=TIME_COLOURS[i%TIME_COLOURS.length]; });
 
     var roomOrder=(rooms||[]).map(function(r){return r.id;});
     Object.keys(tablesByRoom).forEach(function(rid){ if(roomOrder.indexOf(rid)===-1) roomOrder.push(rid); });
@@ -960,14 +977,23 @@ async function loadFloor() {
       if(!roomTables.length) return;
       var room=roomMap[rid];
       var roomName=room?room.name:'Studio';
-      var gridCols=room&&room.grid_cols?room.grid_cols:6;
-      var gridRows=room&&room.grid_rows?room.grid_rows:4;
+      var totalTables=roomTables.length;
+      var gridCols=room&&room.grid_cols?room.grid_cols:Math.min(6,totalTables||6);
+      var gridRows=room&&room.grid_rows?room.grid_rows:Math.ceil(totalTables/gridCols)||4;
       var gridW=gridCols*CELL_W+16;
       var gridH=gridRows*CELL_H+16;
       html+='<div class="floor-room"><div class="floor-room-title">'+roomName+'</div>';
       html+='<div class="floor-grid-wrap"><div class="floor-grid" style="width:'+gridW+'px;height:'+gridH+'px">';
+      // Auto-layout tables that have no position set
+      var unpositioned=roomTables.filter(function(t){return !t.col_position&&!t.row_position;});
+      var autoCol=0,autoRow=0;
+      unpositioned.forEach(function(t){
+        t._autoCol=autoCol; t._autoRow=autoRow;
+        autoCol++; if(autoCol>=gridCols){autoCol=0;autoRow++;}
+      });
       roomTables.forEach(function(t){
-        var col=(t.col_position||1)-1,row=(t.row_position||1)-1;
+        var col=t.col_position?t.col_position-1:t._autoCol||0;
+        var row=t.row_position?t.row_position-1:t._autoRow||0;
         var x=col*CELL_W+8,y=row*CELL_H+8;
         var w=CELL_W-8,h=CELL_H-8;
         var sessionIds=tableSessionMap[t.id]||[];
