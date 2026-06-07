@@ -166,6 +166,12 @@
     .loading-msg { text-align: center; padding: 40px 16px; color: #999; font-size: 14px; }
     .empty-state { text-align: center; padding: 48px 16px; color: #aaa; font-size: 14px; }
     .error-msg { background: #fef2f2; color: #b91c1c; border-radius: 10px; padding: 12px 16px; font-size: 14px; margin-bottom: 12px; }
+    .booking-alert { position: fixed; top: 0; left: 0; right: 0; z-index: 999; background: #1a1a2e; color: white; padding: 14px 20px; display: flex; align-items: center; gap: 14px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); transform: translateY(-100%); transition: transform 0.35s ease; }
+    .booking-alert.show { transform: translateY(0); }
+    .booking-alert-icon { font-size: 24px; flex-shrink: 0; }
+    .booking-alert-text { flex: 1; font-size: 14px; line-height: 1.4; }
+    .booking-alert-title { font-weight: 700; font-size: 15px; color: #f0c040; }
+    .booking-alert-dismiss { padding: 8px 14px; background: #f0c040; color: #1a1a2e; border: none; border-radius: 8px; font-size: 13px; font-weight: 700; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
   </style>
 </head>
 <body>
@@ -185,6 +191,15 @@
 
 <!-- Main app -->
 <div id="main-app">
+  <!-- New booking alert banner -->
+  <div class="booking-alert" id="booking-alert">
+    <div class="booking-alert-icon">🔔</div>
+    <div class="booking-alert-text">
+      <div class="booking-alert-title" id="alert-title">New booking!</div>
+      <div id="alert-body"></div>
+    </div>
+    <button class="booking-alert-dismiss" onclick="dismissAlert()">View ✓</button>
+  </div>
   <div class="top-bar">
     <div class="top-bar-left">
       <span class="logo-text">4CATS</span>
@@ -374,6 +389,8 @@ function loadApp(user) {
     loadKiln();
     loadFloor();
     loadTables();
+    // Start new booking polling after a short delay
+    setTimeout(initBookingPoll, 3000);
   }).catch(function(e){ showErr('Error: '+e.message); });
 }
 
@@ -1144,6 +1161,70 @@ function showTablePopup(el,dataEncoded) {
   if(data.names) msg+='\n'+data.names;
   else msg+='\nEmpty';
   alert(msg);
+}
+
+// ── NEW BOOKING ALERT ─────────────────────────────────────────
+var knownBookingIds = null;
+var alertPollTimer = null;
+var alertDismissed = false;
+
+async function initBookingPoll() {
+  try {
+    var sessionIds = await getTodaySessionIds();
+    if(!sessionIds) return;
+    var data = await sbGet('bookings',{
+      select:'id', 'session_id':'in.('+sessionIds+')',
+      qty:'gt.0', returned_at:'is.null'
+    });
+    knownBookingIds = {};
+    (data||[]).forEach(function(b){ knownBookingIds[b.id]=true; });
+  } catch(e){ knownBookingIds={}; }
+  if(alertPollTimer) clearInterval(alertPollTimer);
+  alertPollTimer = setInterval(pollForNewBookings, 30000);
+}
+
+async function getTodaySessionIds() {
+  var data = await sbGet('sessions',{
+    select:'id', studio_id:'eq.'+studioId, session_date:'eq.'+isoDate(currentDate)
+  });
+  var ids = (data||[]).map(function(s){return s.id;});
+  return ids.length ? ids.join(',') : null;
+}
+
+async function pollForNewBookings() {
+  if(!studioId || !knownBookingIds) return;
+  try {
+    var sessionIds = await getTodaySessionIds();
+    if(!sessionIds) return;
+    var data = await sbGet('bookings',{
+      select:'id,customer_name,qty',
+      'session_id':'in.('+sessionIds+')',
+      qty:'gt.0', returned_at:'is.null'
+    });
+    var newOnes = (data||[]).filter(function(b){ return !knownBookingIds[b.id]; });
+    if(newOnes.length) {
+      newOnes.forEach(function(b){ knownBookingIds[b.id]=true; });
+      var names = newOnes.map(function(b){ return (b.customer_name||'Someone')+(b.qty>1?' ×'+b.qty:''); }).join(', ');
+      var title = newOnes.length===1 ? '🔔 New booking!' : '🔔 '+newOnes.length+' new bookings!';
+      showBookingAlert(title, names);
+      loadCheckin();
+    }
+  } catch(e){ console.warn('poll error',e); }
+}
+
+function showBookingAlert(title, body) {
+  alertDismissed = false;
+  document.getElementById('alert-title').textContent = title;
+  document.getElementById('alert-body').textContent = body;
+  document.getElementById('booking-alert').classList.add('show');
+  setTimeout(function(){ if(!alertDismissed) dismissAlert(); }, 15000);
+  if(navigator.vibrate) navigator.vibrate([200,100,200]);
+}
+
+function dismissAlert() {
+  alertDismissed = true;
+  document.getElementById('booking-alert').classList.remove('show');
+  switchTab('checkin');
 }
 </script>
 </body>
