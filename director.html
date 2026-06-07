@@ -319,6 +319,7 @@ var pendingEmailTimeout = null;
 var pendingEmailInterval = null;
 var pendingEmailUndoData = null;
 var allTables = [];
+var checkinCounts = {};
 var movingBookingId = null;
 var movingCurrentTable = null;
 var lastScheduleSessions = [];
@@ -414,6 +415,7 @@ function shiftDate(n) {
   var label = formatDate(currentDate);
   document.getElementById('checkin-date-label').textContent = label;
   document.getElementById('schedule-date-label').textContent = label;
+  todaySessionsForMove = [];
   loadCheckin();
   loadSchedule();
 }
@@ -468,6 +470,16 @@ async function loadCheckin() {
       select:'booking_id,table_id,studio_tables(table_number)',
       'session_id':'in.('+ids.join(',')+')'
     });
+
+    // Load customer check-ins (signin_entries)
+    var checkins = await sbGet('signin_entries',{
+      select:'session_id,mode',
+      'session_id':'in.('+ids.join(',')+')'
+    });
+    checkinCounts = {};
+    (checkins||[]).forEach(function(e){
+      checkinCounts[e.session_id]=(checkinCounts[e.session_id]||0)+1;
+    });
     var seatMap = {};
     (seating||[]).forEach(function(s){
       if(!seatMap[s.booking_id]) seatMap[s.booking_id] = [];
@@ -505,7 +517,9 @@ async function loadCheckin() {
             '<div class="session-title">'+fmtTime(s.session_time)+' · '+(s.title||'Untitled')+'</div>'+
           '</div>'+
           '<div style="display:flex;align-items:center;gap:8px">'+
-            '<span style="font-size:12px;color:#888">'+arrived+' arrived</span>'+
+            '<span style="font-size:12px;color:#27ae60;font-weight:500">✓ '+arrived+' arrived</span>'+
+            '<button data-sid="'+s.id+'" data-title="'+s.title.replace(/"/g,'&quot;')+'" data-date="'+isoDate(currentDate)+'" onclick="openCheckinListBtn(this)" style="font-size:12px;color:#1a56a8;background:#e8f0fe;border:none;border-radius:20px;padding:3px 10px;cursor:pointer;font-weight:500">'+
+              (checkinCounts[s.id]||0)+' checked in</button>'+
             '<span class="session-reg">'+total+(s.capacity?'/'+s.capacity:'')+'</span>'+
             (total>0?'<button class="reg-btn" style="font-size:12px;padding:5px 10px" onclick="openClassList(\''+s.id+'\',\''+s.title.replace(/'/g,"\\'")+'\',' +total+')">Class list</button>':'')+ 
           '</div>'+
@@ -617,19 +631,90 @@ function closeTableModal() {
 }
 
 // ── class list modal ───────────────────────────────────────────
+var todaySessionsForMove = [];
+function moveCheckinSel(sel){ moveCheckin(sel.getAttribute("data-eid"),sel,sel.getAttribute("data-sid")); }
+function openCheckinListBtn(btn){ openCheckinList(btn.getAttribute("data-sid"),btn.getAttribute("data-title"),btn.getAttribute("data-date")); }
+
+async function loadTodaySessions() {
+  if(todaySessionsForMove.length) return;
+  try {
+    var data = await sbGet('sessions',{
+      select:'id,title,session_time,session_type',
+      studio_id:'eq.'+studioId, session_date:'eq.'+isoDate(currentDate), order:'session_time.asc'
+    });
+    todaySessionsForMove = (data||[]).filter(function(s){ return s.session_type!=='party_time_slot'; });
+  } catch(e){ todaySessionsForMove=[]; }
+}
+
 async function openClassList(sessionId, title, count) {
   document.getElementById('class-modal-title').textContent = title+' — '+count+' registered';
   document.getElementById('class-modal-body').innerHTML = '<div class="loading-msg">Loading...</div>';
   document.getElementById('class-modal-bg').classList.add('open');
+  await loadTodaySessions();
   try {
     var data = await sbGet('bookings',{select:'customer_name,qty',session_id:'eq.'+sessionId,qty:'gt.0',returned_at:'is.null'});
     if(!data||!data.length){ document.getElementById('class-modal-body').innerHTML='<div class="empty-state" style="padding:24px">No bookings found.</div>'; return; }
     document.getElementById('class-modal-body').innerHTML = data.map(function(b){
       var ini=(b.customer_name||'?').trim().split(/\s+/).map(function(w){return w[0];}).join('').toUpperCase().slice(0,2);
-      return '<div class="attendee-row"><div class="avatar">'+ini+'</div><div style="flex:1">'+(b.customer_name||'Unknown')+'</div>'+(b.qty>1?'<span style="font-size:12px;color:#888">×'+b.qty+'</span>':'')+  '</div>';
+      return '<div class="attendee-row"><div class="avatar">'+ini+'</div><div style="flex:1">'+(b.customer_name||'Unknown')+'</div>'+(b.qty>1?'<span style="font-size:12px;color:#888">×'+b.qty+'</span>':'')+'</div>';
     }).join('');
   } catch(e){ document.getElementById('class-modal-body').innerHTML='<div class="error-msg">Error: '+e.message+'</div>'; }
 }
+
+async function openCheckinList(sessionId, title, dateStr) {
+  document.getElementById('class-modal-title').textContent = title+' — Check-ins';
+  document.getElementById('class-modal-body').innerHTML = '<div class="loading-msg">Loading...</div>';
+  document.getElementById('class-modal-bg').classList.add('open');
+  await loadTodaySessions();
+  try {
+    var data = await sbGet('signin_entries',{
+      select:'id,name,email,phone,signed_in_at,mode',
+      session_id:'eq.'+sessionId, order:'signed_in_at.asc'
+    });
+    if(!data||!data.length){
+      document.getElementById('class-modal-body').innerHTML='<div class="empty-state" style="padding:24px">No check-ins yet.</div>';
+      return;
+    }
+    // Build move options (exclude current session)
+    var moveOpts = todaySessionsForMove.filter(function(s){return s.id!==sessionId;})
+      .map(function(s){return '<option value="'+s.id+'">'+fmtTime(s.session_time)+' · '+s.title+'</option>';}).join('');
+
+    document.getElementById('class-modal-body').innerHTML = data.map(function(e){
+      var ini=(e.name||'?').trim().split(/\s+/).map(function(w){return w[0];}).join('').toUpperCase().slice(0,2);
+      var timeStr=e.signed_in_at?new Date(e.signed_in_at).toLocaleTimeString('en-CA',{hour:'numeric',minute:'2-digit'}):'';
+      return '<div class="attendee-row" style="flex-wrap:wrap;gap:8px" id="ci-'+e.id+'">'+
+        '<div class="avatar">'+ini+'</div>'+
+        '<div style="flex:1;min-width:120px">'+
+          '<div style="font-weight:500">'+(e.name||'Unknown')+'</div>'+
+          '<div style="font-size:11px;color:#aaa">'+timeStr+(e.mode&&e.mode!=='normal'?' · '+e.mode:'')+'</div>'+
+        '</div>'+
+        (moveOpts?'<select data-eid="'+e.id+'" data-sid="'+sessionId+'" onchange="moveCheckinSel(this)" style="font-size:12px;padding:5px 8px;border:1px solid #ddd;border-radius:8px;max-width:180px;-webkit-appearance:none">'+
+          '<option value="">Move to...</option>'+moveOpts+
+        '</select>':'')+'</div>';
+    }).join('');
+  } catch(e){ document.getElementById('class-modal-body').innerHTML='<div class="error-msg">Error: '+e.message+'</div>'; }
+}
+
+async function moveCheckin(entryId, selectEl, currentSessionId) {
+  var newSessionId = selectEl.value;
+  if(!newSessionId) return;
+  selectEl.disabled = true;
+  try {
+    await fetch(SUPABASE_URL+'/rest/v1/signin_entries?id=eq.'+entryId,{
+      method:'PATCH',
+      headers:Object.assign({},authHeaders(),{Prefer:'return=minimal'}),
+      body:JSON.stringify({session_id:newSessionId})
+    });
+    // Remove row from modal
+    var row = document.getElementById('ci-'+entryId);
+    if(row){ row.style.opacity='0.4'; row.style.textDecoration='line-through'; }
+    // Update counts
+    checkinCounts[currentSessionId]=Math.max(0,(checkinCounts[currentSessionId]||1)-1);
+    checkinCounts[newSessionId]=(checkinCounts[newSessionId]||0)+1;
+    loadCheckin(); // refresh
+  } catch(e){ selectEl.disabled=false; alert('Error moving: '+e.message); }
+}
+
 function closeClassModal(){ document.getElementById('class-modal-bg').classList.remove('open'); }
 document.addEventListener('click', function(e){
   if(e.target===document.getElementById('class-modal-bg')) closeClassModal();
