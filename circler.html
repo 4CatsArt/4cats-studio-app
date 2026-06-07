@@ -714,34 +714,52 @@
       sbPatch('clay_tickets', id, body).then(function(){
         if (ticket) ticket.stage = newStage;
         done++; if (done===ids.length) { renderKiln(); updateKilnBulkBar(); }
-      }).catch(function(){ done++; if (done===ids.length) { renderKiln(); updateKilnBulkBar(); } });
+      }).catch(function(err){ console.error('sbPatch error:', err); done++; if (done===ids.length) { renderKiln(); updateKilnBulkBar(); } });
     });
     // Email trigger
     var emailTrigger = newStage==='bisque_ready' || newStage==='ready_pickup';
     if (!emailTrigger) return;
-    var fnName   = newStage==='bisque_ready' ? 'send-bisque-email' : 'send-pickup-email';
+    var fnName = newStage==='bisque_ready' ? 'send-bisque-email' : 'send-pickup-email';
     var affected = ids.map(function(id){ return allKilnData.filter(function(k){return k.id===id;})[0]; }).filter(Boolean);
-    var prevStages = {}; affected.forEach(function(t){ prevStages[t.id]=t.stage; });
-    if (pendingEmailTimeout) { clearTimeout(pendingEmailTimeout); clearInterval(pendingEmailInterval); }
+    var prevStages = {};
+    affected.forEach(function(t){ prevStages[t.id] = t.stage; });
+
+    if (pendingEmailTimeout && pendingEmailUndoData && pendingEmailUndoData.newStage === newStage) {
+      // Same stage — merge into existing batch, reset timer to 60s
+      clearTimeout(pendingEmailTimeout);
+      clearInterval(pendingEmailInterval);
+      affected.forEach(function(t){
+        var alreadyIn = pendingEmailUndoData.affected.filter(function(a){return a.id===t.id;}).length > 0;
+        if(!alreadyIn) {
+          pendingEmailUndoData.affected.push(t);
+          pendingEmailUndoData.prevStages[t.id] = prevStages[t.id];
+        }
+      });
+    } else {
+      // New batch (different stage or no pending) — cancel old if any
+      if (pendingEmailTimeout) { clearTimeout(pendingEmailTimeout); clearInterval(pendingEmailInterval); }
+      pendingEmailUndoData = { affected: affected, prevStages: prevStages, newStage: newStage };
+    }
+
     var secondsLeft = 60;
     var banner = document.getElementById('email-banner');
     var bannerText = document.getElementById('email-banner-text');
     function updateBanner() {
-      bannerText.textContent = '📧 Emails sending in 0:' + (secondsLeft<10?'0':'') + secondsLeft + ' — ' + ids.length + ' ticket' + (ids.length>1?'s':'');
+      var n = pendingEmailUndoData.affected.length;
+      bannerText.textContent = '📧 Emails sending in 0:' + (secondsLeft<10?'0':'') + secondsLeft + ' — ' + n + ' ticket' + (n>1?'s':'');
     }
     updateBanner(); banner.classList.add('show');
     pendingEmailInterval = setInterval(function(){ secondsLeft--; if(secondsLeft<=0){clearInterval(pendingEmailInterval);return;} updateBanner(); }, 1000);
-    pendingEmailUndoData = { ids: ids, prevStages: prevStages };
     pendingEmailTimeout = setTimeout(function() {
       clearInterval(pendingEmailInterval);
       banner.classList.remove('show'); pendingEmailTimeout = null;
       var tsCol = newStage==='bisque_ready' ? 'bisque_email_sent_at' : 'pickup_email_sent_at';
-      affected.forEach(function(t) {
+      pendingEmailUndoData.affected.forEach(function(t) {
         var emails = (t.signin_entries||[]).map(function(e){return e.email;}).filter(Boolean);
         if (!emails.length) return;
         fetch(SUPABASE_URL+'/functions/v1/'+fnName, {
           method: 'POST',
-          headers: {'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
+          headers: Object.assign({'Content-Type':'application/json'}, authHeaders()),
           body: JSON.stringify({emails:emails, ticketNumber:t.ticket_number, studioId:studioId, description:t.description||''})
         }).catch(function(err){ console.error('Email error:', err); });
         sbPatch('clay_tickets', t.id, {[tsCol]: new Date().toISOString()}).then(function(){
@@ -755,13 +773,12 @@
     if (pendingEmailTimeout) { clearTimeout(pendingEmailTimeout); clearInterval(pendingEmailInterval); pendingEmailTimeout = null; }
     document.getElementById('email-banner').classList.remove('show');
     if (!pendingEmailUndoData) return;
-    var ids = pendingEmailUndoData.ids;
+    var affected = pendingEmailUndoData.affected;
     var prevStages = pendingEmailUndoData.prevStages;
-    ids.forEach(function(id) {
-      var prev = prevStages[id]; if (!prev) return;
-      sbPatch('clay_tickets', id, {stage: prev}).then(function(){
-        var t = allKilnData.filter(function(k){return k.id===id;})[0];
-        if (t) t.stage = prev; renderKiln();
+    affected.forEach(function(t) {
+      var prev = prevStages[t.id]; if (!prev) return;
+      sbPatch('clay_tickets', t.id, {stage: prev}).then(function(){
+        t.stage = prev; renderKiln();
       });
     });
     pendingEmailUndoData = null;
