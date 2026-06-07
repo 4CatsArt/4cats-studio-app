@@ -1206,19 +1206,27 @@ function doAdvance(ids,newStage) {
     var fnName=newStage==='bisque_ready'?'send-bisque-email':'send-pickup-email';
     var affected=ids.map(function(id){return allKilnData.filter(function(k){return k.id===id;})[0];}).filter(Boolean);
     var prevStages={}; affected.forEach(function(t){prevStages[t.id]=t.stage;});
-    if(pendingEmailTimeout){clearTimeout(pendingEmailTimeout);clearInterval(pendingEmailInterval);}
+    if(pendingEmailTimeout && pendingEmailUndoData && pendingEmailUndoData.newStage===newStage){
+      clearTimeout(pendingEmailTimeout); clearInterval(pendingEmailInterval);
+      affected.forEach(function(t){
+        var alreadyIn=pendingEmailUndoData.affected.filter(function(a){return a.id===t.id;}).length>0;
+        if(!alreadyIn){pendingEmailUndoData.affected.push(t); pendingEmailUndoData.prevStages[t.id]=prevStages[t.id];}
+      });
+    } else {
+      if(pendingEmailTimeout){clearTimeout(pendingEmailTimeout);clearInterval(pendingEmailInterval);}
+      pendingEmailUndoData={affected:affected,prevStages:prevStages,newStage:newStage};
+    }
     var secondsLeft=60,banner=document.getElementById('email-banner'),bannerText=document.getElementById('email-banner-text');
-    function updateBanner(){bannerText.textContent='📧 Emails in 0:'+(secondsLeft<10?'0':'')+secondsLeft+' — '+ids.length+' ticket'+(ids.length>1?'s':'');}
+    function updateBanner(){var n=pendingEmailUndoData.affected.length;bannerText.textContent='📧 Emails in 0:'+(secondsLeft<10?'0':'')+secondsLeft+' — '+n+' ticket'+(n>1?'s':'');}
     updateBanner(); banner.classList.add('show');
     pendingEmailInterval=setInterval(function(){secondsLeft--;if(secondsLeft<=0){clearInterval(pendingEmailInterval);return;}updateBanner();},1000);
-    pendingEmailUndoData={ids:ids,prevStages:prevStages};
     pendingEmailTimeout=setTimeout(function(){
       clearInterval(pendingEmailInterval); banner.classList.remove('show'); pendingEmailTimeout=null;
       var tsCol=newStage==='bisque_ready'?'bisque_email_sent_at':'pickup_email_sent_at';
-      affected.forEach(function(t){
+      pendingEmailUndoData.affected.forEach(function(t){
         var emails=(t.signin_entries||[]).map(function(e){return e.email;}).filter(Boolean);
         if(!emails.length) return;
-        fetch(SUPABASE_URL+'/functions/v1/'+fnName,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},body:JSON.stringify({emails:emails,ticketNumber:t.ticket_number,studioId:studioId,description:t.description||''})}).catch(function(err){console.error(err);});
+        fetch(SUPABASE_URL+'/functions/v1/'+fnName,{method:'POST',headers:Object.assign({'Content-Type':'application/json'},authHeaders()),body:JSON.stringify({emails:emails,ticketNumber:t.ticket_number,studioId:studioId,description:t.description||''})}).catch(function(err){console.error(err);});
         sbPatch('clay_tickets',t.id,{[tsCol]:new Date().toISOString()}).then(function(){t[tsCol]=new Date().toISOString();renderKiln();});
       });
     },60000);
@@ -1228,9 +1236,9 @@ function undoEmailSend() {
   if(pendingEmailTimeout){clearTimeout(pendingEmailTimeout);clearInterval(pendingEmailInterval);pendingEmailTimeout=null;}
   document.getElementById('email-banner').classList.remove('show');
   if(!pendingEmailUndoData) return;
-  pendingEmailUndoData.ids.forEach(function(id){
-    var prev=pendingEmailUndoData.prevStages[id]; if(!prev) return;
-    sbPatch('clay_tickets',id,{stage:prev}).then(function(){var t=allKilnData.filter(function(k){return k.id===id;})[0];if(t) t.stage=prev;renderKiln();});
+  pendingEmailUndoData.affected.forEach(function(t){
+    var prev=pendingEmailUndoData.prevStages[t.id]; if(!prev) return;
+    sbPatch('clay_tickets',t.id,{stage:prev}).then(function(){t.stage=prev;renderKiln();});
   });
   pendingEmailUndoData=null;
 }
