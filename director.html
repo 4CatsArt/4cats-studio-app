@@ -395,6 +395,45 @@ function loadApp(user) {
 }
 
 // ── helpers ───────────────────────────────────────────────────
+function parsePartyAddons(rawPayload, subtype) {
+  try {
+    var payload = typeof rawPayload==='string'?JSON.parse(rawPayload):rawPayload;
+    if(!payload||!payload.line_items) return [];
+    var addons=[];
+    for(var i=0;i<payload.line_items.length;i++){
+      var li=payload.line_items[i];
+      var title=(li.title||li.name||'').trim();
+      var variant=(li.variant_title||'').trim();
+      if(/^\d+(am|pm)/i.test(title)) continue;
+      if(!title||title===variant) continue;
+      addons.push({title:title,variant:variant,qty:li.quantity||1});
+    }
+    return addons;
+  } catch(e){ return []; }
+}
+function parseAddonDetails(addons, subtype) {
+  var result={artTime:null,partyTime:null,guestCount:null};
+  for(var i=0;i<addons.length;i++){
+    var t=addons[i].title.toLowerCase(), v=addons[i].variant||'';
+    var parts=v.split(' / ');
+    for(var j=0;j<parts.length;j++){
+      var p=parts[j].toLowerCase();
+      if(p.indexOf('90')!==-1&&p.indexOf('yes')!==-1) result.artTime='90 min';
+      else if(!result.artTime&&(p.indexOf('60')!==-1||p.indexOf('no art')!==-1)) result.artTime='60 min';
+      if(p.indexOf('45')!==-1&&p.indexOf('min')!==-1) result.partyTime='45 min';
+      else if(p.indexOf('30')!==-1&&p.indexOf('min')!==-1) result.partyTime='30 min';
+      else if(p.indexOf('60')!==-1&&p.indexOf('min')!==-1&&t.indexOf('party')!==-1) result.partyTime='60 min';
+      var nm=p.match(/(\d+)\s*(guests?|people)/);
+      if(nm) result.guestCount=parseInt(nm[1]);
+    }
+    if(t.indexOf('90 min')!==-1&&t.indexOf('art')!==-1) result.artTime='90 min';
+    if(t.indexOf('45')!==-1&&t.indexOf('party')!==-1) result.partyTime='45 min';
+    if(t.indexOf('30')!==-1&&t.indexOf('party')!==-1) result.partyTime='30 min';
+    if(t.indexOf('60')!==-1&&t.indexOf('party')!==-1) result.partyTime='60 min';
+  }
+  if(!result.artTime) result.artTime='60 min';
+  return result;
+}
 function parseMins(str) {
   if(!str || str==='none') return 0;
   var m=(str+'').match(/(\d+)/); return m?parseInt(m[1]):0;
@@ -496,74 +535,68 @@ async function loadCheckin() {
   el.innerHTML = '<div class="loading-msg">Loading...</div>';
   try {
     var dateStr = isoDate(currentDate);
-    // Load sessions
     var sessions = await sbGet('sessions',{
-      select:'id,session_time,title,session_type,capacity',
+      select:'id,session_time,title,session_type,capacity,show',
       studio_id:'eq.'+studioId, session_date:'eq.'+dateStr, order:'session_time.asc'
     });
     sessions = sessions||[];
     if(!sessions.length){ el.innerHTML='<div class="empty-state">No sessions on this day.</div>'; return; }
-
     var ids = sessions.map(function(s){return s.id;});
 
-    // Load bookings with arrived_at and seating
     var bookings = await sbGet('bookings',{
-      select:'id,session_id,customer_name,customer_email,customer_phone,qty,shopify_order_name,arrived_at,returned_at,raw_payload',
+      select:'id,session_id,customer_name,customer_email,qty,shopify_order_name,arrived_at,returned_at,raw_payload',
       'session_id':'in.('+ids.join(',')+')', 'qty':'gt.0', order:'booked_at.asc'
     });
     bookings = (bookings||[]).filter(function(b){ return !b.returned_at; });
 
-    // Load party_details for party sessions
-    var partySessionIds = sessions.filter(function(s){
-      return s.session_type==='party'||s.session_type==='kids_party'||s.title.toLowerCase().indexOf('party')!==-1;
-    }).map(function(s){return s.id;});
+    // party_details
     var partyDetailsMap = {};
-    if(partySessionIds.length) {
-      var partyBookingIds = bookings.filter(function(b){ return partySessionIds.indexOf(b.session_id)!==-1; }).map(function(b){return b.id;});
-      if(partyBookingIds.length) {
-        try {
-          var pds = await sbGet('party_details',{
-            select:'booking_id,party_reason,actual_art_time,actual_party_time',
-            'booking_id':'in.('+partyBookingIds.join(',')+')'
-          });
-          (pds||[]).forEach(function(pd){ partyDetailsMap[pd.booking_id]=pd; });
-        } catch(e){}
-      }
+    var partyBids = bookings.filter(function(b){
+      var s = sessions.filter(function(s){return s.id===b.session_id;})[0]||{};
+      return s.session_type==='party'||s.session_type==='kids_party'||(s.title||'').toLowerCase().indexOf('party')!==-1;
+    }).map(function(b){return b.id;});
+    if(partyBids.length){
+      try {
+        var pds = await sbGet('party_details',{
+          select:'booking_id,party_reason,actual_art_time,actual_party_time',
+          'booking_id':'in.('+partyBids.join(',')+')'
+        });
+        (pds||[]).forEach(function(pd){ partyDetailsMap[pd.booking_id]=pd; });
+      } catch(e){}
     }
 
-    // Load seating assignments
+    // session_staff notes
+    var staffNotes = {};
+    try {
+      var snRows = await sbGet('session_staff',{select:'session_id,notes','session_id':'in.('+ids.join(',')+')'});
+      (snRows||[]).forEach(function(r){ staffNotes[r.session_id]=r.notes||''; });
+    } catch(e){}
+
+    // seating
     var seating = await sbGet('seating_assignments',{
       select:'booking_id,table_id,studio_tables(table_number)',
       'session_id':'in.('+ids.join(',')+')'
     });
+    var seatMap = {};
+    (seating||[]).forEach(function(a){
+      if(!seatMap[a.booking_id]) seatMap[a.booking_id]=[];
+      seatMap[a.booking_id].push(a);
+    });
 
-    // Load customer check-ins (signin_entries)
-    var checkins = await sbGet('signin_entries',{
-      select:'session_id,mode',
-      'session_id':'in.('+ids.join(',')+')'
+    // check-ins
+    var checkinRows = await sbGet('signin_entries',{
+      select:'session_id,mode','session_id':'in.('+ids.join(',')+')'
     });
     checkinCounts = {};
-    (checkins||[]).forEach(function(e){
+    var dropinCounts = {};
+    (checkinRows||[]).forEach(function(e){
       checkinCounts[e.session_id]=(checkinCounts[e.session_id]||0)+1;
-    });
-    var seatMap = {};
-    (seating||[]).forEach(function(s){
-      if(!seatMap[s.booking_id]) seatMap[s.booking_id] = [];
-      seatMap[s.booking_id].push(s);
+      if(e.mode==='dropin') dropinCounts[e.session_id]=(dropinCounts[e.session_id]||0)+1;
     });
 
-    // Booking counts for show/hide logic
+    // booking counts for filter
     var countMap = {};
     bookings.forEach(function(b){ countMap[b.session_id]=(countMap[b.session_id]||0)+(b.qty||0); });
-
-    // Filter sessions same as index.html
-    var filtered = sessions.filter(function(s){
-      if(s.session_type==='party_time_slot') return false;
-      var c = countMap[s.session_id]||0;
-      if(s.show===false && c===0) return false;
-      if(c===0 && s.capacity!==null && s.capacity===0) return false;
-      return true;
-    });
 
     var bookingsBySession = {};
     bookings.forEach(function(b){
@@ -571,82 +604,203 @@ async function loadCheckin() {
       bookingsBySession[b.session_id].push(b);
     });
 
-    var html = '';
+    var el2 = document.createElement('div');
+
     sessions.forEach(function(s){
-      var isParty = s.session_type==='party'||s.session_type==='kids_party'||s.title.toLowerCase().indexOf('party')!==-1;
+      // Filter same as index.html
+      if(s.session_type==='party_time_slot') return;
+      var cnt = countMap[s.id]||0;
+      if(s.show===false && cnt===0) return;
+      if(cnt===0 && s.capacity!==null && s.capacity===0) return;
+
+      var isParty = s.session_type==='party'||s.session_type==='kids_party'||(s.title||'').toLowerCase().indexOf('party')!==-1;
       var sessionBookings = bookingsBySession[s.id]||[];
-      var total = sessionBookings.reduce(function(sum,b){return sum+(b.qty||0);},0);
-      var arrived = sessionBookings.filter(function(b){return b.arrived_at;}).length;
-      // Party: get reason + end time from first booking
-      var partyReason = '';
-      var partyEndTime = '';
-      if(isParty && sessionBookings.length) {
-        var firstBooking = sessionBookings[0];
-        var pd = partyDetailsMap[firstBooking.id]||{};
+      var total = sessionBookings.reduce(function(acc,b){return acc+(b.qty||0);},0);
+      var arrivedCount = sessionBookings.filter(function(b){return !!b.arrived_at;}).length;
+
+      // Party end time
+      var partyReason='', partyEndTime='';
+      if(isParty && sessionBookings.length){
+        var fb = sessionBookings[0];
+        var pd = partyDetailsMap[fb.id]||{};
         partyReason = pd.party_reason||'';
-        // Calculate end time
-        var artMins=0,partyMins=0;
-        if(pd.actual_art_time){ artMins=parseMins(pd.actual_art_time); partyMins=parseMins(pd.actual_party_time); }
+        var artM=0, ptM=0;
+        if(pd.actual_art_time){ artM=parseMins(pd.actual_art_time); ptM=parseMins(pd.actual_party_time||'0'); }
         else {
           try {
-            var payload=typeof firstBooking.raw_payload==='string'?JSON.parse(firstBooking.raw_payload):firstBooking.raw_payload;
-            var items=(payload&&payload.line_items)||[];
-            var li=items[0]||{};
-            var props=li.properties||[];
-            props.forEach(function(p){
-              var n=(p.name||'').toLowerCase();
-              if(n.indexOf('art')!==-1&&n.indexOf('time')!==-1) artMins=parseMins(p.value);
-              if(n.indexOf('party')!==-1&&n.indexOf('time')!==-1) partyMins=parseMins(p.value);
-            });
-            if(!artMins) artMins=60;
-          } catch(e){ artMins=60; }
+            var stl=(s.title||'').toLowerCase();
+            var stype = stl.indexOf('splatter')!==-1?'splatter':stl.indexOf('adult')!==-1?'adult':'kids';
+            var addons = parsePartyAddons(fb.raw_payload, stype);
+            var det = parseAddonDetails(addons, stype);
+            artM = parseMins(det.artTime||'60 min');
+            ptM  = parseMins(det.partyTime||'0');
+          } catch(e){ artM=60; }
         }
-        var totalMins=artMins+partyMins;
-        if(totalMins>0) partyEndTime=addMinsToTime(s.session_time,totalMins);
+        if(artM>0) partyEndTime = addMinsToTime(s.session_time, artM+ptM);
       }
-      html += '<div class="session-block'+(isParty?' party-block':'')+'">'+
-        '<div class="session-header">'+
-          '<div>'+
-            '<div class="session-title">'+fmtTime(s.session_time)+' · '+(s.title||'Untitled')+
-              (partyEndTime?' <span style="font-size:12px;color:#888;font-weight:400">→ '+partyEndTime+'</span>':'')+
-            '</div>'+
-            (partyReason?'<div style="font-size:12px;color:#c0392b;font-weight:600;margin-top:2px">🎉 '+partyReason+'</div>':'')+
-          '</div>'+
-          '<div style="display:flex;align-items:center;gap:8px">'+
-            '<span style="font-size:12px;color:#27ae60;font-weight:500">✓ '+arrived+' arrived</span>'+
-            '<button data-sid="'+s.id+'" data-title="'+s.title.replace(/"/g,'&quot;')+'" data-date="'+isoDate(currentDate)+'" onclick="openCheckinListBtn(this)" style="font-size:12px;color:#1a56a8;background:#e8f0fe;border:none;border-radius:20px;padding:3px 10px;cursor:pointer;font-weight:500">'+
-              (checkinCounts[s.id]||0)+' checked in</button>'+
-            '<span class="session-reg">'+total+(s.capacity?'/'+s.capacity:'')+'</span>'+
-          '</div>'+
-        '</div>';
+
+      // Build session block using DOM
+      var block = document.createElement('div');
+      block.className = 'session-block' + (isParty?' party-block':'');
+
+      var hdr = document.createElement('div');
+      hdr.className = 'session-header';
+
+      var hdrLeft = document.createElement('div');
+      var titleDiv = document.createElement('div');
+      titleDiv.className = 'session-title';
+      titleDiv.textContent = fmtTime(s.session_time) + ' · ' + (s.title||'Untitled');
+      if(partyEndTime){
+        var endSpan = document.createElement('span');
+        endSpan.style.cssText = 'font-size:12px;color:#888;font-weight:400;margin-left:6px';
+        endSpan.textContent = '→ ' + partyEndTime;
+        titleDiv.appendChild(endSpan);
+      }
+      hdrLeft.appendChild(titleDiv);
+      if(partyReason){
+        var reasonDiv = document.createElement('div');
+        reasonDiv.style.cssText = 'font-size:12px;color:#c0392b;font-weight:600;margin-top:2px';
+        reasonDiv.textContent = 'Celebration: ' + partyReason;
+        hdrLeft.appendChild(reasonDiv);
+      }
+
+      var hdrRight = document.createElement('div');
+      hdrRight.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap';
+      hdrRight.innerHTML =
+        '<span style="font-size:12px;color:#27ae60;font-weight:500">'+arrivedCount+' arrived</span>';
+      var ciBtn = document.createElement('button');
+      ciBtn.style.cssText = 'font-size:12px;color:#1a56a8;background:#e8f0fe;border:none;border-radius:20px;padding:3px 10px;cursor:pointer;font-weight:500';
+      ciBtn.textContent = (checkinCounts[s.id]||0)+' checked in';
+      ciBtn.setAttribute('data-sid', s.id);
+      ciBtn.setAttribute('data-title', s.title||'');
+      ciBtn.setAttribute('data-date', isoDate(currentDate));
+      ciBtn.onclick = function(){ openCheckinList(this.getAttribute('data-sid'),this.getAttribute('data-title'),this.getAttribute('data-date')); };
+      hdrRight.appendChild(ciBtn);
+      var regSpan = document.createElement('span');
+      regSpan.className = 'session-reg';
+      regSpan.textContent = total + (s.capacity?'/'+s.capacity:'');
+      hdrRight.appendChild(regSpan);
+
+      hdr.appendChild(hdrLeft);
+      hdr.appendChild(hdrRight);
+      block.appendChild(hdr);
+
+      // Notes + drop-in row
+      var notesRow = document.createElement('div');
+      notesRow.style.cssText = 'padding:8px 16px;border-bottom:1px solid rgba(0,0,0,0.05);display:flex;align-items:center;gap:8px';
+      var notesInput = document.createElement('input');
+      notesInput.type='text'; notesInput.id='snotes-'+s.id;
+      notesInput.value = staffNotes[s.id]||'';
+      notesInput.placeholder = 'Add session notes...';
+      notesInput.style.cssText='flex:1;padding:7px 10px;border:1px solid rgba(0,0,0,0.15);border-radius:8px;font-size:13px;font-family:inherit;outline:none';
+      var saveBtn = document.createElement('button');
+      saveBtn.textContent='Save';
+      saveBtn.style.cssText='padding:7px 12px;background:#1a1a2e;color:#f0c040;border:none;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer';
+      var sid=s.id;
+      saveBtn.onclick = function(){ saveSessionNotes(sid, this); };
+      notesRow.appendChild(notesInput);
+      notesRow.appendChild(saveBtn);
+      if(!isParty){
+        var dropBtn = document.createElement('button');
+        dropBtn.textContent = '+ Drop-in'+(dropinCounts[s.id]?' ('+dropinCounts[s.id]+')':'');
+        dropBtn.style.cssText='padding:7px 12px;background:#e8f0fe;color:#1a56a8;border:none;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer';
+        dropBtn.onclick = function(){ addDropin(sid, this); };
+        notesRow.appendChild(dropBtn);
+      }
+      block.appendChild(notesRow);
+
+      // Booking rows
       if(sessionBookings.length){
         sessionBookings.forEach(function(b){
           var seats = seatMap[b.id]||[];
-          var tableNums = seats.map(function(s){ return s.studio_tables&&s.studio_tables.table_number?'T'+s.studio_tables.table_number:''; }).filter(Boolean);
-          var tableLabel = tableNums.length ? tableNums.join(', ') : 'No table';
+          var tableNums = seats.map(function(a){ return a.studio_tables&&a.studio_tables.table_number?'T'+a.studio_tables.table_number:''; }).filter(Boolean);
+          var tableLabel = tableNums.length?tableNums.join(', '):'No table';
           var hasTable = tableNums.length>0;
-          html += '<div class="booking-row'+(b.arrived_at?' arrived':'')+'" id="br-'+b.id+'">'+
-            '<button class="arrive-check'+(b.arrived_at?' checked':'')+'" onclick="toggleArrived(\''+b.id+'\','+!!b.arrived_at+')" aria-label="Mark arrived">'+
-              (b.arrived_at?'✓':'')+'</button>'+
-            '<div class="booking-info">'+
-              '<div class="booking-name">'+(b.customer_name||'Guest')+'</div>'+
-              (function(){
-              var glazePiece = (s.session_type==='glazing'||s.title.toLowerCase().indexOf('glaz')!==-1) ? getGlazingPiece(b.raw_payload, isoDate(currentDate)) : null;
-              return '<div class="booking-detail">'+(b.shopify_order_name||'')+(b.customer_email?' · '+b.customer_email:'')+(glazePiece?'<span style="margin-left:6px;background:#e8f5e9;color:#2e7d32;font-size:11px;padding:2px 8px;border-radius:20px;font-weight:500">🎨 '+glazePiece+'</span>':'')+'</div>';
-            })() +
-            '</div>'+
-            (b.qty>1?'<span class="qty-badge">×'+b.qty+'</span>':'')+
-            '<button class="table-badge'+(hasTable?'':' no-table')+'" onclick="openTableModal(\''+b.id+'\',\''+tableLabel+'\',\''+s.id+'\')">'+
-              tableLabel+'</button>'+
-          '</div>';
+
+          var row = document.createElement('div');
+          row.className = 'booking-row' + (b.arrived_at?' arrived':'');
+          row.id = 'br-'+b.id;
+
+          var arrBtn = document.createElement('button');
+          arrBtn.className = 'arrive-check'+(b.arrived_at?' checked':'');
+          arrBtn.setAttribute('aria-label','Mark arrived');
+          arrBtn.textContent = b.arrived_at?'✓':'';
+          var bid=b.id, arr=!!b.arrived_at;
+          arrBtn.onclick = function(){ toggleArrived(bid, arr); };
+
+          var info = document.createElement('div');
+          info.className = 'booking-info';
+          var nameDiv = document.createElement('div');
+          nameDiv.className = 'booking-name';
+          nameDiv.textContent = b.customer_name||'Guest';
+          var detDiv = document.createElement('div');
+          detDiv.className = 'booking-detail';
+          var detText = (b.shopify_order_name||'')+(b.customer_email?' · '+b.customer_email:'');
+          // Glazing piece
+          if(s.session_type==='glazing'||(s.title||'').toLowerCase().indexOf('glaz')!==-1){
+            var gp = getGlazingPiece(b.raw_payload, isoDate(currentDate));
+            if(gp) detText += ' — ' + gp;
+          }
+          detDiv.textContent = detText;
+          info.appendChild(nameDiv);
+          info.appendChild(detDiv);
+
+          var tblBtn = document.createElement('button');
+          tblBtn.className = 'table-badge'+(hasTable?'':' no-table');
+          tblBtn.textContent = tableLabel;
+          var bId=b.id, tl=tableLabel, sId=s.id;
+          tblBtn.onclick = function(){ openTableModal(bId, tl, sId); };
+
+          row.appendChild(arrBtn);
+          row.appendChild(info);
+          if(b.qty>1){ var qspan=document.createElement('span'); qspan.className='qty-badge'; qspan.textContent='x'+b.qty; row.appendChild(qspan); }
+          row.appendChild(tblBtn);
+          block.appendChild(row);
         });
       } else {
-        html += '<div style="padding:12px 16px;font-size:13px;color:#aaa">No bookings yet.</div>';
+        var nob = document.createElement('div');
+        nob.style.cssText='padding:12px 16px;font-size:13px;color:#aaa';
+        nob.textContent='No bookings yet.';
+        block.appendChild(nob);
       }
-      html += '</div>';
+      el2.appendChild(block);
     });
-    el.innerHTML = html;
+
+    el.innerHTML='';
+    el.appendChild(el2);
   } catch(e){ el.innerHTML='<div class="error-msg">Error: '+e.message+'</div>'; }
+}
+
+// ── helper functions called from loadCheckin ───────────────────
+async function saveSessionNotes(sessionId, btn) {
+  var notes = (document.getElementById('snotes-'+sessionId)||{value:''}).value;
+  try {
+    var r = await fetch(SUPABASE_URL+'/rest/v1/session_staff?session_id=eq.'+sessionId+'&studio_id=eq.'+studioId,{
+      method:'PATCH', headers:Object.assign({},authHeaders(),{Prefer:'return=minimal'}),
+      body:JSON.stringify({notes:notes,updated_at:new Date().toISOString()})
+    });
+    if(r.status===404||r.ok===false){
+      await fetch(SUPABASE_URL+'/rest/v1/session_staff',{
+        method:'POST', headers:Object.assign({},authHeaders(),{Prefer:'return=minimal'}),
+        body:JSON.stringify({session_id:sessionId,studio_id:studioId,notes:notes,updated_at:new Date().toISOString()})
+      });
+    }
+    if(btn){ var ob=btn.textContent; btn.textContent='Saved!'; setTimeout(function(){btn.textContent=ob;},1500); }
+  } catch(e){ alert('Error saving notes: '+e.message); }
+}
+
+async function addDropin(sessionId, btn) {
+  if(btn){ btn.disabled=true; btn.textContent='...'; }
+  try {
+    await fetch(SUPABASE_URL+'/rest/v1/signin_entries',{
+      method:'POST', headers:Object.assign({},authHeaders(),{Prefer:'return=minimal'}),
+      body:JSON.stringify({session_id:sessionId,studio_id:studioId,name:'Drop-in',mode:'dropin',signed_in_at:new Date().toISOString()})
+    });
+    loadCheckin();
+  } catch(e){
+    alert('Error: '+e.message);
+    if(btn){ btn.disabled=false; btn.textContent='+ Drop-in'; }
+  }
 }
 
 async function toggleArrived(bookingId, currentlyArrived) {
