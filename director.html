@@ -395,6 +395,17 @@ function loadApp(user) {
 }
 
 // ── helpers ───────────────────────────────────────────────────
+function parseMins(str) {
+  if(!str || str==='none') return 0;
+  var m=(str+'').match(/(\d+)/); return m?parseInt(m[1]):0;
+}
+function addMinsToTime(timeStr, mins) {
+  if(!timeStr) return '';
+  var parts=timeStr.split(':').map(Number),h=parts[0],m=parts[1];
+  var total=h*60+m+mins,rh=total%(24*60),nh=Math.floor(rh/60),nm=rh%60;
+  var hour=nh===0?12:nh>12?nh-12:nh,ampm=nh<12?'am':'pm';
+  return nm===0?hour+ampm:hour+':'+String(nm).padStart(2,'0')+ampm;
+}
 function getGlazingPiece(rawPayload, sessionDate) {
   try {
     var payload = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload;
@@ -502,6 +513,24 @@ async function loadCheckin() {
     });
     bookings = (bookings||[]).filter(function(b){ return !b.returned_at; });
 
+    // Load party_details for party sessions
+    var partySessionIds = sessions.filter(function(s){
+      return s.session_type==='party'||s.session_type==='kids_party'||s.title.toLowerCase().indexOf('party')!==-1;
+    }).map(function(s){return s.id;});
+    var partyDetailsMap = {};
+    if(partySessionIds.length) {
+      var partyBookingIds = bookings.filter(function(b){ return partySessionIds.indexOf(b.session_id)!==-1; }).map(function(b){return b.id;});
+      if(partyBookingIds.length) {
+        try {
+          var pds = await sbGet('party_details',{
+            select:'booking_id,party_reason,actual_art_time,actual_party_time',
+            'booking_id':'in.('+partyBookingIds.join(',')+')'
+          });
+          (pds||[]).forEach(function(pd){ partyDetailsMap[pd.booking_id]=pd; });
+        } catch(e){}
+      }
+    }
+
     // Load seating assignments
     var seating = await sbGet('seating_assignments',{
       select:'booking_id,table_id,studio_tables(table_number)',
@@ -544,14 +573,44 @@ async function loadCheckin() {
 
     var html = '';
     sessions.forEach(function(s){
-      var isParty = s.session_type==='party'||s.session_type==='kids_party';
+      var isParty = s.session_type==='party'||s.session_type==='kids_party'||s.title.toLowerCase().indexOf('party')!==-1;
       var sessionBookings = bookingsBySession[s.id]||[];
       var total = sessionBookings.reduce(function(sum,b){return sum+(b.qty||0);},0);
       var arrived = sessionBookings.filter(function(b){return b.arrived_at;}).length;
+      // Party: get reason + end time from first booking
+      var partyReason = '';
+      var partyEndTime = '';
+      if(isParty && sessionBookings.length) {
+        var firstBooking = sessionBookings[0];
+        var pd = partyDetailsMap[firstBooking.id]||{};
+        partyReason = pd.party_reason||'';
+        // Calculate end time
+        var artMins=0,partyMins=0;
+        if(pd.actual_art_time){ artMins=parseMins(pd.actual_art_time); partyMins=parseMins(pd.actual_party_time); }
+        else {
+          try {
+            var payload=typeof firstBooking.raw_payload==='string'?JSON.parse(firstBooking.raw_payload):firstBooking.raw_payload;
+            var items=(payload&&payload.line_items)||[];
+            var li=items[0]||{};
+            var props=li.properties||[];
+            props.forEach(function(p){
+              var n=(p.name||'').toLowerCase();
+              if(n.indexOf('art')!==-1&&n.indexOf('time')!==-1) artMins=parseMins(p.value);
+              if(n.indexOf('party')!==-1&&n.indexOf('time')!==-1) partyMins=parseMins(p.value);
+            });
+            if(!artMins) artMins=60;
+          } catch(e){ artMins=60; }
+        }
+        var totalMins=artMins+partyMins;
+        if(totalMins>0) partyEndTime=addMinsToTime(s.session_time,totalMins);
+      }
       html += '<div class="session-block'+(isParty?' party-block':'')+'">'+
         '<div class="session-header">'+
           '<div>'+
-            '<div class="session-title">'+fmtTime(s.session_time)+' · '+(s.title||'Untitled')+'</div>'+
+            '<div class="session-title">'+fmtTime(s.session_time)+' · '+(s.title||'Untitled')+
+              (partyEndTime?' <span style="font-size:12px;color:#888;font-weight:400">→ '+partyEndTime+'</span>':'')+
+            '</div>'+
+            (partyReason?'<div style="font-size:12px;color:#c0392b;font-weight:600;margin-top:2px">🎉 '+partyReason+'</div>':'')+
           '</div>'+
           '<div style="display:flex;align-items:center;gap:8px">'+
             '<span style="font-size:12px;color:#27ae60;font-weight:500">✓ '+arrived+' arrived</span>'+
