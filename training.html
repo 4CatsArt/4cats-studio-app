@@ -163,6 +163,9 @@
     -webkit-justify-content: center;
     justify-content: center;
     margin-bottom: 8px;
+    width: 236px;
+    margin-left: auto;
+    margin-right: auto;
   }
   .key {
     width: 72px;
@@ -583,8 +586,8 @@
           <button class="key" onclick="keyPress('7')">7</button>
           <button class="key" onclick="keyPress('8')">8</button>
           <button class="key" onclick="keyPress('9')">9</button>
-          <button class="key key-empty"></button>
           <button class="key" onclick="keyPress('0')">0</button>
+          <button class="key key-empty"></button>
           <button class="key key-del" onclick="keyDel()">⌫</button>
         </div>
       </div>
@@ -607,10 +610,19 @@
     <div class="picker-card">
       <div class="picker-title">Select Staff Member</div>
       <div class="picker-sub">Choose a staff member to view their training progress</div>
+
+      <!-- Admin-only studio filter -->
+      <div class="form-group" id="admin-studio-filter-row" style="display:none">
+        <label class="form-label">Filter by Studio</label>
+        <select class="form-select" id="admin-studio-select" onchange="onAdminStudioChange()">
+          <option value="">— All studios —</option>
+        </select>
+      </div>
+
       <div class="form-group" style="margin-bottom:0">
         <label class="form-label">Staff Member</label>
         <select class="form-select" id="staff-select">
-          <option value="">— Select staff —</option>
+          <option value="">— Select staff member —</option>
         </select>
       </div>
       <button class="btn-primary" id="btn-view-staff" onclick="viewStaff()" disabled>View Training Checklist</button>
@@ -800,19 +812,44 @@ function attemptLogin() {
 }
 
 // ── PICKER SCREEN ─────────────────────────────────────────────
+// Cache of all active staff (loaded once per login)
+var allStaffCache = [];
+
 function showPickerScreen() {
   var name = currentManager.nickname || currentManager.display_name;
+  var isAdmin = currentManager.role === 'admin';
   document.getElementById('mgr-name').textContent = name;
-  document.getElementById('mgr-studio').textContent = STUDIO_NAMES[currentStudio] || currentStudio;
   document.getElementById('mgr-avatar').textContent = name.charAt(0).toUpperCase();
   document.getElementById('btn-lock').style.display = 'inline-block';
 
-  // Load staff for this studio
+  if (isAdmin) {
+    document.getElementById('mgr-studio').textContent = 'Admin — All Studios';
+    // Show studio filter and populate it
+    var filterRow = document.getElementById('admin-studio-filter-row');
+    filterRow.style.display = 'block';
+    var adminSel = document.getElementById('admin-studio-select');
+    if (adminSel.options.length === 1) {
+      var keys = Object.keys(STUDIO_NAMES).sort(function(a, b) {
+        return STUDIO_NAMES[a].localeCompare(STUDIO_NAMES[b]);
+      });
+      for (var k = 0; k < keys.length; k++) {
+        var o = document.createElement('option');
+        o.value = keys[k];
+        o.textContent = STUDIO_NAMES[keys[k]];
+        adminSel.appendChild(o);
+      }
+    }
+  } else {
+    document.getElementById('mgr-studio').textContent = STUDIO_NAMES[currentStudio] || currentStudio;
+    document.getElementById('admin-studio-filter-row').style.display = 'none';
+  }
+
+  // Load all active staff once
   var staffSel = document.getElementById('staff-select');
   staffSel.innerHTML = '<option value="">Loading…</option>';
 
   var url = SUPABASE_URL + '/rest/v1/staff_profiles'
-    + '?select=id,user_id,display_name,nickname,role,employment_type'
+    + '?select=id,user_id,display_name,nickname,role,employment_type,studio_ids'
     + '&is_active=eq.true'
     + '&order=display_name.asc';
 
@@ -824,32 +861,45 @@ function showPickerScreen() {
   })
   .then(function(res) { return res.json(); })
   .then(function(data) {
-    var staff = (data || []).filter(function(s) {
-      if (!s.studio_ids || s.studio_ids.length === 0) return false;
-      return s.studio_ids.indexOf(currentStudio) !== -1;
-    });
-
-    staffSel.innerHTML = '<option value="">— Select staff member —</option>';
-    for (var i = 0; i < staff.length; i++) {
-      var s = staff[i];
-      var opt = document.createElement('option');
-      opt.value = JSON.stringify({
-        id: s.id,
-        user_id: s.user_id || '',
-        display_name: s.display_name,
-        nickname: s.nickname || '',
-        role: s.role,
-        employment_type: s.employment_type || 'regular'
-      });
-      opt.textContent = s.nickname || s.display_name;
-      staffSel.appendChild(opt);
-    }
-    staffSel.onchange = function() {
-      document.getElementById('btn-view-staff').disabled = !staffSel.value;
-    };
+    allStaffCache = data || [];
+    populateStaffDropdown(isAdmin ? '' : currentStudio);
   });
 
   showScreen('screen-picker');
+}
+
+function populateStaffDropdown(studioFilter) {
+  var staffSel = document.getElementById('staff-select');
+  var filtered = allStaffCache.filter(function(s) {
+    if (!s.studio_ids || s.studio_ids.length === 0) return false;
+    if (!studioFilter) return true; // admin with no filter = all staff
+    return s.studio_ids.indexOf(studioFilter) !== -1;
+  });
+
+  staffSel.innerHTML = '<option value="">— Select staff member —</option>';
+  for (var i = 0; i < filtered.length; i++) {
+    var s = filtered[i];
+    var opt = document.createElement('option');
+    opt.value = JSON.stringify({
+      id: s.id,
+      user_id: s.user_id || '',
+      display_name: s.display_name,
+      nickname: s.nickname || '',
+      role: s.role,
+      employment_type: s.employment_type || 'regular'
+    });
+    opt.textContent = s.nickname || s.display_name;
+    staffSel.appendChild(opt);
+  }
+  staffSel.onchange = function() {
+    document.getElementById('btn-view-staff').disabled = !staffSel.value;
+  };
+  document.getElementById('btn-view-staff').disabled = true;
+}
+
+function onAdminStudioChange() {
+  var studioFilter = document.getElementById('admin-studio-select').value;
+  populateStaffDropdown(studioFilter);
 }
 
 function viewStaff() {
@@ -1100,10 +1150,15 @@ function updateProgress(done, total) {
 
 // ── NAVIGATION ────────────────────────────────────────────────
 function goBackToPicker() {
-  // Re-require PIN to switch staff member
   currentStaff = null;
   document.getElementById('staff-select').value = '';
   document.getElementById('btn-view-staff').disabled = true;
+  // Re-populate dropdown with current studio filter (admin may have one set)
+  var isAdmin = currentManager && currentManager.role === 'admin';
+  var studioFilter = isAdmin
+    ? (document.getElementById('admin-studio-select').value || '')
+    : currentStudio;
+  populateStaffDropdown(studioFilter);
   showScreen('screen-picker');
 }
 
@@ -1111,10 +1166,13 @@ function doLock() {
   currentManager = null;
   currentStaff = null;
   currentStudio = '';
+  allStaffCache = [];
   pinBuffer = '';
   updatePinDots(false);
   clearError();
   document.getElementById('login-studio-select').value = '';
+  document.getElementById('admin-studio-select').value = '';
+  document.getElementById('admin-studio-filter-row').style.display = 'none';
   document.getElementById('btn-lock').style.display = 'none';
   showScreen('screen-login');
 }
