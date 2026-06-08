@@ -3334,13 +3334,34 @@ async function populateStaffUnitList(selectedIds = [], dueDates = {}) {
     list.innerHTML = '<div style="font-size:12px;color:#bbb">No training units defined yet</div>'
     return
   }
+
+  // Compute auto-defaults based on current role/employment selections
+  const role = document.getElementById('staff-role')?.value || 'staff'
+  const empType = document.getElementById('staff-employment')?.value || 'regular'
+  const autoIds = publishedUnits.filter(u => {
+    if (u.applies_to === 'all') return true
+    if (u.applies_to === 'manager') return role === 'manager' || role === 'admin'
+    if (u.applies_to === 'camp') return empType === 'camp'
+    if (u.applies_to === 'base') return empType === 'regular' || role === 'manager' || role === 'admin'
+    return false
+  }).map(u => u.id)
+
+  // If no explicit ids passed, use auto-defaults
+  const useAuto = selectedIds.length === 0
+  const checkedIds = useAuto ? autoIds : selectedIds
+
   const appliesLabel = { all: 'All', base: 'Base', manager: 'Manager', camp: 'Camp' }
-  list.innerHTML = trainingUnitsCache.filter(u => !u.is_draft).map(u =>
-    `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:0.5px solid #f5f5f0">
+  list.innerHTML = publishedUnits.map(u => {
+    const isAuto = autoIds.includes(u.id)
+    const tagStyle = isAuto
+      ? 'font-size:10px;background:#e8f0fe;color:#3367d6;padding:1px 5px;border-radius:8px'
+      : 'font-size:10px;background:#f0f0f0;color:#999;padding:1px 5px;border-radius:8px'
+    const tagLabel = isAuto ? 'auto' : 'optional'
+    return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:0.5px solid #f5f5f0">
       <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;flex:1">
-        <input type="checkbox" class="staff-unit-cb" value="${u.id}" ${selectedIds.includes(u.id) ? 'checked' : ''}>
+        <input type="checkbox" class="staff-unit-cb" value="${u.id}" ${checkedIds.includes(u.id) ? 'checked' : ''}>
         ${u.name}
-        <span style="font-size:10px;color:#aaa">${appliesLabel[u.applies_to] || u.applies_to}</span>
+        <span style="${tagStyle}">${tagLabel}</span>
       </label>
       <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
         <span style="font-size:10px;color:#aaa">Due:</span>
@@ -3348,7 +3369,7 @@ async function populateStaffUnitList(selectedIds = [], dueDates = {}) {
           style="font-size:11px;padding:2px 4px;border:0.5px solid #e0e0d8;border-radius:4px;outline:none;color:#555">
       </div>
     </div>`
-  ).join('')
+  }).join('')
 }
 
 async function openStaffModal(id = null) {
@@ -3801,18 +3822,24 @@ async function loadTrainingOverview() {
     return
   }
 
+  // Use profile_id (staff_profiles.id) for progress — no auth login required
+  const staffProfileIds = staff.map(s => s.id).filter(Boolean)
   const staffUserIds = staff.filter(s => s.user_id).map(s => s.user_id)
   let progress = [], dueDates = []
-  if (staffUserIds.length) {
+  if (staffProfileIds.length) {
     const [progRes, ddRes] = await Promise.all([
-      sb.from('staff_training_progress').select('*').in('user_id', staffUserIds),
-      sb.from('staff_training_due_dates').select('*').in('user_id', staffUserIds)
+      sb.from('staff_training_progress').select('*').in('profile_id', staffProfileIds),
+      staffUserIds.length ? sb.from('staff_training_due_dates').select('*').in('user_id', staffUserIds) : Promise.resolve({ data: [] })
     ])
     progress = progRes.data || []
     dueDates = ddRes.data || []
   }
+  // Index by profile_id (preferred) — fall back to user_id for older rows
   const progressMap = {}
-  progress.forEach(p => { progressMap[p.user_id + '_' + p.item_id] = p })
+  progress.forEach(p => {
+    const key = p.profile_id ? p.profile_id + '_' + p.item_id : p.user_id + '_' + p.item_id
+    progressMap[key] = p
+  })
   // dueDateMap: userId_unitId -> due_date
   const dueDateMap = {}
   dueDates.forEach(d => { dueDateMap[d.user_id + '_' + d.unit_id] = d.due_date })
@@ -3866,7 +3893,7 @@ async function loadTrainingOverview() {
 
   // ── Staff rows ───────────────────────────────────────────
   const staffRows = staff.map(s => {
-    const hasLogin = !!s.user_id
+    const hasLogin = !!s.id  // profile_id — no auth login needed
     const studioLabel = s.studio_ids?.length
       ? s.studio_ids.slice(0,2).map(id => (STUDIO_VARIANT_MAP[id]||id).split(' - ').pop()).join(', ') + (s.studio_ids.length > 2 ? ` +${s.studio_ids.length-2}` : '')
       : 'All / floater'
@@ -3876,12 +3903,13 @@ async function loadTrainingOverview() {
       const unit = trainingUnitsCache.find(u => u.id === item.unit_id)
       return unit && unitAppliesTo(unit, s)
     })
-    const doneCt = hasLogin ? applicableItems.filter(i => progressMap[s.user_id + '_' + i.id]).length : 0
+    const profileKey = s.id
+    const doneCt = profileKey ? applicableItems.filter(i => progressMap[profileKey + '_' + i.id] || progressMap[s.user_id + '_' + i.id]).length : 0
     const pct = hasLogin && applicableItems.length ? Math.round(doneCt / applicableItems.length * 100) : null
     const pctColor = pct === null ? '#ccc' : pct === 100 ? '#2e7d32' : pct >= 50 ? '#e65100' : '#c0392b'
     const pctBadge = pct !== null
       ? `<span style="font-size:11px;font-weight:700;color:${pctColor};margin-left:6px">${pct}%</span>`
-      : '<span style="font-size:10px;color:#bbb;margin-left:4px">no login</span>'
+      : `<span style="font-size:11px;font-weight:700;color:#ccc;margin-left:6px">0%</span>`
 
     const today = new Date().toISOString().slice(0,10)
 
@@ -3890,7 +3918,7 @@ async function loadTrainingOverview() {
       const borderStyle = `border-left:${isFirstInUnit ? '2px solid #d0d0e8' : '0.5px solid #f0f0e8'}`
       const unit = trainingUnitsCache.find(u => u.id === item.unit_id)
       const applies = unit && unitAppliesTo(unit, s)
-      const dueDate = hasLogin && unit ? dueDateMap[s.user_id + '_' + unit.id] : null
+      const dueDate = unit ? (dueDateMap[s.user_id + '_' + unit.id] || null) : null
       const isLastInUnit = idx === visibleItems.length-1 || visibleItems[idx+1].unit_id !== item.unit_id
 
       if (!applies) {
@@ -3898,15 +3926,11 @@ async function loadTrainingOverview() {
           <span style="color:#ddd;font-size:13px">╌</span>
         </td>`
       }
-      if (!hasLogin) {
-        return `<td style="text-align:center;${borderStyle};padding:4px 2px">
-          <span style="color:#ddd;font-size:11px">–</span>
-        </td>`
-      }
-      const done = progressMap[s.user_id + '_' + item.id]
+      // All staff can have progress via profile_id — no login required
+      const done = progressMap[s.id + '_' + item.id] || (s.user_id ? progressMap[s.user_id + '_' + item.id] : null)
       // Check if unit is overdue (not all done and past due date)
       const unitItems = visibleItems.filter(i => i.unit_id === unit.id)
-      const unitDone = unitItems.every(i => progressMap[s.user_id + '_' + i.id])
+      const unitDone = unitItems.every(i => progressMap[s.id + '_' + i.id] || (s.user_id ? progressMap[s.user_id + '_' + i.id] : false))
       const isOverdue = dueDate && dueDate < today && !unitDone
       const bg = done ? '#f0faf0' : isOverdue ? '#fff8f8' : ''
 
@@ -3918,7 +3942,7 @@ async function loadTrainingOverview() {
           : ''
 
       return `<td style="text-align:center;${borderStyle};padding:4px 2px;background:${bg}">
-        <span style="font-size:14px;cursor:pointer" onclick="toggleTrainingItem('${s.user_id}','${item.id}',${!!done})" title="${item.title}">${done ? '✅' : '⬜'}</span>
+        <span style="font-size:14px;cursor:pointer" onclick="toggleTrainingItem('${s.id}','${item.id}',${!!done},'${s.user_id||''}')" title="${done && done.completed_at ? item.title + ' — ' + new Date(done.completed_at).toLocaleDateString('en-CA',{month:'short',day:'numeric',year:'numeric'}) : item.title}">${done ? '✅' : '⬜'}</span>
         ${dueDateTag}
       </td>`
     }).join('')
@@ -3972,11 +3996,17 @@ async function loadTrainingOverview() {
 }
 
 
-async function toggleTrainingItem(userId, itemId, isDone) {
+async function toggleTrainingItem(profileId, itemId, isDone, userId) {
   if (isDone) {
-    await sb.from('staff_training_progress').delete().eq('user_id', userId).eq('item_id', itemId)
+    // Delete by profile_id if exists, else fall back to user_id
+    const { data: existing } = await sb.from('staff_training_progress').select('id').eq('profile_id', profileId).eq('item_id', itemId).limit(1)
+    if (existing?.length) {
+      await sb.from('staff_training_progress').delete().eq('profile_id', profileId).eq('item_id', itemId)
+    } else if (userId) {
+      await sb.from('staff_training_progress').delete().eq('user_id', userId).eq('item_id', itemId)
+    }
   } else {
-    await sb.from('staff_training_progress').insert({ user_id: userId, item_id: itemId, completed_at: new Date().toISOString() })
+    await sb.from('staff_training_progress').insert({ profile_id: profileId, user_id: userId || null, item_id: itemId, completed_at: new Date().toISOString() })
   }
   loadTrainingOverview()
 }
@@ -4244,7 +4274,7 @@ async function applyMassDueDates() {
   const userIds = staffWithLogin.map(s => s.user_id)
   const { data: progress } = await sb.from('staff_training_progress').select('*').in('user_id', userIds)
   const { data: items } = await sb.from('training_items').select('id, unit_id')
-  const progressSet = new Set((progress || []).map(p => p.user_id + '_' + p.item_id))
+  const progressSet = new Set((progress || []).map(p => (p.profile_id || p.user_id) + '_' + p.item_id))
 
   // Build upserts — skip if unit is 100% complete for that staff member
   const upserts = []
@@ -5850,7 +5880,7 @@ function showAdminToast(msg, duration = 2500) {
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px">
       <div class="modal-field">
         <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Role</label>
-        <select id="staff-role" onchange="togglePinRow()" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;background:white">
+        <select id="staff-role" onchange="togglePinRow();populateStaffUnitList([])" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;background:white">
           <option value="staff">Staff</option>
           <option value="manager">Manager</option>
           <option value="admin">Admin</option>
@@ -5858,7 +5888,7 @@ function showAdminToast(msg, duration = 2500) {
       </div>
       <div class="modal-field">
         <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Employment</label>
-        <select id="staff-employment" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;background:white">
+        <select id="staff-employment" onchange="populateStaffUnitList([])" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;background:white">
           <option value="regular">Regular</option>
           <option value="camp">Camp</option>
         </select>
