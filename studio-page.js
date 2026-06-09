@@ -25,6 +25,53 @@
   var SB_URL       = CFG.supabaseUrl || 'https://snxibhbhhchjthfmjtaj.supabase.co';
   var SB_ANON      = CFG.supabaseAnon || '';
 
+  // Maps studio_id to Shopify variant title (uppercase)
+  var STUDIO_VARIANT_MAP = {
+    'BC-RICH-GC':  'BC / RICHMOND - GARDEN CITY',
+    'BC-RICH-STV': 'BC / RICHMOND - STEVESTON',
+    'BC-SUR-SSR':  'BC / SURREY - SOUTH',
+    'BC-YVR-KIT':  'BC / VANCOUVER - KITSILANO',
+    'BC-YVR-MS':   'BC / VANCOUVER - MAIN STREET',
+    'BC-YVR-UBC':  'BC / VANCOUVER - UBC',
+    'BC-YYJ-CSV':  'BC / VICTORIA - COOK STREET VILLAGE',
+    'BC-YYJ-ESQ':  'BC / VICTORIA - ESQUIMALT',
+    'BC-YYJ-OB':   'BC / VICTORIA - OAK BAY',
+    'BC-YYJ-VIC':  'BC / VICTORIA - UPTOWN',
+    'AB-YYC-ING':  'AB / CALGARY - INGLEWOOD',
+    'AB-STA-STA':  'AB / ST ALBERT',
+    'ON-BRL-BRL':  'ON / BURLINGTON - SOUTH',
+    'ON-CMB-GLT':  'ON / CAMBRIDGE - GALT',
+    'ON-ERN-ERN':  'ON / ERIN',
+    'ON-HAM-OS':   'ON / HAMILTON - OTTAWA STREET',
+    'ON-HAM-WD':   'ON / HAMILTON - WATERDOWN',
+    'ON-HAM-WH':   'ON / HAMILTON - WEST HARBOUR',
+    'ON-KGN-AP':   'ON / KINGSTON - ARLINGTON PARK',
+    'ON-LDN-BYR':  'ON / LONDON - BYRON',
+    'ON-LDN-WVG':  'ON / LONDON - WORTLEY VILLAGE',
+    'ON-MIS-PC':   'ON / MISSISSAUGA - PORT CREDIT',
+    'ON-OAK-OAK':  'ON / OAKVILLE - NORTH',
+    'ON-OAK-WST':  'ON / OAKVILLE - WEST',
+    'ON-YOW-GLB':  'ON / OTTAWA - THE GLEBE',
+    'ON-STC-STC':  'ON / ST CATHARINES',
+    'ON-YYZ-AVE':  'ON / TORONTO - AVENUE ROAD',
+    'ON-YYZ-BP':   'ON / TORONTO - BABY POINT',
+    'ON-YYZ-LEA':  'ON / TORONTO - LEASIDE',
+    'ON-YYZ-BEA':  'ON / TORONTO - THE BEACHES',
+    'ON-WTR-WTR':  'ON / WATERLOO - UPTOWN'
+  };
+
+  // Find the variant matching the current studio, fallback to first
+  function findStudioVariant(variants) {
+    if (!variants || !variants.length) return null;
+    var target = STUDIO_VARIANT_MAP[STUDIO_ID] || '';
+    if (!target) return variants[0];
+    for (var i = 0; i < variants.length; i++) {
+      var vt = (variants[i].title || '').toUpperCase();
+      if (vt === target) return variants[i];
+    }
+    return variants[0];
+  }
+
   var SB_HEADERS   = {
     'apikey':        SB_ANON,
     'Authorization': 'Bearer ' + SB_ANON,
@@ -200,8 +247,8 @@
     var timeDate = parts[0] ? parts[0].trim() : '';
     var evtTitle = parts[1] ? parts[1].trim() : title;
 
-    var v      = (product.variants && product.variants[0]) || {};
-    var price  = v.price ? '$' + parseFloat(v.price).toFixed(0) : '';
+    var v      = findStudioVariant(product.variants) || {};
+    var price  = v.price ? '$' + (parseFloat(v.price) / 100).toFixed(0) : '';
     var qty    = v.inventory_quantity;
     var isFull = qty !== null && qty <= 0;
     var isLow  = qty !== null && qty > 0 && qty <= 4;
