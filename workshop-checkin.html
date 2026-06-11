@@ -262,8 +262,16 @@
       headers: headers,
       body: (opts && opts.body) || undefined
     }).then(function(r) {
-      if (r.status === 204) return { ok: true, data: null };
-      return r.json().then(function(d) { return { ok: r.ok, data: d, status: r.status }; });
+      if (r.status === 204 || r.status === 201) {
+        // Try to parse body if present, otherwise return null data
+        return r.text().then(function(t) {
+          if (!t || !t.trim()) return { ok: r.ok, data: null, status: r.status };
+          try { return { ok: r.ok, data: JSON.parse(t), status: r.status }; }
+          catch(e) { return { ok: r.ok, data: null, status: r.status }; }
+        });
+      }
+      return r.json().then(function(d) { return { ok: r.ok, data: d, status: r.status }; })
+        .catch(function() { return { ok: r.ok, data: null, status: r.status }; });
     });
   }
 
@@ -524,9 +532,8 @@
 
     // Create clay ticket
     sbRpc('next_clay_ticket_number', {}).then(function(tNum) {
-      if (!tNum || typeof tNum !== 'number') {
-        // RPC failed - still check in but without ticket
-        console.warn('next_clay_ticket_number failed:', tNum);
+      if (tNum === null || tNum === undefined) {
+        console.warn('next_clay_ticket_number returned null');
         doInsertEntries(sessionId, names, primaryEmail, null, null, btn);
         return;
       }
@@ -543,22 +550,19 @@
         is_party: false,
         clay_type: currentClay || null
       };
-      sbFetch('clay_tickets', {
+      // Use select=* to force body response with the new row
+      sbFetch('clay_tickets?select=id,ticket_number', {
         method: 'POST',
         body: JSON.stringify(body),
         prefer: 'return=representation'
       }).then(function(r) {
-        if (!r.ok) {
-          console.warn('clay_tickets insert failed:', r.data);
-          doInsertEntries(sessionId, names, primaryEmail, null, null, btn);
-          return;
-        }
-        var ticket = (r.data && r.data[0]) ? r.data[0] : null;
+        var ticket = (r.data && Array.isArray(r.data) && r.data[0]) ? r.data[0] : (r.data && r.data.id ? r.data : null);
         var newTicketId = ticket ? ticket.id : null;
+        if (!newTicketId) console.warn('clay_tickets: no id returned, ok='+r.ok, r.data);
         doInsertEntries(sessionId, names, primaryEmail, newTicketId, tNum, btn);
       }).catch(function(e) {
         console.warn('clay_tickets error:', e);
-        doInsertEntries(sessionId, names, primaryEmail, null, null, btn);
+        doInsertEntries(sessionId, names, primaryEmail, null, tNum, btn);
       });
     }).catch(function(e) {
       console.warn('RPC error:', e);
