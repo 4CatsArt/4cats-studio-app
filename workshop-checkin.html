@@ -252,9 +252,14 @@
   }
 
   function sbFetch(path, opts) {
+    var headers = sbHeaders();
+    if (opts && opts.headers) {
+      var k; for (k in opts.headers) { headers[k] = opts.headers[k]; }
+    }
+    if (opts && opts.prefer) { headers['Prefer'] = opts.prefer; }
     return fetch(SUPABASE_URL + '/rest/v1/' + path, {
       method: (opts && opts.method) || 'GET',
-      headers: sbHeaders(),
+      headers: headers,
       body: (opts && opts.body) || undefined
     }).then(function(r) {
       if (r.status === 204) return { ok: true, data: null };
@@ -267,7 +272,10 @@
       method: 'POST',
       headers: sbHeaders(),
       body: JSON.stringify(params || {})
-    }).then(function(r) { return r.json(); });
+    }).then(function(r) {
+      if (!r.ok) { console.warn('RPC ' + fn + ' failed:', r.status); return null; }
+      return r.json();
+    }).catch(function(e) { console.warn('RPC error:', e); return null; });
   }
 
   // ── url helpers ────────────────────────────────────────────
@@ -516,7 +524,9 @@
 
     // Create clay ticket
     sbRpc('next_clay_ticket_number', {}).then(function(tNum) {
-      if (!tNum) {
+      if (!tNum || typeof tNum !== 'number') {
+        // RPC failed - still check in but without ticket
+        console.warn('next_clay_ticket_number failed:', tNum);
         doInsertEntries(sessionId, names, primaryEmail, null, null, btn);
         return;
       }
@@ -538,10 +548,21 @@
         body: JSON.stringify(body),
         headers: { Prefer: 'return=representation' }
       }).then(function(r) {
-        var ticket = (r.ok && r.data && r.data[0]) ? r.data[0] : null;
+        if (!r.ok) {
+          console.warn('clay_tickets insert failed:', r.data);
+          doInsertEntries(sessionId, names, primaryEmail, null, null, btn);
+          return;
+        }
+        var ticket = (r.data && r.data[0]) ? r.data[0] : null;
         var newTicketId = ticket ? ticket.id : null;
         doInsertEntries(sessionId, names, primaryEmail, newTicketId, tNum, btn);
+      }).catch(function(e) {
+        console.warn('clay_tickets error:', e);
+        doInsertEntries(sessionId, names, primaryEmail, null, null, btn);
       });
+    }).catch(function(e) {
+      console.warn('RPC error:', e);
+      doInsertEntries(sessionId, names, primaryEmail, null, null, btn);
     });
   }
 
@@ -568,11 +589,15 @@
     sbFetch('signin_entries', {
       method: 'POST',
       body: JSON.stringify(entries),
-      headers: { Prefer: 'return=minimal' }
+      prefer: 'return=minimal'
     }).then(function(r) {
       btn.disabled = false;
       btn.textContent = 'Check In';
-      if (!r.ok) { showToast('Error - please try again'); return; }
+      if (!r.ok) {
+        console.warn('signin_entries error:', r.data);
+        showToast('Error - please try again');
+        return;
+      }
 
       // Update glazing date if using existing ticket
       if (isGlazing && glazingTicketId && glazingTicketId !== '__new__') {
