@@ -4311,27 +4311,30 @@ async function loadInfoView() {
 // Session-type colour palette (by time slot index, cycles)
 let fpTableSlotMap = {}  // tableId → {table, slots} — populated during renderFloorView
 
-const FLOOR_COLOURS = [
-  { bg: '#e8f0fe', border: '#4285f4', text: '#1a56db' },
-  { bg: '#fce8d8', border: '#f4845f', text: '#c2410c' },
-  { bg: '#e6f4ea', border: '#34a853', text: '#166534' },
-  { bg: '#fef3c7', border: '#f59e0b', text: '#92400e' },
-  { bg: '#fce7f3', border: '#ec4899', text: '#9d174d' },
-  { bg: '#ede9fe', border: '#8b5cf6', text: '#5b21b6' },
-  { bg: '#ccfbf1', border: '#14b8a6', text: '#0f766e' },
-  { bg: '#fff1f2', border: '#f43f5e', text: '#9f1239' },
-]
-
-// Time slot → colour index (stable across reloads)
-let floorTimeColours = {}
-
-function getFloorColour(timeStr) {
-  if (!floorTimeColours[timeStr]) {
-    const idx = Object.keys(floorTimeColours).length % FLOOR_COLOURS.length
-    floorTimeColours[timeStr] = FLOOR_COLOURS[idx]
-  }
-  return floorTimeColours[timeStr]
+// Session-type colour palette — deterministic by session type
+const SESSION_TYPE_COLOURS = {
+  party:    { bg: '#fce7f3', border: '#f472b6', text: '#9d174d' },
+  minimake: { bg: '#fef9c3', border: '#facc15', text: '#854d0e' },
+  glazing:  { bg: '#ede9fe', border: '#a78bfa', text: '#5b21b6' },
+  wheel:    { bg: '#f3f4f6', border: '#9ca3af', text: '#374151' },
+  kids:     { bg: '#dcfce7', border: '#4ade80', text: '#166534' },
+  default:  { bg: '#dbeafe', border: '#60a5fa', text: '#1e40af' },
 }
+
+function getSessionColour(session) {
+  if (!session) return SESSION_TYPE_COLOURS.default
+  const title = (session.title || '').toLowerCase()
+  const type = (session.session_type || '').toLowerCase()
+  if (type === 'party') return SESSION_TYPE_COLOURS.party
+  if (title.includes('mini make')) return SESSION_TYPE_COLOURS.minimake
+  if (type === 'glazing' || title.includes('glazing')) return SESSION_TYPE_COLOURS.glazing
+  if (title.includes('wheel')) return SESSION_TYPE_COLOURS.wheel
+  if (/class\s+\d+\s+of\s+\d+/i.test(session.title || '') || title.includes('kids')) return SESSION_TYPE_COLOURS.kids
+  return SESSION_TYPE_COLOURS.default
+}
+
+// Keep getFloorColour as alias for backwards compat with legend rendering
+function getFloorColour(timeStr) { return SESSION_TYPE_COLOURS.default }
 
 // ── LOAD FLOOR VIEW ───────────────────────────────────────────────
 // Floor plan grid constants (must match admin.html)
@@ -4340,7 +4343,7 @@ const FP_CELL_H = 80
 const FP_THICK = 4
 
 async function loadFloorView() {
-  floorTimeColours = {}
+  // colour system is now session-type based
   const el = document.getElementById('floor-view-content')
   el.innerHTML = '<div class="loading">Loading floor plan…</div>'
   const today = dateStr(currentDate)
@@ -4410,7 +4413,7 @@ async function loadFloorView() {
     const [tableId, sessionId] = key.split('|')
     const session = sessions.find(s => s.id === sessionId)
     if (!session || !tableMap[tableId]) return
-    const colour = getFloorColour(session.session_time)
+    const colour = getSessionColour(session)
     const sessionBookings = aList.map(a => {
       const b = bookings.find(bk => bk.id === a.booking_id)
       return { name: a.customer_name || (b ? b.customer_name : '?'), qty: b ? b.qty : 1, bookingId: a.booking_id, assignmentId: a.id, assignedBy: a.assigned_by }
@@ -4420,14 +4423,24 @@ async function loadFloorView() {
   })
 
   // ── LEGEND ────────────────────────────────────────────────────────
-  const usedTimes = [...new Set(sessions.map(s => s.session_time))].sort()
+  const legendItems = [
+    { label: 'Party', key: 'party' },
+    { label: 'Mini Make', key: 'minimake' },
+    { label: 'Glazing', key: 'glazing' },
+    { label: 'Wheel', key: 'wheel' },
+    { label: 'Kids Class', key: 'kids' },
+    { label: 'Workshop / Other', key: 'default' },
+  ]
   let legendHtml = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:1.2rem;align-items:center">'
-  legendHtml += '<span style="font-size:12px;color:#888">Time slots:</span>'
-  usedTimes.forEach(t => {
-    const c = getFloorColour(t)
-    legendHtml += `<span style="font-size:12px;padding:2px 10px;border-radius:10px;background:${c.bg};color:${c.text};border:1px solid ${c.border}">${fmtTime(t)}</span>`
+  legendHtml += '<span style="font-size:12px;color:#888">Session types:</span>'
+  legendItems.forEach(item => {
+    const c = SESSION_TYPE_COLOURS[item.key]
+    legendHtml += `<span style="font-size:12px;padding:2px 10px;border-radius:10px;background:${c.bg};color:${c.text};border:1px solid ${c.border}">${item.label}</span>`
   })
-  const unassignedSessions = sessions.filter(s => !assignments.some(a => a.session_id === s.id))
+  const sessionIdsWithBookings = new Set(bookings.map(b => b.session_id))
+  const unassignedSessions = sessions.filter(s =>
+    !assignments.some(a => a.session_id === s.id) && sessionIdsWithBookings.has(s.id)
+  )
   if (unassignedSessions.length) {
     legendHtml += `<span style="font-size:12px;color:#e65100;margin-left:8px">⚠ ${unassignedSessions.length} session${unassignedSessions.length > 1 ? 's' : ''} not yet assigned</span>`
   }
@@ -4762,6 +4775,7 @@ async function assignTablesForDay() {
       const isMiniMake = (session.title || '').toLowerCase().includes('mini make')
       const isWheel = (session.title || '').toLowerCase().includes('wheel')
       const isKidsClass = /class\s+\d+\s+of\s+\d+/i.test(session.title || '')
+      const isSplatter = isParty && (session.title || '').toLowerCase().includes('splatter')
 
       if (isParty) {
         // Party: figure out total guests, pick group tables
@@ -4772,8 +4786,18 @@ async function assignTablesForDay() {
 
         // Find a group with enough tables all free
         // Groups are already ordered by sort_order from the DB fetch
+        // For splatter parties: try groups containing splatter-preferred tables first
+        const sortedForParty = isSplatter
+          ? tableGroups.slice().sort((a, b) => {
+              const aHasSplatter = (a.table_ids || []).some(id => { const t = tables.find(x => x.id === id); return t && t.is_splatter_preferred })
+              const bHasSplatter = (b.table_ids || []).some(id => { const t = tables.find(x => x.id === id); return t && t.is_splatter_preferred })
+              if (aHasSplatter && !bHasSplatter) return -1
+              if (!aHasSplatter && bHasSplatter) return 1
+              return (a.sort_order || 0) - (b.sort_order || 0)
+            })
+          : tableGroups
         let assigned = false
-        for (const group of tableGroups) {
+        for (const group of sortedForParty) {
           const groupTables = (group.table_ids || []).map(id => tables.find(t => t.id === id)).filter(Boolean)
           const allFreeCheck = groupTables.slice(0, tablesNeeded).every(t => isTableFree(t.id, startMins, endMins))
           console.log('  Group:', group.name, '(priority', group.sort_order||0, ') tables:', groupTables.map(t=>'T'+t.table_number), 'needed:', tablesNeeded, 'allFree:', allFreeCheck)
@@ -4833,80 +4857,65 @@ async function assignTablesForDay() {
         // Free tables helper
         const isFreeAndAvailable = t => isTableFree(t.id, startMins, endMins)
 
-        // Tables preferred for this session type
-        const preferredFree = tables.filter(t => {
+        // ALL free tables (excluding glazing-only for non-glazing, party-only for non-party)
+        const allAvailable = tables.filter(t => {
           if (!isFreeAndAvailable(t)) return false
-          if (isGlazing && t.is_glazing_preferred) return true
-          if (isMiniMake && t.is_minimake_preferred) return true
-          if (isWheel && t.is_wheel_preferred) return true
-          if (isKidsClass && t.is_kids_class_preferred) return true
-          return false
-        })
-
-        // Tables that held the same session type earlier (same-type reuse, soft)
-        const reuseFree = tables.filter(t => {
-          if (!isFreeAndAvailable(t)) return false
-          return (tableHold[t.id] || []).some(h => {
-            const prevSession = sessions.find(s => timeToMins(s.session_time) + getHoldMinutes(s) === h.end)
-            if (!prevSession) return false
-            const prevIsGlazing = prevSession.session_type === 'glazing'
-            const prevIsMiniMake = (prevSession.title || '').toLowerCase().includes('mini make')
-            const prevIsWheel = (prevSession.title || '').toLowerCase().includes('wheel')
-            const prevIsKidsClass = /class\s+\d+\s+of\s+\d+/i.test(prevSession.title || '')
-            return (isGlazing && prevIsGlazing) || (isMiniMake && prevIsMiniMake) || (isWheel && prevIsWheel) || (isKidsClass && prevIsKidsClass)
-          })
-        })
-
-        // Tables with NO preference flags — truly neutral tables
-        const neutralFree = tables.filter(t => {
-          if (!isFreeAndAvailable(t)) return false
-          if (t.is_glazing_only && !isGlazing) return false  // glazing-only: skip for non-glazing
-          // Skip tables that are preferred for OTHER session types
-          const isPreferredForOther = (
-            (t.is_glazing_preferred && !isGlazing) ||
-            (t.is_minimake_preferred && !isMiniMake) ||
-            (t.is_wheel_preferred && !isWheel) ||
-            (t.is_kids_class_preferred && !isKidsClass) ||
-            (t.is_kids_party_preferred)  // always skip party tables for non-party
-          )
-          if (isPreferredForOther) return false
+          if (t.is_glazing_only && !isGlazing) return false
+          if (t.is_kids_party_preferred && !isParty) return false
           return true
         })
 
-        // Tables preferred for OTHER types — use only if nothing else available
-        const otherPreferredFree = tables.filter(t => {
-          if (!isFreeAndAvailable(t)) return false
-          if (t.is_glazing_only && !isGlazing) return false
-          if (t.is_kids_party_preferred) return false  // never use party tables for non-party
-          const isPreferredForOther = (
-            (t.is_glazing_preferred && !isGlazing) ||
-            (t.is_minimake_preferred && !isMiniMake) ||
-            (t.is_wheel_preferred && !isWheel) ||
-            (t.is_kids_class_preferred && !isKidsClass)
+        // Tier 1: preferred for THIS session type + same-type reuse
+        const tier1 = allAvailable.filter(t => {
+          const isPreferredForThis = (
+            (isGlazing && t.is_glazing_preferred) ||
+            (isMiniMake && t.is_minimake_preferred) ||
+            (isWheel && t.is_wheel_preferred) ||
+            (isKidsClass && t.is_kids_class_preferred)
           )
-          return isPreferredForOther
+          if (isPreferredForThis) return true
+          // Same-type reuse
+          return (tableHold[t.id] || []).some(h => {
+            const prev = sessions.find(s => timeToMins(s.session_time) + getHoldMinutes(s) === h.end)
+            if (!prev) return false
+            return (isGlazing && prev.session_type === 'glazing') ||
+              (isMiniMake && (prev.title||'').toLowerCase().includes('mini make')) ||
+              (isWheel && (prev.title||'').toLowerCase().includes('wheel')) ||
+              (isKidsClass && /class\s+\d+\s+of\s+\d+/i.test(prev.title||''))
+          })
         })
 
-        // Glazing-only tables — absolute last resort for non-glazing
-        const glazingOnlyFree = tables.filter(t =>
+        // Tier 2: no preference flags at all (truly neutral)
+        const tier2 = allAvailable.filter(t =>
+          !t.is_glazing_preferred && !t.is_minimake_preferred &&
+          !t.is_wheel_preferred && !t.is_kids_class_preferred
+        )
+
+        // Tier 3: preferred for OTHER types (avoid but use rather than leave unassigned)
+        const tier3 = allAvailable.filter(t => {
+          const isPreferredForThis = (isGlazing && t.is_glazing_preferred) ||
+            (isMiniMake && t.is_minimake_preferred) ||
+            (isWheel && t.is_wheel_preferred) ||
+            (isKidsClass && t.is_kids_class_preferred)
+          return !isPreferredForThis
+        })
+
+        // Tier 4: glazing-only as absolute last resort for non-glazing
+        const tier4 = tables.filter(t =>
           isFreeAndAvailable(t) && t.is_glazing_only && !isGlazing
         )
 
-        // Build strictly tiered candidate list
+        // Build candidate list — guaranteed non-empty if ANY table is free
         const candidates = []
         const add = t => { if (!candidates.find(c => c.id === t.id)) candidates.push(t) }
+        tier1.forEach(add)
+        tier2.forEach(add)
+        tier3.forEach(add)
+        tier4.forEach(add)
 
-        // Tier 1: reuse same-type + preferred for this type
-        reuseFree.forEach(add)
-        preferredFree.forEach(add)
-        // Tier 2: neutral tables (no preference flags, not glazing-only)
-        neutralFree.forEach(add)
-        // Tier 3: tables preferred for other types (avoid but use if needed)
-        otherPreferredFree.forEach(add)
-        // Tier 4: glazing-only tables (absolute last resort for non-glazing)
-        glazingOnlyFree.forEach(add)
-        // Tier 4: glazing-only tables (absolute last resort for non-glazing)
-        glazingOnlyFree.forEach(add)
+        if (candidates.length === 0) {
+          console.warn('[Assign] No candidates for session:', session.title, '@', session.session_time)
+        }
 
         // Fill tables: pack bookings into seats, move to next table when full
         let tableIdx = 0
@@ -5044,7 +5053,7 @@ function showTablePopup(tableId) {
     slotsHtml = '<div style="color:#bbb;font-size:13px;padding:0.5rem 0">No sessions assigned to this table today.</div>'
   } else {
     slots.forEach(sl => {
-      const c = getFloorColour(sl.session.session_time)
+      const c = getSessionColour(sl.session)
       slotsHtml += `<div style="margin-bottom:1rem">`
       slotsHtml += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">`
       slotsHtml += `<span style="background:${c.bg};color:${c.text};border:1px solid ${c.border};padding:2px 10px;border-radius:10px;font-size:12px;font-weight:600">${fmtTime(sl.session.session_time)}</span>`
