@@ -172,6 +172,19 @@ canvas{border-radius:50%;display:block}
 .quick-name-input.has-name:focus{border-bottom-color:#888;background:#f5f5f0;border-radius:6px}
 .quick-name-input:focus{border-color:#888;background:white}
 
+/* CHECKOUT TAB */
+.checkout-list{padding:8px 0}
+.checkout-row{display:flex;align-items:flex-start;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #f0f0e8;gap:12px}
+.checkout-info{flex:1;min-width:0}
+.checkout-name{font-size:15px;font-weight:600;color:#1a1a1a}
+.checkout-meta{font-size:12px;color:#aaa;margin-top:2px}
+.checkout-right{flex-shrink:0;min-width:200px}
+.checkout-select{width:100%;padding:8px 10px;border:1px solid #e0e0d8;border-radius:8px;font-size:14px;background:white}
+.checkout-other-input{width:100%;padding:8px 10px;border:1px solid #e0e0d8;border-radius:8px;font-size:14px;box-sizing:border-box}
+.checkout-confirm-btn{margin-top:8px;width:100%;padding:9px;background:#1a1a2e;color:#f0c040;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
+.checkout-undo-btn{margin-left:10px;padding:4px 10px;background:none;border:1px solid #ccc;border-radius:6px;font-size:12px;color:#888;cursor:pointer}
+.checkout-done{display:flex;align-items:center;padding:8px 0}
+
 /* ADD CHILD MODAL */
 .add-child-overlay{display:none;position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(0,0,0,.45);z-index:600;-webkit-align-items:center;align-items:center;-webkit-justify-content:center;justify-content:center;padding:20px}
 .add-child-overlay.open{display:-webkit-flex;display:flex}
@@ -293,6 +306,7 @@ canvas{border-radius:50%;display:block}
     <button class="tab-btn active" onclick="switchTab('checkin',this)">&#x2713; Check-In</button>
     <button class="tab-btn" onclick="switchTab('details',this)">&#x270E; Details</button>
     <button class="tab-btn" onclick="switchTab('badges',this)">&#x1F3C5; Badges</button>
+    <button class="tab-btn" onclick="switchTab('checkout',this)">&#x1F6AA; Check-Out</button>
   </div>
 
   <!-- QUICK CHECK-IN TAB -->
@@ -308,6 +322,11 @@ canvas{border-radius:50%;display:block}
   <!-- BADGES TAB -->
   <div id="tab-badges" class="tab-content">
     <div id="badges-content"><div class="loading">Loading...</div></div>
+  </div>
+
+  <!-- CHECKOUT TAB -->
+  <div id="tab-checkout" class="tab-content">
+    <div id="checkout-content"><div class="loading">Loading...</div></div>
   </div>
 
 <!-- FINALE OVERLAY -->
@@ -652,12 +671,29 @@ function initApp() {
 
 // Run on page load
 document.addEventListener('DOMContentLoaded', function() {
-  // Event delegation for medical icon taps
+  // Event delegation for medical icon taps and checkout buttons
   document.addEventListener('click', function(e) {
     var el = e.target
-    if (el && el.className && el.className.indexOf('medical-icon') >= 0) {
+    if (el && el.className && typeof el.className === 'string' && el.className.indexOf('medical-icon') >= 0) {
       var uid = el.getAttribute('data-uid')
       if (uid) showMedical(uid)
+    }
+    if (el && el.className && typeof el.className === 'string' && el.className.indexOf('checkout-confirm-btn') >= 0) {
+      var uid = el.getAttribute('data-uid')
+      if (uid) doCheckout(uid)
+    }
+    if (el && el.className && typeof el.className === 'string' && el.className.indexOf('checkout-undo-btn') >= 0) {
+      var uid = el.getAttribute('data-uid')
+      if (uid) undoCheckout(uid)
+    }
+  })
+  // Show/hide other input on select change
+  document.addEventListener('change', function(e) {
+    var el = e.target
+    if (el && el.className && typeof el.className === 'string' && el.className.indexOf('checkout-select') >= 0) {
+      var uid = el.getAttribute('data-uid')
+      var other = document.getElementById('coother-' + uid)
+      if (other) other.style.display = el.value === '__other__' ? 'block' : 'none'
     }
   })
   document.getElementById('login-password').addEventListener('keydown', function(e) {
@@ -756,7 +792,7 @@ function loadDay() {
         ? sbGet('tally_registrations?select=*&shopify_order_name=in.(' + orderNames.map(function(n){ return encodeURIComponent(n) }).join(',') + ')')
         : Promise.resolve([])
 
-      var attPromise = sbGet('attendance?select=session_id,shopify_order_name,camper_name,attended,alternate_pickup&attended_date=eq.' + today + '&' + sessionIdFilter)
+      var attPromise = sbGet('attendance?select=session_id,shopify_order_name,camper_name,attended,alternate_pickup,checked_out_by&attended_date=eq.' + today + '&' + sessionIdFilter)
 
       var badgePromise = orderNames.length
         ? sbGet('camp_daily_badges?select=order_name,camper_name,badge_name,session_date&order_name=in.(' + orderNames.map(function(n){ return encodeURIComponent(n) }).join(',') + ')')
@@ -849,6 +885,7 @@ function loadDay() {
                 tallyId: t.id || null,
                 attendanceChecked: att ? att.attended : false,
               alternatePick: (att && att.alternate_pickup) ? att.alternate_pickup : '',
+              checkedOutBy: (att && att.checked_out_by) ? att.checked_out_by : '',
                 table: '',
                 badge: todayBadge ? todayBadge.badge : '',
                 notes: t.notes || b.order_note || '',
@@ -1221,6 +1258,120 @@ function showMedical(uid) {
 function closeMedical() { document.getElementById('medical-modal').className = 'modal-overlay' }
 
 // -- TAB SWITCHING -------------------------------------------------
+function renderCheckoutTab() {
+  var el = document.getElementById('checkout-content')
+  if (!el) return
+  var today = dateStr(currentDate)
+
+  // Only show checked-in kids
+  var list = allChildren.filter(function(c) { return c.attendanceChecked })
+  list.sort(function(a,b) { return (a.name||'').localeCompare(b.name||'') })
+
+  if (!list.length) {
+    el.innerHTML = '<div class="empty">No checked-in children yet.</div>'
+    return
+  }
+
+  var rows = list.map(function(child) {
+    var uid = child._uid
+    // Build dropdown options
+    var opts = ''
+    if (child.registeredBy) opts += '<option value="' + child.registeredBy + '">' + child.registeredBy + ' (Parent)</option>'
+    if (child.emergency) opts += '<option value="' + child.emergency + '">' + child.emergency + ' (Emergency)</option>'
+    if (child.alternatePick) opts += '<option value="' + child.alternatePick + '">' + child.alternatePick + ' (Alt Pickup)</option>'
+    if (child.walkHome) opts += '<option value="__walkhome__">Walk Home</option>'
+    opts += '<option value="__other__">Other...</option>'
+
+    var checkedOut = child.checkedOutBy ? true : false
+    var rowStyle = checkedOut ? 'background:#f0fdf4' : ''
+
+    return '<div class="checkout-row" id="corow-' + uid + '" style="' + rowStyle + '">' +
+      '<div class="checkout-info">' +
+        '<div class="checkout-name">' + (child.name || '') + '</div>' +
+        '<div class="checkout-meta">' + (child.sessionGroup === 'am' ? 'AM' : child.sessionGroup === 'fd' ? 'Full Day' : 'PM') + (child.aftercare ? ' &middot; Aftercare' : '') + '</div>' +
+      '</div>' +
+      '<div class="checkout-right">' +
+        (checkedOut
+          ? '<div class="checkout-done"><span style="color:#3B6D11;font-weight:600">&#x2713; ' + child.checkedOutBy + '</span><button class="checkout-undo-btn" data-uid="' + uid + '">Undo</button></div>'
+          : '<div class="checkout-select-wrap">' +
+              '<select class="checkout-select" id="cosel-' + uid + '" data-uid="' + uid + '">' +
+                '<option value="">-- Select --</option>' + opts +
+              '</select>' +
+              '<div class="checkout-other-wrap" id="coother-' + uid + '" style="display:none;margin-top:6px">' +
+                '<input type="text" class="checkout-other-input" id="coinput-' + uid + '" placeholder="Enter name...">' +
+              '</div>' +
+              '<button class="checkout-confirm-btn" data-uid="' + uid + '">Check Out</button>' +
+            '</div>'
+        ) +
+      '</div>' +
+    '</div>'
+  }).join('')
+
+  el.innerHTML = '<div class="checkout-list">' + rows + '</div>'
+}
+
+function doCheckout(uid) {
+  var child = null
+  allChildren.forEach(function(x) { if (x._uid === uid) child = x })
+  if (!child) return
+
+  var sel = document.getElementById('cosel-' + uid)
+  var val = sel ? sel.value : ''
+  if (val === '__other__') {
+    var inp = document.getElementById('coinput-' + uid)
+    val = inp ? inp.value.trim() : ''
+  }
+  if (val === '__walkhome__') val = 'Walk Home'
+  if (!val) { showToast('Please select who picked up'); return }
+
+  child.checkedOutBy = val
+  var today = dateStr(currentDate)
+  var now = new Date().toISOString()
+
+  // Upsert attendance row with checkout info
+  sbGet('attendance?shopify_order_name=eq.' + encodeURIComponent(child.orderName) + '&camper_name=eq.' + encodeURIComponent(child.name) + '&attended_date=eq.' + today + '&select=id&limit=1').then(function(rows) {
+    var payload = { checked_out_at: now, checked_out_by: val }
+    if (rows && rows.length) {
+      sbPatch('attendance?id=eq.' + rows[0].id, payload)
+    } else {
+      sbPost('attendance', {
+        session_id: child.sessionId,
+        shopify_order_name: child.orderName,
+        camper_name: child.name,
+        attended: true,
+        attended_date: today,
+        checked_out_at: now,
+        checked_out_by: val
+      })
+    }
+  })
+
+  // Update row to show checked out state
+  var row = document.getElementById('corow-' + uid)
+  if (row) {
+    row.style.background = '#f0fdf4'
+    row.querySelector('.checkout-right').innerHTML =
+      '<div class="checkout-done"><span style="color:#3B6D11;font-weight:600">&#x2713; ' + val + '</span><button class="checkout-undo-btn" data-uid="' + uid + '">Undo</button></div>'
+  }
+  showToast(child.name + ' checked out!')
+}
+
+function undoCheckout(uid) {
+  var child = null
+  allChildren.forEach(function(x) { if (x._uid === uid) child = x })
+  if (!child) return
+  child.checkedOutBy = ''
+  var today = dateStr(currentDate)
+
+  sbGet('attendance?shopify_order_name=eq.' + encodeURIComponent(child.orderName) + '&camper_name=eq.' + encodeURIComponent(child.name) + '&attended_date=eq.' + today + '&select=id&limit=1').then(function(rows) {
+    if (rows && rows.length) {
+      sbPatch('attendance?id=eq.' + rows[0].id, { checked_out_at: null, checked_out_by: null })
+    }
+  })
+  renderCheckoutTab()
+  showToast('Checkout undone')
+}
+
 function switchTab(tab, btn) {
   var contents = document.querySelectorAll('.tab-content')
   for (var i = 0; i < contents.length; i++) contents[i].classList.remove('active')
@@ -1230,6 +1381,7 @@ function switchTab(tab, btn) {
   if (btn) btn.classList.add('active')
   if (tab === 'badges') renderBadgesTab()
   if (tab === 'details') renderDetailsTab()
+  if (tab === 'checkout') renderCheckoutTab()
 }
 
 // notes popup state
