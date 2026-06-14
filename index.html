@@ -4796,112 +4796,58 @@ async function assignTablesForDay() {
       const isSplatter = isParty && (session.title || '').toLowerCase().includes('splatter')
 
       if (isParty) {
-        // Always assign 2 tables minimum per party (directors can manually adjust for larger parties)
-        // Session capacity is the Shopify booking slots, not actual guest count
+        // Each booking is a separate party — assign a unique group to each booking
         const tablesNeeded = 2
 
-        console.log('[Party] session:', session.session_time, 'tablesNeeded:', tablesNeeded)
+        console.log('[Party] session:', session.session_time, 'bookings:', sessionBookings.length, '(each gets its own group)')
 
-        // Find a group with enough tables all free
-        // Groups are already ordered by sort_order from the DB fetch
-        // For splatter parties: try groups containing splatter-preferred tables first
-        const sortedForParty = isSplatter
-          ? tableGroups.slice().sort((a, b) => {
-              const aHasSplatter = (a.table_ids || []).some(id => { const t = tables.find(x => x.id === id); return t && t.is_splatter_preferred })
-              const bHasSplatter = (b.table_ids || []).some(id => { const t = tables.find(x => x.id === id); return t && t.is_splatter_preferred })
-              if (aHasSplatter && !bHasSplatter) return -1
-              if (!aHasSplatter && bHasSplatter) return 1
-              return (a.sort_order || 0) - (b.sort_order || 0)
-            })
-          : tableGroups
-        let assigned = false
-        for (const group of sortedForParty) {
-          // HARD RULE: one party per group per day
-          if (usedGroupIds.has(group.id)) continue
-          const groupTables = (group.table_ids || []).map(id => tables.find(t => t.id === id)).filter(Boolean)
-          if (groupTables.length < tablesNeeded) continue
-          const candidateTables = groupTables.slice(0, tablesNeeded)
-          const allFree = candidateTables.every(t => isTableFree(t.id, startMins, endMins))
-          if (!allFree) continue
+        for (const booking of sessionBookings) {
+          const sortedForParty = isSplatter
+            ? tableGroups.slice().sort((a, b) => {
+                const aHasSplatter = (a.table_ids || []).some(id => { const t = tables.find(x => x.id === id); return t && t.is_splatter_preferred })
+                const bHasSplatter = (b.table_ids || []).some(id => { const t = tables.find(x => x.id === id); return t && t.is_splatter_preferred })
+                if (aHasSplatter && !bHasSplatter) return -1
+                if (!aHasSplatter && bHasSplatter) return 1
+                return (a.sort_order || 0) - (b.sort_order || 0)
+              })
+            : tableGroups
 
-          candidateTables.forEach(t => { holdTable(t.id, startMins, endMins) })
-          usedGroupIds.add(group.id)
-          console.log('[Party assigned] session:', session.session_time, 'id:', session.id.substring(0,8), 'group:', group.name, 'tables:', candidateTables.map(t=>'T'+t.table_number))
-          
-          // Assign bookings across tables — spread them evenly
-          // IMPORTANT: assign each table to the session even if it has no booking on it
-          // so the floor plan shows the full group as reserved
-          if (sessionBookings.length === 0) {
-            // No bookings yet — still reserve all tables
-            candidateTables.forEach(t => {
-              newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: t.id, booking_id: null, customer_name: null, assigned_by: 'auto' })
-            })
-          } else if (sessionBookings.length <= candidateTables.length) {
-            // Fewer bookings than tables — put one booking per table, reserve extras
-            sessionBookings.forEach((b, idx) => {
-              newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: candidateTables[idx].id, booking_id: b.id, customer_name: b.customer_name, assigned_by: 'auto' })
-            })
-            // Reserve remaining tables with null booking
-            for (let i = sessionBookings.length; i < candidateTables.length; i++) {
-              newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: candidateTables[i].id, booking_id: null, customer_name: null, assigned_by: 'auto' })
+          let bookingAssigned = false
+          for (const group of sortedForParty) {
+            if (usedGroupIds.has(group.id)) continue
+            const groupTables = (group.table_ids || []).map(id => tables.find(t => t.id === id)).filter(Boolean)
+            if (groupTables.length < tablesNeeded) continue
+            const candidateTables = groupTables.slice(0, tablesNeeded)
+            const allFree = candidateTables.every(t => isTableFree(t.id, startMins, endMins))
+            if (!allFree) continue
+
+            candidateTables.forEach(t => { holdTable(t.id, startMins, endMins) })
+            usedGroupIds.add(group.id)
+            console.log('[Party assigned] booking:', booking.customer_name, 'session:', session.session_time, 'group:', group.name, 'tables:', candidateTables.map(t => 'T' + t.table_number))
+
+            // First table gets the actual booking, rest are reserved for the party
+            newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: candidateTables[0].id, booking_id: booking.id, customer_name: booking.customer_name, assigned_by: 'auto' })
+            for (let i = 1; i < candidateTables.length; i++) {
+              newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: candidateTables[i].id, booking_id: null, customer_name: booking.customer_name + ' (cont.)', assigned_by: 'auto' })
             }
-          } else {
-            // More bookings than tables — spread across tables
-            sessionBookings.forEach((b, idx) => {
-              const t = candidateTables[idx % candidateTables.length]
-              newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: t.id, booking_id: b.id, customer_name: b.customer_name, assigned_by: 'auto' })
-            })
+            bookingAssigned = true
+            break
           }
-          assigned = true
-          break
-        }
 
-        // Fallback tiered by preference — never use wheel/glazing/minimake/kids-class tables if avoidable
-        if (!assigned) {
-          console.log('[Party FALLBACK] session:', session.session_time, 'id:', session.id.substring(0,8), 'usedGroups:', [...usedGroupIds])
-          // Tier 1: party-preferred tables
-          const partyPreferred = tables.filter(t => t.is_kids_party_preferred && isTableFree(t.id, startMins, endMins))
-          // Tier 2: truly neutral tables (no preference flags)
-          const neutralFreeParty = tables.filter(t =>
-            isTableFree(t.id, startMins, endMins) &&
-            !t.is_kids_party_preferred &&
-            !t.is_glazing_preferred && !t.is_glazing_only &&
-            !t.is_minimake_preferred && !t.is_wheel_preferred &&
-            !t.is_kids_class_preferred
-          )
-          // Tier 3: other-preferred tables (last resort, excluding glazing-only)
-          const otherFreeParty = tables.filter(t =>
-            isTableFree(t.id, startMins, endMins) &&
-            !t.is_kids_party_preferred &&
-            !t.is_glazing_only
-          )
-
-          const pool = []
-          const addP = t => { if (!pool.find(x => x.id === t.id)) pool.push(t) }
-          partyPreferred.forEach(addP)
-          neutralFreeParty.forEach(addP)
-          otherFreeParty.forEach(addP)
-
-          const picked = pool.slice(0, tablesNeeded)
-          picked.forEach(t => { holdTable(t.id, startMins, endMins) })
-          if (sessionBookings.length === 0) {
-            picked.forEach(t => {
-              newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: t.id, booking_id: null, customer_name: null, assigned_by: 'auto' })
-            })
-          } else if (sessionBookings.length <= picked.length) {
-            sessionBookings.forEach((b, idx) => {
-              if (!picked[idx]) return
-              newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: picked[idx].id, booking_id: b.id, customer_name: b.customer_name, assigned_by: 'auto' })
-            })
-            for (let i = sessionBookings.length; i < picked.length; i++) {
-              newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: picked[i].id, booking_id: null, customer_name: null, assigned_by: 'auto' })
+          if (!bookingAssigned) {
+            // Fallback: use any free party-preferred or neutral tables
+            console.log('[Party FALLBACK] booking:', booking.customer_name, 'session:', session.session_time)
+            const pool = []
+            const addP = t => { if (!pool.find(x => x.id === t.id)) pool.push(t) }
+            tables.filter(t => t.is_kids_party_preferred && isTableFree(t.id, startMins, endMins)).forEach(addP)
+            tables.filter(t => isTableFree(t.id, startMins, endMins) && !t.is_kids_party_preferred && !t.is_glazing_preferred && !t.is_glazing_only && !t.is_minimake_preferred && !t.is_wheel_preferred && !t.is_kids_class_preferred).forEach(addP)
+            tables.filter(t => isTableFree(t.id, startMins, endMins) && !t.is_kids_party_preferred && !t.is_glazing_only).forEach(addP)
+            const picked = pool.slice(0, tablesNeeded)
+            picked.forEach(t => { holdTable(t.id, startMins, endMins) })
+            newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: picked[0].id, booking_id: booking.id, customer_name: booking.customer_name, assigned_by: 'auto' })
+            for (let i = 1; i < picked.length; i++) {
+              newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: picked[i].id, booking_id: null, customer_name: booking.customer_name + ' (cont.)', assigned_by: 'auto' })
             }
-          } else {
-            sessionBookings.forEach((b, idx) => {
-              const t = picked[idx % Math.max(picked.length, 1)]
-              if (!t) return
-              newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: t.id, booking_id: b.id, customer_name: b.customer_name, assigned_by: 'auto' })
-            })
           }
         }
 
