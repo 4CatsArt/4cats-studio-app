@@ -407,10 +407,17 @@ canvas{border-radius:50%;display:block}
   <div class="notes-popup">
     <h3 id="notes-popup-name"></h3>
     <div class="notes-sub" id="notes-popup-sub"></div>
-    <textarea id="notes-popup-text" placeholder="Add a note (e.g. different pickup person, allergy reminder...)"></textarea>
+    <div style="margin-bottom:10px">
+      <label style="font-size:12px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:4px">Alternate Pickup Person</label>
+      <input type="text" id="notes-popup-pickup" placeholder="e.g. Grandma Susan, 647-555-1234" style="width:100%;padding:8px 10px;border:1px solid #e0e0d8;border-radius:8px;font-size:14px;box-sizing:border-box">
+    </div>
+    <div style="margin-bottom:10px">
+      <label style="font-size:12px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:4px">Notes</label>
+      <textarea id="notes-popup-text" placeholder="Add a note (e.g. allergy reminder, late pickup...)" style="margin-bottom:0"></textarea>
+    </div>
     <div class="notes-popup-btns">
       <button class="notes-cancel-btn" onclick="closeNotes()">Cancel</button>
-      <button class="notes-save-btn" onclick="saveNotes()">Save Note</button>
+      <button class="notes-save-btn" onclick="saveNotes()">Save</button>
     </div>
   </div>
 </div>
@@ -749,7 +756,7 @@ function loadDay() {
         ? sbGet('tally_registrations?select=*&shopify_order_name=in.(' + orderNames.map(function(n){ return encodeURIComponent(n) }).join(',') + ')')
         : Promise.resolve([])
 
-      var attPromise = sbGet('attendance?select=session_id,shopify_order_name,camper_name,attended&' + sessionIdFilter)
+      var attPromise = sbGet('attendance?select=session_id,shopify_order_name,camper_name,attended,alternate_pickup&attended_date=eq.' + today + '&' + sessionIdFilter)
 
       var badgePromise = orderNames.length
         ? sbGet('camp_daily_badges?select=order_name,camper_name,badge_name,session_date&order_name=in.(' + orderNames.map(function(n){ return encodeURIComponent(n) }).join(',') + ')')
@@ -841,6 +848,7 @@ function loadDay() {
                 aftercare: t.aftercare || b.aftercare || false,
                 tallyId: t.id || null,
                 attendanceChecked: att ? att.attended : false,
+              alternatePick: (att && att.alternate_pickup) ? att.alternate_pickup : '',
                 table: '',
                 badge: todayBadge ? todayBadge.badge : '',
                 notes: t.notes || b.order_note || '',
@@ -983,6 +991,7 @@ function renderCheckinList() {
         '<div class="child-info">' +
           '<div class="child-name">' + (c.name || '<em style="color:#bbb">No name yet</em>') + '</div>' +
           '<div class="child-meta">' + metaParts.join(' &middot; ') + '</div>' +
+          (c.alternatePick ? '<div id="pickuptag-' + uid + '" style="font-size:11px;color:#92400E;margin-top:2px;font-weight:500">Pickup: ' + c.alternatePick + '</div>' : '<div id="pickuptag-' + uid + '" style="display:none;font-size:11px;color:#92400E;margin-top:2px;font-weight:500"></div>') +
         '</div>' +
         '<div class="card-badges">' + groupTag + aftercareTag + walkTag + medIcon + '</div>' +
       '</div>' +
@@ -1357,6 +1366,7 @@ function openNotes(uid) {
   var parent = c.registeredBy ? c.registeredBy : ''
   document.getElementById('notes-popup-sub').textContent = (parent ? parent : '') + (parent && phone ? '  |  ' : '') + phone
   document.getElementById('notes-popup-text').value = c.notes || ''
+  document.getElementById('notes-popup-pickup').value = c.alternatePick || ''
   document.getElementById('notes-popup').className = 'notes-popup-overlay open'
   setTimeout(function() { document.getElementById('notes-popup-text').focus() }, 100)
 }
@@ -1369,14 +1379,16 @@ function closeNotes() {
 function saveNotes() {
   if (!notesUid) return
   var val = document.getElementById('notes-popup-text').value
+  var pickup = document.getElementById('notes-popup-pickup').value.trim()
   var c = null
   allChildren.forEach(function(x) { if (x._uid === notesUid) c = x })
   if (!c) return
   c.notes = val
-  // Save to tally
-  var payload = { notes: val || null }
+  c.alternatePick = pickup
+  // Save notes to tally_registrations
+  var tallyPayload = { notes: val || null }
   if (c.tallyId) {
-    sbPatch('tally_registrations?id=eq.' + c.tallyId, payload)
+    sbPatch('tally_registrations?id=eq.' + c.tallyId, tallyPayload)
   } else {
     sbPost('tally_registrations', {
       shopify_order_name: c.orderName,
@@ -1386,11 +1398,37 @@ function saveNotes() {
       if (rows && rows.length && rows[0].id) c.tallyId = rows[0].id
     })
   }
+  // Save alternate_pickup to attendance (today only)
+  var today = dateStr(currentDate)
+  sbGet('attendance?shopify_order_name=eq.' + encodeURIComponent(c.orderName) + '&camper_name=eq.' + encodeURIComponent(c.name) + '&attended_date=eq.' + today + '&select=id&limit=1').then(function(rows) {
+    if (rows && rows.length) {
+      sbPatch('attendance?id=eq.' + rows[0].id, { alternate_pickup: pickup || null })
+    } else {
+      sbPost('attendance', {
+        session_id: c.sessionId,
+        shopify_order_name: c.orderName,
+        camper_name: c.name,
+        attended: c.attendanceChecked,
+        attended_date: today,
+        alternate_pickup: pickup || null
+      })
+    }
+  })
   // Update the note dot in the quick checkin table
   var dot = document.getElementById('notedot-' + notesUid)
   if (dot) dot.style.display = val ? 'inline-block' : 'none'
+  // Update pickup tag on card
+  renderPickupTag(notesUid, pickup)
   closeNotes()
-  showToast('Note saved!')
+  showToast('Saved!')
+}
+
+function renderPickupTag(uid, pickup) {
+  var el = document.getElementById('pickuptag-' + uid)
+  if (el) {
+    el.textContent = pickup ? 'Pickup: ' + pickup : ''
+    el.style.display = pickup ? 'block' : 'none'
+  }
 }
 
 function renderQuickCheckin(dayPlanText, campSessions) {
@@ -1430,7 +1468,7 @@ function renderQuickCheckin(dayPlanText, campSessions) {
   html += '</div></div>'
 
   html += '<div style="overflow-x:auto"><table class="quick-table">'
-  html += '<thead><tr><th style="width:44px"></th><th>Child</th><th>Parent</th><th style="width:64px">Table</th><th style="width:44px">Info</th></tr></thead>'
+  html += '<thead><tr><th style="width:44px"></th><th>Child</th><th>Parent</th><th style="width:64px">Table</th><th>Alt Pickup</th><th style="width:44px">Info</th></tr></thead>'
   html += '<tbody id="quick-tbody"></tbody></table></div>'
   html += '<button class="add-child-btn" onclick="openAddChild()">&#xFF0B; Add Child</button>'
 
@@ -1485,7 +1523,7 @@ function renderQuickRows() {
       '<td><div class="parent-info">' + (c.registeredBy || '') + '</div>' +
         '<div class="parent-phone">' + (c.phone || '') + '</div>' +
       '</td>' +
-      '<td style="text-align:center;padding:6px 4px"><input class="table-input" style="width:52px;text-align:center;font-size:14px" id="qtable-' + uid + '" type="number" min="1" max="30" value="' + (c.table || '') + '" placeholder="-" onchange="updateTableQ(&quot;' + uid + '&quot;,this.value)"></td>' +'<td style="text-align:center"><button class="notes-icon" onclick="openNotes(&quot;' + uid + '&quot;)" title="Notes / Info">&#x1F4DD;' + (c.notes ? '<span class="notes-dot"></span>' : '') + '</button></td>' +
+      '<td style="text-align:center;padding:6px 4px"><input class="table-input" style="width:52px;text-align:center;font-size:14px" id="qtable-' + uid + '" type="number" min="1" max="30" value="' + (c.table || '') + '" placeholder="-" onchange="updateTableQ(&quot;' + uid + '&quot;,this.value)"></td>' +'<td style="font-size:12px;color:#92400E;padding:6px 4px" id="pickuptag-' + uid + '">' + (c.alternatePick || '') + '</td>' + '<td style="text-align:center"><button class="notes-icon" onclick="openNotes(&quot;' + uid + '&quot;)" title="Notes / Info">&#x1F4DD;' + (c.notes ? '<span class="notes-dot"></span>' : '') + '</button></td>' +
     '</tr>'
   }).join('')
 }
