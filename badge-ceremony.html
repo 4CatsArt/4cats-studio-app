@@ -68,6 +68,8 @@ canvas{display:block;width:100%;height:100%}
 .ceremony-kid-name{font-weight:500;flex:1}
 .ceremony-kid-badge{font-size:12px;color:#888}
 .ceremony-reset{font-size:12px;color:#888;text-align:center;margin-top:10px;cursor:pointer;text-decoration:underline}
+.split-btn{padding:6px 14px;font-size:12px;font-weight:600;border:1.5px solid #d0d0c8;border-radius:20px;background:white;color:#888;cursor:pointer}
+.split-btn.active{background:#1a1a2e;color:#f0c040;border-color:#1a1a2e}
 .winner-box{text-align:center;min-height:40px;margin-bottom:8px}
 .winner-name{font-size:24px;font-weight:600;color:#533AB7}
 .winner-badge-name{font-size:13px;color:#888;margin-top:2px}
@@ -171,6 +173,10 @@ canvas{display:block;width:100%;height:100%}
       <div class="winner-box" id="winner-am"></div>
       <div class="ceremony-roster" id="roster-am"></div>
       <div class="ceremony-reset" onclick="resetCeremony('am')">Reset</div>
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid #f0f0e8">
+        <button class="split-btn" id="split-btn-am" onclick="toggleTableSplit('am')">&#x2702; Split by Table</button>
+        <div id="split-panel-am" style="display:none;margin-top:8px"></div>
+      </div>
     </div>
   </div>
 
@@ -195,6 +201,10 @@ canvas{display:block;width:100%;height:100%}
       <div class="winner-box" id="winner-pm"></div>
       <div class="ceremony-roster" id="roster-pm"></div>
       <div class="ceremony-reset" onclick="resetCeremony('pm')">Reset</div>
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid #f0f0e8">
+        <button class="split-btn" id="split-btn-pm" onclick="toggleTableSplit('pm')">&#x2702; Split by Table</button>
+        <div id="split-panel-pm" style="display:none;margin-top:8px"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -285,6 +295,8 @@ var currentUserId = null
 var currentStudioId = null
 var currentDate = new Date()
 var allChildren = []
+var tableFilter = { am: [], pm: [] }  // empty = show all
+var tableSplitOn = { am: false, pm: false }
 var badgeHistory = {}
 var spinAngles = { am: 0, pm: 0 }
 var spinning = { am: false, pm: false }
@@ -538,11 +550,16 @@ function loadDay() {
       var tallyP = orderNames.length ? sbGet('tally_registrations?select=*&shopify_order_name=in.(' + orderNames.map(function(n) { return encodeURIComponent(n) }).join(',') + ')') : Promise.resolve([])
       var attP   = sbGet('attendance?select=session_id,shopify_order_name,camper_name,attended&attended_date=eq.' + today + '&' + sessionIdFilter)
       var badgeP = orderNames.length ? sbGet('camp_daily_badges?select=order_name,camper_name,badge_name,session_date&order_name=in.(' + orderNames.map(function(n) { return encodeURIComponent(n) }).join(',') + ')') : Promise.resolve([])
+      var seatP  = sbGet('seating_assignments?select=booking_id,table_number&' + sessionIdFilter.replace('session_id=in.', 'session_id=in.')  )
 
-      Promise.all([tallyP, attP, badgeP]).then(function(results) {
+      Promise.all([tallyP, attP, badgeP, seatP]).then(function(results) {
         var tallyRows = Array.isArray(results[0]) ? results[0] : []
         var attRows   = Array.isArray(results[1]) ? results[1] : []
         var badgeRows = Array.isArray(results[2]) ? results[2] : []
+        var seatRows  = Array.isArray(results[3]) ? results[3] : []
+        // Build booking_id -> table_number map
+        var seatMap = {}
+        seatRows.forEach(function(s) { if (s.booking_id) seatMap[s.booking_id] = s.table_number })
 
         var tallyMap = {}
         tallyRows.forEach(function(t) { if (!tallyMap[t.shopify_order_name]) tallyMap[t.shopify_order_name] = []; tallyMap[t.shopify_order_name].push(t) })
@@ -586,7 +603,8 @@ function loadDay() {
                 orderName: b.shopify_order_name,
                 badge: todayBadge ? todayBadge.badge : '',
                 awardedBadges: bHist.map(function(bh) { return bh.badge }),
-                attendanceChecked: true
+                attendanceChecked: true,
+                tableNum: seatMap[b.id] || null
               })
             })
           })
@@ -636,9 +654,64 @@ function parseLineItemProps(rawPayload, sessionDate) {
 function wheelKids(group) {
   return allChildren.filter(function(c) {
     if (!c.name) return false
-    if (group === 'am') return c.sessionGroup === 'am'
-    return c.sessionGroup === 'fd' || c.sessionGroup === 'pm'
+    var inGroup = group === 'am' ? c.sessionGroup === 'am' : (c.sessionGroup === 'fd' || c.sessionGroup === 'pm')
+    if (!inGroup) return false
+    if (tableSplitOn[group] && tableFilter[group].length > 0) {
+      return tableFilter[group].indexOf(c.tableNum) >= 0
+    }
+    return true
   })
+}
+
+function getTablesForGroup(group) {
+  var tables = []
+  allChildren.forEach(function(c) {
+    var inGroup = group === 'am' ? c.sessionGroup === 'am' : (c.sessionGroup === 'fd' || c.sessionGroup === 'pm')
+    if (inGroup && c.tableNum !== null && c.tableNum !== undefined) {
+      if (tables.indexOf(c.tableNum) < 0) tables.push(c.tableNum)
+    }
+  })
+  tables.sort(function(a,b){ return a - b })
+  return tables
+}
+
+function toggleTableSplit(group) {
+  tableSplitOn[group] = !tableSplitOn[group]
+  tableFilter[group] = []
+  var btn = document.getElementById('split-btn-' + group)
+  var panel = document.getElementById('split-panel-' + group)
+  if (btn) btn.className = 'split-btn' + (tableSplitOn[group] ? ' active' : '')
+  if (panel) {
+    if (tableSplitOn[group]) {
+      var tables = getTablesForGroup(group)
+      if (!tables.length) {
+        panel.innerHTML = '<div style="font-size:13px;color:#aaa;padding:4px 0">No table assignments found</div>'
+      } else {
+        panel.innerHTML = tables.map(function(t) {
+          return '<label style="display:inline-flex;align-items:center;gap:5px;margin:4px 6px 4px 0;font-size:13px;cursor:pointer">' +
+            '<input type="checkbox" data-group="' + group + '" data-table="' + t + '" onchange="toggleTableCheck(this)"> Table ' + t + '</label>'
+        }).join('')
+      }
+      panel.style.display = 'block'
+    } else {
+      panel.style.display = 'none'
+      panel.innerHTML = ''
+    }
+  }
+  renderWheels()
+  updateCeremonyWarnings()
+}
+
+function toggleTableCheck(el) {
+  var group = el.getAttribute('data-group')
+  var tNum = parseInt(el.getAttribute('data-table'))
+  if (el.checked) {
+    if (tableFilter[group].indexOf(tNum) < 0) tableFilter[group].push(tNum)
+  } else {
+    tableFilter[group] = tableFilter[group].filter(function(t) { return t !== tNum })
+  }
+  renderWheels()
+  updateCeremonyWarnings()
 }
 
 // ── TAB & MODE ────────────────────────────────────────────────────
