@@ -4772,6 +4772,8 @@ async function assignTablesForDay() {
         return 0
       })
 
+    const usedGroupIds = new Set() // track which groups have been assigned a party
+
     const newAssignments = []
 
     for (const session of sessionsToAssign) {
@@ -4794,8 +4796,7 @@ async function assignTablesForDay() {
         const totalGuests = sessionBookings.reduce((sum, b) => sum + (b.qty || 0), 0)
         const tablesNeeded = totalGuests <= 16 ? 2 : totalGuests <= 24 ? 3 : 4
 
-        console.log('[Party] session:', session.session_time, 'guests:', totalGuests, 'holdMins:', holdMins, 'startMins:', startMins, 'endMins:', endMins)
-        console.log('[Party] tableHold snapshot:', JSON.stringify(tableHold))
+        console.log('[Party] session:', session.session_time, 'guests:', totalGuests, 'tablesNeeded:', tablesNeeded)
 
         // Find a group with enough tables all free
         // Groups are already ordered by sort_order from the DB fetch
@@ -4811,17 +4812,16 @@ async function assignTablesForDay() {
           : tableGroups
         let assigned = false
         for (const group of sortedForParty) {
+          // HARD RULE: one party per group per day
+          if (usedGroupIds.has(group.id)) continue
           const groupTables = (group.table_ids || []).map(id => tables.find(t => t.id === id)).filter(Boolean)
-          const allFreeCheck = groupTables.slice(0, tablesNeeded).every(t => isTableFree(t.id, startMins, endMins))
-          console.log('  Group:', group.name, '(priority', group.sort_order||0, ') tables:', groupTables.map(t=>'T'+t.table_number), 'needed:', tablesNeeded, 'allFree:', allFreeCheck)
           if (groupTables.length < tablesNeeded) continue
           const candidateTables = groupTables.slice(0, tablesNeeded)
           const allFree = candidateTables.every(t => isTableFree(t.id, startMins, endMins))
-          console.log('[Party check] group:', group.name, 'session:', session.session_time, 'startMins:', startMins, 'endMins:', endMins, 'allFree:', allFree, 'holds:', candidateTables.map(t => 'T'+t.table_number+':'+JSON.stringify(tableHold[t.id])))
           if (!allFree) continue
 
           candidateTables.forEach(t => { holdTable(t.id, startMins, endMins) })
-          console.log('[Party hold] session:', session.session_time, 'startMins:', startMins, 'endMins:', endMins, 'tables:', candidateTables.map(t=>'T'+t.table_number), 'holds after:', candidateTables.map(t => JSON.stringify(tableHold[t.id])))
+          usedGroupIds.add(group.id)
           sessionBookings.forEach((b, idx) => {
             const t = candidateTables[idx % candidateTables.length]
             newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: t.id, booking_id: b.id, customer_name: b.customer_name, assigned_by: 'auto' })
