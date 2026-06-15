@@ -64,6 +64,7 @@
   .stage-drying       { background:#fff3e0; color:#e65100; }
   .stage-bisque_ready { background:#e8f5e9; color:#2e7d32; }
   .stage-ready_pickup { background:#e3f2fd; color:#1565c0; }
+  .stage-picked_up    { background:#f0f0f0; color:#555; }
 
   .type-chip { display:inline-block; padding:2px 8px; border-radius:8px; font-size:11px; font-weight:600; }
   .type-workshop { background:#e8eaf6; color:#283593; }
@@ -225,6 +226,7 @@
       <option value="drying">Drying / Processing</option>
       <option value="bisque_ready">Bisque — Ready for Glazing</option>
       <option value="ready_pickup">Ready for Pickup</option>
+      <option value="picked_up">Picked Up ✓</option>
     </select>
     <select id="filter-type" onchange="renderTable()">
       <option value="">All types</option>
@@ -288,6 +290,7 @@
           <th onclick="sortBy('session_type')">Type</th>
           <th onclick="sortBy('stage')">Stage</th>
           <th onclick="sortBy('glazed_on')">Glazed On</th>
+          <th onclick="sortBy('picked_up_on')">Picked Up On</th>
           <th class="no-sort">Names</th>
           <th class="no-sort">Email</th>
           <th class="no-sort">Last Email</th>
@@ -345,6 +348,7 @@
         <option value="drying">Drying / Processing</option>
         <option value="bisque_ready">Bisque — Ready for Glazing</option>
         <option value="ready_pickup">Ready for Pickup</option>
+        <option value="picked_up">Picked Up ✓</option>
       </select>
     </div>
 
@@ -453,7 +457,8 @@ const STUDIO_NAMES = {
 const STAGES = {
   drying:       { label:'Drying / Processing 🪴',          next:'bisque_ready', nextLabel:'→ Bisque Fired — Ready for Glazing', emailTrigger: false },
   bisque_ready: { label:'✅ Bisque — Ready for Glazing',    next:'ready_pickup', nextLabel:'→ Ready for Pickup 🎉',              emailTrigger: true  },
-  ready_pickup: { label:'🎉 Ready for Pickup',              next: null,          nextLabel: null,                                emailTrigger: true  },
+  ready_pickup: { label:'🎉 Ready for Pickup',              next:'picked_up',    nextLabel:'→ Picked Up ✓',                     emailTrigger: true  },
+  picked_up:    { label:'✓ Picked Up',                      next: null,          nextLabel: null,                                emailTrigger: false },
 }
 
 function sessionType(t) {
@@ -541,7 +546,7 @@ async function loadTickets() {
   const stageF = document.getElementById('filter-stage').value
 
   let q = sb.from('clay_tickets')
-    .select(`id, ticket_number, studio_id, stage, is_party, description, clay_type, created_at, glazed_on,
+    .select(`id, ticket_number, studio_id, stage, is_party, description, clay_type, created_at, glazed_on, picked_up_on,
              kiln_delay_sent_at, bisque_email_sent_at, pickup_email_sent_at,
              bisque_expiry_date, pickup_expiry_date, session_id,
              signin_entries(name, email),
@@ -549,7 +554,7 @@ async function loadTickets() {
     .order('created_at', { ascending: false })
     .limit(500)
 
-  if (!stageF) q = q.neq('stage', 'ready_pickup')
+  if (!stageF) q = q.in('stage', ['drying', 'bisque_ready', 'ready_pickup'])
   else         q = q.eq('stage', stageF)
   if (studioId) q = q.eq('studio_id', studioId)
 
@@ -694,7 +699,7 @@ function renderTable() {
         ? `<button class="advance-btn" onclick="promptAdvance('${t.id}','${t.ticket_number}','${stage.next}','${(stage.nextLabel||'').replace(/'/g,"\\'")}')">
              ${stage.nextLabel}
            </button>`
-        : `<span class="done-badge">✓ Ready for Pickup</span>`
+        : `<span class="done-badge">✓ Picked Up</span>`
 
     const checked  = selectedIds.has(t.id) ? 'checked' : ''
     const selClass = selectedIds.has(t.id) ? ' selected' : ''
@@ -708,6 +713,10 @@ function renderTable() {
       <td>${typeChip(type)}</td>
       <td><span class="stage-chip stage-${t.stage}">${stage.label}</span></td>
       <td>${glazedOn}</td>
+      <td>${t.picked_up_on
+        ? `<input type="date" value="${t.picked_up_on}" onchange="updatePickedUpOn('${t.id}',this.value)" style="border:1px solid #d0d0c8;border-radius:6px;font-size:11px;padding:3px 6px;outline:none;background:white;width:120px">`
+        : `<input type="date" onchange="updatePickedUpOn('${t.id}',this.value)" style="border:1px solid #d0d0c8;border-radius:6px;font-size:11px;padding:3px 6px;outline:none;background:white;width:120px">`
+      }</td>
       <td style="font-size:12px;color:#555">${(t.signin_entries||[]).map(c=>c.name).join(', ') || '<span style="color:#bbb">—</span>'}</td>
       <td style="font-size:12px;color:#555">${(t.signin_entries||[]).filter(c=>c.email).map(c=>c.email).join(', ') || '<span style="color:#bbb">—</span>'}</td>
       <td>${lastEmailCell}</td>
@@ -987,6 +996,17 @@ async function confirmAdvance() {
   const nums = ids.map(id => allTickets.find(t => t.id === id)?.ticket_number).filter(Boolean).join(', ')
   showToast(`${ids.length > 1 ? ids.length + ' tickets' : '#' + nums} → ${STAGES[nextStage].label}`)
   ids.forEach(id => { const t = allTickets.find(t => t.id === id); if (t) t.stage = nextStage })
+
+  // Auto-set picked_up_on = today when advancing to picked_up
+  if (nextStage === 'picked_up') {
+    const today = new Date().toISOString().split('T')[0]
+    const toUpdate = ids.filter(id => { const t = allTickets.find(t => t.id === id); return t && !t.picked_up_on })
+    if (toUpdate.length) {
+      await sb.from('clay_tickets').update({ picked_up_on: today }).in('id', toUpdate)
+      toUpdate.forEach(id => { const t = allTickets.find(t => t.id === id); if (t) t.picked_up_on = today })
+    }
+  }
+
   clearSelection(); renderTable()
   pendingAdvance = null
 }
@@ -1104,6 +1124,14 @@ function fmtDate(d) {
   if (!d) return '—'
   const dt = d.includes('T') ? new Date(d) : new Date(d + 'T12:00:00')
   return dt.toLocaleDateString('en-CA', { month:'short', day:'numeric', year:'numeric' })
+}
+
+async function updatePickedUpOn(id, date) {
+  const { error } = await sb.from('clay_tickets').update({ picked_up_on: date || null }).eq('id', id)
+  if (error) { showToast('Error saving date'); return }
+  const t = allTickets.find(t => t.id === id)
+  if (t) t.picked_up_on = date || null
+  showToast('Picked up date saved')
 }
 
 async function updateGlazedOn(id, date) {
