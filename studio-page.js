@@ -118,6 +118,7 @@
       html +=
         '<div class="sp-session-card" data-handle="' + esc(handle) + '">' +
           '<div class="sp-session-card__thumb">' +
+            (p.image ? '<img src="' + esc(p.image) + '" loading="lazy" style="width:100%;height:100%;object-fit:cover;">' : '') +
             (timeStr ? '<div class="sp-session-card__time-badge">' + esc(timeStr) + '</div>' : '') +
           '</div>' +
           '<div class="sp-session-card__body">' +
@@ -130,24 +131,6 @@
     });
     track.innerHTML = html;
 
-    // Fetch images for each card from Shopify storefront
-    track.querySelectorAll('.sp-session-card[data-handle]').forEach(function(card) {
-      var handle = card.getAttribute('data-handle');
-      if (!handle) return;
-      fetch('/products/' + handle + '.js')
-        .then(function(r) { return r.json(); })
-        .then(function(p) {
-          var img = p.images && p.images[0] ? p.images[0].src : null;
-          if (img) {
-            var thumb = card.querySelector('.sp-session-card__thumb');
-            if (thumb) {
-              var timeBadge = thumb.querySelector('.sp-session-card__time-badge');
-              thumb.innerHTML = '<img src="' + img + '" loading="lazy" style="width:100%;height:100%;object-fit:cover;">';
-              if (timeBadge) thumb.appendChild(timeBadge);
-            }
-          }
-        }).catch(function() {});
-    });
   }
 
   function renderFriday(panel, p) {
