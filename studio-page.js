@@ -185,7 +185,7 @@
       '</ul>' +
       '<div class="sp-mm-btns">' +
         (mm ? '<a href="' + esc(mm.url) + '" class="button button--solid button--regular">Book This Week \u2192</a>' : '') +
-        (next ? '<a href="' + esc(next.url) + '" class="button button--outline button--regular">Preview Next Week \u2192</a>' : '') +
+        (next ? '<a href="' + esc(next.url) + '" class="button button--outline button--regular">Book Next Week \u2192</a>' : '') +
       '</div>' +
     '</div>';
 
