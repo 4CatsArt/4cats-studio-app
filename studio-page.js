@@ -181,7 +181,7 @@
         track.innerHTML = html;
       })
       .catch(function() {
-        track.innerHTML = '<div class="sp-empty" style="min-width:280px">Couldn't load today's sessions — <a href="/pages/schedule" style="color:var(--color-accent-main);font-weight:600">see the full schedule</a></div>';
+        track.innerHTML = '<div class="sp-empty" style="min-width:280px">Couldn\'t load today\'s sessions — <a href="/pages/schedule" style="color:var(--color-accent-main);font-weight:600">see the full schedule</a></div>';
       });
   }
 
