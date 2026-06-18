@@ -83,6 +83,7 @@
       .then(function(data) {
         renderToday(track, data.today || []);
         renderFriday(panel, data.friday || null);
+        renderMiniMake(data); 
       })
       .catch(function() {
         if (track) track.innerHTML = '<div class="sp-empty" style="min-width:280px">Couldn\'t load today\'s sessions \u2014 <a href="/pages/schedule" style="color:var(--color-accent-main);font-weight:600">see the full schedule</a></div>';
@@ -149,6 +150,47 @@
         '</div>' +
       '</div>';
   }
+
+  function renderMiniMake(data) {
+  var section = document.getElementById('sp-minimake-section');
+  if (!section) return;
+  var mm = data.miniMake;
+  var next = data.nextMiniMake;
+  if (!mm && !next) { section.style.display = 'none'; return; }
+
+  var thisHtml = mm
+    ? '<div class="sp-mm-photo">' +
+        (mm.image ? '<img src="' + esc(mm.image) + '" alt="' + esc(mm.title) + '" loading="lazy">' : '<div class="sp-mm-photo-empty"></div>') +
+        '<div class="sp-mm-photo-label">This week</div>' +
+      '</div>'
+    : '<div class="sp-mm-photo sp-mm-photo-empty"></div>';
+
+  var nextHtml = next
+    ? '<div class="sp-mm-photo">' +
+        (next.image ? '<img src="' + esc(next.image) + '" alt="' + esc(next.title) + '" loading="lazy">' : '<div class="sp-mm-photo-empty"></div>') +
+        '<div class="sp-mm-photo-label">Next week</div>' +
+      '</div>'
+    : '<div class="sp-mm-photo sp-mm-photo-empty"></div>';
+
+  var centerHtml =
+    '<div class="sp-mm-center">' +
+      '<div class="sp-mm-eyebrow">Mini Makes from ' + esc((mm || next).price || '$8') + ' \u2665</div>' +
+      '<h2 class="sp-mm-title">' + esc((mm || next).title) + '</h2>' +
+      '<p class="sp-mm-desc">Just want somewhere to go? We got you.<br>Drop in, make something &amp; hang out!</p>' +
+      '<ul class="sp-mm-list">' +
+        '<li>No experience needed</li>' +
+        '<li>One visit, drop in anytime</li>' +
+        '<li>Rotating weekly themes</li>' +
+        '<li>Fun, social &amp; relaxing</li>' +
+      '</ul>' +
+      '<div class="sp-mm-btns">' +
+        (mm ? '<a href="' + esc(mm.url) + '" class="button button--solid button--regular">Book This Week \u2192</a>' : '') +
+        (next ? '<a href="' + esc(next.url) + '" class="button button--outline button--regular">Preview Next Week \u2192</a>' : '') +
+      '</div>' +
+    '</div>';
+
+  section.innerHTML = thisHtml + centerHtml + nextHtml;
+}
 
   // ── 3. THIS WEEK'S PROJECTS ─────────────────────────────────────
 
