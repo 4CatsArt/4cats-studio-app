@@ -171,6 +171,11 @@
     track.innerHTML = html;
   }
 
+  window.spCarouselScroll = function(dir) {
+  var track = document.getElementById('sp-today-track');
+  if (track) track.scrollBy({ left: dir * 220, behavior: 'smooth' });
+};
+
   function renderFriday(panel, p) {
     if (!panel) return;
     if (!p) { panel.style.display = 'none'; return; }
