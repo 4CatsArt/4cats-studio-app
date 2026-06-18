@@ -16,7 +16,7 @@
   var SB_URL     = CFG.supabaseUrl|| 'https://snxibhbhhchjthfmjtaj.supabase.co';
   var SB_ANON    = CFG.supabaseAnon|| '';
 
-  var COLLECTION_HANDLE = 'today-at-the-studio';
+  var STUDIO_TODAY_URL = SB_URL + '/functions/v1/studio-today';
 
   // ── STUDIO → SHOPIFY VARIANT TITLE MAP ─────────────────────────
   var STUDIO_VARIANT_MAP = {
@@ -130,59 +130,7 @@
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  // Is product a weekly (form-based) type?
-  function isWeeklyProduct(product) {
-    var tags = (product.tags || '').toLowerCase();
-    for (var i = 0; i < WEEKLY_PRODUCT_TYPES.length; i++) {
-      if (tags.indexOf(WEEKLY_PRODUCT_TYPES[i]) > -1) return true;
-    }
-    // Also check product type field
-    var type = (product.product_type || '').toLowerCase();
-    for (var j = 0; j < WEEKLY_PRODUCT_TYPES.length; j++) {
-      if (type.indexOf(WEEKLY_PRODUCT_TYPES[j]) > -1) return true;
-    }
-    return false;
-  }
 
-  // Build product link — weekly products get ?studio=ID, variant products get ?variant=ID
-  function buildProductUrl(product) {
-    var base = '/products/' + product.handle;
-    if (isWeeklyProduct(product)) {
-      return base + '?studio=' + encodeURIComponent(STUDIO_ID);
-    }
-    var v = findStudioVariant(product.variants);
-    if (v && v.id) return base + '?variant=' + v.id;
-    return base + '?studio=' + encodeURIComponent(STUDIO_ID);
-  }
-
-  // Get availability for a product at this studio
-  function getAvailability(product) {
-    if (isWeeklyProduct(product)) {
-      // Can't know exact availability for form-based products — just show as available
-      return { available: true, spaces: null, isFull: false, isLow: false };
-    }
-    var v = findStudioVariant(product.variants);
-    if (!v) return { available: false, spaces: 0, isFull: true, isLow: false };
-    var qty = v.inventory_quantity;
-    return {
-      available: qty === null || qty > 0,
-      spaces: qty,
-      isFull: qty !== null && qty <= 0,
-      isLow: qty !== null && qty > 0 && qty <= 4
-    };
-  }
-
-  // ── FETCH COLLECTION PRODUCTS ───────────────────────────────────
-
-  function fetchCollectionProducts(callback) {
-    // Fetch up to 250 products from the collection
-    fetch('/collections/' + COLLECTION_HANDLE + '/products.json?limit=250')
-      .then(function(r) { return r.json(); })
-      .then(function(data) {
-        callback(null, data.products || []);
-      })
-      .catch(function(e) { callback(e, []); });
-  }
 
   // ── 1. TODAY'S SLIDER ───────────────────────────────────────────
 
@@ -190,105 +138,52 @@
     var track = document.getElementById('sp-today-track');
     if (!track || !STUDIO_ID) return;
 
-    var today    = todayStr();
-    var monday   = mondayOfWeek();
-    var sunday   = sundayOfWeek();
-
-    fetchCollectionProducts(function(err, products) {
-      if (err || !products.length) {
-        track.innerHTML = '<div class="sp-empty" style="min-width:280px">No sessions today — <a href="#" id="sp-schedule-link" style="color:var(--color-accent-main);font-weight:600">see the full schedule</a></div>';
-        return;
-      }
-
-      // Filter to today's products
-      var todayProducts = products.filter(function(p) {
-        var eventDate = getMetafield(p, 'custom.event_date');
-        if (!eventDate) return false;
-        // Weekly products: show if event_date (Monday) is the current week's Monday
-        if (isWeeklyProduct(p)) {
-          return eventDate === monday;
-        }
-        // All others: show only if event_date = today exactly
-        return eventDate === today;
-      });
-
-      // Filter out Friday Night Specials (they go in the right panel)
-      todayProducts = todayProducts.filter(function(p) {
-        var tags = (p.tags || '').toLowerCase();
-        return tags.indexOf('friday-night-special') === -1;
-      });
-
-      if (!todayProducts.length) {
-        track.innerHTML = '<div class="sp-empty" style="min-width:280px">Nothing scheduled for today — <a href="#" id="sp-schedule-link" style="color:var(--color-accent-main);font-weight:600">see the full schedule</a></div>';
-        return;
-      }
-
-      var html = '';
-      todayProducts.forEach(function(p) {
-        var img     = (p.images && p.images[0]) ? p.images[0].src : '';
-        var title   = p.title || '';
-        var price   = p.variants && p.variants[0] ? '$' + parseFloat(p.variants[0].price).toFixed(0) : '';
-        var url     = buildProductUrl(p);
-        var avail   = getAvailability(p);
-
-        var spotsHtml = '';
-        if (avail.isFull) {
-          spotsHtml = '<div class="sp-session-card__spots" style="color:#c0391e">Sold out</div>';
-        } else if (avail.isLow) {
-          spotsHtml = '<div class="sp-session-card__spots" style="color:#c0391e">Only ' + avail.spaces + ' spots left!</div>';
-        } else if (avail.spaces !== null) {
-          spotsHtml = '<div class="sp-session-card__spots">' + avail.spaces + ' spots left</div>';
+    fetch(STUDIO_TODAY_URL + '?studio_id=' + encodeURIComponent(STUDIO_ID), {
+      headers: SB_HEADERS
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var products = data.today || [];
+        if (!products.length) {
+          track.innerHTML = '<div class="sp-empty" style="min-width:280px">Nothing scheduled for today — <a href="/pages/schedule" style="color:var(--color-accent-main);font-weight:600">see the full schedule</a></div>';
+          return;
         }
 
-        var bookHtml = avail.isFull
-          ? '<div class="sp-session-card__book" style="opacity:.5;cursor:default">Sold Out</div>'
-          : '<a href="' + esc(url) + '" class="sp-session-card__book">Book now →</a>';
+        var html = '';
+        products.forEach(function(p) {
+          var spotsHtml = '';
+          if (p.isFull) {
+            spotsHtml = '<div class="sp-session-card__spots" style="color:#c0391e">Sold out</div>';
+          } else if (p.isLow) {
+            spotsHtml = '<div class="sp-session-card__spots" style="color:#c0391e">Only ' + p.spaces + ' spots left!</div>';
+          } else if (p.spaces !== null) {
+            spotsHtml = '<div class="sp-session-card__spots">' + p.spaces + ' spots left</div>';
+          }
 
-        html +=
-          '<div class="sp-session-card">' +
-            '<div class="sp-session-card__thumb">' +
-              (img ? '<img src="' + esc(img) + '" alt="' + esc(title) + '" loading="lazy">' : '') +
-            '</div>' +
-            '<div class="sp-session-card__body">' +
-              '<div class="sp-session-card__title">' + esc(title) + '</div>' +
-              (price ? '<div class="sp-session-card__price">' + esc(price) + '</div>' : '') +
-              spotsHtml +
-            '</div>' +
-            bookHtml +
-          '</div>';
+          var bookHtml = p.isFull
+            ? '<div class="sp-session-card__book" style="opacity:.5;cursor:default">Sold Out</div>'
+            : '<a href="' + esc(p.url) + '" class="sp-session-card__book">Book now →</a>';
+
+          html +=
+            '<div class="sp-session-card">' +
+              '<div class="sp-session-card__thumb">' +
+                (p.image ? '<img src="' + esc(p.image) + '" alt="' + esc(p.title) + '" loading="lazy">' : '') +
+              '</div>' +
+              '<div class="sp-session-card__body">' +
+                '<div class="sp-session-card__title">' + esc(p.title) + '</div>' +
+                (p.price ? '<div class="sp-session-card__price">' + esc(p.price) + '</div>' : '') +
+                spotsHtml +
+              '</div>' +
+              bookHtml +
+            '</div>';
+        });
+
+        track.innerHTML = html;
+      })
+      .catch(function() {
+        track.innerHTML = '<div class="sp-empty" style="min-width:280px">Couldn't load today's sessions — <a href="/pages/schedule" style="color:var(--color-accent-main);font-weight:600">see the full schedule</a></div>';
       });
-
-      track.innerHTML = html;
-    });
   }
-
-  // Helper: get product metafield value from .js endpoint metafields object
-  function getMetafield(product, key) {
-    if (!product.metafields) return null;
-    // Shopify /products.json doesn't return metafields — use tags as fallback
-    // The event_date is stored as a tag: event-date:2026-06-18
-    var tags = (product.tags || '');
-    var tagList = tags.split(',');
-    var prefix = key.replace('custom.', '') + ':';
-    for (var i = 0; i < tagList.length; i++) {
-      var t = tagList[i].trim();
-      if (t.toLowerCase().indexOf(prefix.toLowerCase()) === 0) {
-        return t.substring(prefix.length).trim();
-      }
-    }
-    return null;
-  }
-
-  // ── NOTE ON event_date ──────────────────────────────────────────
-  // /collections/.../products.json does NOT return metafields.
-  // Two options:
-  //   A) Tag products with event-date:YYYY-MM-DD (getMetafield reads this)
-  //   B) Use Shopify Storefront API with a token (reads metafields natively)
-  // We use option A — tag-based — as it requires no API token.
-  // For weekly products, tag with event-date:YYYY-MM-DD (the Monday).
-  // For parties/one-off, tag with event-date:YYYY-MM-DD (the actual date).
-  // Shopify Flow can auto-add/remove these tags based on custom.event_date metafield.
-  // ────────────────────────────────────────────────────────────────
 
   // ── 2. FRIDAY NIGHT SPECIAL PANEL ──────────────────────────────
 
@@ -296,60 +191,34 @@
     var panel = document.getElementById('sp-friday-panel');
     if (!panel || !STUDIO_ID) return;
 
-    var today = todayStr();
-
-    fetchCollectionProducts(function(err, products) {
-      if (err || !products.length) { panel.style.display = 'none'; return; }
-
-      // Filter to friday-night-special tagged products with upcoming date
-      var fridayProducts = products.filter(function(p) {
-        var tags = (p.tags || '').toLowerCase();
-        if (tags.indexOf('friday-night-special') === -1) return false;
-        var eventDate = getMetafield(p, 'custom.event_date') || getMetafield(p, 'event-date');
-        return eventDate && eventDate >= today;
+    fetch(STUDIO_TODAY_URL + '?studio_id=' + encodeURIComponent(STUDIO_ID), {
+      headers: SB_HEADERS
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var p = data.friday;
+        if (!p) { panel.style.display = 'none'; return; }
+        renderFridayPanel(panel, p);
+      })
+      .catch(function() {
+        panel.style.display = 'none';
       });
-
-      if (!fridayProducts.length) { panel.style.display = 'none'; return; }
-
-      // Sort by event date ascending — pick nearest upcoming
-      fridayProducts.sort(function(a, b) {
-        var da = getMetafield(a, 'custom.event_date') || getMetafield(a, 'event-date') || '';
-        var db = getMetafield(b, 'custom.event_date') || getMetafield(b, 'event-date') || '';
-        return da.localeCompare(db);
-      });
-
-      var product = fridayProducts[0];
-      renderFridayPanel(panel, product);
-    });
   }
 
-  function renderFridayPanel(panel, product) {
-    var v       = findStudioVariant(product.variants) || {};
-    var url     = '/products/' + product.handle + (v.id ? '?variant=' + v.id : '');
-    var qty     = v.inventory_quantity;
-    var isFull  = qty !== null && qty <= 0;
-
-    // Get friday_image metafield via tag: friday-image:URL
-    // (set via Shopify Flow or manually — the image URL as a tag value)
-    // Fallback to first product image
-    var fridayImg = getMetafield(product, 'friday-image');
-    var fallbackImg = (product.images && product.images[0]) ? product.images[0].src : '';
-    var imgSrc = fridayImg || fallbackImg;
-
-    // Get event date for display
-    var eventDate = getMetafield(product, 'custom.event_date') || getMetafield(product, 'event-date');
-    var dateDisplay = eventDate ? fmtDate(eventDate) : '';
+  function renderFridayPanel(panel, p) {
+    var imgSrc  = p.fridayImage || p.image || '';
+    var dateDisplay = p.eventDate ? fmtDate(p.eventDate) : '';
 
     panel.innerHTML =
       '<div class="sp-friday">' +
         (imgSrc
-          ? '<div class="sp-friday__img"><img src="' + esc(imgSrc) + '" alt="' + esc(product.title) + '" loading="lazy"></div>'
+          ? '<div class="sp-friday__img"><img src="' + esc(imgSrc) + '" alt="' + esc(p.title) + '" loading="lazy"></div>'
           : '<div class="sp-friday__img sp-friday__img--empty"></div>') +
         '<div class="sp-friday__footer">' +
           (dateDisplay ? '<div class="sp-friday__date">' + esc(dateDisplay) + '</div>' : '') +
-          (isFull
+          (p.isFull
             ? '<div class="sp-friday__btn sp-friday__btn--sold">Sold Out</div>'
-            : '<a href="' + esc(url) + '" class="sp-friday__btn">BOOK FRIDAY NIGHT →</a>') +
+            : '<a href="' + esc(p.url) + '" class="sp-friday__btn">BOOK FRIDAY NIGHT →</a>') +
         '</div>' +
       '</div>';
   }
