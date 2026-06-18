@@ -187,7 +187,6 @@
           ? '<div class="sp-friday__img"><img src="' + esc(imgSrc) + '" alt="' + esc(p.title) + '" loading="lazy"></div>'
           : '<div class="sp-friday__img sp-friday__img--empty"></div>') +
         '<div class="sp-friday__footer">' +
-          (dateDisplay ? '<div class="sp-friday__date">' + esc(dateDisplay) + '</div>' : '') +
           (p.isFull
             ? '<div class="sp-friday__btn sp-friday__btn--sold">Sold Out</div>'
             : '<a href="' + esc(p.url) + '" class="sp-friday__btn">BOOK FRIDAY NIGHT \u2192</a>') +
