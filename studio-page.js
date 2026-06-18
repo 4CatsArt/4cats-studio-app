@@ -53,9 +53,6 @@
     'ON-WTR-WTR':  'ON / WATERLOO - UPTOWN'
   };
 
-  // Weekly (form-based) product types — studio is in the HTML form
-  var WEEKLY_PRODUCT_TYPES = ['workshop', 'mini-make', 'glazing', 'lineup'];
-
   function findStudioVariant(variants) {
     if (!variants || !variants.length) return null;
     var target = STUDIO_VARIANT_MAP[STUDIO_ID] || '';
@@ -83,24 +80,6 @@
     return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
   }
 
-  // Get Monday of current week (YYYY-MM-DD)
-  function mondayOfWeek() {
-    var now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Toronto' }));
-    var day = now.getDay(); // 0=Sun
-    var diff = (day === 0) ? -6 : 1 - day;
-    now.setDate(now.getDate() + diff);
-    return now.toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
-  }
-
-  // Get Sunday of current week (YYYY-MM-DD)
-  function sundayOfWeek() {
-    var now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Toronto' }));
-    var day = now.getDay();
-    var diff = day === 0 ? 0 : 7 - day;
-    now.setDate(now.getDate() + diff);
-    return now.toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
-  }
-
   function fmtDate(d) {
     if (!d) return '';
     var dt = new Date(d + 'T12:00:00');
@@ -119,7 +98,7 @@
 
   function stars(n) {
     var s = '';
-    for (var i = 0; i < 5; i++) s += i < n ? '★' : '☆';
+    for (var i = 0; i < 5; i++) s += i < n ? '\u2605' : '\u2606';
     return s;
   }
 
@@ -130,85 +109,73 @@
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  function cleanTitle(title) {
+    if (!title) return '';
+    return title.indexOf('|') > -1 ? title.split('|').slice(1).join('|').trim() : title;
+  }
 
+  // ── 1 + 2. TODAY SLIDER + FRIDAY PANEL (single fetch) ──────────
 
-  // ── 1. TODAY'S SLIDER ───────────────────────────────────────────
-
-  function loadToday() {
+  function loadTodayAndFriday() {
     var track = document.getElementById('sp-today-track');
-    if (!track || !STUDIO_ID) return;
-
-    fetch(STUDIO_TODAY_URL + '?studio_id=' + encodeURIComponent(STUDIO_ID), {
-      headers: SB_HEADERS
-    })
-      .then(function(r) { return r.json(); })
-      .then(function(data) {
-        var products = data.today || [];
-        if (!products.length) {
-          track.innerHTML = '<div class="sp-empty" style="min-width:280px">Nothing scheduled for today — <a href="/pages/schedule" style="color:var(--color-accent-main);font-weight:600">see the full schedule</a></div>';
-          return;
-        }
-
-        var html = '';
-        products.forEach(function(p) {
-          var spotsHtml = '';
-          if (p.isFull) {
-            spotsHtml = '<div class="sp-session-card__spots" style="color:#c0391e">Sold out</div>';
-          } else if (p.isLow) {
-            spotsHtml = '<div class="sp-session-card__spots" style="color:#c0391e">Only ' + p.spaces + ' spots left!</div>';
-          } else if (p.spaces !== null) {
-            spotsHtml = '<div class="sp-session-card__spots">' + p.spaces + ' spots left</div>';
-          }
-
-          var bookHtml = p.isFull
-            ? '<div class="sp-session-card__book" style="opacity:.5;cursor:default">Sold Out</div>'
-            : '<a href="' + esc(p.url) + '" class="sp-session-card__book">Book now →</a>';
-
-          html +=
-            '<div class="sp-session-card">' +
-              '<div class="sp-session-card__thumb">' +
-                (p.image ? '<img src="' + esc(p.image) + '" alt="' + esc(p.title) + '" loading="lazy">' : '') +
-              '</div>' +
-              '<div class="sp-session-card__body">' +
-                '<div class="sp-session-card__title">' + esc(p.title.indexOf('|') > -1 ? p.title.split('|').slice(1).join('|').trim() : p.title) + '</div>' +
-                (p.price ? '<div class="sp-session-card__price">' + esc(p.price) + '</div>' : '') +
-                spotsHtml +
-              '</div>' +
-              bookHtml +
-            '</div>';
-        });
-
-        track.innerHTML = html;
-      })
-      .catch(function() {
-        track.innerHTML = '<div class="sp-empty" style="min-width:280px">Couldn\'t load today\'s sessions \u2014 <a href="/pages/schedule" style="color:var(--color-accent-main);font-weight:600">see the full schedule</a></div>';
-      });
-  }
-
-  // ── 2. FRIDAY NIGHT SPECIAL PANEL ──────────────────────────────
-
-  function loadFridayNightSpecial() {
     var panel = document.getElementById('sp-friday-panel');
-    if (!panel || !STUDIO_ID) return;
+    if (!STUDIO_ID) return;
 
     fetch(STUDIO_TODAY_URL + '?studio_id=' + encodeURIComponent(STUDIO_ID), {
       headers: SB_HEADERS
     })
       .then(function(r) { return r.json(); })
       .then(function(data) {
-        var p = data.friday;
-        if (!p) { panel.style.display = 'none'; return; }
-        renderFridayPanel(panel, p);
+        renderToday(track, data.today || []);
+        renderFriday(panel, data.friday || null);
       })
       .catch(function() {
-        panel.style.display = 'none';
+        if (track) track.innerHTML = '<div class="sp-empty" style="min-width:280px">Couldn\'t load today\'s sessions \u2014 <a href="/pages/schedule" style="color:var(--color-accent-main);font-weight:600">see the full schedule</a></div>';
+        if (panel) panel.style.display = 'none';
       });
   }
 
-  function renderFridayPanel(panel, p) {
-    var imgSrc  = p.fridayImage || p.image || '';
-    var dateDisplay = p.eventDate ? fmtDate(p.eventDate) : '';
+  function renderToday(track, products) {
+    if (!track) return;
+    if (!products.length) {
+      track.innerHTML = '<div class="sp-empty" style="min-width:280px">Nothing scheduled for today \u2014 <a href="/pages/schedule" style="color:var(--color-accent-main);font-weight:600">see the full schedule</a></div>';
+      return;
+    }
+    var html = '';
+    products.forEach(function(p) {
+      var title = cleanTitle(p.title);
+      var spotsHtml = '';
+      if (p.isFull) {
+        spotsHtml = '<div class="sp-session-card__spots" style="color:#c0391e">Sold out</div>';
+      } else if (p.isLow) {
+        spotsHtml = '<div class="sp-session-card__spots" style="color:#c0391e">Only ' + p.spaces + ' spots left!</div>';
+      } else if (p.spaces !== null) {
+        spotsHtml = '<div class="sp-session-card__spots">' + p.spaces + ' spots left</div>';
+      }
+      var bookHtml = p.isFull
+        ? '<div class="sp-session-card__book" style="opacity:.5;cursor:default">Sold Out</div>'
+        : '<a href="' + esc(p.url) + '" class="sp-session-card__book">Book now \u2192</a>';
+      html +=
+        '<div class="sp-session-card">' +
+          '<div class="sp-session-card__thumb">' +
+            (p.image ? '<img src="' + esc(p.image) + '" alt="' + esc(title) + '" loading="lazy">' : '') +
+          '</div>' +
+          '<div class="sp-session-card__body">' +
+            '<div class="sp-session-card__title">' + esc(title) + '</div>' +
+            (p.price ? '<div class="sp-session-card__price">' + esc(p.price) + '</div>' : '') +
+            spotsHtml +
+          '</div>' +
+          bookHtml +
+        '</div>';
+    });
+    track.innerHTML = html;
+  }
 
+  function renderFriday(panel, p) {
+    if (!panel) return;
+    if (!p) { panel.style.display = 'none'; return; }
+    var imgSrc = p.fridayImage || p.image || '';
+    var dateDisplay = p.eventDate ? fmtDate(p.eventDate) : '';
     panel.innerHTML =
       '<div class="sp-friday">' +
         (imgSrc
@@ -218,7 +185,7 @@
           (dateDisplay ? '<div class="sp-friday__date">' + esc(dateDisplay) + '</div>' : '') +
           (p.isFull
             ? '<div class="sp-friday__btn sp-friday__btn--sold">Sold Out</div>'
-            : '<a href="' + esc(p.url) + '" class="sp-friday__btn">BOOK FRIDAY NIGHT →</a>') +
+            : '<a href="' + esc(p.url) + '" class="sp-friday__btn">BOOK FRIDAY NIGHT \u2192</a>') +
         '</div>' +
       '</div>';
   }
@@ -229,8 +196,8 @@
     var grid = document.getElementById('sp-projects-grid');
     if (!grid || !STUDIO_ID) return;
 
-    var todayS   = todayStr();
-    var weekEnd  = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Toronto' }));
+    var todayS  = todayStr();
+    var weekEnd = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Toronto' }));
     weekEnd.setDate(weekEnd.getDate() + 6);
     var weekEndStr = weekEnd.toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
 
@@ -245,15 +212,12 @@
         grid.innerHTML = '<div class="sp-empty">Check back soon for this week\'s projects!</div>';
         return;
       }
-
       var seen = {}, handles = [];
       sessions.forEach(function(s) {
         var h = s.shopify_product_handle;
         if (h && !seen[h]) { seen[h] = true; handles.push({ handle: h, title: s.title }); }
       });
-
       if (!handles.length) { renderProjectsFromTitles(grid, sessions); return; }
-
       var fetches = handles.slice(0, 8).map(function(item) {
         return fetch('/products/' + item.handle + '.js')
           .then(function(r) { return r.json(); })
@@ -267,18 +231,16 @@
           })
           .catch(function() { return { title: item.title, handle: item.handle, image: null, url: '#' }; });
       });
-
       Promise.all(fetches).then(function(products) {
         var html = '';
         products.forEach(function(p) {
-          var name = p.title;
-          if (name.indexOf('|') > -1) name = name.split('|').slice(1).join('|').trim();
+          var name = cleanTitle(p.title);
           html +=
             '<a href="' + esc(p.url) + '" class="sp-project-card">' +
               '<div class="sp-project-card__thumb">' +
                 (p.image
                   ? '<img src="' + esc(p.image) + '" alt="' + esc(name) + '" loading="lazy">'
-                  : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:28px">🎨</div>') +
+                  : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:28px">\uD83C\uDFA8</div>') +
               '</div>' +
               '<div class="sp-project-card__name">' + esc(name) + '</div>' +
             '</a>';
@@ -293,11 +255,10 @@
   function renderProjectsFromTitles(grid, sessions) {
     var seen = {}, html = '';
     sessions.forEach(function(s) {
-      var name = s.title;
-      if (name.indexOf('|') > -1) name = name.split('|').slice(1).join('|').trim();
+      var name = cleanTitle(s.title);
       if (!seen[name]) {
         seen[name] = true;
-        html += '<div class="sp-project-card"><div class="sp-project-card__thumb" style="display:flex;align-items:center;justify-content:center;font-size:32px">🎨</div><div class="sp-project-card__name">' + esc(name) + '</div></div>';
+        html += '<div class="sp-project-card"><div class="sp-project-card__thumb" style="display:flex;align-items:center;justify-content:center;font-size:32px">\uD83C\uDFA8</div><div class="sp-project-card__name">' + esc(name) + '</div></div>';
       }
     });
     grid.innerHTML = html || '<div class="sp-empty">Check back soon!</div>';
@@ -316,35 +277,28 @@
 
     sbFetch(query).then(function(weeks) {
       if (!weeks || !weeks.length) {
-        grid.innerHTML = '<div class="sp-week-card"><div class="sp-week-card__theme" style="color:rgba(255,255,255,.5)">Themes coming soon…</div></div>';
+        grid.innerHTML = '<div class="sp-week-card"><div class="sp-week-card__theme" style="color:rgba(255,255,255,.5)">Themes coming soon\u2026</div></div>';
         return;
       }
-
       var todayDt = new Date(todayS);
       var html = '';
       weeks.forEach(function(w) {
         var startDt = w.week_start ? new Date(w.week_start + 'T12:00:00') : null;
         var endDt   = w.week_end   ? new Date(w.week_end   + 'T12:00:00') : null;
         var isCurrent = startDt && endDt && todayDt >= startDt && todayDt <= endDt;
-
         var themeFull = w.theme || '';
-        var themeDisplay = themeFull.indexOf('·') > -1
-          ? themeFull.split('·').slice(1).join('·').trim()
+        var themeDisplay = themeFull.indexOf('\u00b7') > -1
+          ? themeFull.split('\u00b7').slice(1).join('\u00b7').trim()
           : themeFull;
-
         var datesStr = (w.week_start && w.week_end)
-          ? fmtDate(w.week_start) + ' – ' + fmtDate(w.week_end)
-          : '';
-
+          ? fmtDate(w.week_start) + ' \u2013 ' + fmtDate(w.week_end) : '';
         var tags = themeDisplay.replace(' Week','').replace(' Collection','').split(' ');
         var tagHtml = '';
         tags.slice(0,3).forEach(function(t) {
           if (t.length > 2) tagHtml += '<span class="sp-week-card__tag">' + esc(t) + '</span>';
         });
-
         var linkOpen  = w.curriculum_url ? '<a href="' + esc(w.curriculum_url) + '" target="_blank" rel="noopener">' : '<div>';
         var linkClose = w.curriculum_url ? '</a>' : '</div>';
-
         html += linkOpen +
           '<div class="sp-week-card' + (isCurrent ? ' sp-week-card--current' : '') + '">' +
             (isCurrent ? '<span class="sp-week-card__badge">This week</span>' : '') +
@@ -354,7 +308,6 @@
           '</div>' +
         linkClose;
       });
-
       grid.innerHTML = html;
     }).catch(function() {
       grid.innerHTML = '<div class="sp-week-card"><div class="sp-week-card__theme" style="color:rgba(255,255,255,.5)">Couldn\'t load weeks right now.</div></div>';
@@ -373,7 +326,6 @@
 
     sbFetch(query).then(function(reviews) {
       if (!reviews || !reviews.length) { grid.innerHTML = '<div class="sp-empty">Reviews coming soon!</div>'; return; }
-
       var html = '';
       reviews.forEach(function(r) {
         html +=
@@ -393,37 +345,37 @@
   // ── 6. STUDIO PREFERENCE WIDGET ─────────────────────────────────
 
   var STUDIO_LIST = [
-    { id: 'BC-RICH-GC',  name: 'Richmond – Garden City' },
-    { id: 'BC-RICH-STV', name: 'Richmond – Steveston' },
-    { id: 'BC-SUR-SSR',  name: 'Surrey – South' },
-    { id: 'BC-YVR-KIT',  name: 'Vancouver – Kitsilano' },
-    { id: 'BC-YVR-MS',   name: 'Vancouver – Main Street' },
-    { id: 'BC-YVR-UBC',  name: 'Vancouver – UBC' },
-    { id: 'BC-YYJ-CSV',  name: 'Victoria – Cook Street Village' },
-    { id: 'BC-YYJ-ESQ',  name: 'Victoria – Esquimalt' },
-    { id: 'BC-YYJ-OB',   name: 'Victoria – Oak Bay' },
-    { id: 'BC-YYJ-VIC',  name: 'Victoria – Uptown' },
-    { id: 'AB-YYC-ING',  name: 'Calgary – Inglewood' },
+    { id: 'BC-RICH-GC',  name: 'Richmond \u2013 Garden City' },
+    { id: 'BC-RICH-STV', name: 'Richmond \u2013 Steveston' },
+    { id: 'BC-SUR-SSR',  name: 'Surrey \u2013 South' },
+    { id: 'BC-YVR-KIT',  name: 'Vancouver \u2013 Kitsilano' },
+    { id: 'BC-YVR-MS',   name: 'Vancouver \u2013 Main Street' },
+    { id: 'BC-YVR-UBC',  name: 'Vancouver \u2013 UBC' },
+    { id: 'BC-YYJ-CSV',  name: 'Victoria \u2013 Cook Street Village' },
+    { id: 'BC-YYJ-ESQ',  name: 'Victoria \u2013 Esquimalt' },
+    { id: 'BC-YYJ-OB',   name: 'Victoria \u2013 Oak Bay' },
+    { id: 'BC-YYJ-VIC',  name: 'Victoria \u2013 Uptown' },
+    { id: 'AB-YYC-ING',  name: 'Calgary \u2013 Inglewood' },
     { id: 'AB-STA-STA',  name: 'St Albert' },
-    { id: 'ON-BRL-BRL',  name: 'Burlington – South' },
-    { id: 'ON-CMB-GLT',  name: 'Cambridge – Galt' },
+    { id: 'ON-BRL-BRL',  name: 'Burlington \u2013 South' },
+    { id: 'ON-CMB-GLT',  name: 'Cambridge \u2013 Galt' },
     { id: 'ON-ERN-ERN',  name: 'Erin' },
-    { id: 'ON-HAM-OS',   name: 'Hamilton – Ottawa Street' },
-    { id: 'ON-HAM-WD',   name: 'Hamilton – Waterdown' },
-    { id: 'ON-HAM-WH',   name: 'Hamilton – West Harbour' },
-    { id: 'ON-KGN-AP',   name: 'Kingston – Arlington Park' },
-    { id: 'ON-LDN-BYR',  name: 'London – Byron' },
-    { id: 'ON-LDN-WVG',  name: 'London – Wortley Village' },
-    { id: 'ON-MIS-PC',   name: 'Mississauga – Port Credit' },
-    { id: 'ON-OAK-OAK',  name: 'Oakville – North' },
-    { id: 'ON-OAK-WST',  name: 'Oakville – West' },
-    { id: 'ON-YOW-GLB',  name: 'Ottawa – The Glebe' },
+    { id: 'ON-HAM-OS',   name: 'Hamilton \u2013 Ottawa Street' },
+    { id: 'ON-HAM-WD',   name: 'Hamilton \u2013 Waterdown' },
+    { id: 'ON-HAM-WH',   name: 'Hamilton \u2013 West Harbour' },
+    { id: 'ON-KGN-AP',   name: 'Kingston \u2013 Arlington Park' },
+    { id: 'ON-LDN-BYR',  name: 'London \u2013 Byron' },
+    { id: 'ON-LDN-WVG',  name: 'London \u2013 Wortley Village' },
+    { id: 'ON-MIS-PC',   name: 'Mississauga \u2013 Port Credit' },
+    { id: 'ON-OAK-OAK',  name: 'Oakville \u2013 North' },
+    { id: 'ON-OAK-WST',  name: 'Oakville \u2013 West' },
+    { id: 'ON-YOW-GLB',  name: 'Ottawa \u2013 The Glebe' },
     { id: 'ON-STC-STC',  name: 'St Catharines' },
-    { id: 'ON-YYZ-AVE',  name: 'Toronto – Avenue Road' },
-    { id: 'ON-YYZ-BP',   name: 'Toronto – Baby Point' },
-    { id: 'ON-YYZ-LEA',  name: 'Toronto – Leaside' },
-    { id: 'ON-YYZ-BEA',  name: 'Toronto – The Beaches' },
-    { id: 'ON-WTR-WTR',  name: 'Waterloo – Uptown' }
+    { id: 'ON-YYZ-AVE',  name: 'Toronto \u2013 Avenue Road' },
+    { id: 'ON-YYZ-BP',   name: 'Toronto \u2013 Baby Point' },
+    { id: 'ON-YYZ-LEA',  name: 'Toronto \u2013 Leaside' },
+    { id: 'ON-YYZ-BEA',  name: 'Toronto \u2013 The Beaches' },
+    { id: 'ON-WTR-WTR',  name: 'Waterloo \u2013 Uptown' }
   ];
 
   var PREF_KEY = '4cats_preferred_studio';
@@ -473,8 +425,7 @@
   // ── INIT ────────────────────────────────────────────────────────
 
   function init() {
-    loadToday();
-    loadFridayNightSpecial();
+    loadTodayAndFriday();
     loadProjects();
     loadUpcomingWeeks();
     loadReviews();
