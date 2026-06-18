@@ -170,7 +170,7 @@
     ? '<div class="sp-mm-photo">' +
         (next.image ? '<img src="' + esc(next.image) + '" alt="' + esc(next.title) + '" loading="lazy">' : '<div class="sp-mm-photo-empty"></div>') +
         '<div class="sp-mm-photo-label">Next week: ' + esc(next.title) + '</div>' +
-        '<a href="' + esc(next.url) + '" class="sp-mm-photo-btn sp-mm-photo-btn--outline">Preview Next Week \u2192</a>' +
+        '<a href="' + esc(next.url) + '" class="sp-mm-photo-btn">Book Next Week \u2192</a>' +
       '</div>'
     : '<div class="sp-mm-photo sp-mm-photo-empty"></div>';
 
