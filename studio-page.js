@@ -10,65 +10,20 @@
 (function () {
   'use strict';
 
-  var CFG        = window.SP_CONFIG || {};
-  var STUDIO_ID  = CFG.studioId   || '';
-  var STUDIO_NAME= CFG.studioName || '4Cats';
-  var SB_URL     = CFG.supabaseUrl|| 'https://snxibhbhhchjthfmjtaj.supabase.co';
-  var SB_ANON    = CFG.supabaseAnon|| '';
+  var CFG         = window.SP_CONFIG || {};
+  var STUDIO_ID   = CFG.studioId    || '';
+  var STUDIO_NAME = CFG.studioName  || '4Cats';
+  var SB_URL      = CFG.supabaseUrl || 'https://snxibhbhhchjthfmjtaj.supabase.co';
+  var SB_ANON     = CFG.supabaseAnon|| '';
 
   var STUDIO_TODAY_URL = SB_URL + '/functions/v1/studio-today';
-
-  // ── STUDIO → SHOPIFY VARIANT TITLE MAP ─────────────────────────
-  var STUDIO_VARIANT_MAP = {
-    'BC-RICH-GC':  'BC / RICHMOND - GARDEN CITY',
-    'BC-RICH-STV': 'BC / RICHMOND - STEVESTON',
-    'BC-SUR-SSR':  'BC / SURREY - SOUTH',
-    'BC-YVR-KIT':  'BC / VANCOUVER - KITSILANO',
-    'BC-YVR-MS':   'BC / VANCOUVER - MAIN STREET',
-    'BC-YVR-UBC':  'BC / VANCOUVER - UBC',
-    'BC-YYJ-CSV':  'BC / VICTORIA - COOK STREET VILLAGE',
-    'BC-YYJ-ESQ':  'BC / VICTORIA - ESQUIMALT',
-    'BC-YYJ-OB':   'BC / VICTORIA - OAK BAY',
-    'BC-YYJ-VIC':  'BC / VICTORIA - UPTOWN',
-    'AB-YYC-ING':  'AB / CALGARY - INGLEWOOD',
-    'AB-STA-STA':  'AB / ST ALBERT',
-    'ON-BRL-BRL':  'ON / BURLINGTON - SOUTH',
-    'ON-CMB-GLT':  'ON / CAMBRIDGE - GALT',
-    'ON-ERN-ERN':  'ON / ERIN',
-    'ON-HAM-OS':   'ON / HAMILTON - OTTAWA STREET',
-    'ON-HAM-WD':   'ON / HAMILTON - WATERDOWN',
-    'ON-HAM-WH':   'ON / HAMILTON - WEST HARBOUR',
-    'ON-KGN-AP':   'ON / KINGSTON - ARLINGTON PARK',
-    'ON-LDN-BYR':  'ON / LONDON - BYRON',
-    'ON-LDN-WVG':  'ON / LONDON - WORTLEY VILLAGE',
-    'ON-MIS-PC':   'ON / MISSISSAUGA - PORT CREDIT',
-    'ON-OAK-OAK':  'ON / OAKVILLE - NORTH',
-    'ON-OAK-WST':  'ON / OAKVILLE - WEST',
-    'ON-YOW-GLB':  'ON / OTTAWA - THE GLEBE',
-    'ON-STC-STC':  'ON / ST CATHARINES',
-    'ON-YYZ-AVE':  'ON / TORONTO - AVENUE ROAD',
-    'ON-YYZ-BP':   'ON / TORONTO - BABY POINT',
-    'ON-YYZ-LEA':  'ON / TORONTO - LEASIDE',
-    'ON-YYZ-BEA':  'ON / TORONTO - THE BEACHES',
-    'ON-WTR-WTR':  'ON / WATERLOO - UPTOWN'
-  };
-
-  function findStudioVariant(variants) {
-    if (!variants || !variants.length) return null;
-    var target = STUDIO_VARIANT_MAP[STUDIO_ID] || '';
-    if (!target) return variants[0];
-    for (var i = 0; i < variants.length; i++) {
-      if ((variants[i].title || '').toUpperCase() === target) return variants[i];
-    }
-    return variants[0];
-  }
 
   // ── UTILITIES ───────────────────────────────────────────────────
 
   var SB_HEADERS = {
-    'apikey': SB_ANON,
+    'apikey':        SB_ANON,
     'Authorization': 'Bearer ' + SB_ANON,
-    'Content-Type': 'application/json'
+    'Content-Type':  'application/json'
   };
 
   function sbFetch(path) {
@@ -90,10 +45,10 @@
     if (!str) return '';
     var parts = str.split(':');
     var h = parseInt(parts[0], 10);
-    var m = parts[1];
+    var m = parseInt(parts[1], 10);
     var ampm = h >= 12 ? 'pm' : 'am';
     h = h % 12 || 12;
-    return m === '00' ? h + ampm : h + ':' + m + ampm;
+    return m === 0 ? h + ampm : h + ':' + (m < 10 ? '0' + m : m) + ampm;
   }
 
   function stars(n) {
@@ -143,7 +98,10 @@
     }
     var html = '';
     products.forEach(function(p) {
-      var title = cleanTitle(p.title);
+      var title  = cleanTitle(p.title);
+      var handle = p.url ? p.url.split('/products/')[1].split('?')[0] : '';
+      var timeStr = p.sessionTime ? fmtTime(p.sessionTime) : '';
+
       var spotsHtml = '';
       if (p.isFull) {
         spotsHtml = '<div class="sp-session-card__spots" style="color:#c0391e">Sold out</div>';
@@ -152,13 +110,15 @@
       } else if (p.spaces !== null) {
         spotsHtml = '<div class="sp-session-card__spots">' + p.spaces + ' spots left</div>';
       }
+
       var bookHtml = p.isFull
         ? '<div class="sp-session-card__book" style="opacity:.5;cursor:default">Sold Out</div>'
         : '<a href="' + esc(p.url) + '" class="sp-session-card__book">Book now \u2192</a>';
+
       html +=
-        '<div class="sp-session-card">' +
+        '<div class="sp-session-card" data-handle="' + esc(handle) + '">' +
           '<div class="sp-session-card__thumb">' +
-            (p.image ? '<img src="' + esc(p.image) + '" alt="' + esc(title) + '" loading="lazy">' : '') +
+            (timeStr ? '<div class="sp-session-card__time-badge">' + esc(timeStr) + '</div>' : '') +
           '</div>' +
           '<div class="sp-session-card__body">' +
             '<div class="sp-session-card__title">' + esc(title) + '</div>' +
@@ -169,18 +129,31 @@
         '</div>';
     });
     track.innerHTML = html;
-  }
 
-  window.spCarouselScroll = function(dir) {
-  var track = document.getElementById('sp-today-track');
-  if (track) track.scrollBy({ left: dir * 220, behavior: 'smooth' });
-};
+    // Fetch images for each card from Shopify storefront
+    track.querySelectorAll('.sp-session-card[data-handle]').forEach(function(card) {
+      var handle = card.getAttribute('data-handle');
+      if (!handle) return;
+      fetch('/products/' + handle + '.js')
+        .then(function(r) { return r.json(); })
+        .then(function(p) {
+          var img = p.images && p.images[0] ? p.images[0].src : null;
+          if (img) {
+            var thumb = card.querySelector('.sp-session-card__thumb');
+            if (thumb) {
+              var timeBadge = thumb.querySelector('.sp-session-card__time-badge');
+              thumb.innerHTML = '<img src="' + img + '" loading="lazy" style="width:100%;height:100%;object-fit:cover;">';
+              if (timeBadge) thumb.appendChild(timeBadge);
+            }
+          }
+        }).catch(function() {});
+    });
+  }
 
   function renderFriday(panel, p) {
     if (!panel) return;
     if (!p) { panel.style.display = 'none'; return; }
     var imgSrc = p.fridayImage || p.image || '';
-    var dateDisplay = p.eventDate ? fmtDate(p.eventDate) : '';
     panel.innerHTML =
       '<div class="sp-friday">' +
         (imgSrc
@@ -404,10 +377,16 @@
     list.innerHTML = html;
   }
 
+  window.spCarouselScroll = function(dir) {
+    var track = document.getElementById('sp-today-track');
+    if (track) track.scrollBy({ left: dir * 220, behavior: 'smooth' });
+  };
+
   window.spPrefToggle = function() {
     var p = document.getElementById('sp-pref-popup');
     if (p) p.classList.toggle('open');
   };
+
   window.spSetStudio = function(id) {
     setPref(id);
     var found = STUDIO_LIST.filter(function(s) { return s.id === id; })[0];
@@ -420,6 +399,7 @@
     var p = document.getElementById('sp-pref-popup');
     if (p) p.classList.remove('open');
   };
+
   document.addEventListener('click', function(e) {
     var w = document.getElementById('sp-studio-pref');
     var p = document.getElementById('sp-pref-popup');
