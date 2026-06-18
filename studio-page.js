@@ -99,7 +99,7 @@
     var html = '';
     products.forEach(function(p) {
       var title  = cleanTitle(p.title);
-      var handle = p.url ? p.url.split('/products/')[1].split('?')[0] : '';
+      var handle = p.handle || (p.url ? p.url.split('/products/')[1].split('?')[0] : '');
       var timeStr = p.sessionTime ? fmtTime(p.sessionTime) : '';
 
       var spotsHtml = '';
