@@ -161,31 +161,43 @@
   var thisHtml = mm
     ? '<div class="sp-mm-photo">' +
         (mm.image ? '<img src="' + esc(mm.image) + '" alt="' + esc(mm.title) + '" loading="lazy">' : '<div class="sp-mm-photo-empty"></div>') +
-        '<div class="sp-mm-photo-label">This week</div>' +
+        '<div class="sp-mm-photo-label">This week: ' + esc(mm.title) + '</div>' +
+        '<a href="' + esc(mm.url) + '" class="sp-mm-photo-btn">Book This Week \u2192</a>' +
       '</div>'
     : '<div class="sp-mm-photo sp-mm-photo-empty"></div>';
 
   var nextHtml = next
     ? '<div class="sp-mm-photo">' +
         (next.image ? '<img src="' + esc(next.image) + '" alt="' + esc(next.title) + '" loading="lazy">' : '<div class="sp-mm-photo-empty"></div>') +
-        '<div class="sp-mm-photo-label">Next week</div>' +
+        '<div class="sp-mm-photo-label">Next week: ' + esc(next.title) + '</div>' +
+        '<a href="' + esc(next.url) + '" class="sp-mm-photo-btn sp-mm-photo-btn--outline">Preview Next Week \u2192</a>' +
       '</div>'
     : '<div class="sp-mm-photo sp-mm-photo-empty"></div>';
 
   var centerHtml =
     '<div class="sp-mm-center">' +
       '<div class="sp-mm-eyebrow">Mini Makes from ' + esc((mm || next).price || '$8') + ' \u2665</div>' +
-      '<h2 class="sp-mm-title">' + esc((mm || next).title) + '</h2>' +
-      '<p class="sp-mm-desc">Just want somewhere to go? We got you.<br>Drop in, make something &amp; hang out!</p>' +
-      '<ul class="sp-mm-list">' +
-        '<li>No experience needed</li>' +
-        '<li>One visit, drop in anytime</li>' +
-        '<li>Rotating weekly themes</li>' +
-        '<li>Fun, social &amp; relaxing</li>' +
-      '</ul>' +
-      '<div class="sp-mm-btns">' +
-        (mm ? '<a href="' + esc(mm.url) + '" class="button button--solid button--regular">Book This Week \u2192</a>' : '') +
-        (next ? '<a href="' + esc(next.url) + '" class="button button--outline button--regular">Book Next Week \u2192</a>' : '') +
+      '<div class="sp-mm-cols">' +
+        '<div>' +
+          '<p class="sp-mm-desc">Just want somewhere to go? We got you. Drop in, make something &amp; hang out!</p>' +
+          '<ul class="sp-mm-list">' +
+            '<li>\uD83D\uDC8C No experience needed</li>' +
+            '<li>\uD83C\uDFA8 Choose from weekly themes</li>' +
+            '<li>\u2728 One visit, drop in anytime</li>' +
+            '<li>\uD83D\uDE0A Fun, social &amp; relaxing</li>' +
+          '</ul>' +
+        '</div>' +
+        '<div>' +
+          '<div class="sp-mm-perfect-label">Perfect for:</div>' +
+          '<ul class="sp-mm-list">' +
+            '<li>\uD83D\uDC65 Friend hangs</li>' +
+            '<li>\uD83D\uDC97 Casual date nights</li>' +
+            '<li>\uD83C\uDF19 After dinner plans</li>' +
+            '<li>\u2614 Rainy days</li>' +
+            '<li>\uD83C\uDFA8 Creative breaks</li>' +
+            '<li>\uD83D\uDCA1 &ldquo;We should do something tonight&rdquo;</li>' +
+          '</ul>' +
+        '</div>' +
       '</div>' +
     '</div>';
 
