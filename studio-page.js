@@ -170,7 +170,7 @@
                 (p.image ? '<img src="' + esc(p.image) + '" alt="' + esc(p.title) + '" loading="lazy">' : '') +
               '</div>' +
               '<div class="sp-session-card__body">' +
-                '<div class="sp-session-card__title">' + esc(p.title) + '</div>' +
+                '<div class="sp-session-card__title">' + esc(p.title.indexOf('|') > -1 ? p.title.split('|').slice(1).join('|').trim() : p.title) + '</div>' +
                 (p.price ? '<div class="sp-session-card__price">' + esc(p.price) + '</div>' : '') +
                 spotsHtml +
               '</div>' +
