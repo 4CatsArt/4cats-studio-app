@@ -103,14 +103,13 @@
       var handle = p.handle || (p.url ? p.url.split('/products/')[1].split('?')[0] : '');
       var timeStr = p.sessionTime ? fmtTime(p.sessionTime) : '';
 
-      var spotsHtml = '';
+      var spotsText = '';
       if (p.isFull) {
-        spotsHtml = '<div class="sp-session-card__spots" style="color:#c0391e">Sold out</div>';
-      } else if (p.isLow) {
-        spotsHtml = '<div class="sp-session-card__spots" style="color:#c0391e">Only ' + p.spaces + ' spots left!</div>';
+        spotsText = 'Sold out';
       } else if (p.spaces !== null && p.spaces <= 6) {
-        spotsHtml = '<div class="sp-session-card__spots">' + p.spaces + ' spots left</div>';
+        spotsText = p.spaces + ' spots left';
       }
+      var spotsHtml = '<div class="sp-session-card__spots" style="color:' + (spotsText ? '#c0391e' : 'transparent') + '">' + (spotsText || 'x') + '</div>';
 
       var bookHtml = p.isFull
         ? '<div class="sp-session-card__book" style="opacity:.5;cursor:default">Sold Out</div>'
