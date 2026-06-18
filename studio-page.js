@@ -108,7 +108,7 @@
         spotsHtml = '<div class="sp-session-card__spots" style="color:#c0391e">Sold out</div>';
       } else if (p.isLow) {
         spotsHtml = '<div class="sp-session-card__spots" style="color:#c0391e">Only ' + p.spaces + ' spots left!</div>';
-      } else if (p.spaces !== null) {
+      } else if (p.spaces !== null && p.spaces <= 6) {
         spotsHtml = '<div class="sp-session-card__spots">' + p.spaces + ' spots left</div>';
       }
 
