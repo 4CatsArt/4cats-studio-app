@@ -161,7 +161,7 @@
   var thisHtml = mm
     ? '<div class="sp-mm-photo">' +
         (mm.image ? '<img src="' + esc(mm.image) + '" alt="' + esc(mm.title) + '" loading="lazy">' : '<div class="sp-mm-photo-empty"></div>') +
-        '<div class="sp-mm-photo-label">This week: ' + esc(mm.title) + '</div>' +
+        '<div class="sp-mm-photo-label">Next week: ' + esc(next.title) + '</div>' +
         '<a href="' + esc(mm.url) + '" class="sp-mm-photo-btn">Book This Week \u2192</a>' +
       '</div>'
     : '<div class="sp-mm-photo sp-mm-photo-empty"></div>';
