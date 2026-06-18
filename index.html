@@ -2419,6 +2419,17 @@ async function loadDay2View() {
   }
 
   await Promise.all([loadTaskTemplates(currentStudioId), loadStudioStaff(currentStudioId)])
+  await autoGenerateRepeatingTasks(currentStudioId, today)
+
+  const [announcements, dailyNotes, tasks] = await Promise.all([
+    loadAnnouncements(currentStudioId, today),
+    loadDailyNotes(currentStudioId, today),
+    loadTasks(currentStudioId, today)
+  ])
+
+  const { data: walkinData } = await sb.from('daily_walkins')
+    .select('walkins').eq('studio_id', currentStudioId).eq('report_date', today).single()
+  const currentWalkins = walkinData?.walkins || 0
 
   const filtered = preFiltered.filter(s =>
     (s.show !== false || (bookingCountsD2[s.id] || 0) > 0) &&
@@ -2446,17 +2457,103 @@ async function loadDay2View() {
     }
   }
 
-  // Curriculum links for top panel
-  const allSessions = filtered
-  const workshopSession = allSessions.find(s => s.session_type === 'workshop')
-  const workshopCurrLink = workshopSession ? getCurriculumLinks(workshopSession.title, today) : null
-  const partyCurrLink = partySessions.length ? getCurriculumLinks('party', today) : null
+  // ── Theme banner, announcements, break/tasks, count ──────────
+  const themeBannerHtml = buildThemeBanner(today)
+  const { urgent: urgentHtml, normal: normalHtml } = buildAnnouncementBanners(announcements)
 
-  const sdl = staffDatalistHtml
-  // Use any session's staff for day-level fields (director/demoers/circlers saved to all)
-  const anyStaff = Object.values(staffDataD2)[0] || {}
+  const breakVal = dailyNotes?.break_schedule || ''
+  const existingNoteId = dailyNotes?.id || ''
+  const taskRows = tasks.map(task => {
+    const done = task.status === 'complete'
+    return `<div id="task-row-${task.id}" style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:0.5px solid #f5f5f0;${done ? 'opacity:0.45' : ''}">${buildTaskRowInner(task)}</div>`
+  }).join('')
+  const emptyTasks = tasks.length === 0 ? '<div style="font-size:12px;color:#bbb;padding:8px 0">No tasks for today — add one below</div>' : ''
+  const breakTasksHtml = `<div style="background:white;border:0.5px solid #e0e0d8;border-radius:10px;margin-bottom:0.6rem;overflow:hidden">
+    <div style="display:grid;grid-template-columns:25% 75%;gap:0">
+      <div style="padding:14px 16px;border-right:0.5px solid #f0f0e8">
+        <div style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">☕ Break Schedule</div>
+        <textarea id="break-schedule-input" data-studio="${currentStudioId}" data-date="${today}" data-existing-id="${existingNoteId}"
+          placeholder="e.g. Sarah 11:30, Mike 12:00, Jenny 1:00pm..."
+          style="width:100%;height:72px;border:0.5px solid #e0e0d8;border-radius:6px;padding:7px 10px;font-size:13px;resize:none;outline:none;box-sizing:border-box;font-family:inherit"
+          onblur="saveDailyNotes('${currentStudioId}','${today}')">${breakVal}</textarea>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+          <button onclick="saveDailyNotes('${currentStudioId}','${today}')" style="font-size:11px;padding:4px 12px;background:#1a1a1a;color:white;border:none;border-radius:6px;cursor:pointer">Save</button>
+          <span id="break-save-confirm" style="font-size:11px;color:#2e7d32;opacity:0;transition:opacity 0.3s">✓ Saved</span>
+        </div>
+      </div>
+      <div style="padding:14px 16px">
+        <div style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">✅ Today's Tasks</div>
+        <div id="task-list">${taskRows}${emptyTasks}</div>
+        <div style="margin-top:8px">
+          <div style="display:flex;gap:6px;margin-bottom:6px">
+            <select id="new-task-template" onchange="applyTaskTemplate()" style="flex:2;padding:6px 10px;border:0.5px solid #e0e0d8;border-radius:6px;font-size:13px;outline:none;background:white;color:#888">
+              <option value="">📋 Pick from library...</option>
+              ${taskTemplates.map(t => `<option value="${t.id}" data-title="${t.title}" data-notes="${t.notes||''}" data-url="${t.url||''}">${t.title}</option>`).join('')}
+            </select>
+            <span style="line-height:32px;font-size:12px;color:#bbb">or</span>
+            <input id="new-task-input" type="text" placeholder="Type a custom task..."
+              style="flex:2;padding:6px 10px;border:0.5px solid #e0e0d8;border-radius:6px;font-size:13px;outline:none"
+              onkeydown="if(event.key==='Enter') addTask('${currentStudioId}','${today}')">
+          </div>
+          <div style="display:flex;gap:6px">
+            <input id="new-task-assignee" type="text" placeholder="Assign to..." list="staff-list-task" autocomplete="off"
+              style="flex:1;padding:6px 10px;border:0.5px solid #e0e0d8;border-radius:6px;font-size:13px;outline:none">
+            ${staffDatalistHtml('staff-list-task')}
+            <input id="new-task-due" type="date" value="${today}" style="padding:6px 10px;border:0.5px solid #e0e0d8;border-radius:6px;font-size:13px;outline:none">
+            <button onclick="addTask('${currentStudioId}','${today}')" style="padding:6px 14px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">+</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`
+
+  // Participant totals
+  let totalNonParty = 0, totalPartyGuests = 0
+  for (const s of filtered) {
+    if (s.session_type !== 'party') {
+      totalNonParty += (bookingCountsD2[s.id] || 0)
+    } else {
+      for (const b of (partyBookingsMap[s.id] || [])) {
+        const pd = partyDetailsMap[b.id]
+        if (pd && pd.actual_guests) totalPartyGuests += parseInt(pd.actual_guests) || 0
+        else if (pd && pd.expected_guests) totalPartyGuests += parseInt(pd.expected_guests) || 0
+        else if (b.estimated_attendance) totalPartyGuests += parseInt(b.estimated_attendance) || 0
+        else totalPartyGuests += (b.qty || 0)
+      }
+    }
+  }
+  const totalDropins = Object.values(dropinCountsD2).reduce((s, n) => s + n, 0)
+  const grandTotal = totalNonParty + totalPartyGuests + totalDropins + currentWalkins
+
+  const STUDIO_GROUP = { 'BC-YVR-MS':'A', 'BC-YYJ-VIC':'A' }
+  const group = STUDIO_GROUP[currentStudioId] || 'B'
+  const isWeekend = [0, 6].includes(currentDate.getDay())
+  const thresholds = {
+    A: { weekday: [{max:9,msg:'Very slow day - consider closing',bg:'#fff3e0',color:'#e65100'},{max:20,msg:'Keep growing!',bg:'#fff0e0',color:'#c96a00'},{max:79,msg:'Have a good day in the studio!',bg:'#fffde7',color:'#9a7c00'},{max:Infinity,msg:'You made your goal, congratulations!',bg:'#e8f5e9',color:'#2e7d32'}], weekend: [{max:9,msg:'Uh oh - we need to grow!',bg:'#fff3e0',color:'#e65100'},{max:20,msg:'Keep growing!',bg:'#fff0e0',color:'#c96a00'},{max:159,msg:'Have a good day in the studio!',bg:'#fffde7',color:'#9a7c00'},{max:Infinity,msg:'You made your goal, congratulations!',bg:'#e8f5e9',color:'#2e7d32'}] },
+    B: { weekday: [{max:9,msg:'Very slow day - consider closing',bg:'#fff3e0',color:'#e65100'},{max:20,msg:'Keep growing!',bg:'#fff0e0',color:'#c96a00'},{max:59,msg:'Have a good day in the studio!',bg:'#fffde7',color:'#9a7c00'},{max:Infinity,msg:'You made your goal, congratulations!',bg:'#e8f5e9',color:'#2e7d32'}], weekend: [{max:9,msg:'Uh oh - we need to grow!',bg:'#fff3e0',color:'#e65100'},{max:20,msg:'Keep growing!',bg:'#fff0e0',color:'#c96a00'},{max:99,msg:'Have a good day in the studio!',bg:'#fffde7',color:'#9a7c00'},{max:Infinity,msg:'You made your goal, congratulations!',bg:'#e8f5e9',color:'#2e7d32'}] }
+  }
+  const thresh = thresholds[group][isWeekend ? 'weekend' : 'weekday'].find(t => grandTotal <= t.max)
+  const partyNote = totalPartyGuests > 0 ? ` <span style="font-size:12px;opacity:0.8">(incl. ${totalPartyGuests} party guests)</span>` : ''
+  const dropinNote = totalDropins > 0 ? ` <span style="font-size:12px;opacity:0.8">(incl. ${totalDropins} drop-in${totalDropins !== 1 ? 's' : ''})</span>` : ''
+  const walkinsNote = currentWalkins > 0 ? ` <span style="font-size:12px;opacity:0.8">(incl. ${currentWalkins} other drop-ins)</span>` : ''
+  const countBannerHtml = `<div style="background:${thresh.bg};color:${thresh.color};border-radius:10px;padding:12px 18px;margin-bottom:1rem;display:flex;align-items:center;justify-content:space-between;font-size:14px;gap:12px;">
+    <span><strong>${grandTotal} participants today</strong>${partyNote}${dropinNote}${walkinsNote}</span>
+    <span style="font-weight:500">${thresh.msg}</span>
+    <div style="display:flex;align-items:center;gap:8px;margin-left:auto" class="no-print">
+      <button onclick="printFullDay()" style="padding:4px 12px;background:white;color:#444;border:0.5px solid #d0d0c8;border-radius:6px;font-size:12px;cursor:pointer;white-space:nowrap">🖨 Print Full Day</button>
+      <span style="color:rgba(0,0,0,0.2)">|</span>
+      <span style="font-size:12px;white-space:nowrap">Other drop-ins:</span>
+      <input type="number" id="walkins-input" value="${currentWalkins}" min="0" style="width:60px;padding:4px 8px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;text-align:center">
+      <button onclick="saveWalkins()" style="padding:4px 12px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:12px;cursor:pointer" id="walkins-save-btn">Save</button>
+    </div>
+  </div>`
 
   // ── Staff panel ──────────────────────────────────────────────
+  const workshopSession = filtered.find(s => s.session_type === 'workshop')
+  const workshopCurrLink = workshopSession ? getCurriculumLinks(workshopSession.title, today) : null
+  const partyCurrLink = partySessions.length ? getCurriculumLinks('party', today) : null
+  const sdl = staffDatalistHtml
+  const anyStaff = Object.values(staffDataD2)[0] || {}
   const hasGlazing = nonPartySessions.some(s => s.session_type === 'glazing')
   const staffPanel = `
   <div class="d2-staff-panel" id="d2-staff-panel">
