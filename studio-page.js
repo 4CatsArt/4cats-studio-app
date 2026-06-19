@@ -172,30 +172,8 @@
     : '<div class="sp-mm-photo sp-mm-photo-empty"></div>';
 
   var centerHtml =
-    '<div class="sp-mm-center">' +
-      '<div class="sp-mm-eyebrow">Mini Makes from ' + esc((mm || next).price || '$8') + ' \u2665</div>' +
-      '<div class="sp-mm-cols">' +
-        '<div>' +
-          '<p class="sp-mm-desc">Just want somewhere to go? We got you. Drop in, make something &amp; hang out!</p>' +
-          '<ul class="sp-mm-list">' +
-            '<li>\uD83D\uDC8C No experience needed</li>' +
-            '<li>\uD83C\uDFA8 Choose from weekly themes</li>' +
-            '<li>\u2728 One visit, drop in anytime</li>' +
-            '<li>\uD83D\uDE0A Fun, social &amp; relaxing</li>' +
-          '</ul>' +
-        '</div>' +
-        '<div>' +
-          '<div class="sp-mm-perfect-label">Perfect for:</div>' +
-          '<ul class="sp-mm-list">' +
-            '<li>\uD83D\uDC65 Friend hangs</li>' +
-            '<li>\uD83D\uDC97 Casual date nights</li>' +
-            '<li>\uD83C\uDF19 After dinner plans</li>' +
-            '<li>\u2614 Rainy days</li>' +
-            '<li>\uD83C\uDFA8 Creative breaks</li>' +
-            '<li>\uD83D\uDCA1 &ldquo;We should do something tonight&rdquo;</li>' +
-          '</ul>' +
-        '</div>' +
-      '</div>' +
+    '<div class="sp-mm-center" style="padding:0;overflow:hidden;">' +
+      '<img src="https://cdn.shopify.com/s/files/1/1451/3756/files/mini_make_banner_studio_page.png?v=1781828229" alt="Mini Makes from $8" style="width:100%;height:100%;object-fit:cover;display:block;">' +
     '</div>';
 
   section.innerHTML = thisHtml + centerHtml + nextHtml;
