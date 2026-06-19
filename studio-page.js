@@ -183,77 +183,8 @@
 
   // ── 3. THIS WEEK'S PROJECTS ─────────────────────────────────────
 
-  function loadProjects() {
-    var grid = document.getElementById('sp-projects-grid');
-    if (!grid || !STUDIO_ID) return;
 
-    var todayS  = todayStr();
-    var weekEnd = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Toronto' }));
-    weekEnd.setDate(weekEnd.getDate() + 6);
-    var weekEndStr = weekEnd.toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
 
-    var query = 'sessions?select=id,title,shopify_product_handle' +
-      '&studio_id=eq.' + encodeURIComponent(STUDIO_ID) +
-      '&session_date=gte.' + encodeURIComponent(todayS) +
-      '&session_date=lte.' + encodeURIComponent(weekEndStr) +
-      '&order=session_date.asc&limit=50';
-
-    sbFetch(query).then(function(sessions) {
-      if (!sessions || !sessions.length) {
-        grid.innerHTML = '<div class="sp-empty">Check back soon for this week\'s projects!</div>';
-        return;
-      }
-      var seen = {}, handles = [];
-      sessions.forEach(function(s) {
-        var h = s.shopify_product_handle;
-        if (h && !seen[h]) { seen[h] = true; handles.push({ handle: h, title: s.title }); }
-      });
-      if (!handles.length) { renderProjectsFromTitles(grid, sessions); return; }
-      var fetches = handles.slice(0, 8).map(function(item) {
-        return fetch('/products/' + item.handle + '.js')
-          .then(function(r) { return r.json(); })
-          .then(function(p) {
-            return {
-              title:  p.title || item.title,
-              handle: p.handle || item.handle,
-              image:  (p.images && p.images[0]) ? p.images[0].src : null,
-              url:    '/products/' + (p.handle || item.handle)
-            };
-          })
-          .catch(function() { return { title: item.title, handle: item.handle, image: null, url: '#' }; });
-      });
-      Promise.all(fetches).then(function(products) {
-        var html = '';
-        products.forEach(function(p) {
-          var name = cleanTitle(p.title);
-          html +=
-            '<a href="' + esc(p.url) + '" class="sp-project-card">' +
-              '<div class="sp-project-card__thumb">' +
-                (p.image
-                  ? '<img src="' + esc(p.image) + '" alt="' + esc(name) + '" loading="lazy">'
-                  : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:28px">\uD83C\uDFA8</div>') +
-              '</div>' +
-              '<div class="sp-project-card__name">' + esc(name) + '</div>' +
-            '</a>';
-        });
-        grid.innerHTML = html || '<div class="sp-empty">Check back soon for this week\'s projects!</div>';
-      });
-    }).catch(function() {
-      grid.innerHTML = '<div class="sp-empty">Couldn\'t load projects right now.</div>';
-    });
-  }
-
-  function renderProjectsFromTitles(grid, sessions) {
-    var seen = {}, html = '';
-    sessions.forEach(function(s) {
-      var name = cleanTitle(s.title);
-      if (!seen[name]) {
-        seen[name] = true;
-        html += '<div class="sp-project-card"><div class="sp-project-card__thumb" style="display:flex;align-items:center;justify-content:center;font-size:32px">\uD83C\uDFA8</div><div class="sp-project-card__name">' + esc(name) + '</div></div>';
-      }
-    });
-    grid.innerHTML = html || '<div class="sp-empty">Check back soon!</div>';
-  }
 
   // ── 4. UPCOMING WEEKS ───────────────────────────────────────────
 
@@ -424,7 +355,6 @@
 
   function init() {
     loadTodayAndFriday();
-    loadProjects();
     loadUpcomingWeeks();
     loadReviews();
     initPrefWidget();
