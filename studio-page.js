@@ -81,7 +81,7 @@
     })
       .then(function(r) { return r.json(); })
       .then(function(data) {
-        renderToday(track, data.today || []);
+        renderToday(track, data.today || [], (data.meta || {}).sessionDayLabel);
         renderFriday(panel, data.friday || null);
         renderMiniMake(data); 
       })
@@ -91,8 +91,10 @@
       });
   }
 
-  function renderToday(track, products) {
+  function renderToday(track, products, dayLabel) {
     if (!track) return;
+    var heading = document.getElementById('sp-today-heading');
+    if (heading) heading.textContent = (dayLabel === 'tomorrow' ? 'Tomorrow' : 'Today') + ' at 4Cats ' + STUDIO_NAME;
     if (!products.length) {
       track.innerHTML = '<div class="sp-empty" style="min-width:280px">Nothing scheduled for today \u2014 <a href="/pages/schedule" style="color:var(--color-accent-main);font-weight:600">see the full schedule</a></div>';
       return;
