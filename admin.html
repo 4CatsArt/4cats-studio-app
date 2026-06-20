@@ -1195,7 +1195,7 @@ function showInventoryOverlay(title, variants, studioRegs) {
       <td style="padding:8px 12px;font-size:13px;font-weight:500">${getStudioName(studio.id)}</td>
       <td style="padding:8px 12px;text-align:center;font-size:16px;font-weight:600;color:${reg===0?'#bbb':'#1a1a1a'}">${reg}</td>
       <td style="padding:8px 12px;text-align:center;font-size:16px;font-weight:600;color:${qtyColor}">${qty===null?'—':qty}</td>
-      <td style="padding:8px 12px">${v?`<div style="display:flex;gap:6px;align-items:center"><input type="number" id="inv-input-${v.inventory_item_id}" value="${qty}" style="width:60px;padding:4px 8px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;text-align:center"><button onclick="setInventory(${v.inventory_item_id},'inv-input-${v.inventory_item_id}',this)" style="padding:4px 12px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:12px;cursor:pointer">Set</button></div>`:'<span style="color:#ddd;font-size:11px">Not offered</span>'}</td>
+      <td style="padding:8px 12px">${v?`<div style="display:flex;gap:6px;align-items:center"><input type="number" id="inv-input-${v.inventory_item_id}" value="${qty}" style="width:60px;padding:4px 8px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;text-align:center"><button data-sid="${studio.id}" data-title="${title.replace(/"/g,'&quot;')}" onclick="setInventory(${v.inventory_item_id},'inv-input-${v.inventory_item_id}',this,this.dataset.sid,this.dataset.title)" style="padding:4px 12px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:12px;cursor:pointer">Set</button></div>`:'<span style="color:#ddd;font-size:11px">Not offered</span>'}</td>
     </tr>`
   }).join('')
   const overlay = document.createElement('div')
@@ -1219,13 +1219,35 @@ function showInventoryOverlay(title, variants, studioRegs) {
   document.body.appendChild(overlay)
 }
 
-async function setInventory(inventoryItemId, inputId, btn) {
+// After a successful Shopify inventory set, immediately update spaces_left_cache in Supabase
+// so embeds reflect the new value without needing a manual sync.
+// studioId + shopifyTitle let us find the right session rows.
+async function syncCacheAfterSet(studioId, shopifyTitle, qty) {
+  if (!studioId || !shopifyTitle) return
+  // Derive the session title from the shopify title (strip leading time/date prefix e.g. "3pm Sun May 10th | ")
+  const titleMatch = shopifyTitle.match(/\|\s*(.+)$/)
+  const sessionTitle = titleMatch ? titleMatch[1].trim() : shopifyTitle
+  const today = new Date().toISOString().slice(0, 10)
+  try {
+    await sb.from('sessions')
+      .update({ spaces_left_cache: qty })
+      .eq('studio_id', studioId)
+      .ilike('title', sessionTitle)
+      .gte('session_date', today)
+  } catch(e) { /* non-critical, don't surface */ }
+}
+
+async function setInventory(inventoryItemId, inputId, btn, studioId, shopifyTitle) {
   const qty = parseInt(document.getElementById(inputId).value); if (isNaN(qty)) return
   btn.textContent = '...'; btn.disabled = true
   try {
     const res = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({action:'set',inventory_item_id:inventoryItemId,quantity:qty}) })
     const data = await res.json()
-    if (data.inventory_level) { btn.textContent='Saved ✓'; btn.style.background='#2e7d32'; setTimeout(()=>{btn.textContent='Set';btn.style.background='#1a1a1a';btn.disabled=false},2000) }
+    if (data.inventory_level) {
+      btn.textContent='Saved ✓'; btn.style.background='#2e7d32'
+      syncCacheAfterSet(studioId, shopifyTitle, qty)
+      setTimeout(()=>{btn.textContent='Set';btn.style.background='#1a1a1a';btn.disabled=false},2000)
+    }
     else { btn.textContent='Error'; btn.disabled=false }
   } catch(e) { btn.textContent='Error'; btn.disabled=false }
 }
@@ -1250,12 +1272,12 @@ async function loadInventory() {
     const varTitle = STUDIO_VARIANT_MAP[studio.id], v = varTitle ? variantMap[varTitle] : null
     const qty = v ? v.inventory_quantity : null
     let qtyClass = qty===null?'':qty<0?'oversold':qty===0?'zero':qty<=3?'low':'good'
-    html += `<div class="inv-row"><div class="inv-studio-name">${getStudioName(studio.id)}</div><div class="inv-qty ${qtyClass}">${qty===null?'—':qty}</div>${v?`<div class="inv-edit"><input type="number" id="tab-inv-${v.inventory_item_id}" value="${qty}" min="0"><button class="inv-save-btn" onclick="setInventoryFromTab(${v.inventory_item_id},'tab-inv-${v.inventory_item_id}',this)">Set</button></div>`:'<span class="inv-not-offered">Not offered</span>'}</div>`
+    html += `<div class="inv-row"><div class="inv-studio-name">${getStudioName(studio.id)}</div><div class="inv-qty ${qtyClass}">${qty===null?'—':qty}</div>${v?`<div class="inv-edit"><input type="number" id="tab-inv-${v.inventory_item_id}" value="${qty}" min="0"><button class="inv-save-btn" data-sid="${studio.id}" data-title="${title.replace(/"/g,'&quot;')}" onclick="setInventoryFromTab(${v.inventory_item_id},'tab-inv-${v.inventory_item_id}',this,this.dataset.sid,this.dataset.title)">Set</button></div>`:'<span class="inv-not-offered">Not offered</span>'}</div>`
   })
   document.getElementById('inventory-container').innerHTML = html + '</div>'
 }
 
-async function setInventoryFromTab(inventoryItemId, inputId, btn) {
+async function setInventoryFromTab(inventoryItemId, inputId, btn, studioId, shopifyTitle) {
   const qty = parseInt(document.getElementById(inputId).value); if (isNaN(qty)) return
   btn.textContent = '...'; btn.disabled = true
   try {
@@ -1276,6 +1298,7 @@ async function setInventoryFromTab(inventoryItemId, inputId, btn) {
         const invInput = row.querySelector('input[type=number]')
         if (invInput) invInput.value = qty
       }
+      syncCacheAfterSet(studioId, shopifyTitle, qty)
       setTimeout(()=>{btn.textContent='Set';btn.classList.remove('saved');btn.disabled=false},2000)
     } else { btn.textContent='Error'; btn.disabled=false }
   } catch(e) { btn.textContent='Error'; btn.disabled=false }
@@ -1370,7 +1393,7 @@ async function loadStudioView() {
     const invItemId = studioViewVariantMap[s.id]
     const invInputId = `bs-inv-${s.id}`
     const invEdit = invItemId
-      ? `<div class="inv-edit" style="margin-left:4px"><input type="number" id="${invInputId}" value="${spacesLeft !== null ? spacesLeft : 0}" min="0" style="width:52px"><button class="inv-save-btn" onclick="setInventoryFromTab(${invItemId},'${invInputId}',this)">Set</button></div>`
+      ? `<div class="inv-edit" style="margin-left:4px"><input type="number" id="${invInputId}" value="${spacesLeft !== null ? spacesLeft : 0}" min="0" style="width:52px"><button class="inv-save-btn" data-sid="${studioId}" data-title="${s.title.replace(/"/g,'&quot;')}" onclick="setInventoryFromTab(${invItemId},'${invInputId}',this,this.dataset.sid,this.dataset.title)">Set</button></div>`
       : ''
     rightHtml += `<div class="split-item"><div><div class="split-item-title">${s.title}</div><div class="split-item-sub">${time}</div></div><div style="display:flex;align-items:center;gap:12px"><div style="text-align:center"><div style="font-size:16px;font-weight:600;color:${regColor}">${s.reg}</div><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.3px">Reg</div></div><div style="text-align:center"><div class="bs-left-val" style="font-size:16px;font-weight:600;color:${spacesColor}">${spacesLabel}</div><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.3px">Left</div></div>${invEdit}</div></div>`
   })
