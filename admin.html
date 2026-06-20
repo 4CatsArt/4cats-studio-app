@@ -733,7 +733,7 @@ async function cacheVariants(shopifyTitle, data) {
   if (!data.variants || !data.handle) return
   const variantRows = data.variants.map(v => {
     const sid = Object.keys(STUDIO_VARIANT_MAP).find(k => STUDIO_VARIANT_MAP[k] === v.variant_title)
-    return sid ? { studio_id: sid, variant_id: v.variant_id } : null
+    return sid ? { studio_id: sid, variant_id: v.variant_id, inventory_item_id: v.inventory_item_id } : null
   }).filter(Boolean)
   if (!variantRows.length) return
   try { await sb.rpc('upsert_shopify_variants', { p_shopify_title: shopifyTitle, p_product_handle: data.handle, p_product_id: data.product_id, p_status: data.status || 'active', p_variants: variantRows }) } catch(e) {}
@@ -1356,6 +1356,31 @@ async function loadStudioView() {
     if (bookings) bookings.forEach(b => { counts[b.session_id]=(counts[b.session_id]||0)+(b.qty||0) })
   }
   const activeSessions = studioSessions.map(s=>({...s,reg:counts[s.id]||0})).filter(s=>s.show)
+
+  // Pre-populate studioViewVariantMap from cached shopify_variants so Set buttons
+  // appear immediately without needing a full Shopify sync first.
+  if (activeSessions.length) {
+    const shopifyTitles = [...new Set(activeSessions.map(s => buildShopifyTitle(s.session_date, s.session_time||'00:00:00', s.title)).filter(Boolean))]
+    if (shopifyTitles.length) {
+      try {
+        const { data: cachedVars } = await sb.from('shopify_variants')
+          .select('studio_id, inventory_item_id, shopify_title')
+          .in('shopify_title', shopifyTitles)
+          .eq('studio_id', studioId)
+          .not('inventory_item_id', 'is', null)
+        if (cachedVars && cachedVars.length) {
+          // Build a map: shopifyTitle → inventory_item_id for this studio
+          const titleToInvItemId = {}
+          cachedVars.forEach(v => { titleToInvItemId[v.shopify_title] = v.inventory_item_id })
+          activeSessions.forEach(s => {
+            if (studioViewVariantMap[s.id]) return // already set from a sync
+            const st = buildShopifyTitle(s.session_date, s.session_time||'00:00:00', s.title)
+            if (st && titleToInvItemId[st]) studioViewVariantMap[s.id] = titleToInvItemId[st]
+          })
+        }
+      } catch(e) { /* non-critical */ }
+    }
+  }
   const studioName = getStudioName(studioId)
   // Load notes for this studio/date combo
   const bsDates = [...new Set((sessions||[]).map(s=>s.session_date))]
