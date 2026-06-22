@@ -777,12 +777,9 @@ function refreshAttendance() {
   var orderNames = []
   allChildren.forEach(function(c) { if (c.orderName && orderNames.indexOf(c.orderName) < 0) orderNames.push(c.orderName) })
 
-  var attPromise = sbGet('attendance?select=session_id,shopify_order_name,camper_name,attended&session_id=in.(' + sessionIds.join(',') + ')&attended_date=eq.' + today)
-  var tallyPromise = orderNames.length ? sbGet('tally_registrations?select=shopify_order_name,camper_name,table_num&shopify_order_name=in.(' + orderNames.map(function(n){ return encodeURIComponent(n) }).join(',') + ')') : Promise.resolve([])
-
-  Promise.all([attPromise, tallyPromise]).then(function(results) {
-    var attRows   = Array.isArray(results[0]) ? results[0] : []
-    var tallyRows = Array.isArray(results[1]) ? results[1] : []
+  var attPromise = sbGet('attendance?select=session_id,shopify_order_name,camper_name,attended,table_number&session_id=in.(' + sessionIds.join(',') + ')&attended_date=eq.' + today)
+  Promise.all([attPromise]).then(function(results) {
+    var attRows = Array.isArray(results[0]) ? results[0] : []
     var changed = false
 
     attRows.forEach(function(a) {
@@ -796,12 +793,13 @@ function refreshAttendance() {
       })
     })
 
-    tallyRows.forEach(function(t) {
-      var key = t.shopify_order_name + '|' + (t.camper_name || '').toLowerCase().trim()
+    // Table numbers come from attendance (per-day), not tally
+    attRows.forEach(function(a) {
+      var key = a.shopify_order_name + '|' + (a.camper_name || '').toLowerCase().trim()
       allChildren.forEach(function(c) {
         var cKey = c.orderName + '|' + c.name.toLowerCase().trim()
-        if (cKey === key && t.table_num !== undefined && c.table !== (t.table_num || '')) {
-          c.table = t.table_num || ''
+        if (cKey === key && a.table_number !== undefined && c.table !== String(a.table_number || '')) {
+          c.table = a.table_number ? String(a.table_number) : ''
           changed = true
         }
       })
@@ -858,7 +856,7 @@ function loadDay() {
         ? sbGet('tally_registrations?select=*&shopify_order_name=in.(' + orderNames.map(function(n){ return encodeURIComponent(n) }).join(',') + ')')
         : Promise.resolve([])
 
-      var attPromise = sbGet('attendance?select=session_id,shopify_order_name,camper_name,attended&' + sessionIdFilter)
+      var attPromise = sbGet('attendance?select=session_id,shopify_order_name,camper_name,attended,table_number,alternate_pickup,checked_out_by,aftercare&attended_date=eq.' + today + '&' + sessionIdFilter)
 
       var badgePromise = orderNames.length
         ? sbGet('camp_daily_badges?select=order_name,camper_name,badge_name,session_date&order_name=in.(' + orderNames.map(function(n){ return encodeURIComponent(n) }).join(',') + ')')
@@ -948,7 +946,7 @@ function loadDay() {
                 aftercare: t.aftercare || b.aftercare || false,
                 tallyId: t.id || null,
                 attendanceChecked: att ? att.attended : false,
-                table: t.table_num ? String(t.table_num) : '',
+                table: (att && att.table_number) ? String(att.table_number) : '',
                 badge: todayBadge ? todayBadge.badge : '',
                 notes: t.notes || b.order_note || '',
                 alternatePick: (att && att.alternate_pickup) ? att.alternate_pickup : '',
@@ -1189,15 +1187,16 @@ function updateTableQ(uid, val) {
   // Update pill in quick row
   var row = document.getElementById('qrow-' + uid)
   if (row) { var pill = row.querySelector('.table-pill'); if (pill) pill.textContent = val ? 'T' + val : '' }
-  // Auto-save to Supabase immediately
-  var payload = { table_num: val || null }
-  if (c.tallyId) {
-    sbPatch('tally_registrations?id=eq.' + c.tallyId, payload)
-  } else if (c.name) {
-    sbPost('tally_registrations', { shopify_order_name: c.orderName, camper_name: c.name, table_num: val || null }).then(function(rows) {
-      if (rows && rows.length && rows[0].id) c.tallyId = rows[0].id
-    })
-  }
+  // Auto-save table number to attendance (per-day)
+  var today = dateStr(currentDate)
+  var tNum = val ? parseInt(val) : null
+  sbGet('attendance?shopify_order_name=eq.' + encodeURIComponent(c.orderName) + '&camper_name=eq.' + encodeURIComponent(c.name) + '&attended_date=eq.' + today + '&select=id&limit=1').then(function(rows) {
+    if (rows && rows.length) {
+      sbPatch('attendance?id=eq.' + rows[0].id, { table_number: tNum })
+    } else {
+      sbPost('attendance', { session_id: c.sessionId, shopify_order_name: c.orderName, camper_name: c.name, attended: c.attendanceChecked, attended_date: today, table_number: tNum })
+    }
+  })
 }
 
 function updateBadge(uid, val) {
