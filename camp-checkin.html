@@ -1522,29 +1522,39 @@ function closeNotes() {
 function saveNotes() {
   if (!notesUid) return
   var noteVal = document.getElementById('notes-popup-text').value
+  var pickupEl = document.getElementById('notes-popup-pickup')
+  var pickup = pickupEl ? pickupEl.value.trim() : ''
   var c = null
   allChildren.forEach(function(x) { if (x._uid === notesUid) c = x })
   if (!c) return
   c.notes = noteVal
+  c.alternatePick = pickup
 
-  // Combine pickup people + general notes into one notes field
-  // Store as JSON string so we can parse it back
-  var pickupPeople = c.pickupPeople || []
-  var combined = JSON.stringify({ pickup: pickupPeople, note: noteVal })
-
-  var payload = { notes: combined }
+  // Save notes to tally_registrations
   if (c.tallyId) {
-    sbPatch('tally_registrations?id=eq.' + c.tallyId, payload)
+    sbPatch('tally_registrations?id=eq.' + c.tallyId, { notes: noteVal || null, alternate_pickup: pickup || null })
   } else {
-    sbPost('tally_registrations', { shopify_order_name: c.orderName, camper_name: c.name, notes: combined }).then(function(rows) {
+    sbPost('tally_registrations', { shopify_order_name: c.orderName, camper_name: c.name, notes: noteVal || null, alternate_pickup: pickup || null }).then(function(rows) {
       if (rows && rows.length && rows[0].id) c.tallyId = rows[0].id
     })
   }
 
+  // Save alternate_pickup to attendance (today only)
+  var today = dateStr(currentDate)
+  sbGet('attendance?shopify_order_name=eq.' + encodeURIComponent(c.orderName) + '&camper_name=eq.' + encodeURIComponent(c.name) + '&attended_date=eq.' + today + '&select=id&limit=1').then(function(rows) {
+    if (rows && rows.length) {
+      sbPatch('attendance?id=eq.' + rows[0].id, { alternate_pickup: pickup || null })
+    } else {
+      sbPost('attendance', { session_id: c.sessionId, shopify_order_name: c.orderName, camper_name: c.name, attended: c.attendanceChecked, attended_date: today, alternate_pickup: pickup || null })
+    }
+  })
+
+  // Update pickup tag in the quick row immediately
+  renderPickupTag(notesUid, pickup)
+
   // Update note dot
-  var hasSomething = noteVal || (pickupPeople && pickupPeople.length)
   var dot = document.getElementById('notedot-' + notesUid)
-  if (dot) dot.style.display = hasSomething ? 'inline-block' : 'none'
+  if (dot) dot.style.display = (noteVal || pickup) ? 'inline-block' : 'none'
 
   closeNotes()
   showToast('Saved!')
@@ -3593,7 +3603,7 @@ function undoCheckout(uid) {
 
 function renderPickupTag(uid, pickup) {
   var el = document.getElementById('pickuptag-' + uid)
-  if (el) { el.textContent = pickup || ''; el.style.display = pickup ? 'block' : 'none' }
+  if (el) el.textContent = pickup || ''
 }
 
 function showToast(msg) {
