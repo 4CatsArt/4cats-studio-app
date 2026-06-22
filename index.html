@@ -2403,16 +2403,19 @@ async function loadDay2View() {
   const preFiltered = (sessions || []).filter(s => matchesFilters(s, filters))
   const ids = preFiltered.map(s => s.id)
 
-  const staffDataD2 = {}, bookingCountsD2 = {}, dropinCountsD2 = {}, signinDataD2 = {}
+  const staffDataD2 = {}, bookingCountsD2 = {}, dropinCountsD2 = {}, signinDataD2 = {}, aftercareCountsD2 = {}
 
   if (ids.length) {
     const [{ data: staff }, { data: bookings }, { data: signins }] = await Promise.all([
       sb.from('session_staff').select('*').in('session_id', ids),
-      sb.from('bookings').select('session_id, qty').in('session_id', ids).gt('qty', 0).is('returned_at', null),
+      sb.from('bookings').select('session_id, qty, aftercare').in('session_id', ids).gt('qty', 0).is('returned_at', null),
       sb.from('signin_entries').select('session_id, mode').in('session_id', ids)
     ])
     if (staff) staff.forEach(s => { staffDataD2[s.session_id] = s })
-    if (bookings) bookings.forEach(b => { bookingCountsD2[b.session_id] = (bookingCountsD2[b.session_id] || 0) + (b.qty || 0) })
+    if (bookings) bookings.forEach(b => {
+      bookingCountsD2[b.session_id] = (bookingCountsD2[b.session_id] || 0) + (b.qty || 0)
+      if (b.aftercare) aftercareCountsD2[b.session_id] = (aftercareCountsD2[b.session_id] || 0) + (b.qty || 0)
+    })
     if (signins) signins.forEach(e => {
       if (!signinDataD2[e.session_id]) signinDataD2[e.session_id] = []
       signinDataD2[e.session_id].push(e)
@@ -2611,16 +2614,30 @@ async function loadDay2View() {
         const dropins = dropinCountsD2[s.id] || 0
         const checkedIn = signinDataD2[s.id]?.filter(e => e.mode !== 'dropin').length || 0
         const isDropinEligible = ['workshop', 'glazing'].includes(s.session_type)
+        const isCamp = s.session_type === 'camp'
+        const aftercareCount = isCamp ? (aftercareCountsD2[s.id] || 0) : 0
+        const campDayVal = isCamp ? (staff.camp_day ? staff.camp_day.replace('Day ', '') : '') : ''
         const safeTitle = s.title.replace(/'/g, "\\'").replace(/"/g, '&quot;')
+        const notesCellContent = isCamp
+          ? `<div style="display:flex;gap:6px;align-items:center">
+              <label style="font-size:11px;color:#888;white-space:nowrap">Day #</label>
+              <input type="number" id="d2-campday-${s.id}" value="${campDayVal}" min="1" max="99" placeholder="1"
+                style="width:52px;padding:4px 7px;border:0.5px solid #d0d0c8;border-radius:5px;font-size:13px;outline:none"
+                onkeydown="if(event.key==='Enter')saveDay2Row('${s.id}')">
+              <input class="d2-notes" type="text" id="d2-notes-${s.id}" value="${(staff.notes || '').replace(/"/g,'&quot;')}" placeholder="Notes…"
+                style="flex:1" onkeydown="if(event.key==='Enter')saveDay2Row('${s.id}')">
+            </div>`
+          : `<input class="d2-notes" type="text" id="d2-notes-${s.id}" value="${(staff.notes || '').replace(/"/g,'&quot;')}" placeholder="Session notes…" onkeydown="if(event.key==='Enter')saveDay2Row('${s.id}')">`
         return `<tr id="d2-row-${s.id}"${reg === 0 ? ' style="opacity:0.4"' : ''}>
           <td class="d2-time">${time}</td>
           <td><span class="d2-title">${titleClean}</span><span class="d2-badge ${badge}">${s.session_type}</span></td>
           <td>
             <span class="d2-reg" onclick="showBookings('${s.id}','${safeTitle}','${today}','${s.session_type}','${s.session_time||'00:00:00'}')">${reg}${s.capacity ? ' / ' + s.capacity : ''}</span>
             ${checkedIn ? `<button class="d2-checkin-btn" style="margin-left:6px" onclick="showSignins('${s.id}','${safeTitle}')">✅ ${checkedIn}</button>` : ''}
+            ${aftercareCount ? `<span style="margin-left:6px;font-size:11px;background:#ede7f6;color:#5b4fcf;padding:2px 7px;border-radius:10px;font-weight:500">🌙 ${aftercareCount} aftercare</span>` : ''}
           </td>
           <td>${isDropinEligible ? `<div class="d2-dropin-wrap"><span class="d2-dropin-count" id="dropin-count-${s.id}">${dropins || '—'}</span><button class="d2-dropin-btn" onclick="addDropin('${s.id}')">+</button></div>` : '<span style="color:#ccc">—</span>'}</td>
-          <td><input class="d2-notes" type="text" id="d2-notes-${s.id}" value="${(staff.notes || '').replace(/"/g,'&quot;')}" placeholder="Session notes…" onkeydown="if(event.key==='Enter')saveDay2Row('${s.id}')"></td>
+          <td>${notesCellContent}</td>
           <td><button class="d2-row-save" id="d2-row-save-${s.id}" onclick="saveDay2Row('${s.id}')">Save</button></td>
         </tr>`
       }
@@ -2805,10 +2822,14 @@ async function saveDay2Staff() {
 async function saveDay2Row(sessionId) {
   const btn = document.getElementById('d2-row-save-' + sessionId)
   const notesEl = document.getElementById('d2-notes-' + sessionId)
+  const campDayEl = document.getElementById('d2-campday-' + sessionId)
   if (btn) { btn.textContent = '…'; btn.disabled = true }
   const notes = notesEl ? notesEl.value : ''
+  const campDayRaw = campDayEl ? campDayEl.value : ''
+  const camp_day = campDayRaw ? 'Day ' + parseInt(campDayRaw) : null
   const { data: existing } = await sb.from('session_staff').select('id').eq('session_id', sessionId).single()
   const payload = { session_id: sessionId, studio_id: currentStudioId, notes, updated_at: new Date().toISOString() }
+  if (camp_day !== null) payload.camp_day = camp_day
   if (existing) await sb.from('session_staff').update(payload).eq('session_id', sessionId)
   else await sb.from('session_staff').insert(payload)
   if (btn) { btn.classList.add('saved'); btn.textContent = '✓'; setTimeout(() => { btn.classList.remove('saved'); btn.textContent = 'Save'; btn.disabled = false }, 1800) }
