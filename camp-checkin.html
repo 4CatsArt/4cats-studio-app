@@ -721,10 +721,19 @@ function refreshAttendance() {
   })
   if (!sessionIds.length) return
 
-  sbGet('attendance?select=session_id,shopify_order_name,camper_name,attended&session_id=in.(' + sessionIds.join(',') + ')&attended_date=eq.' + today).then(function(rows) {
-    if (!rows || rows.error || !rows.length) return
+  // Get order names for tally lookup
+  var orderNames = []
+  allChildren.forEach(function(c) { if (c.orderName && orderNames.indexOf(c.orderName) < 0) orderNames.push(c.orderName) })
+
+  var attPromise = sbGet('attendance?select=session_id,shopify_order_name,camper_name,attended&session_id=in.(' + sessionIds.join(',') + ')&attended_date=eq.' + today)
+  var tallyPromise = orderNames.length ? sbGet('tally_registrations?select=shopify_order_name,camper_name,table_num&shopify_order_name=in.(' + orderNames.map(function(n){ return encodeURIComponent(n) }).join(',') + ')') : Promise.resolve([])
+
+  Promise.all([attPromise, tallyPromise]).then(function(results) {
+    var attRows   = Array.isArray(results[0]) ? results[0] : []
+    var tallyRows = Array.isArray(results[1]) ? results[1] : []
     var changed = false
-    rows.forEach(function(a) {
+
+    attRows.forEach(function(a) {
       var key = a.shopify_order_name + '|' + (a.camper_name || '').toLowerCase().trim()
       allChildren.forEach(function(c) {
         var cKey = c.orderName + '|' + c.name.toLowerCase().trim()
@@ -734,6 +743,18 @@ function refreshAttendance() {
         }
       })
     })
+
+    tallyRows.forEach(function(t) {
+      var key = t.shopify_order_name + '|' + (t.camper_name || '').toLowerCase().trim()
+      allChildren.forEach(function(c) {
+        var cKey = c.orderName + '|' + c.name.toLowerCase().trim()
+        if (cKey === key && t.table_num !== undefined && c.table !== (t.table_num || '')) {
+          c.table = t.table_num || ''
+          changed = true
+        }
+      })
+    })
+
     if (changed) {
       updateStatsBar()
       renderQuickRows()
@@ -1107,17 +1128,22 @@ function updateTable(uid, val) {
 }
 
 function updateTableQ(uid, val) {
-  allChildren.forEach(function(c) {
-    if (c._uid === uid) {
-      c.table = val
-      // update the tableTag pill in the quick row live
-      var row = document.getElementById('qrow-' + uid)
-      if (row) {
-        var pill = row.querySelector('.table-pill')
-        if (pill) pill.textContent = val ? 'T' + val : ''
-      }
-    }
-  })
+  var c = null
+  allChildren.forEach(function(x) { if (x._uid === uid) c = x })
+  if (!c) return
+  c.table = val
+  // Update pill in quick row
+  var row = document.getElementById('qrow-' + uid)
+  if (row) { var pill = row.querySelector('.table-pill'); if (pill) pill.textContent = val ? 'T' + val : '' }
+  // Auto-save to Supabase immediately
+  var payload = { table_num: val || null }
+  if (c.tallyId) {
+    sbPatch('tally_registrations?id=eq.' + c.tallyId, payload)
+  } else if (c.name) {
+    sbPost('tally_registrations', { shopify_order_name: c.orderName, camper_name: c.name, table_num: val || null }).then(function(rows) {
+      if (rows && rows.length && rows[0].id) c.tallyId = rows[0].id
+    })
+  }
 }
 
 function updateBadge(uid, val) {
