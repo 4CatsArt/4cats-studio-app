@@ -2601,6 +2601,13 @@ async function loadDay2View() {
 
   // ── Non-party session rows ────────────────────────────────────
   // ── Unified session rows (all types, sorted by time) ─────────
+  // Shared camp day number — find the first set value across all camp sessions
+  const sharedCampDayVal = (function() {
+    const campStaff = filtered.filter(s => s.session_type === 'camp').map(s => staffDataD2[s.id] || {})
+    const found = campStaff.find(st => st.camp_day)
+    return found ? found.camp_day.replace('Day ', '') : ''
+  })()
+
   let unifiedTableHtml = ''
   if (filtered.length) {
     const allRows = filtered.map(s => {
@@ -2617,14 +2624,18 @@ async function loadDay2View() {
         const isDropinEligible = ['workshop', 'glazing'].includes(s.session_type)
         const isCamp = s.session_type === 'camp'
         const aftercareCount = isCamp ? (aftercareCountsD2[s.id] || 0) : 0
-        const campDayVal = isCamp ? (staff.camp_day ? staff.camp_day.replace('Day ', '') : '') : ''
+        const titleLower = s.title.toLowerCase()
+        const isFullDayCamp = isCamp && (titleLower.includes('full day') || titleLower.includes('full-day') || titleLower.includes('pa day') || titleLower.includes('pd day') || titleLower.includes('no school'))
         const safeTitle = s.title.replace(/'/g, "\\'").replace(/"/g, '&quot;')
         const notesCellContent = isCamp
           ? `<div style="display:flex;gap:6px;align-items:center">
               <label style="font-size:11px;color:#888;white-space:nowrap">Day #</label>
-              <input type="number" id="d2-campday-${s.id}" value="${campDayVal}" min="1" max="99" placeholder="1"
-                style="width:52px;padding:4px 7px;border:0.5px solid #d0d0c8;border-radius:5px;font-size:13px;outline:none"
-                onkeydown="if(event.key==='Enter')saveDay2Row('${s.id}')">
+              ${isFullDayCamp
+                ? `<input type="number" id="d2-campday-${s.id}" value="${sharedCampDayVal}" min="1" max="99" placeholder="?"
+                    style="width:52px;padding:4px 7px;border:0.5px solid #d0d0c8;border-radius:5px;font-size:13px;outline:none"
+                    onkeydown="if(event.key==='Enter')saveDay2Row('${s.id}')">`
+                : `<span style="width:52px;padding:4px 7px;font-size:13px;color:#888;font-weight:500">${sharedCampDayVal || '—'}</span>`
+              }
               <input class="d2-notes" type="text" id="d2-notes-${s.id}" value="${(staff.notes || '').replace(/"/g,'&quot;')}" placeholder="Notes…"
                 style="flex:1" onkeydown="if(event.key==='Enter')saveDay2Row('${s.id}')">
             </div>`
@@ -2828,11 +2839,25 @@ async function saveDay2Row(sessionId) {
   const notes = notesEl ? notesEl.value : ''
   const campDayRaw = campDayEl ? campDayEl.value : ''
   const camp_day = campDayRaw ? 'Day ' + parseInt(campDayRaw) : null
+
   const { data: existing } = await sb.from('session_staff').select('id').eq('session_id', sessionId).single()
   const payload = { session_id: sessionId, studio_id: currentStudioId, notes, updated_at: new Date().toISOString() }
   if (camp_day !== null) payload.camp_day = camp_day
   if (existing) await sb.from('session_staff').update(payload).eq('session_id', sessionId)
   else await sb.from('session_staff').insert(payload)
+
+  // If this is a full day camp row with a day number, propagate to all other camp sessions today
+  if (camp_day) {
+    const today = dateStr(currentDate)
+    const { data: otherSessions } = await sb.from('sessions')
+      .select('id').eq('studio_id', currentStudioId).eq('session_date', today).eq('session_type', 'camp').neq('id', sessionId)
+    for (const s of (otherSessions || [])) {
+      const { data: ex } = await sb.from('session_staff').select('id').eq('session_id', s.id).single()
+      if (ex) await sb.from('session_staff').update({ camp_day, updated_at: new Date().toISOString() }).eq('session_id', s.id)
+      else await sb.from('session_staff').insert({ session_id: s.id, studio_id: currentStudioId, camp_day })
+    }
+  }
+
   if (btn) { btn.classList.add('saved'); btn.textContent = '✓'; setTimeout(() => { btn.classList.remove('saved'); btn.textContent = 'Save'; btn.disabled = false }, 1800) }
 }
 
