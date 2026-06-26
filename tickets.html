@@ -162,6 +162,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
       </select>
       <select class="filter-select" id="f-priority" onchange="applyFilters()">
         <option value="">All Priorities</option>
+        <option value="emergency">Emergency</option>
         <option value="high">High</option>
         <option value="normal">Normal</option>
         <option value="low">Low</option>
@@ -216,7 +217,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
         <div class="modal-label">Priority</div>
         <select class="modal-select" id="nt-priority">
           <option value="normal">Normal</option>
-          <option value="high">High</option>
+          <option value="emergency">Emergency</option>
+        <option value="high">High</option>
           <option value="low">Low</option>
         </select>
       </div>
@@ -280,8 +282,8 @@ var openTicketData = null
 var selectedBooking = null
 var _readMap = {}
 
-var PRIORITY_COLORS = { high: '#c0392b', normal: '#2471a3', low: '#888' }
-var PRIORITY_BG = { high: '#fdf0ee', normal: '#eaf4fb', low: '#f5f5f5' }
+var PRIORITY_COLORS = { emergency: '#7b0000', high: '#c0392b', normal: '#2471a3', low: '#888' }
+var PRIORITY_BG = { emergency: '#fde8e8', high: '#fdf0ee', normal: '#eaf4fb', low: '#f5f5f5' }
 var STATUS_COLORS = { open: '#2e7d32', in_progress: '#7a5800', waiting_on_studio: '#6a1b9a', resolved: '#888' }
 var STATUS_BG = { open: '#e8f5e9', in_progress: '#fffbe6', waiting_on_studio: '#f3e5f5', resolved: '#f5f5f5' }
 var STATUS_LABELS = { open: 'Open', in_progress: 'In Progress', waiting_on_studio: 'Waiting on Studio', resolved: 'Resolved' }
@@ -433,12 +435,14 @@ function renderStats() {
   var open = allTickets.filter(function(t) { return t.status === 'open' }).length
   var inProg = allTickets.filter(function(t) { return t.status === 'in_progress' }).length
   var waiting = allTickets.filter(function(t) { return t.status === 'waiting_on_studio' }).length
+  var emergency = allTickets.filter(function(t) { return t.priority === 'emergency' && t.status !== 'resolved' }).length
   var high = allTickets.filter(function(t) { return t.priority === 'high' && t.status !== 'resolved' }).length
   var mine = allTickets.filter(function(t) { return t.assigned_to_user_id === currentUser.id && t.status !== 'resolved' }).length
   var chips = [
     { label: 'Open', value: open, color: '#2e7d32' },
     { label: 'In Progress', value: inProg, color: '#7a5800' },
     { label: 'Waiting on Studio', value: waiting, color: '#6a1b9a' },
+    { label: 'Emergency', value: emergency, color: '#7b0000' },
     { label: 'High Priority', value: high, color: '#c0392b' },
     { label: 'Assigned to Me', value: mine, color: '#2471a3' }
   ]
@@ -632,6 +636,16 @@ function clearSelectedBooking() {
   el.innerHTML = ''
 }
 
+function sendEmergencyEmail(ticketId, title, studioId, category, message, createdBy) {
+  var studio = allStudios.find(function(s) { return s.id === studioId })
+  var studioName = studio ? studio.name : studioId
+  fetch('https://snxibhbhhchjthfmjtaj.supabase.co/functions/v1/send-emergency-ticket', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA' },
+    body: JSON.stringify({ ticket_id: ticketId, title: title, studio_name: studioName, category: category, message: message, created_by: createdBy })
+  }).catch(function(e) { console.error('Emergency email error:', e) })
+}
+
 function submitNewTicket() {
   var title = (document.getElementById('nt-title').value || '').trim()
   var studioId = document.getElementById('nt-studio').value
@@ -798,7 +812,7 @@ function renderThreadActions(ticket) {
 
   // Priority changer
   html += '<select onchange="changePriority(\'' + ticket.id + '\',this.value)" style="padding:6px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:12px;outline:none;background:white;cursor:pointer">'
-  ;['high','normal','low'].forEach(function(p) {
+  ;['emergency','high','normal','low'].forEach(function(p) {
     html += '<option value="' + p + '"' + (ticket.priority === p ? ' selected' : '') + '>' + capFirst(p) + ' Priority</option>'
   })
   html += '</select>'
@@ -824,7 +838,13 @@ function changeStatus(ticketId, status) {
 function changePriority(ticketId, priority) {
   sb.from('tickets').update({ priority: priority, updated_at: new Date().toISOString() }).eq('id', ticketId).then(function() {
     fetchAllTickets()
-    if (openTicketData && openTicketData.id === ticketId) { openTicketData.priority = priority; renderThreadActions(openTicketData) }
+    if (openTicketData && openTicketData.id === ticketId) {
+      openTicketData.priority = priority
+      renderThreadActions(openTicketData)
+      if (priority === 'emergency') {
+        sendEmergencyEmail(ticketId, openTicketData.title, openTicketData.studio_id, openTicketData.category, null, currentUser.email)
+      }
+    }
   })
 }
 
