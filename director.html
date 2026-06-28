@@ -1010,7 +1010,7 @@ async function loadSchedule() {
     (bookingRows||[]).forEach(function(b){ counts[b.session_id]=(counts[b.session_id]||0)+(b.qty||0); });
     // Fetch session_staff
     try {
-      var staffRows = await sbGet('session_staff',{select:'session_id,teacher,circler','session_id':'in.('+ids.join(',')+')'});
+      var staffRows = await sbGet('session_staff',{select:'session_id,teacher,teacher2,circler,circler2,circler3,director,break_director,break_teacher,break_teacher2,break_circler,break_circler2,break_circler3','session_id':'in.('+ids.join(',')+')'});
       sessionStaffMap={};
       (staffRows||[]).forEach(function(r){ sessionStaffMap[r.session_id]=r; });
     } catch(e){ sessionStaffMap={}; }
@@ -1027,26 +1027,117 @@ async function loadSchedule() {
   } catch(e){ el.innerHTML='<div class="error-msg">Error: '+e.message+'</div>'; }
 }
 
+function parseBreakTime(t) {
+  // Parse "11:30am" or "11am" -> minutes since midnight for comparison
+  if (!t) return null;
+  t = t.toLowerCase().trim().replace('*','');
+  var m = t.match(/^(\d{1,2})(?::(\d{2}))?(am|pm)$/);
+  if (!m) return null;
+  var h = parseInt(m[1]), mins = parseInt(m[2]||'0'), ap = m[3];
+  if (ap==='pm'&&h<12) h+=12;
+  if (ap==='am'&&h===12) h=0;
+  return h*60+mins;
+}
+
+function getBreaksBeforeSession(sessionTime, prevSessionTime) {
+  // Collect all staff breaks that fall between prevSessionTime and sessionTime
+  var sMin = parseBreakTime(sessionTime);
+  if (sMin===null) return [];
+  var breaks = [];
+  Object.values(sessionStaffMap).forEach(function(entry) {
+    var rolePairs = [
+      ['Director', entry.director, entry.break_director],
+      ['Demoer 1', entry.teacher,  entry.break_teacher],
+      ['Demoer 2', entry.teacher2, entry.break_teacher2],
+      ['Circler 1',entry.circler,  entry.break_circler],
+      ['Circler 2',entry.circler2, entry.break_circler2],
+      ['Circler 3',entry.circler3, entry.break_circler3]
+    ];
+    rolePairs.forEach(function(pair) {
+      var role=pair[0], name=pair[1], brk=pair[2];
+      if (!brk || !name) return;
+      var bMin = parseBreakTime(brk);
+      if (bMin===null) return;
+      // Show break if it falls at or before this session time
+      if (bMin <= sMin) {
+        // Check not already added
+        var key = name+'|'+brk;
+        var already = breaks.some(function(b){ return b.key===key; });
+        if (!already) breaks.push({key:key, name:name, time:brk, timeMin:bMin});
+      }
+    });
+  });
+  // Sort by break time
+  breaks.sort(function(a,b){ return a.timeMin-b.timeMin; });
+  return breaks;
+}
+
 function renderSchedule() {
   var el = document.getElementById('schedule-content');
   if(!lastScheduleSessions.length) return;
   var sel = document.getElementById('staff-select');
   var selectedName = sel&&sel.selectedIndex>0?sel.options[sel.selectedIndex].text:'';
-  var rows = lastScheduleSessions.map(function(s){
+
+  // Collect all breaks already shown so we don't repeat them
+  var shownBreaks = {};
+  var rows = '';
+
+  lastScheduleSessions.forEach(function(s) {
     var booked=lastScheduleCounts[s.id]||0,cap=s.capacity||0;
     var pct=cap>0?Math.min(100,Math.round(booked/cap*100)):0;
     var fillCls=pct>=100?'full':pct>=75?'warn':'';
     var staffEntry=sessionStaffMap[s.id]||{};
     var isDemoer=!!(selectedName&&staffEntry.teacher&&staffEntry.teacher.toLowerCase().indexOf(selectedName.toLowerCase())!==-1);
     var titleSafe=(s.title||'Untitled').replace(/'/g,"\\'").replace(/"/g,'&quot;');
-    return '<tr class="'+(isDemoer?'is-demoer':'')+'">' +
+    var sMin = parseBreakTime(s.session_time);
+
+    // Find breaks for this session's staff that fall at or before this session time
+    var rolePairs = [
+      ['Director', staffEntry.director, staffEntry.break_director],
+      ['Demoer 1', staffEntry.teacher,  staffEntry.break_teacher],
+      ['Demoer 2', staffEntry.teacher2, staffEntry.break_teacher2],
+      ['Circler 1',staffEntry.circler,  staffEntry.break_circler],
+      ['Circler 2',staffEntry.circler2, staffEntry.break_circler2],
+      ['Circler 3',staffEntry.circler3, staffEntry.break_circler3]
+    ];
+    // Group breaks by time
+    var breaksByTime = {};
+    rolePairs.forEach(function(pair) {
+      var name=pair[1], brk=pair[2];
+      if (!brk||!name) return;
+      var bMin = parseBreakTime(brk);
+      if (bMin===null||bMin>sMin) return;
+      var key = name+'|'+brk;
+      if (shownBreaks[key]) return;
+      if (!breaksByTime[brk]) breaksByTime[brk] = [];
+      breaksByTime[brk].push(name);
+    });
+
+    // Emit break rows before this session row
+    Object.keys(breaksByTime).sort(function(a,b){
+      return parseBreakTime(a)-parseBreakTime(b);
+    }).forEach(function(brkTime) {
+      var names = breaksByTime[brkTime];
+      names.forEach(function(name) {
+        shownBreaks[name+'|'+brkTime] = true;
+      });
+      rows += '<tr style="background:#fffbea">' +
+        '<td class="time-cell" style="color:#b45309;font-size:12px">'+brkTime+'</td>' +
+        '<td colspan="2" style="font-size:12px;color:#92400e">'+
+          '<span style="background:#fef3c7;border:1px solid #fcd34d;border-radius:12px;padding:2px 8px;font-weight:600;margin-right:6px">☕ Break</span>'+
+          names.join(', ')+
+        '</td></tr>';
+    });
+
+    rows += '<tr class="'+(isDemoer?'is-demoer':'')+'">' +
       '<td class="time-cell">'+fmtTime(s.session_time)+'</td>'+
       '<td><span class="session-name">'+(s.title||'Untitled')+'</span>'+(isDemoer?'<span style="font-size:11px;color:#c0392b;background:#fdecea;padding:2px 7px;border-radius:20px;margin-left:6px">Your session</span>':'')+'</td>'+
       '<td style="text-align:center;white-space:nowrap">'+
         '<button class="reg-btn" onclick="openClassList(\''+s.id+'\',\''+titleSafe+'\','+booked+')">'+booked+(cap?'/'+cap:'')+'</button>'+
         (cap?'<div class="cap-bar"><div class="cap-fill '+fillCls+'" style="width:'+pct+'%"></div></div>':'')+
       '</td></tr>';
-  }).join('');
+  });
+
   el.innerHTML='<div class="schedule-wrap"><table class="schedule-table"><thead><tr><th>Time</th><th>Session</th><th style="text-align:center">Reg</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
 }
 
