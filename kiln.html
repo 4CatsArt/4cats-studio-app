@@ -391,12 +391,13 @@
             <th class="no-sort">Session</th>
             <th class="no-sort">Customer</th>
             <th class="no-sort">Email</th>
+            <th class="no-sort">Guests</th>
             <th class="no-sort">Status</th>
             <th class="no-sort">Action</th>
           </tr>
         </thead>
         <tbody id="party-table-body">
-          <tr class="empty-row"><td colspan="6">Loading...</td></tr>
+          <tr class="empty-row"><td colspan="7">Loading...</td></tr>
         </tbody>
       </table>
     </div>
@@ -1341,7 +1342,7 @@ function switchTab(tab) {
 }
 
 async function loadPartyTickets() {
-  document.getElementById('party-table-body').innerHTML = '<tr class="empty-row"><td colspan="6">Loading...</td></tr>'
+  document.getElementById('party-table-body').innerHTML = '<tr class="empty-row"><td colspan="7">Loading...</td></tr>'
   const stageF = document.getElementById('party-filter-stage').value
 
   let q = sb.from('party_tickets')
@@ -1355,11 +1356,65 @@ async function loadPartyTickets() {
 
   const { data, error } = await q
   if (error) {
-    document.getElementById('party-table-body').innerHTML = `<tr class="empty-row"><td colspan="6" style="color:#c0392b">Error: ${error.message}</td></tr>`
+    document.getElementById('party-table-body').innerHTML = `<tr class="empty-row"><td colspan="7" style="color:#c0392b">Error: ${error.message}</td></tr>`
     return
   }
   allPartyTickets = data || []
+
+  // Attach final guest count from the after-party form (party_details.actual_guests)
+  await attachPartyGuestCounts(allPartyTickets)
+
   renderPartyTable()
+}
+
+async function attachPartyGuestCounts(tickets) {
+  const datesNeeded = [...new Set(tickets.map(t => t.session_date).filter(Boolean))]
+  if (!datesNeeded.length) return
+
+  // Find party sessions on those dates (optionally scoped to studio)
+  let sq = sb.from('sessions')
+    .select('id, studio_id, session_date, title')
+    .eq('session_type', 'party')
+    .in('session_date', datesNeeded)
+  if (studioId) sq = sq.eq('studio_id', studioId)
+  const { data: sessions } = await sq
+  if (!sessions || !sessions.length) return
+
+  const sessionIds = sessions.map(s => s.id)
+
+  const { data: bookings } = await sb.from('bookings')
+    .select('id, session_id')
+    .in('session_id', sessionIds)
+    .is('returned_at', null)
+  if (!bookings || !bookings.length) return
+
+  const bookingIds = bookings.map(b => b.id)
+
+  const { data: pds } = await sb.from('party_details')
+    .select('booking_id, actual_guests, expected_guests')
+    .in('booking_id', bookingIds)
+  if (!pds || !pds.length) return
+
+  // Map booking_id -> party_details, then session_id -> party_details (via booking)
+  const pdByBooking = {}
+  pds.forEach(pd => { pdByBooking[pd.booking_id] = pd })
+  const pdBySession = {}
+  bookings.forEach(b => {
+    if (pdByBooking[b.id]) pdBySession[b.session_id] = pdByBooking[b.id]
+  })
+
+  // Match each ticket to a session by studio_id + session_date + title
+  tickets.forEach(t => {
+    const match = sessions.find(s =>
+      s.session_date === t.session_date &&
+      s.studio_id === t.studio_id &&
+      (s.title || '').trim() === (t.session_title || '').trim()
+    )
+    if (match && pdBySession[match.id]) {
+      t._guestCount = pdBySession[match.id].actual_guests ?? pdBySession[match.id].expected_guests ?? null
+      t._guestCountIsFinal = pdBySession[match.id].actual_guests != null
+    }
+  })
 }
 
 function renderPartyTable() {
@@ -1368,7 +1423,7 @@ function renderPartyTable() {
   if (search) tickets = tickets.filter(t => t.ticket_number.includes(search))
 
   if (!tickets.length) {
-    document.getElementById('party-table-body').innerHTML = '<tr class="empty-row"><td colspan="6">No active party tickets.</td></tr>'
+    document.getElementById('party-table-body').innerHTML = '<tr class="empty-row"><td colspan="7">No active party tickets.</td></tr>'
     return
   }
 
@@ -1382,12 +1437,18 @@ function renderPartyTable() {
            onclick="promptPartyAdvance('${t.id}','${t.ticket_number}')">
            → Ready for Pickup
          </button>`
+    const guestCell = t._guestCount != null
+      ? (t._guestCountIsFinal
+          ? `<span style="font-weight:600;color:#2e7d32">${t._guestCount}</span>`
+          : `<span style="color:#999" title="Estimated — after-party form not yet finalized">~${t._guestCount}</span>`)
+      : `<span style="color:#bbb" title="No after-party form found for this session">—</span>`
     return `<tr>
       <td class="ticket-num">${t.ticket_number}</td>
       <td style="white-space:nowrap;color:#888;font-size:12px">${sessionDate}</td>
       <td style="font-size:12px;color:#333;max-width:200px">${t.session_title || '—'}</td>
       <td style="font-size:12px;color:#555">${t.customer_name || '—'}</td>
       <td style="font-size:12px;color:#555">${t.customer_email || '<span style="color:#bbb">—</span>'}</td>
+      <td style="font-size:12px;text-align:center">${guestCell}</td>
       <td><span class="stage-chip ${statusCls}">${statusLabel}</span></td>
       <td>${action}</td>
     </tr>`
