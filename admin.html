@@ -1539,10 +1539,12 @@ async function runFullSync(extended = false) {
   const origText = extended ? '⟳ Sync 91–150d' : '⟳ Full Sync'
   const origBg = extended ? '#4a3a8a' : '#1a4fa0'
 
-  // 3-day chunks to stay well under the 150s edge function timeout
-  const chunks = extended
-    ? [[91,93],[94,96],[97,99],[100,102],[103,105],[106,108],[109,111],[112,114],[115,117],[118,120],[121,123],[124,126],[127,129],[130,132],[133,135],[136,138],[139,141],[142,144],[145,147],[148,150]]
-    : [[0,2],[3,5],[6,8],[9,11],[12,14],[15,17],[18,20],[21,23],[24,26],[27,29],[30,32],[33,35],[36,38],[39,41],[42,44],[45,47],[48,50],[51,53],[54,56],[57,59],[60,62],[63,65],[66,68],[69,71],[72,74],[75,77],[78,80],[81,83],[84,86],[87,90]]
+  // 1-day chunks — keeps each invocation small and fast (~10-30 sec)
+  // Days much further out have less Shopify content so they're even faster
+  const startDay = extended ? 91 : 0
+  const endDay = extended ? 150 : 90
+  const chunks = []
+  for (let d = startDay; d <= endDay; d++) chunks.push([d, d])
 
   let totalDone = 0, totalNotFound = 0
   const failedChunks = []
@@ -1573,8 +1575,35 @@ async function runFullSync(extended = false) {
     } catch(e) {
       failedChunks.push(`${from}-${to}d (${e.message || 'error'})`)
     }
-    // Pause between chunks to let Shopify rate limit recover
-    if (i < chunks.length - 1) await new Promise(r => setTimeout(r, 1500))
+    // Short pause between chunks
+    if (i < chunks.length - 1) await new Promise(r => setTimeout(r, 500))
+  }
+
+  // Auto-retry failed chunks once
+  if (failedChunks.length > 0 && failedChunks.length < chunks.length) {
+    const toRetry = [...failedChunks]
+    failedChunks.length = 0
+    for (let i = 0; i < toRetry.length; i++) {
+      const match = toRetry[i].match(/^(\d+)-(\d+)d/)
+      if (!match) { failedChunks.push(toRetry[i]); continue }
+      const from = parseInt(match[1]), to = parseInt(match[2])
+      btn.textContent = `Retry ${i+1}/${toRetry.length} ⟳`
+      try {
+        const res = await fetch('https://snxibhbhhchjthfmjtaj.supabase.co/functions/v1/sync-shopify-variants', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from_day: from, to_day: to })
+        })
+        if (res.ok) {
+          const data = await res.json()
+          if (data.success) {
+            totalDone += data.done || 0
+            totalNotFound += data.not_found || 0
+          } else failedChunks.push(toRetry[i])
+        } else failedChunks.push(toRetry[i])
+      } catch(e) { failedChunks.push(toRetry[i]) }
+      if (i < toRetry.length - 1) await new Promise(r => setTimeout(r, 500))
+    }
   }
 
   if (failedChunks.length === 0) {
