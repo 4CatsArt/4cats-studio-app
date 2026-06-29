@@ -1414,6 +1414,7 @@ async function attachPartyGuestCounts(tickets) {
       t._guestCount = pdBySession[match.id].actual_guests ?? pdBySession[match.id].expected_guests ?? null
       t._guestCountIsFinal = pdBySession[match.id].actual_guests != null
     }
+    if (match) t._sessionId = match.id
   })
 }
 
@@ -1442,13 +1443,16 @@ function renderPartyTable() {
           ? `<span style="font-weight:600;color:#2e7d32">${t._guestCount}</span>`
           : `<span style="color:#999" title="Estimated — after-party form not yet finalized">~${t._guestCount}</span>`)
       : `<span style="color:#bbb" title="No after-party form found for this session">—</span>`
+    const checkinLink = t._sessionId
+      ? `<br><a href="#" onclick="openCheckinPopup('${t._sessionId}','${(t.session_title||'').replace(/'/g, "\\'")}');return false" style="font-size:11px;color:#2d6a9f;text-decoration:none">👀 Check-in list</a>`
+      : ''
     return `<tr>
       <td class="ticket-num">${t.ticket_number}</td>
       <td style="white-space:nowrap;color:#888;font-size:12px">${sessionDate}</td>
       <td style="font-size:12px;color:#333;max-width:200px">${t.session_title || '—'}</td>
       <td style="font-size:12px;color:#555">${t.customer_name || '—'}</td>
       <td style="font-size:12px;color:#555">${t.customer_email || '<span style="color:#bbb">—</span>'}</td>
-      <td style="font-size:12px;text-align:center">${guestCell}</td>
+      <td style="font-size:12px;text-align:center">${guestCell}${checkinLink}</td>
       <td><span class="stage-chip ${statusCls}">${statusLabel}</span></td>
       <td>${action}</td>
     </tr>`
@@ -1458,6 +1462,58 @@ function renderPartyTable() {
 }
 
 let pendingPartyAdvance = null
+
+async function openCheckinPopup(sessionId, sessionTitle) {
+  const win = window.open('', 'checkinList', 'width=480,height=640,scrollbars=yes')
+  if (!win) { showToast('Popup blocked — please allow popups for this site'); return }
+  win.document.write(`
+    <html><head><title>Check-In List</title>
+    <style>
+      body{font-family:-apple-system,Segoe UI,sans-serif;margin:0;padding:16px;background:#faf9f5;color:#1a1a1a}
+      h2{font-size:16px;margin:0 0 4px}
+      .sub{font-size:12px;color:#888;margin-bottom:16px}
+      .entry{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #eee}
+      .name{font-weight:600;font-size:14px}
+      .meta{font-size:12px;color:#888}
+      .empty{color:#aaa;font-size:13px;padding:20px 0;text-align:center}
+      .count{font-size:12px;color:#2e7d32;font-weight:600;margin-bottom:10px}
+    </style></head>
+    <body>
+      <h2>🎉 ${sessionTitle || 'Party'}</h2>
+      <div class="sub">Loading check-ins…</div>
+      <div id="list"></div>
+    </body></html>
+  `)
+  win.document.close()
+
+  const { data: entries, error } = await sb.from('signin_entries')
+    .select('name, email, mode, signed_in_at')
+    .eq('session_id', sessionId)
+    .eq('mode', 'party')
+    .order('signed_in_at', { ascending: true })
+
+  if (!win || win.closed) return
+  const subEl = win.document.querySelector('.sub')
+  const listEl = win.document.getElementById('list')
+
+  if (error) {
+    subEl.textContent = 'Error loading check-ins'
+    listEl.innerHTML = `<div class="empty">${error.message}</div>`
+    return
+  }
+  if (!entries || !entries.length) {
+    subEl.textContent = 'No check-ins yet'
+    listEl.innerHTML = '<div class="empty">No guests have checked in for this party yet.</div>'
+    return
+  }
+  subEl.textContent = ''
+  listEl.innerHTML = `<div class="count">${entries.length} checked in</div>` + entries.map(e => `
+    <div class="entry">
+      <span class="name">${e.name || '—'}</span>
+      <span class="meta">${e.signed_in_at ? new Date(e.signed_in_at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}) : ''}</span>
+    </div>
+  `).join('')
+}
 
 function promptPartyAdvance(id, ticketNumber) {
   pendingPartyAdvance = { id, ticketNumber }
