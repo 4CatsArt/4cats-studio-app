@@ -241,6 +241,7 @@ select:focus, input:focus { border-color: #888; }
     <button class="tab-btn" onclick="switchTab('camps')">🏕 Camp Forms<span id="camps-badge" class="tab-badge" style="display:none"></span></button>
     <button class="tab-btn" onclick="switchTab('referrals')">📊 Referrals</button>
     <button class="tab-btn" onclick="switchTab('tables')">🪑 Tables</button>
+    <button class="tab-btn" onclick="switchTab('weekview')">📆 Week View</button>
     <div class="top-bar-right"><button class="signout-btn" onclick="signOut()">Sign out</button></div>
   </div>
   <div class="tab-content active" id="tab-schedule">
@@ -776,6 +777,7 @@ async function initApp() {
   document.getElementById('cv-studio').innerHTML = '<option value="">Select a studio...</option>' + opts
   document.getElementById('rpt-studio').innerHTML = '<option value="">All studios</option>' + opts
   document.getElementById('inv-studio').innerHTML = '<option value="">Select a studio...</option>' + opts
+  const wvSel = document.getElementById('wv-studio'); if (wvSel) wvSel.innerHTML = '<option value="">Select a studio...</option>' + opts
   const aseSel = document.getElementById('ase-studio'); if (aseSel) aseSel.innerHTML = '<option value="">Select a studio...</option>' + opts
   const csdSel = document.getElementById('csd-studio'); if (csdSel) csdSel.innerHTML = '<option value="">Select a studio...</option>' + opts
   const today = dateStr(new Date()), in7 = dateStr(addDays(new Date(), 7))
@@ -789,7 +791,7 @@ async function initApp() {
 }
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','training','staff','parties','users','clay','reviews','guide','setup','camps','referrals','tables'][i] === tab))
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','training','staff','parties','users','clay','reviews','guide','setup','camps','referrals','tables','weekview'][i] === tab))
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'))
   document.getElementById(`tab-${tab}`).classList.add('active')
   if (tab === 'curriculum') loadCurriculum()
@@ -805,6 +807,7 @@ function switchTab(tab) {
   if (tab === 'setup') loadSetupTab()
   if (tab === 'camps') loadCampFormsTab()
   if (tab === 'referrals') { if (!document.getElementById('ref-date-from').value) initReferralDates(); loadReferrals() }
+  if (tab === 'weekview') initWeekView()
 }
 
 async function loadQualityBadge() {
@@ -3949,6 +3952,156 @@ async function loadCampView() {
 }
 
 function pad2(n) { return n < 10 ? '0' + n : '' + n }
+
+// ── Week View ─────────────────────────────────────────────────────────────
+var weekViewStart = null // Date, always a Sunday
+var weekViewData = []    // cached sessions+reg for the loaded week
+
+function startOfWeek(d) {
+  var r = new Date(d)
+  r.setDate(r.getDate() - r.getDay()) // back up to Sunday
+  r.setHours(0,0,0,0)
+  return r
+}
+
+function initWeekView() {
+  if (weekViewStart === null) weekViewStart = startOfWeek(new Date())
+  updateWeekViewLabel()
+}
+
+function resetWeekView() {
+  document.getElementById('week-view-container').innerHTML = '<div class="empty">Select a studio and click Load.</div>'
+}
+
+function goToCurrentWeek() {
+  weekViewStart = startOfWeek(new Date())
+  updateWeekViewLabel()
+  if (document.getElementById('wv-studio').value) loadWeekView()
+}
+
+function updateWeekViewLabel() {
+  var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  var end = addDays(weekViewStart, 6)
+  var label = months[weekViewStart.getMonth()] + ' ' + weekViewStart.getDate()
+  label += ' – '
+  if (end.getMonth() !== weekViewStart.getMonth()) label += months[end.getMonth()] + ' '
+  label += end.getDate() + ', ' + end.getFullYear()
+  document.getElementById('wv-week-label').textContent = label
+}
+
+function shiftWeekView(dir) {
+  if (weekViewStart === null) weekViewStart = startOfWeek(new Date())
+  weekViewStart = addDays(weekViewStart, dir * 7)
+  updateWeekViewLabel()
+  if (document.getElementById('wv-studio').value) loadWeekView()
+}
+
+async function loadWeekView() {
+  var studioId = document.getElementById('wv-studio').value
+  if (!studioId) { alert('Please select a studio first.'); return }
+  if (weekViewStart === null) initWeekView()
+
+  var container = document.getElementById('week-view-container')
+  container.innerHTML = '<div class="loading">Loading week…</div>'
+
+  var fromStr = dateStr(weekViewStart)
+  var toStr = dateStr(addDays(weekViewStart, 6))
+
+  var { data: sessions, error } = await sb.from('sessions')
+    .select('id, title, session_date, session_time, session_type, capacity, spaces_left_cache, show')
+    .eq('studio_id', studioId)
+    .gte('session_date', fromStr)
+    .lte('session_date', toStr)
+    .order('session_date')
+    .order('session_time')
+
+  if (error) { container.innerHTML = '<div class="empty">Error loading sessions.</div>'; return }
+
+  var sessionIds = (sessions || []).map(function(s) { return s.id })
+  var counts = {}
+  if (sessionIds.length) {
+    var { data: bookings } = await sb.from('bookings')
+      .select('session_id, qty')
+      .in('session_id', sessionIds)
+      .gt('qty', 0)
+    if (bookings) bookings.forEach(function(b) {
+      counts[b.session_id] = (counts[b.session_id] || 0) + (b.qty || 0)
+    })
+  }
+
+  weekViewData = (sessions || []).map(function(s) {
+    return Object.assign({}, s, { reg: counts[s.id] || 0 })
+  })
+
+  renderWeekView()
+}
+
+function renderWeekView() {
+  var container = document.getElementById('week-view-container')
+  if (!weekViewStart) { container.innerHTML = '<div class="empty">Select a studio and click Load.</div>'; return }
+  var typeFilter = document.getElementById('wv-type').value
+  var sessions = weekViewData.filter(function(s) { return !typeFilter || s.session_type === typeFilter })
+
+  var byDate = {}
+  sessions.forEach(function(s) {
+    if (!byDate[s.session_date]) byDate[s.session_date] = []
+    byDate[s.session_date].push(s)
+  })
+
+  var dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+  var today = dateStr(new Date())
+  var totalReg = sessions.reduce(function(acc, s) { return acc + s.reg }, 0)
+
+  var html = '<div style="padding:16px 20px 8px">'
+  html += '<div style="font-size:12px;color:#888;margin-bottom:14px">' + sessions.length + ' session' + (sessions.length !== 1 ? 's' : '') + ' scheduled this week · ' + totalReg + ' total registrations</div>'
+
+  html += '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:8px">'
+
+  for (var i = 0; i < 7; i++) {
+    var d = addDays(weekViewStart, i)
+    var dateKey = dateStr(d)
+    var isToday = dateKey === today
+    var daySessions = (byDate[dateKey] || []).slice().sort(function(a,b) {
+      return (a.session_time||'').localeCompare(b.session_time||'')
+    })
+
+    html += '<div style="background:' + (isToday ? '#fffbea' : '#fafaf8') + ';border-radius:8px;border:1px solid #e8e8e0;' + (isToday ? 'box-shadow:inset 0 0 0 2px #f9a825;' : '') + 'min-height:140px;padding:8px;display:flex;flex-direction:column;gap:6px">'
+    html += '<div style="text-align:center;padding-bottom:6px;border-bottom:1px solid #e8e8e0">'
+    html += '<div style="font-size:10px;font-weight:600;color:#999;text-transform:uppercase;letter-spacing:0.4px">' + dayNames[d.getDay()] + '</div>'
+    html += '<div style="font-size:15px;font-weight:' + (isToday ? '700' : '600') + ';color:' + (isToday ? '#b8860b' : '#1a1a1a') + '">' + d.getDate() + '</div>'
+    html += '</div>'
+
+    if (daySessions.length === 0) {
+      html += '<div style="font-size:11px;color:#ccc;text-align:center;padding-top:10px">Nothing scheduled</div>'
+    } else {
+      daySessions.forEach(function(s) {
+        var isFull = s.capacity > 0 && s.reg >= s.capacity
+        var spacesLeft = s.spaces_left_cache !== null && s.spaces_left_cache !== undefined
+          ? s.spaces_left_cache
+          : (s.capacity > 0 ? s.capacity - s.reg : null)
+        var regColor = s.reg === 0 ? '#bbb' : isFull ? '#2e7d32' : '#1a4fa0'
+        var spacesColor = spacesLeft === null ? '#bbb' : spacesLeft <= 0 ? '#2e7d32' : spacesLeft <= 2 ? '#f9a825' : '#888'
+        var timeStr = s.session_time ? s.session_time.substring(0,5) : ''
+        var badge = getBadge(s.session_type)
+
+        html += '<div style="padding:5px 6px;background:#fff;border:1px solid #e8e8e0;border-radius:5px;border-left:3px solid ' + regColor + '">'
+        html += '<div style="display:flex;align-items:center;gap:4px;margin-bottom:2px"><span class="badge ' + badge + '" style="font-size:8px;padding:1px 4px">' + s.session_type + '</span>' + (s.show ? '' : '<span title="Hidden from staff" style="font-size:10px">👁</span>') + '</div>'
+        html += '<div style="font-size:11px;font-weight:600;color:#1a1a1a;line-height:1.3;margin-bottom:2px">' + (timeStr ? timeStr + ' &middot; ' : '') + s.title + '</div>'
+        html += '<div style="display:flex;justify-content:space-between;align-items:center">'
+        html += '<span style="font-size:11px;font-weight:700;color:' + regColor + '">' + s.reg + ' reg</span>'
+        if (spacesLeft !== null) html += '<span style="font-size:10px;color:' + spacesColor + '">' + spacesLeft + ' left</span>'
+        html += '</div></div>'
+      })
+    }
+    html += '</div>'
+  }
+
+  html += '</div>' // end grid
+  html += '</div>' // end outer padding
+
+  container.innerHTML = html
+}
+
 
 function switchTasksSubtab(name) {
   const isLive = name === 'live'
@@ -7357,6 +7510,37 @@ function drawReferralDonut(sorted, total) {
     <div id="tables-rooms-editor"></div>
   </div>
 
+</div>
+
+<div class="tab-content" id="tab-weekview">
+  <div class="toolbar">
+    <div class="toolbar-group">
+      <label>Studio</label>
+      <select id="wv-studio" onchange="resetWeekView()"><option value="">Select a studio...</option></select>
+    </div>
+    <div class="toolbar-sep"></div>
+    <div class="toolbar-group">
+      <label>Week</label>
+      <button class="btn" onclick="shiftWeekView(-1)">← Prev</button>
+      <span id="wv-week-label" style="font-size:13px;font-weight:600;min-width:200px;text-align:center;display:inline-block"></span>
+      <button class="btn" onclick="shiftWeekView(1)">Next →</button>
+      <button class="btn" onclick="goToCurrentWeek()">This Week</button>
+      <button class="btn btn-primary" onclick="loadWeekView()">Load</button>
+    </div>
+    <div class="toolbar-sep"></div>
+    <div class="toolbar-group">
+      <label>Type</label>
+      <select id="wv-type" onchange="renderWeekView()">
+        <option value="">All types</option>
+        <option value="workshop">Workshop</option>
+        <option value="party">Party</option>
+        <option value="glazing">Glazing</option>
+        <option value="class">Class</option>
+        <option value="camp">Camp</option>
+      </select>
+    </div>
+  </div>
+  <div id="week-view-container"><div class="empty">Select a studio and click Load.</div></div>
 </div>
 
 <!-- Add/Edit Table Modal -->
