@@ -241,6 +241,7 @@ select:focus, input:focus { border-color: #888; }
     <button class="tab-btn" onclick="switchTab('camps')">🏕 Camp Forms<span id="camps-badge" class="tab-badge" style="display:none"></span></button>
     <button class="tab-btn" onclick="switchTab('referrals')">📊 Referrals</button>
     <button class="tab-btn" onclick="switchTab('tables')">🪑 Tables</button>
+    <button class="tab-btn" onclick="switchTab('studiopages')">🌐 Studio Pages</button>
     <div class="top-bar-right"><button class="signout-btn" onclick="signOut()">Sign out</button></div>
   </div>
   <div class="tab-content active" id="tab-schedule">
@@ -824,7 +825,7 @@ async function initApp() {
 }
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','training','staff','parties','users','clay','reviews','guide','setup','camps','referrals','tables'][i] === tab))
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','training','staff','parties','users','clay','reviews','guide','setup','camps','referrals','tables','studiopages'][i] === tab))
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'))
   document.getElementById(`tab-${tab}`).classList.add('active')
   if (tab === 'curriculum') loadCurriculum()
@@ -840,6 +841,7 @@ function switchTab(tab) {
   if (tab === 'setup') loadSetupTab()
   if (tab === 'camps') loadCampFormsTab()
   if (tab === 'referrals') { if (!document.getElementById('ref-date-from').value) initReferralDates(); loadReferrals() }
+  if (tab === 'studiopages') initStudioPagesTab()
 }
 
 async function loadQualityBadge() {
@@ -9211,6 +9213,138 @@ openEditTableModal = function(id) {
 
 </script>
 
+
+<div class="tab-content" id="tab-studiopages" style="padding:1.5rem;max-width:820px">
+
+  <h2 style="margin:0 0 4px;font-size:17px;font-weight:600">Studio Page Metafields</h2>
+  <p style="font-size:12px;color:#888;margin-bottom:1.25rem">
+    Bulk-update the Shopify studio-calendar page fields (Hours, Closure Notice, Pickup Hours, Closed Days)
+    across one, several, or all studios. Only checked fields below get pushed — leave a field unchecked to
+    leave it untouched.
+  </p>
+
+  <div style="margin-bottom:1.25rem">
+    <label style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:6px">Studios</label>
+    <div id="sp-studio-picker"></div>
+  </div>
+
+  <div id="sp-fields" style="display:flex;flex-direction:column;gap:14px;margin-bottom:1.5rem"></div>
+
+  <div style="display:flex;align-items:center;gap:10px">
+    <button class="btn btn-primary" id="sp-submit-btn" onclick="submitStudioMetafields()">Update Selected Studios</button>
+    <span id="sp-status" style="font-size:12px;color:#888"></span>
+  </div>
+
+  <div id="sp-results" style="margin-top:1.5rem"></div>
+
+</div>
+
+<script>
+// ===== STUDIO PAGES TAB =====
+
+const SP_FIELDS = [
+  { key: 'studio_hours',   label: 'Studio Hours',   placeholder: 'e.g. Wed–Sun, 11am–8pm',         multiline: true },
+  { key: 'closure_notice', label: 'Closure Notice',  placeholder: 'Leave blank to remove the banner', multiline: true },
+  { key: 'pickup_hours',   label: 'Pickup Hours',   placeholder: 'e.g. Sat & Sun 1–5pm',           multiline: false },
+  { key: 'closed_days',    label: 'Closed Days',    placeholder: 'e.g. Mondays and Tuesdays',      multiline: false }
+]
+
+function initStudioPagesTab() {
+  const picker = document.getElementById('sp-studio-picker')
+  if (!picker.dataset.built) {
+    buildStudioPicker('sp-studio-picker')
+    picker.dataset.built = '1'
+  }
+  if (!document.getElementById('sp-fields').dataset.built) {
+    document.getElementById('sp-fields').innerHTML = SP_FIELDS.map(f => `
+      <div style="border:0.5px solid #e0e0d8;border-radius:8px;padding:10px 12px;background:white">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;cursor:pointer;margin-bottom:6px">
+          <input type="checkbox" id="sp-enable-${f.key}" onchange="document.getElementById('sp-input-${f.key}').disabled = !this.checked">
+          ${f.label}
+        </label>
+        ${f.multiline
+          ? `<textarea id="sp-input-${f.key}" disabled placeholder="${f.placeholder}" style="width:100%;min-height:60px;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;font-family:inherit;resize:vertical;background:#fafaf8"></textarea>`
+          : `<input type="text" id="sp-input-${f.key}" disabled placeholder="${f.placeholder}" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;background:#fafaf8">`}
+      </div>`).join('')
+    document.getElementById('sp-fields').dataset.built = '1'
+    // grey out disabled inputs visually
+    document.querySelectorAll('#sp-fields input[type=checkbox]').forEach(cb => {
+      cb.addEventListener('change', function() {
+        const input = document.getElementById(this.id.replace('sp-enable-', 'sp-input-'))
+        input.style.background = this.checked ? 'white' : '#fafaf8'
+      })
+    })
+  }
+}
+
+async function submitStudioMetafields() {
+  const statusEl = document.getElementById('sp-status')
+  const resultsEl = document.getElementById('sp-results')
+  resultsEl.innerHTML = ''
+  statusEl.style.color = '#888'
+
+  const selected = getStudioPickerSelection('sp-studio-picker') // [] = all studios
+
+  const updates = {}
+  SP_FIELDS.forEach(f => {
+    const enabled = document.getElementById(`sp-enable-${f.key}`).checked
+    if (enabled) updates[f.key] = document.getElementById(`sp-input-${f.key}`).value
+  })
+
+  if (!Object.keys(updates).length) {
+    statusEl.style.color = '#c0392b'
+    statusEl.textContent = 'Check at least one field to update.'
+    return
+  }
+
+  const studioCount = Object.keys(STUDIO_VARIANT_MAP).length
+  const targetDesc = selected.length ? `${selected.length} studio(s)` : `ALL ${studioCount} studios`
+  if (!confirm(`Update ${Object.keys(updates).length} field(s) on ${targetDesc}?`)) return
+
+  const btn = document.getElementById('sp-submit-btn')
+  btn.disabled = true
+  statusEl.textContent = 'Updating… this can take a minute or two for many studios.'
+
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/sync-studio-metafields`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ studio_ids: selected.length ? selected : 'all', updates })
+    })
+    const data = await res.json()
+    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`)
+
+    const results = data.results || []
+    const okCount = results.filter(r => r.status === 'done' && Object.values(r.fields || {}).every(v => v === 'updated' || v === 'created')).length
+
+    statusEl.style.color = okCount === results.length ? '#2e7d32' : '#e65100'
+    statusEl.textContent = `Done — ${okCount}/${results.length} studio(s) updated cleanly.`
+
+    resultsEl.innerHTML = `
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="text-align:left;color:#888;border-bottom:0.5px solid #e0e0d8">
+          <th style="padding:6px 8px">Studio</th><th style="padding:6px 8px">Status</th><th style="padding:6px 8px">Detail</th>
+        </tr></thead>
+        <tbody>
+        ${results.map(r => {
+          const ok = r.status === 'done' && Object.values(r.fields || {}).every(v => v === 'updated' || v === 'created')
+          const detail = r.fields ? Object.entries(r.fields).map(([k,v]) => `${k}: ${v}`).join(', ') : (r.error || '')
+          return `<tr style="border-bottom:0.5px solid #f5f5f0">
+            <td style="padding:6px 8px">${getStudioName(r.studio_id)}</td>
+            <td style="padding:6px 8px;font-weight:600;color:${ok ? '#2e7d32' : '#c0392b'}">${ok ? 'OK' : (r.status === 'error' ? 'Error' : 'Issues')}</td>
+            <td style="padding:6px 8px;color:#888">${detail}</td>
+          </tr>`
+        }).join('')}
+        </tbody>
+      </table>`
+  } catch (e) {
+    statusEl.style.color = '#c0392b'
+    statusEl.textContent = 'Failed: ' + e.message
+  } finally {
+    btn.disabled = false
+  }
+}
+</script>
 
 </body>
 </html>
