@@ -1146,7 +1146,9 @@ async function renderSchedule() {
         const safeTitle = shopifyTitle.replace(/'/g, "\\'")
         const studioRegs = JSON.stringify(Object.fromEntries(Object.entries(row.studios).map(([id,s]) => [id, s.reg])))
         const safeRegs = studioRegs.replace(/'/g, "&#39;")
-        shopifyBtn = `<button class="btn-shopify" onclick="checkShopifyRow('${safeTitle}', this, '${date}', '${row.time||'00:00:00'}', JSON.parse(this.dataset.regs))" data-regs='${safeRegs}'>Check Shopify ↗</button>`
+        const isLineup = Object.values(row.studios).some(s => s.is_lineup)
+        const safeRowTitle = row.title.replace(/'/g, "\\'")
+        shopifyBtn = `<button class="btn-shopify" onclick="checkShopifyRow('${safeTitle}', this, '${date}', '${row.time||'00:00:00'}', JSON.parse(this.dataset.regs), ${isLineup}, '${safeRowTitle}')" data-regs='${safeRegs}'>Check Shopify ↗</button>`
       } else {
         shopifyBtn = `<span style="color:#ddd;font-size:10px">class series</span>`
       }
@@ -1213,7 +1215,7 @@ async function renderSchedule() {
   document.getElementById('grid-body').innerHTML = bodyHtml || `<tr><td colspan="${gridStudios.length+2}" class="empty">No sessions match filters.</td></tr>`
 }
 
-async function checkShopifyRow(shopifyTitle, btn, sessionDate, sessionTime, studioRegs) {
+async function checkShopifyRow(shopifyTitle, btn, sessionDate, sessionTime, studioRegs, isLineup, rowTitle) {
   btn.textContent = '...'; btn.disabled = true
   try {
     const res = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({action:'get_all',product_title:shopifyTitle}) })
@@ -1235,6 +1237,17 @@ async function checkShopifyRow(shopifyTitle, btn, sessionDate, sessionTime, stud
       const memSession = scheduleData.find(s => s.id === session.id)
       if (memSession) { memSession.capacity = capacity; memSession.shopify_status = shopifyStatus }
     })
+    if (isLineup && rowTitle) {
+      const lineupTitle = buildLineupTitle(sessionDate, rowTitle)
+      try {
+        const lr = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({action:'get_lineup_handle', lineup_title:lineupTitle}) })
+        const ldata = await lr.json()
+        if (!ldata.error && ldata.handle) {
+          await sb.from('sessions').update({ lineup_handle: ldata.handle }).eq('session_date', sessionDate).eq('title', rowTitle)
+          scheduleData.forEach(s => { if (s.session_date===sessionDate && s.title===rowTitle) s.lineup_handle = ldata.handle })
+        }
+      } catch(e) {}
+    }
     renderSchedule()
   } catch(e) { btn.textContent = 'Error'; btn.disabled = false }
 }
@@ -1562,6 +1575,27 @@ async function syncStudioInventory() {
       }
     } catch(e) { notFound.push(item.shopifyTitle + ' (network error)') }
   }
+
+  // Sync lineup storefront handles for any Cat-Week-style sessions on this day
+  const lineupSeen = new Set(), lineupToSync = []
+  activeSessions.forEach(s => {
+    if (!s.is_lineup) return
+    const key = `${s.session_date}|${s.title}`
+    if (lineupSeen.has(key)) return
+    lineupSeen.add(key)
+    lineupToSync.push({ session_date: s.session_date, title: s.title, lineupTitle: buildLineupTitle(s.session_date, s.title) })
+  })
+  for (const item of lineupToSync) {
+    btn.textContent = `Syncing lineups...`
+    try {
+      const res = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({action:'get_lineup_handle', lineup_title:item.lineupTitle}) })
+      const data = await res.json()
+      if (data.error || !data.handle) { notFound.push(item.lineupTitle + ' (lineup product)'); continue }
+      await sb.from('sessions').update({ lineup_handle: data.handle }).eq('session_date', item.session_date).eq('title', item.title)
+      activeSessions.forEach(s => { if (s.session_date===item.session_date && s.title===item.title) s.lineup_handle = data.handle })
+    } catch(e) { notFound.push(item.lineupTitle + ' (lineup, network error)') }
+  }
+
   btn.textContent = `Sync Shopify Inventory${notFound.length ? ` (${notFound.length} missing)` : ''}`; btn.disabled = false
   if (notFound.length) showSyncErrors(notFound)
   loadStudioView()
@@ -9254,7 +9288,6 @@ function initStudioPagesTab() {
   if (!picker.dataset.built) {
     buildStudioPicker('sp-studio-picker')
     picker.dataset.built = '1'
-    spKeepStudioListVisible()
   }
   if (!document.getElementById('sp-fields').dataset.built) {
     document.getElementById('sp-fields').innerHTML = SP_FIELDS.map(f => `
@@ -9275,26 +9308,6 @@ function initStudioPagesTab() {
         input.style.background = this.checked ? 'white' : '#fafaf8'
       })
     })
-  }
-}
-
-// Keep every studio checkbox visible at all times (not just when "All" is
-// unchecked) so individual/cross-province selections (e.g. a local snow
-// closure) are always one click away, without altering the shared picker
-// used elsewhere.
-function spKeepStudioListVisible() {
-  const container = document.getElementById('sp-studio-picker')
-  if (!container) return
-  const list = container.querySelector('[style*="max-height"]')
-  if (list) list.style.display = 'block'
-
-  const allCb = document.getElementById('sp-studio-picker-all')
-  if (allCb) {
-    allCb.onchange = function() {
-      document.querySelectorAll('.sp-studio-picker-studio-cb').forEach(cb => cb.checked = false)
-      document.querySelectorAll('.sp-studio-picker-province').forEach(cb => cb.checked = false)
-      if (list) list.style.display = 'block'
-    }
   }
 }
 
