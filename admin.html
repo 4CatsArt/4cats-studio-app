@@ -4065,6 +4065,37 @@ async function loadWeekView() {
     return Object.assign({}, s, { reg: counts[s.id] || 0 })
   })
 
+  // Cross-check against cached shopify_variants to flag sessions whose title
+  // resolves to a Shopify product, but where THIS studio has no variant for it
+  // (i.e. it's not actually offered/bookable here even though it looks live).
+  weekViewData.forEach(function(s) { s.shopifyTitleResolved = buildShopifyTitle(s.session_date, s.session_time || '00:00:00', s.title) })
+  var resolvedTitles = [].concat.apply([], weekViewData.map(function(s) {
+    return (s.shopifyTitleResolved && s.shopifyTitleResolved !== 'OVERRIDE') ? [s.shopifyTitleResolved] : []
+  }))
+  resolvedTitles = resolvedTitles.filter(function(t, i) { return resolvedTitles.indexOf(t) === i })
+
+  var variantTitleSet = {}
+  if (resolvedTitles.length) {
+    try {
+      var { data: cachedVars } = await sb.from('shopify_variants')
+        .select('shopify_title')
+        .in('shopify_title', resolvedTitles)
+        .eq('studio_id', studioId)
+        .not('inventory_item_id', 'is', null)
+      if (cachedVars) cachedVars.forEach(function(v) { variantTitleSet[v.shopify_title] = true })
+    } catch (e) { /* non-critical */ }
+  }
+
+  weekViewData.forEach(function(s) {
+    if (!s.shopifyTitleResolved || s.shopifyTitleResolved === 'OVERRIDE') {
+      s.liveProductStatus = 'none' // dashboard-only by design (e.g. class 2+ of a series)
+    } else if (variantTitleSet[s.shopifyTitleResolved]) {
+      s.liveProductStatus = 'live' // confirmed variant exists for this studio
+    } else {
+      s.liveProductStatus = 'missing' // title resolves, but no variant cached for this studio — flag it
+    }
+  })
+
   renderWeekView()
 }
 
@@ -4084,8 +4115,11 @@ function renderWeekView() {
   var today = dateStr(new Date())
   var totalReg = sessions.reduce(function(acc, s) { return acc + s.reg }, 0)
 
+  var hasMissing = sessions.some(function(s) { return s.liveProductStatus === 'missing' })
+
   var html = '<div style="padding:16px 20px 8px">'
-  html += '<div style="font-size:12px;color:#888;margin-bottom:14px">' + sessions.length + ' session' + (sessions.length !== 1 ? 's' : '') + ' scheduled this week · ' + totalReg + ' total registrations</div>'
+  html += '<div style="font-size:12px;color:#888;margin-bottom:6px">' + sessions.length + ' session' + (sessions.length !== 1 ? 's' : '') + ' scheduled this week · ' + totalReg + ' total registrations</div>'
+  if (hasMissing) html += '<div style="font-size:11px;color:#c47f1d;margin-bottom:14px"><span style="background:#fdecc8;border-radius:3px;padding:0 4px;font-weight:600">⚠ no variant</span> = this session has a Shopify product title, but no matching variant for this studio — it isn\'t actually bookable here.</div>'
 
   html += '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:8px">'
 
@@ -4111,21 +4145,33 @@ function renderWeekView() {
         var spacesLeft = s.spaces_left_cache !== null && s.spaces_left_cache !== undefined
           ? s.spaces_left_cache
           : (s.capacity > 0 ? s.capacity - s.reg : null)
-        var isDead = s.reg === 0 && spacesLeft === 0
-        var regColor = isDead ? '#bbb' : s.reg === 0 ? '#bbb' : isFull ? '#2e7d32' : '#1a4fa0'
-        var spacesColor = isDead ? '#bbb' : spacesLeft === null ? '#bbb' : spacesLeft <= 0 ? '#2e7d32' : spacesLeft <= 2 ? '#f9a825' : '#888'
+        var isMissing = s.liveProductStatus === 'missing'
+        var isDead = !isMissing && s.reg === 0 && spacesLeft === 0
+        var regColor = (isDead || isMissing) ? '#bbb' : s.reg === 0 ? '#bbb' : isFull ? '#2e7d32' : '#1a4fa0'
+        var spacesColor = (isDead || isMissing) ? '#bbb' : spacesLeft === null ? '#bbb' : spacesLeft <= 0 ? '#2e7d32' : spacesLeft <= 2 ? '#f9a825' : '#888'
         var timeStr = s.session_time ? s.session_time.substring(0,5) : ''
         var badge = getBadge(s.session_type)
-        var cardBg = isDead ? '#f3f3ef' : '#fff'
-        var titleColor = isDead ? '#aaa' : '#1a1a1a'
+        var cardBg = isMissing ? '#fff8f0' : isDead ? '#f3f3ef' : '#fff'
+        var titleColor = (isDead || isMissing) ? '#aaa' : '#1a1a1a'
         var opacity = isDead ? 'opacity:0.65;' : ''
+        var borderColor = isMissing ? '#e6a23c' : regColor
 
-        html += '<div onclick="openWeekSpotsModal(\'' + s.id + '\')" style="cursor:pointer;padding:5px 6px;background:' + cardBg + ';border:1px solid #e8e8e0;border-radius:5px;border-left:3px solid ' + regColor + ';' + opacity + '" title="Click to adjust spaces">'
-        html += '<div style="display:flex;align-items:center;gap:4px;margin-bottom:2px"><span class="badge ' + badge + '" style="font-size:8px;padding:1px 4px' + (isDead ? ';filter:grayscale(1)' : '') + '">' + s.session_type + '</span>' + (s.show ? '' : '<span title="Hidden from staff" style="font-size:10px">👁</span>') + '</div>'
+        var isEditable = s.liveProductStatus === 'live'
+        var clickAttr = isEditable ? ' onclick="openWeekSpotsModal(\'' + s.id + '\')" style="cursor:pointer;' : ' style="'
+        var cardTitleAttr = isEditable ? ' title="Click to adjust spaces"'
+          : isMissing ? ' title="This studio has no matching Shopify variant — not actually bookable here"'
+          : ' title="No live Shopify product — not editable here"'
+
+        html += '<div' + clickAttr + 'padding:5px 6px;background:' + cardBg + ';border:1px solid ' + (isMissing ? '#f0d9b5' : '#e8e8e0') + ';border-radius:5px;border-left:3px solid ' + borderColor + ';' + opacity + '"' + cardTitleAttr + '>'
+        html += '<div style="display:flex;align-items:center;gap:4px;margin-bottom:2px"><span class="badge ' + badge + '" style="font-size:8px;padding:1px 4px' + (isDead ? ';filter:grayscale(1)' : '') + '">' + s.session_type + '</span>' + (s.show ? '' : '<span title="Hidden from staff" style="font-size:10px">👁</span>') + (isMissing ? '<span style="font-size:9px;background:#fdecc8;color:#a15c00;border-radius:3px;padding:0 4px;font-weight:600">⚠ no variant</span>' : '') + '</div>'
         html += '<div style="font-size:11px;font-weight:600;color:' + titleColor + ';line-height:1.3;margin-bottom:2px">' + (timeStr ? timeStr + ' &middot; ' : '') + s.title + '</div>'
         html += '<div style="display:flex;justify-content:space-between;align-items:center">'
         html += '<span style="font-size:11px;font-weight:700;color:' + regColor + '">' + s.reg + ' reg</span>'
-        if (spacesLeft !== null) html += '<span style="font-size:10px;color:' + spacesColor + '">' + spacesLeft + ' left ✎</span>'
+        if (isMissing) {
+          html += '<span style="font-size:10px;color:#c47f1d">not offered</span>'
+        } else if (spacesLeft !== null) {
+          html += '<span style="font-size:10px;color:' + spacesColor + '">' + spacesLeft + (isEditable ? ' left ✎' : ' left') + '</span>'
+        }
         html += '</div></div>'
       })
     }
@@ -4160,7 +4206,7 @@ function openWeekSpotsModal(sessionId) {
       '<input id="wv-spots-input" type="number" min="0" value="' + spacesLeft + '" style="flex:1;text-align:center;height:34px;border:1px solid #ddd;border-radius:6px;font-size:15px;box-sizing:border-box">' +
       '<button class="btn" onclick="adjustWvSpots(1)" style="width:36px">+</button>' +
     '</div>' +
-    '<div style="font-size:11px;color:#aaa;margin-bottom:10px;line-height:1.5">Saving will push to Shopify if a matching product is found, and update the dashboard either way.</div>' +
+    '<div style="font-size:11px;color:#aaa;margin-bottom:10px;line-height:1.5">Saves directly to Shopify. Only available for sessions with a live Shopify product.</div>' +
     '<div id="wv-modal-status" style="font-size:11px;color:#888;min-height:14px;margin-bottom:8px"></div>' +
     '<div style="display:flex;justify-content:flex-end;gap:8px">' +
       '<button class="btn" onclick="document.getElementById(\'wv-modal\').remove()">Cancel</button>' +
@@ -4184,36 +4230,54 @@ async function saveWeekSpots(sessionId) {
   var statusEl = document.getElementById('wv-modal-status')
   var saveBtn = document.getElementById('wv-modal-save-btn')
   if (isNaN(newQty) || newQty < 0) { statusEl.textContent = 'Enter a valid number.'; return }
-  statusEl.textContent = 'Saving…'
+  statusEl.textContent = 'Checking Shopify…'
   if (saveBtn) saveBtn.disabled = true
 
   var studioId = document.getElementById('wv-studio').value
   var shopifyTitle = buildShopifyTitle(s.session_date, s.session_time || '00:00:00', s.title)
-  var pushedToShopify = false
 
+  if (!shopifyTitle || shopifyTitle === 'OVERRIDE') {
+    statusEl.textContent = 'No live Shopify product for this session — not editable here.'
+    if (saveBtn) saveBtn.disabled = false
+    return
+  }
+
+  var variant = null
   try {
-    if (shopifyTitle && shopifyTitle !== 'OVERRIDE') {
-      var res = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({action:'get_all',product_title:shopifyTitle}) })
-      var data = await res.json()
-      if (!data.error && data.variants) {
-        var varTitle = STUDIO_VARIANT_MAP[studioId]
-        var variant = data.variants.find(function(v) { return v.variant_title === varTitle })
-        if (variant) {
-          var setRes = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({action:'set',inventory_item_id:variant.inventory_item_id,quantity:newQty}) })
-          var setData = await setRes.json()
-          if (setData.inventory_level) pushedToShopify = true
-        }
-      }
+    var res = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({action:'get_all',product_title:shopifyTitle}) })
+    var data = await res.json()
+    if (!data.error && data.variants) {
+      var varTitle = STUDIO_VARIANT_MAP[studioId]
+      variant = data.variants.find(function(v) { return v.variant_title === varTitle }) || null
     }
-  } catch (e) { /* fall through to dashboard-only save */ }
+  } catch (e) { variant = null }
+
+  if (!variant) {
+    statusEl.textContent = 'No live Shopify product found for this studio — could not save.'
+    if (saveBtn) saveBtn.disabled = false
+    return
+  }
+
+  statusEl.textContent = 'Saving…'
+  var setData
+  try {
+    var setRes = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({action:'set',inventory_item_id:variant.inventory_item_id,quantity:newQty}) })
+    setData = await setRes.json()
+  } catch (e) { setData = null }
+
+  if (!setData || !setData.inventory_level) {
+    statusEl.textContent = 'Shopify update failed — try again.'
+    if (saveBtn) saveBtn.disabled = false
+    return
+  }
 
   var newCapacity = s.reg + newQty
   var { error } = await sb.from('sessions').update({ capacity: newCapacity, spaces_left_cache: newQty }).eq('id', sessionId)
-  if (error) { statusEl.textContent = 'Error saving — try again.'; if (saveBtn) saveBtn.disabled = false; return }
+  if (error) { statusEl.textContent = 'Synced to Shopify, but dashboard update failed — refresh to confirm.'; if (saveBtn) saveBtn.disabled = false; return }
 
   s.capacity = newCapacity
   s.spaces_left_cache = newQty
-  statusEl.textContent = pushedToShopify ? 'Saved — synced to Shopify ✓' : 'Saved to dashboard (no Shopify match found)'
+  statusEl.textContent = 'Saved — synced to Shopify ✓'
   setTimeout(function() {
     var modal = document.getElementById('wv-modal'); if (modal) modal.remove()
     renderWeekView()
