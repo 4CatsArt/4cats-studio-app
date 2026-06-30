@@ -439,6 +439,25 @@
   </div>
 </div>
 
+<!-- REVERT STAGE -->
+<div class="overlay" id="revert-overlay">
+  <div class="confirm-card">
+    <div style="font-size:15px;font-weight:700;margin-bottom:8px">Revert Stage?</div>
+    <div class="confirm-ticket" id="revert-num"></div>
+    <div style="font-size:13px;color:#666;margin:10px 0 4px">Revert to:</div>
+    <select id="revert-stage-select" style="width:100%;padding:8px 10px;border:1.5px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none;font-family:inherit;margin-bottom:10px">
+      <option value="drying">Drying / Processing 🪴</option>
+      <option value="bisque_ready">✅ Bisque — Ready for Glazing</option>
+      <option value="ready_pickup">🎉 Ready for Pickup</option>
+    </select>
+    <div style="font-size:12px;color:#aaa;margin-bottom:8px">This will not send any email. Use this to undo a mistaken advance.</div>
+    <div class="confirm-btns">
+      <button class="confirm-no" onclick="closeRevert()">Cancel</button>
+      <button class="confirm-yes" id="revert-yes" onclick="confirmRevert()">Revert</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -741,10 +760,16 @@ function renderTable() {
              <button class="advance-btn" style="background:#2e7d32" onclick="promptAdvance('${t.id}','${t.ticket_number}','ready_pickup','→ Skip to Ready for Pickup 🎉')">→ Skip to Pickup</button>
            </div>`
       : stage.next
-        ? `<button class="advance-btn" onclick="promptAdvance('${t.id}','${t.ticket_number}','${stage.next}','${(stage.nextLabel||'').replace(/'/g,"\\'")}')">
-             ${stage.nextLabel}
-           </button>`
-        : `<span class="done-badge">✓ Picked Up</span>`
+        ? `<div style="display:flex;flex-direction:column;gap:4px">
+             <button class="advance-btn" onclick="promptAdvance('${t.id}','${t.ticket_number}','${stage.next}','${(stage.nextLabel||'').replace(/'/g,"\\'")}')">
+               ${stage.nextLabel}
+             </button>
+             <button class="advance-btn" style="background:#fff;color:#999;border:1px solid #ddd" onclick="promptRevert('${t.id}','${t.ticket_number}','${t.stage}')">↩ Revert stage…</button>
+           </div>`
+        : `<div style="display:flex;flex-direction:column;gap:4px">
+             <span class="done-badge">✓ Picked Up</span>
+             <button class="advance-btn" style="background:#fff;color:#999;border:1px solid #ddd" onclick="promptRevert('${t.id}','${t.ticket_number}','${t.stage}')">↩ Revert stage…</button>
+           </div>`
 
     const checked  = selectedIds.has(t.id) ? 'checked' : ''
     const selClass = selectedIds.has(t.id) ? ' selected' : ''
@@ -948,6 +973,56 @@ function promptAdvance(id, num, nextStage, nextLabel) {
 }
 
 function closeConfirm() { document.getElementById('confirm-overlay').classList.remove('show'); }
+
+let pendingRevert = null
+
+function promptRevert(id, num, currentStage) {
+  pendingRevert = { id, num, currentStage }
+  document.getElementById('revert-num').textContent = num
+  const sel = document.getElementById('revert-stage-select')
+  // Default the dropdown to one step behind the current stage
+  const order = ['drying', 'bisque_ready', 'ready_pickup', 'picked_up']
+  const idx = order.indexOf(currentStage)
+  const defaultTo = idx > 0 ? order[idx - 1] : 'drying'
+  sel.value = defaultTo
+  // Hide the option matching the current stage (can't "revert" to where it already is)
+  Array.from(sel.options).forEach(o => { o.style.display = o.value === currentStage ? 'none' : '' })
+  document.getElementById('revert-overlay').classList.add('show')
+}
+
+function closeRevert() { document.getElementById('revert-overlay').classList.remove('show'); pendingRevert = null }
+
+async function confirmRevert() {
+  if (!pendingRevert) return
+  const { id, num } = pendingRevert
+  const targetStage = document.getElementById('revert-stage-select').value
+  const btn = document.getElementById('revert-yes')
+  btn.disabled = true; btn.textContent = '...'
+
+  // Clean up fields tied to stages we're reverting OUT of, so the ticket
+  // doesn't carry stale expiry dates / email-sent flags / pickup dates.
+  const patch = { stage: targetStage }
+  if (targetStage === 'drying') {
+    patch.bisque_expiry_date = null
+    patch.bisque_email_sent_at = null
+  }
+  if (targetStage === 'drying' || targetStage === 'bisque_ready') {
+    patch.pickup_expiry_date = null
+    patch.pickup_email_sent_at = null
+    patch.picked_up_on = null
+  }
+
+  const { error } = await sb.from('clay_tickets').update(patch).eq('id', id)
+  btn.disabled = false; btn.textContent = 'Revert'
+  closeRevert()
+
+  if (error) { showToast('Error — try again'); console.error(error); return }
+
+  const t = allTickets.find(t => t.id === id)
+  if (t) Object.assign(t, patch)
+  showToast(`#${num} reverted to ${STAGES[targetStage].label} — no email sent`)
+  renderTable()
+}
 
 async function confirmAdvance() {
   if (!pendingAdvance) return
