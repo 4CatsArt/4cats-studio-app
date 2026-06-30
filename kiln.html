@@ -1346,7 +1346,7 @@ async function loadPartyTickets() {
   const stageF = document.getElementById('party-filter-stage').value
 
   let q = sb.from('party_tickets')
-    .select('id, ticket_number, studio_id, customer_name, customer_email, session_title, session_date, status, created_at')
+    .select('id, ticket_number, studio_id, customer_name, customer_email, session_title, session_date, status, created_at, booking_id')
     .order('created_at', { ascending: false })
     .limit(500)
 
@@ -1368,57 +1368,32 @@ async function loadPartyTickets() {
 }
 
 async function attachPartyGuestCounts(tickets) {
-  const datesNeeded = [...new Set(tickets.map(t => t.session_date).filter(Boolean))]
-  if (!datesNeeded.length) return
+  const bookingIds = tickets.map(t => t.booking_id).filter(Boolean)
+  if (!bookingIds.length) return
 
-  // Find party sessions on those dates (optionally scoped to studio)
-  let sq = sb.from('sessions')
-    .select('id, studio_id, session_date, title')
-    .eq('session_type', 'party')
-    .in('session_date', datesNeeded)
-  if (studioId) sq = sq.eq('studio_id', studioId)
-  const { data: sessions } = await sq
-  if (!sessions || !sessions.length) return
-
-  const sessionIds = sessions.map(s => s.id)
-
+  // Fetch party_details and session_id directly via booking_id
   const { data: bookings } = await sb.from('bookings')
     .select('id, session_id')
-    .in('session_id', sessionIds)
-    .is('returned_at', null)
-  if (!bookings || !bookings.length) return
-
-  const bookingIds = bookings.map(b => b.id)
+    .in('id', bookingIds)
+  const bookingMap = {}
+  if (bookings) bookings.forEach(b => { bookingMap[b.id] = b })
 
   const { data: pds } = await sb.from('party_details')
     .select('booking_id, actual_guests, expected_guests')
     .in('booking_id', bookingIds)
   if (!pds || !pds.length) return
 
-  // Map booking_id -> party_details, then session_id -> party_details (via booking)
   const pdByBooking = {}
   pds.forEach(pd => { pdByBooking[pd.booking_id] = pd })
-  const pdBySession = {}
-  bookings.forEach(b => {
-    if (pdByBooking[b.id]) pdBySession[b.session_id] = pdByBooking[b.id]
-  })
 
-  // Match each ticket to a session by studio_id + session_date + title
   tickets.forEach(t => {
-    const match = sessions.find(s =>
-      s.session_date === t.session_date &&
-      s.studio_id === t.studio_id &&
-      (
-        (s.title || '').trim() === (t.session_title || '').trim() ||
-        (s.title || '').toLowerCase().includes((t.session_title || '').toLowerCase()) ||
-        (t.session_title || '').toLowerCase().includes((s.title || '').toLowerCase())
-      )
-    )
-    if (match && pdBySession[match.id]) {
-      t._guestCount = pdBySession[match.id].actual_guests ?? pdBySession[match.id].expected_guests ?? null
-      t._guestCountIsFinal = pdBySession[match.id].actual_guests != null
+    const pd = pdByBooking[t.booking_id]
+    if (pd) {
+      t._guestCount = pd.actual_guests ?? pd.expected_guests ?? null
+      t._guestCountIsFinal = pd.actual_guests != null
     }
-    if (match) t._sessionId = match.id
+    const bk = bookingMap[t.booking_id]
+    if (bk) t._sessionId = bk.session_id
   })
 }
 
