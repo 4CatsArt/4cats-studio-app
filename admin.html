@@ -909,6 +909,16 @@ function buildShopifyTitle(sessionDate, sessionTime, sessionTitle) {
   return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${cleanTitle}${seriesSuffix}`
 }
 
+function buildLineupTitle(sessionDate, theme) {
+  const d = new Date(sessionDate + 'T12:00:00')
+  const daysFull = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
+  const days3 = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  const dayFull = daysFull[d.getDay()], day3 = days3[d.getDay()], month = months[d.getMonth()], date = d.getDate()
+  const suffix = date===1||date===21||date===31?'st':date===2||date===22?'nd':date===3||date===23?'rd':'th'
+  return `${dayFull} Lineup | ${theme} | ${day3} ${month} ${date}${suffix}`
+}
+
 function isSeriesClass2Plus(title) { return /\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(title) }
 function getSeriesClass1Title(title) { return title.replace(/\s*-?\s*class\s+\d+\s+of\s+\d+/i, '').trim() }
 
@@ -1703,6 +1713,27 @@ async function syncWeekInventory() {
       }
     } catch(e) { notFound.push(item.shopifyTitle + ' (network error)') }
   }
+
+  // Sync lineup storefront handles — one handle per date+theme, shared across all studios/times
+  const lineupSeen = new Set(), lineupToSync = []
+  scheduleData.forEach(s => {
+    if (!s.is_lineup) return
+    const key = `${s.session_date}|${s.title}`
+    if (lineupSeen.has(key)) return
+    lineupSeen.add(key)
+    lineupToSync.push({ session_date: s.session_date, title: s.title, lineupTitle: buildLineupTitle(s.session_date, s.title) })
+  })
+  for (const item of lineupToSync) {
+    btn.textContent = `Syncing lineups...`
+    try {
+      const res = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({action:'get_lineup_handle', lineup_title:item.lineupTitle}) })
+      const data = await res.json()
+      if (data.error || !data.handle) { notFound.push(item.lineupTitle + ' (lineup product)'); continue }
+      await sb.from('sessions').update({ lineup_handle: data.handle }).eq('session_date', item.session_date).eq('title', item.title)
+      scheduleData.forEach(s => { if (s.session_date===item.session_date && s.title===item.title) s.lineup_handle = data.handle })
+    } catch(e) { notFound.push(item.lineupTitle + ' (lineup, network error)') }
+  }
+
   btn.textContent = `Sync Shopify${notFound.length ? ` (${notFound.length} missing)` : ''}`; btn.disabled = false
   if (notFound.length) showSyncErrors(notFound)
   renderSchedule()
