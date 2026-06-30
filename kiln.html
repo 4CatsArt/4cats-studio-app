@@ -559,7 +559,7 @@ async function loadTickets() {
              signin_entries(name, email),
              sessions(title, session_date, session_time, session_type)`)
     .order('created_at', { ascending: false })
-    .limit(500)
+    .limit(2000)
 
   if (!stageF) q = q.in('stage', ['drying', 'bisque_ready', 'ready_pickup'])
   else         q = q.eq('stage', stageF)
@@ -592,6 +592,39 @@ function clearExtraFilters() {
   document.getElementById('filter-created-from').value = ''
   document.getElementById('filter-created-to').value = ''
   document.getElementById('filter-clear-btn').style.display = 'none'
+  renderTable()
+}
+
+// Fallback: if a ticket # search comes up empty in the locally-loaded batch
+// (it may be older than the fetch window/limit, or in a different stage),
+// look it up directly in the database regardless of stage/studio/limit.
+let lastServerSearch = ''
+async function searchTicketServerSide(search) {
+  if (search === lastServerSearch) return
+  lastServerSearch = search
+
+  const { data, error } = await sb.from('clay_tickets')
+    .select(`id, ticket_number, studio_id, stage, is_party, description, clay_type, created_at, glazed_on, picked_up_on,
+             kiln_delay_sent_at, bisque_email_sent_at, pickup_email_sent_at,
+             bisque_expiry_date, pickup_expiry_date, session_id,
+             signin_entries(name, email),
+             sessions(title, session_date, session_time, session_type)`)
+    .ilike('ticket_number', `%${search}%`)
+    .limit(20)
+
+  // Bail if the search box changed while this was in flight
+  if (document.getElementById('search-input').value.trim() !== search) return
+
+  if (error || !data || !data.length) {
+    document.getElementById('table-body').innerHTML = '<tr class="empty-row"><td colspan="12">No tickets found matching that number — check the number or try the Party Artwork tab.</td></tr>'
+    return
+  }
+
+  // Merge any newly found tickets into allTickets so renderTable can pick them up
+  data.forEach(found => {
+    if (!allTickets.some(t => t.id === found.id)) allTickets.push(found)
+  })
+  lastServerSearch = '' // allow re-search if needed
   renderTable()
 }
 
@@ -639,7 +672,12 @@ function renderTable() {
   })
 
   if (!tickets.length) {
-    document.getElementById('table-body').innerHTML = '<tr class="empty-row"><td colspan="12">No active artwork tickets.</td></tr>'
+    if (search) {
+      document.getElementById('table-body').innerHTML = '<tr class="empty-row"><td colspan="12">Searching all tickets…</td></tr>'
+      searchTicketServerSide(search)
+    } else {
+      document.getElementById('table-body').innerHTML = '<tr class="empty-row"><td colspan="12">No active artwork tickets.</td></tr>'
+    }
     selectedIds.clear(); updateBulkBar(); return
   }
 
