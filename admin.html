@@ -776,6 +776,31 @@ async function cacheVariants(shopifyTitle, data) {
   try { await sb.rpc('upsert_shopify_variants', { p_shopify_title: shopifyTitle, p_product_handle: data.handle, p_product_id: data.product_id, p_status: data.status || 'active', p_variants: variantRows }) } catch(e) {}
 }
 
+// Builds a full week→handle map from every Mini Make product's Event Date metafield
+// (any status — past, current, or future week), then writes each week's handle to
+// exactly the sessions that fall in that Monday–Sunday week. This replaces relying
+// on "whichever product is active right now", which only ever covered one week.
+async function syncMinimakeWeeks(notFound) {
+  try {
+    const res = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({action:'get_minimake_week_map'}) })
+    const data = await res.json()
+    const weeks = data.weeks || {}
+    const weekStarts = Object.keys(weeks)
+    if (!weekStarts.length) { notFound.push('Mini Make: no weeks found'); return }
+    for (const weekStart of weekStarts) {
+      const handle = weeks[weekStart].handle
+      const start = new Date(weekStart + 'T12:00:00')
+      const end = new Date(start); end.setDate(end.getDate() + 6)
+      const weekEnd = end.toISOString().slice(0, 10)
+      await sb.from('sessions').update({ minimake_handle: handle }).eq('title', 'Mini Make Drop In').gte('session_date', weekStart).lte('session_date', weekEnd)
+      scheduleData.forEach(s => { if (s.title === 'Mini Make Drop In' && s.session_date >= weekStart && s.session_date <= weekEnd) s.minimake_handle = handle })
+    }
+    if (data.skipped && data.skipped.length) {
+      data.skipped.forEach(t => notFound.push(`Mini Make: "${t}" missing Event Date metafield`))
+    }
+  } catch(e) { notFound.push('Mini Make weeks (network error)') }
+}
+
 sb.auth.getSession().then(({ data: { session } }) => { if (session) { currentUser = session.user; initApp() } })
 
 async function signIn() {
@@ -1249,14 +1274,7 @@ async function checkShopifyRow(shopifyTitle, btn, sessionDate, sessionTime, stud
       } catch(e) {}
     }
     if (rowTitle === 'Mini Make Drop In') {
-      try {
-        const mr = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({action:'get_active_minimake_handle'}) })
-        const mdata = await mr.json()
-        if (!mdata.error && mdata.handle) {
-          await sb.from('sessions').update({ minimake_handle: mdata.handle }).eq('title', 'Mini Make Drop In')
-          scheduleData.forEach(s => { if (s.title === 'Mini Make Drop In') s.minimake_handle = mdata.handle })
-        }
-      } catch(e) {}
+      await syncMinimakeWeeks([])
     }
     renderSchedule()
   } catch(e) { btn.textContent = 'Error'; btn.disabled = false }
@@ -1606,19 +1624,12 @@ async function syncStudioInventory() {
     } catch(e) { notFound.push(item.lineupTitle + ' (lineup, network error)') }
   }
 
-  // Sync the active Mini Make storefront handle — one global handle shared by every
-  // Mini Make session everywhere (it's not date- or studio-specific)
+  // Sync the active Mini Make storefront handle — but only for THIS date, since the
+  // handle found is whichever product is active right now, which only represents
+  // the current week. Other weeks' Mini Make sessions must not be touched here.
   if (activeSessions.some(s => s.title === 'Mini Make Drop In')) {
     btn.textContent = `Syncing mini make...`
-    try {
-      const res = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({action:'get_active_minimake_handle'}) })
-      const data = await res.json()
-      if (data.error || !data.handle) { notFound.push('Mini Make active product (not found)') }
-      else {
-        await sb.from('sessions').update({ minimake_handle: data.handle }).eq('title', 'Mini Make Drop In')
-        activeSessions.forEach(s => { if (s.title === 'Mini Make Drop In') s.minimake_handle = data.handle })
-      }
-    } catch(e) { notFound.push('Mini Make active product (network error)') }
+    await syncMinimakeWeeks(notFound)
   }
 
   btn.textContent = `Sync Shopify Inventory${notFound.length ? ` (${notFound.length} missing)` : ''}`; btn.disabled = false
@@ -1795,19 +1806,12 @@ async function syncWeekInventory() {
     } catch(e) { notFound.push(item.lineupTitle + ' (lineup, network error)') }
   }
 
-  // Sync the active Mini Make storefront handle — one global handle shared by every
-  // Mini Make session everywhere (it's not date- or studio-specific)
+  // Sync the active Mini Make storefront handle — but only for the date range actually
+  // loaded in this sync run, since the handle found is whichever product is active
+  // right now, which only represents the current week. Other weeks must not be touched.
   if (scheduleData.some(s => s.title === 'Mini Make Drop In')) {
     btn.textContent = `Syncing mini make...`
-    try {
-      const res = await fetch(EDGE_URL, { method:'POST', headers:{'Authorization':`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({action:'get_active_minimake_handle'}) })
-      const data = await res.json()
-      if (data.error || !data.handle) { notFound.push('Mini Make active product (not found)') }
-      else {
-        await sb.from('sessions').update({ minimake_handle: data.handle }).eq('title', 'Mini Make Drop In')
-        scheduleData.forEach(s => { if (s.title === 'Mini Make Drop In') s.minimake_handle = data.handle })
-      }
-    } catch(e) { notFound.push('Mini Make active product (network error)') }
+    await syncMinimakeWeeks(notFound)
   }
 
   btn.textContent = `Sync Shopify${notFound.length ? ` (${notFound.length} missing)` : ''}`; btn.disabled = false
