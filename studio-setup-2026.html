@@ -186,6 +186,11 @@ function calcShelvingTargets(bisqueCarts, pickupCarts) {
   return { targetShelves, targetWheels }
 }
 
+// ---------- BASKET CALCULATOR CONFIG ----------
+// Fixed targets — same for every studio, regardless of shelving.
+const LARGE_BASKETS_TARGET = 28
+const SMALL_BASKETS_TARGET = 18
+
 // ---------- AUTH ----------
 sb.auth.getSession().then(({ data: { session } }) => { if (session) { currentUser = session.user; initApp() } })
 
@@ -301,7 +306,7 @@ function renderTemplateManager() {
       <div class="item-row">
         <div style="flex:1">
           <span class="item-title">${i.title}</span>
-          <span style="font-size:10px;color:#aaa;margin-left:6px">${i.item_type === 'shelving_calc' ? '(shelving calculator)' : '(checklist item)'}</span>
+          <span style="font-size:10px;color:#aaa;margin-left:6px">${i.item_type === 'shelving_calc' ? '(shelving calculator)' : i.item_type === 'basket_calc' ? '(basket calculator)' : '(checklist item)'}</span>
         </div>
         <div class="item-actions">
           <button class="btn btn-sm" onclick="showItemModal('${section.id}', '${i.id}')">Edit</button>
@@ -453,6 +458,43 @@ function renderItem(item) {
     </div>`
   }
 
+  if (item.item_type === 'basket_calc') {
+    const status = getStatus(item.id)
+    const v = (status && status.value) || {}
+    const currentLarge = v.current_large ?? ''
+    const currentSmall = v.current_small ?? ''
+    const hasAll = v.current_large !== undefined && v.current_small !== undefined
+    const bringLarge = Math.max(0, LARGE_BASKETS_TARGET - (Number(v.current_large) || 0))
+    const bringSmall = Math.max(0, SMALL_BASKETS_TARGET - (Number(v.current_small) || 0))
+    return `<div class="item-row" style="display:block">
+      <div style="display:flex;align-items:center;gap:8px">
+        <div class="item-title" style="flex:1">${item.title}${item.link_url ? `<a href="${item.link_url}" target="_blank">How-to →</a>` : ''}</div>
+        ${mgmtItemBtns}
+      </div>
+      ${item.description ? `<div class="item-desc">${item.description}</div>` : ''}
+      <div class="shelf-calc-box">
+        <div style="font-size:11px;color:#aaa;margin-bottom:10px">Target for every studio: ${LARGE_BASKETS_TARGET} large baskets, ${SMALL_BASKETS_TARGET} small baskets.</div>
+        <div class="shelf-inputs" style="margin-top:0">
+          <div class="shelf-field"><label>Current Large Baskets</label>
+            <input type="number" min="0" id="clarge-${item.id}" value="${currentLarge}">
+          </div>
+          <div class="shelf-field"><label>Current Small Baskets</label>
+            <input type="number" min="0" id="csmall-${item.id}" value="${currentSmall}">
+          </div>
+        </div>
+        <div class="shelf-result" id="basket-result-${item.id}" style="margin-top:10px">
+          ${hasAll
+            ? `Target: <b>${LARGE_BASKETS_TARGET}</b> large / <b>${SMALL_BASKETS_TARGET}</b> small &nbsp;·&nbsp; Bring: <b>${bringLarge}</b> large, <b>${bringSmall}</b> small`
+            : 'Enter current counts, then click Save.'}
+        </div>
+        <div style="margin-top:10px;display:flex;align-items:center;gap:10px">
+          <button class="btn btn-sm btn-primary" onclick="saveBasketCalc('${item.id}')">Save</button>
+          <span id="basket-save-status-${item.id}" style="font-size:11px;color:#2e7d32"></span>
+        </div>
+      </div>
+    </div>`
+  }
+
   const status = getStatus(item.id)
   const checked = status && status.checked
   return `<div class="item-row">
@@ -526,6 +568,37 @@ async function saveShelvingCalc(itemId) {
   document.getElementById('shelf-result-' + itemId).innerHTML = hasAll
     ? `Target: <b>${targetShelves}</b> shelves / <b>${targetWheels}</b> wheel sets &nbsp;·&nbsp; Bring: <b>${bringShelves}</b> shelves, <b>${bringWheels}</b> wheel sets`
     : 'Enter cart counts and current totals to calculate.'
+}
+
+async function saveBasketCalc(itemId) {
+  const large = document.getElementById('clarge-' + itemId).value
+  const small = document.getElementById('csmall-' + itemId).value
+  const value = {
+    current_large: large === '' ? undefined : Number(large),
+    current_small: small === '' ? undefined : Number(small),
+  }
+  const hasAll = value.current_large !== undefined && value.current_small !== undefined
+  const statusEl = document.getElementById('basket-save-status-' + itemId)
+  statusEl.textContent = 'Saving…'
+  statusEl.style.color = '#888'
+  const res = await upsertStudioItem(currentStudioId, itemId, { value, checked: hasAll })
+  if (!res || !res.ok) { statusEl.textContent = ''; return }
+  statusEl.textContent = 'Saved ✓'
+  statusEl.style.color = '#2e7d32'
+  setTimeout(() => { if (statusEl.textContent === 'Saved ✓') statusEl.textContent = '' }, 3000)
+
+  const existing = statusRows.find(r => r.item_id === itemId)
+  if (existing) { existing.value = value; existing.checked = hasAll }
+  else statusRows.push({ studio_id: currentStudioId, item_id: itemId, value, checked: hasAll })
+  const allExisting = allStatusRows.find(r => r.studio_id === currentStudioId && r.item_id === itemId)
+  if (allExisting) { allExisting.value = value; allExisting.checked = hasAll }
+  else allStatusRows.push({ studio_id: currentStudioId, item_id: itemId, value, checked: hasAll })
+
+  const bringLarge = Math.max(0, LARGE_BASKETS_TARGET - (value.current_large || 0))
+  const bringSmall = Math.max(0, SMALL_BASKETS_TARGET - (value.current_small || 0))
+  document.getElementById('basket-result-' + itemId).innerHTML = hasAll
+    ? `Target: <b>${LARGE_BASKETS_TARGET}</b> large / <b>${SMALL_BASKETS_TARGET}</b> small &nbsp;·&nbsp; Bring: <b>${bringLarge}</b> large, <b>${bringSmall}</b> small`
+    : 'Enter current counts, then click Save.'
 }
 
 // ---------- PHOTO UPLOAD ----------
@@ -641,11 +714,13 @@ function showItemModal(sectionId, itemId) {
         </div>
         <div class="modal-field">
           <label>Item Type</label>
-          <select id="item-type" onchange="document.getElementById('shelf-note').style.display = this.value==='shelving_calc' ? '' : 'none'">
+          <select id="item-type" onchange="document.getElementById('shelf-note').style.display = this.value==='shelving_calc' ? '' : 'none'; document.getElementById('basket-note').style.display = this.value==='basket_calc' ? '' : 'none'">
             <option value="checkbox" ${editing && editing.item_type==='checkbox' ? 'selected' : ''}>Checklist item</option>
             <option value="shelving_calc" ${editing && editing.item_type==='shelving_calc' ? 'selected' : ''}>Shelving calculator (carts → shelves & wheels)</option>
+            <option value="basket_calc" ${editing && editing.item_type==='basket_calc' ? 'selected' : ''}>Basket calculator (fixed target per studio)</option>
           </select>
           <div id="shelf-note" style="font-size:11px;color:#aaa;margin-top:4px;display:${editing && editing.item_type==='shelving_calc' ? '' : 'none'}">Shelves needed = ${FIXED_CARTS_TOTAL_SHELVES} (fixed carts) + (bisque carts + pickup carts) × ${SHELVES_PER_BISQUE_PICKUP_CART}. Wheel sets needed = ${FIXED_CARTS.length} (fixed carts) + bisque carts + pickup carts (1 set per cart).</div>
+          <div id="basket-note" style="font-size:11px;color:#aaa;margin-top:4px;display:${editing && editing.item_type==='basket_calc' ? '' : 'none'}">Target for every studio: ${LARGE_BASKETS_TARGET} large baskets, ${SMALL_BASKETS_TARGET} small baskets.</div>
         </div>
         <div class="modal-field">
           <label>Description (optional)</label>
