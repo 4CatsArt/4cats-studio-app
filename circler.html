@@ -708,9 +708,11 @@ function isoDate(d) {
       var names    = (k.signin_entries||[]).map(function(e){return e.name;}).filter(Boolean).join(', ') || '—';
       var expiry   = stage==='bisque_ready'?(k.bisque_expiry_date||'—'):stage==='ready_pickup'?(k.pickup_expiry_date||'—'):'—';
       var lastEmail = stage==='bisque_ready'?k.bisque_email_sent_at:k.pickup_email_sent_at;
-      var emailCell = lastEmail
+      var canEmail = stage==='bisque_ready' || stage==='ready_pickup';
+      var resendBtn = canEmail ? '<button class="adv-btn" style="background:#e3f2fd;color:#1565c0;padding:3px 8px;font-size:11px;margin-left:4px" data-id="'+k.id+'" data-stage="'+stage+'" onclick="resendKilnEmailBtn(this)">'+(lastEmail?'Resend':'Send')+'</button>' : '';
+      var emailCell = (lastEmail
         ? '<span class="email-sent">✓ Sent</span>'
-        : (stage==='drying'?'<span class="email-pending">—</span>':'<span class="email-pending">Not sent</span>');
+        : (stage==='drying'?'<span class="email-pending">—</span>':'<span class="email-pending">Not sent</span>')) + resendBtn;
       var skipCell = (stage === 'drying') ? '<button class="adv-btn" style="background:#e8f5e9;color:#2e7d32;margin-left:4px" data-id="'+k.id+'" data-stage="ready_pickup" onclick="advanceKilnBtn(this)">Skip to Pickup</button>' : '';
       var advCell = canAdv
         ? '<button class="adv-btn '+(stage==="bisque_ready"?"pickup":"")+' " data-id="'+k.id+'" data-stage="'+nStage[stage]+'" onclick="advanceKilnBtn(this)">'+nLabel[stage]+'</button>'+skipCell
@@ -808,6 +810,45 @@ function isoDate(d) {
       });
     });
     pendingEmailUndoData = null;
+  }
+
+  function resendKilnEmailBtn(btn) { resendKilnEmail(btn.getAttribute('data-id'), btn.getAttribute('data-stage'), btn); }
+
+  async function resendKilnEmail(id, stage, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Sending...'; }
+    try {
+      var url = new URL(SUPABASE_URL + '/rest/v1/clay_tickets');
+      url.searchParams.set('select', 'id,ticket_number,description,signin_entries(name,email)');
+      url.searchParams.set('id', 'eq.' + id);
+      url.searchParams.set('limit', '1');
+      var r = await fetch(url.toString(), { headers: authHeaders() });
+      var rows = await r.json();
+      if (!r.ok) throw new Error(JSON.stringify(rows));
+      var t = rows && rows[0];
+      if (!t) throw new Error('Ticket not found');
+      var emails = (t.signin_entries||[]).map(function(e){return e.email;}).filter(Boolean);
+      if (!emails.length) {
+        alert('No email addresses on file for this ticket. Add a sign-in entry with an email first.');
+        if (btn) { btn.disabled = false; btn.textContent = 'Send'; }
+        return;
+      }
+      var fnName = stage==='bisque_ready' ? 'send-bisque-email' : 'send-pickup-email';
+      var resp = await fetch(SUPABASE_URL+'/functions/v1/'+fnName, {
+        method: 'POST',
+        headers: (function(){var h=authHeaders();h['Content-Type']='application/json';return h;})(),
+        body: JSON.stringify({emails:emails, ticketNumber:t.ticket_number, studioId:studioId, description:t.description||''})
+      });
+      if (!resp.ok) { var errText = await resp.text(); throw new Error(errText); }
+      var tsCol = stage==='bisque_ready' ? 'bisque_email_sent_at' : 'pickup_email_sent_at';
+      var pb = {}; pb[tsCol] = new Date().toISOString();
+      await sbPatch('clay_tickets', id, pb);
+      var localTicket = allKilnData.filter(function(k){return k.id===id;})[0];
+      if (localTicket) localTicket[tsCol] = pb[tsCol];
+      renderKiln();
+    } catch(e) {
+      alert('Error sending email: ' + e.message);
+      if (btn) { btn.disabled = false; btn.textContent = 'Send'; }
+    }
   }
 
   async function advanceKiln(id, newStage) {
