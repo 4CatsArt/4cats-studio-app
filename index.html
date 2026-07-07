@@ -313,6 +313,20 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .d2-expand-btn:hover { background: #fce8f0; }
 .d2-party-detail-row td { padding: 0 !important; border-bottom: 0.5px solid #f0b8cc !important; }
 .d2-party-detail-inner { padding: 0 12px 14px; background: #fff8fb; }
+
+/* TAG COMPONENT */
+.tag-input-wrap { border: 0.5px solid #d0d0c8; border-radius: 7px; padding: 5px 8px; background: white; display: flex; flex-wrap: wrap; gap: 5px; align-items: center; min-height: 38px; cursor: text; transition: border-color 0.15s; }
+.tag-input-wrap:focus-within { border-color: #888; }
+.tag-chip { display: inline-flex; align-items: center; gap: 4px; background: #f0f0ea; border-radius: 20px; padding: 2px 8px 2px 10px; font-size: 12px; color: #444; white-space: nowrap; }
+.tag-chip-remove { background: none; border: none; cursor: pointer; color: #aaa; font-size: 14px; line-height: 1; padding: 0; margin: 0; }
+.tag-chip-remove:hover { color: #c0392b; }
+.tag-text-input { border: none; outline: none; font-size: 13px; min-width: 120px; flex: 1; padding: 2px 4px; font-family: inherit; background: transparent; }
+.tag-dropdown { position: absolute; background: white; border: 0.5px solid #d0d0c8; border-radius: 7px; box-shadow: 0 4px 16px rgba(0,0,0,0.1); z-index: 2000; max-height: 180px; overflow-y: auto; min-width: 200px; }
+.tag-dropdown-item { padding: 8px 12px; font-size: 13px; cursor: pointer; }
+.tag-dropdown-item:hover, .tag-dropdown-item.active { background: #f5f5f0; }
+.tag-dropdown-item.create { color: #6a1b9a; font-style: italic; }
+.tag-dropdown-empty { padding: 8px 12px; font-size: 13px; color: #aaa; }
+
 </style>
 </head>
 <body>
@@ -2278,7 +2292,7 @@ async function loadApp() {
   await loadCurrentView()
   setupRealtimeBookings()
   await loadPartyAlerts()
-  checkTicketsBadgeOnLoad()
+  loadAllTags(function() { checkTicketsBadgeOnLoad() })
 }
 
 function syncDatePicker() {
@@ -5931,6 +5945,186 @@ function renderLinksView() {
     + '</div>'
 }
 
+
+// ── SHARED TAG COMPONENT ──────────────────────────────────────
+
+var _allTags = []     // {id, name} loaded from DB
+var _tagInstances = {}  // keyed by containerId -> { selectedIds: [], canCreate: bool }
+
+function loadAllTags(cb) {
+  sb.from('tags').select('id, name').order('name').then(function(res) {
+    _allTags = res.data || []
+    if (cb) cb()
+  })
+}
+
+function initTagInput(containerId, canCreate, initialNames) {
+  initialNames = initialNames || []
+  var selectedIds = []
+  // Match initial names to tag ids
+  initialNames.forEach(function(name) {
+    var tag = _allTags.find(function(t) { return t.name.toLowerCase() === name.toLowerCase() })
+    if (tag) selectedIds.push(tag.id)
+  })
+  _tagInstances[containerId] = { selectedIds: selectedIds, canCreate: canCreate }
+  renderTagInput(containerId)
+}
+
+function renderTagInput(containerId) {
+  var wrap = document.getElementById(containerId)
+  if (!wrap) return
+  var inst = _tagInstances[containerId]
+  if (!inst) return
+
+  wrap.innerHTML = ''
+  wrap.className = 'tag-input-wrap'
+  wrap.style.position = 'relative'
+
+  // Render selected chips
+  inst.selectedIds.forEach(function(id) {
+    var tag = _allTags.find(function(t) { return t.id === id })
+    if (!tag) return
+    var chip = document.createElement('span')
+    chip.className = 'tag-chip'
+    chip.innerHTML = escHtml(tag.name) + '<button class="tag-chip-remove" type="button">x</button>'
+    chip.querySelector('.tag-chip-remove').addEventListener('click', function(e) {
+      e.stopPropagation()
+      inst.selectedIds = inst.selectedIds.filter(function(x) { return x !== id })
+      renderTagInput(containerId)
+    })
+    wrap.appendChild(chip)
+  })
+
+  // Text input
+  var input = document.createElement('input')
+  input.className = 'tag-text-input'
+  input.placeholder = inst.selectedIds.length ? '' : 'Add tags...'
+  input.setAttribute('autocomplete', 'off')
+  wrap.appendChild(input)
+
+  // Dropdown container
+  var dropdown = document.createElement('div')
+  dropdown.className = 'tag-dropdown'
+  dropdown.style.display = 'none'
+  dropdown.style.position = 'absolute'
+  dropdown.style.top = (wrap.offsetHeight + 4) + 'px'
+  dropdown.style.left = '0'
+  dropdown.style.right = '0'
+  wrap.appendChild(dropdown)
+
+  input.addEventListener('input', function() {
+    showTagDropdown(containerId, input, dropdown)
+  })
+  input.addEventListener('keydown', function(e) {
+    if (e.keyCode === 27) { dropdown.style.display = 'none'; input.value = '' }
+    if (e.keyCode === 8 && !input.value && inst.selectedIds.length) {
+      inst.selectedIds.pop()
+      renderTagInput(containerId)
+    }
+  })
+  input.addEventListener('focus', function() {
+    showTagDropdown(containerId, input, dropdown)
+  })
+
+  document.addEventListener('click', function hideDD(e) {
+    if (!wrap.contains(e.target)) {
+      dropdown.style.display = 'none'
+      document.removeEventListener('click', hideDD)
+    }
+  })
+
+  wrap.addEventListener('click', function() { input.focus() })
+}
+
+function showTagDropdown(containerId, input, dropdown) {
+  var inst = _tagInstances[containerId]
+  var q = (input.value || '').trim().toLowerCase()
+  var available = _allTags.filter(function(t) {
+    if (inst.selectedIds.indexOf(t.id) !== -1) return false
+    if (q && t.name.toLowerCase().indexOf(q) === -1) return false
+    return true
+  })
+
+  dropdown.innerHTML = ''
+  if (!available.length && !q) { dropdown.style.display = 'none'; return }
+
+  available.forEach(function(tag) {
+    var item = document.createElement('div')
+    item.className = 'tag-dropdown-item'
+    item.textContent = tag.name
+    item.addEventListener('mousedown', function(e) {
+      e.preventDefault()
+      inst.selectedIds.push(tag.id)
+      input.value = ''
+      dropdown.style.display = 'none'
+      renderTagInput(containerId)
+    })
+    dropdown.appendChild(item)
+  })
+
+  // "Create" option — home office only
+  if (inst.canCreate && q && !_allTags.find(function(t) { return t.name.toLowerCase() === q })) {
+    var createItem = document.createElement('div')
+    createItem.className = 'tag-dropdown-item create'
+    createItem.textContent = 'Create tag "' + q + '"'
+    createItem.addEventListener('mousedown', function(e) {
+      e.preventDefault()
+      createTag(q, function(newTag) {
+        inst.selectedIds.push(newTag.id)
+        input.value = ''
+        dropdown.style.display = 'none'
+        renderTagInput(containerId)
+      })
+    })
+    dropdown.appendChild(createItem)
+  } else if (!available.length) {
+    var empty = document.createElement('div')
+    empty.className = 'tag-dropdown-empty'
+    empty.textContent = inst.canCreate ? 'Type to create a tag' : 'No matching tags'
+    dropdown.appendChild(empty)
+  }
+
+  dropdown.style.display = 'block'
+}
+
+function createTag(name, cb) {
+  sb.from('tags').insert({ name: name, created_by_user_id: currentUser.id, created_at: new Date().toISOString() }).select('id, name').then(function(res) {
+    if (res.error || !res.data || !res.data.length) { alert('Error creating tag'); return }
+    var newTag = res.data[0]
+    _allTags.push(newTag)
+    _allTags.sort(function(a,b) { return a.name.localeCompare(b.name) })
+    if (cb) cb(newTag)
+  })
+}
+
+function getTagIds(containerId) {
+  return (_tagInstances[containerId] || {}).selectedIds || []
+}
+
+function getTagNames(containerId) {
+  var ids = getTagIds(containerId)
+  return ids.map(function(id) {
+    var t = _allTags.find(function(x) { return x.id === id })
+    return t ? t.name : null
+  }).filter(Boolean)
+}
+
+function saveTicketTags(ticketId, tagIds, cb) {
+  // Delete existing then insert new
+  sb.from('ticket_tags').delete().eq('ticket_id', ticketId).then(function() {
+    if (!tagIds.length) { if (cb) cb(); return }
+    var rows = tagIds.map(function(tid) { return { ticket_id: ticketId, tag_id: tid } })
+    sb.from('ticket_tags').insert(rows).then(function() { if (cb) cb() })
+  })
+}
+
+function loadTicketTags(ticketId, cb) {
+  sb.from('ticket_tags').select('tag_id').eq('ticket_id', ticketId).then(function(res) {
+    var ids = (res.data || []).map(function(r) { return r.tag_id })
+    cb(ids)
+  })
+}
+
 // ── TICKETS (studio view) ─────────────────────────────────────
 
 var ticketState = { tickets: [], openTicketId: null, bookingSearchResults: [], selectedBooking: null }
@@ -5943,11 +6137,17 @@ function loadTicketsView() {
 
 function fetchStudioTickets() {
   sb.from('tickets')
-    .select('id, title, category, priority, status, created_at, updated_at, customer_email, shopify_order_name, assigned_to_user_id, ticket_messages(id)')
+    .select('id, title, category, priority, status, created_at, updated_at, customer_email, shopify_order_name, assigned_to_user_id, ticket_messages(id), ticket_tags(tag_id)')
     .eq('studio_id', currentStudioId)
     .order('updated_at', { ascending: false })
     .then(function(res) {
       ticketState.tickets = res.data || []
+      ticketState.tickets.forEach(function(t) {
+        t.tag_names = (t.ticket_tags || []).map(function(tt) {
+          var tag = _allTags.find(function(x) { return x.id === tt.tag_id })
+          return tag ? tag.name : null
+        }).filter(Boolean)
+      })
       renderTicketsList()
       checkTicketsUnread()
     })
@@ -6064,6 +6264,7 @@ function renderTicketsList() {
         + '<span style="font-size:11px;color:#aaa">' + icon + ' ' + cat + '</span>'
         + (t.customer_email ? '<span style="font-size:11px;color:#888">· ' + escHtml(t.customer_email) + '</span>' : '')
         + '</div>'
+        + (t.tag_names && t.tag_names.length ? '<div style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap">' + t.tag_names.map(function(n) { return '<span style="font-size:11px;padding:1px 7px;border-radius:20px;background:#f0f0ea;color:#666">' + escHtml(n) + '</span>' }).join('') + '</div>' : '')
         + '</div>'
         + '<div style="text-align:right;flex-shrink:0;margin-left:8px">'
         + '<div style="font-size:11px;color:#aaa">' + fmtRelTime(t.updated_at) + '</div>'
@@ -6133,6 +6334,7 @@ function renderNewTicketModal() {
     + '</div>'
     + '<div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">First Message</div>'
     + '<textarea id="nt-message" placeholder="Describe the issue in detail..." style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none;resize:vertical;min-height:90px;font-family:inherit"></textarea></div>'
+    + '<div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Tags (optional)</div><div id="nt-tags-input" style="min-height:38px"></div></div>'
     + '<button onclick="submitNewTicket()" style="padding:10px;background:#1a1a1a;color:white;border:none;border-radius:7px;font-size:14px;cursor:pointer;font-weight:500">Create Ticket</button>'
     + '</div></div></div>'
 }
@@ -6140,6 +6342,7 @@ function renderNewTicketModal() {
 function openNewTicketModal() {
   ticketState.selectedBooking = null
   document.getElementById('new-ticket-modal').style.display = 'block'
+  setTimeout(function() { initTagInput('nt-tags-input', false, []) }, 50)
 }
 function closeNewTicketModal() {
   document.getElementById('new-ticket-modal').style.display = 'none'
@@ -6243,9 +6446,12 @@ function submitNewTicket() {
       body: message,
       created_at: new Date().toISOString()
     }).then(function() {
-      closeNewTicketModal()
-      markTicketRead(ticketId)
-      fetchStudioTickets()
+      var tagIds = getTagIds('nt-tags-input')
+      saveTicketTags(ticketId, tagIds, function() {
+        closeNewTicketModal()
+        markTicketRead(ticketId)
+        fetchStudioTickets()
+      })
     })
   })
 }
@@ -6261,10 +6467,13 @@ function openTicket(ticketId) {
 
   Promise.all([
     sb.from('tickets').select('*').eq('id', ticketId).single(),
-    sb.from('ticket_messages').select('id, ticket_id, author_user_id, body, created_at').eq('ticket_id', ticketId).order('created_at', { ascending: true })
+    sb.from('ticket_messages').select('id, ticket_id, author_user_id, body, created_at').eq('ticket_id', ticketId).order('created_at', { ascending: true }),
+    sb.from('ticket_tags').select('tag_id').eq('ticket_id', ticketId)
   ]).then(function(results) {
     var ticket = results[0].data
     var messages = results[1].data || []
+    var tagIds = (results[2].data || []).map(function(r) { return r.tag_id })
+    ticket.tag_names = tagIds.map(function(id) { var t = _allTags.find(function(x) { return x.id === id }); return t ? t.name : null }).filter(Boolean)
     renderThreadModal(ticket, messages)
   })
 }
@@ -6296,6 +6505,7 @@ function renderThreadModal(ticket, messages) {
     + '<span style="font-size:11px;color:#aaa">' + cat + '</span>'
     + '</div>'
     + (ticket.customer_email ? '<div style="font-size:12px;color:#888;margin-top:6px">Customer: ' + escHtml(ticket.customer_email) + (ticket.shopify_order_name ? ' &bull; ' + escHtml(ticket.shopify_order_name) : '') + '</div>' : '')
+    + (ticket.tag_names && ticket.tag_names.length ? '<div style="margin-top:6px;display:flex;gap:4px;flex-wrap:wrap">' + ticket.tag_names.map(function(n) { return '<span style="font-size:11px;padding:2px 8px;border-radius:20px;background:#f0f0ea;color:#666">' + escHtml(n) + '</span>' }).join('') + '</div>' : '')
     + '</div>'
     + '<button onclick="closeThreadModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;padding:0;line-height:1;flex-shrink:0">x</button>'
     + '</div>'
