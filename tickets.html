@@ -113,6 +113,20 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 
 /* LOADING */
 .loading { color: #aaa; font-size: 14px; padding: 2rem; text-align: center; }
+
+/* TAG COMPONENT */
+.tag-input-wrap { border: 0.5px solid #d0d0c8; border-radius: 7px; padding: 5px 8px; background: white; display: flex; flex-wrap: wrap; gap: 5px; align-items: center; min-height: 38px; cursor: text; transition: border-color 0.15s; }
+.tag-input-wrap:focus-within { border-color: #888; }
+.tag-chip { display: inline-flex; align-items: center; gap: 4px; background: #f0f0ea; border-radius: 20px; padding: 2px 8px 2px 10px; font-size: 12px; color: #444; white-space: nowrap; }
+.tag-chip-remove { background: none; border: none; cursor: pointer; color: #aaa; font-size: 14px; line-height: 1; padding: 0; margin: 0; }
+.tag-chip-remove:hover { color: #c0392b; }
+.tag-text-input { border: none; outline: none; font-size: 13px; min-width: 120px; flex: 1; padding: 2px 4px; font-family: inherit; background: transparent; }
+.tag-dropdown { position: absolute; background: white; border: 0.5px solid #d0d0c8; border-radius: 7px; box-shadow: 0 4px 16px rgba(0,0,0,0.1); z-index: 2000; max-height: 180px; overflow-y: auto; min-width: 200px; }
+.tag-dropdown-item { padding: 8px 12px; font-size: 13px; cursor: pointer; }
+.tag-dropdown-item:hover, .tag-dropdown-item.active { background: #f5f5f0; }
+.tag-dropdown-item.create { color: #6a1b9a; font-style: italic; }
+.tag-dropdown-empty { padding: 8px 12px; font-size: 13px; color: #aaa; }
+
 </style>
 </head>
 <body>
@@ -240,6 +254,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
       <div class="modal-label">First Message</div>
       <textarea class="modal-textarea" id="nt-message" placeholder="Describe the issue in detail..."></textarea>
     </div>
+    <div class="modal-field">
+      <div class="modal-label">Tags (optional)</div>
+      <div id="nt-tags-input"></div>
+    </div>
     <button class="action-btn btn-primary" style="width:100%;padding:10px;font-size:14px" onclick="submitNewTicket()">Create Ticket</button>
   </div>
 </div>
@@ -339,7 +357,8 @@ function loadApp() {
     document.getElementById('app-screen').style.display = 'block'
     Promise.all([
       loadStudios(),
-      loadHoUsers()
+      loadHoUsers(),
+      new Promise(function(resolve) { loadAllTags(resolve) })
     ]).then(function() {
       populateStudioFilter()
       populateAssigneeFilter()
@@ -407,10 +426,17 @@ function populateNewTicketAssigneeDropdown() {
 
 function fetchAllTickets() {
   sb.from('tickets')
-    .select('id, title, category, priority, status, created_at, updated_at, studio_id, customer_email, shopify_order_name, assigned_to_user_id, ticket_messages(id, created_at)')
+    .select('id, title, category, priority, status, created_at, updated_at, studio_id, customer_email, shopify_order_name, assigned_to_user_id, ticket_messages(id, created_at), ticket_tags(tag_id)')
     .order('updated_at', { ascending: false })
     .then(function(res) {
       allTickets = res.data || []
+      // Attach tag names
+      allTickets.forEach(function(t) {
+        t.tag_names = (t.ticket_tags || []).map(function(tt) {
+          var tag = _allTags.find(function(x){return x.id===tt.tag_id})
+          return tag ? tag.name : null
+        }).filter(Boolean)
+      })
       loadReadReceipts()
     })
 }
@@ -572,6 +598,7 @@ function openNewTicketModal() {
   document.getElementById('nt-title').value = ''
   document.getElementById('nt-message').value = ''
   document.getElementById('new-ticket-modal').style.display = 'block'
+  initTagInput('nt-tags-input', true, [])
 }
 function closeNewTicketModal() {
   document.getElementById('new-ticket-modal').style.display = 'none'
@@ -743,6 +770,19 @@ function renderThread(ticket, messages) {
     if (ticket.shopify_order_name) custHtml += ' &bull; ' + escHtml(ticket.shopify_order_name)
   }
   document.getElementById('th-customer').innerHTML = custHtml
+  // Load ticket tags and init tag input
+  loadTicketTags(ticket.id, function(tagIds) {
+    var tagNames = tagIds.map(function(id) { var t = _allTags.find(function(x){return x.id===id}); return t?t.name:null }).filter(Boolean)
+    initTagInput('th-tags-wrap', true, tagNames)
+    // Watch for changes and auto-save
+    var wrap = document.getElementById('th-tags-wrap')
+    if (wrap) {
+      var obs = new MutationObserver(function() {
+        saveTicketTags(ticket.id, getTagIds('th-tags-wrap'), function(){})
+      })
+      obs.observe(wrap, { childList: true, subtree: true })
+    }
+  })
 
   // Messages
   var msgHtml = ''
@@ -893,6 +933,186 @@ function closeThreadModal() {
   document.getElementById('thread-modal').style.display = 'none'
   openTicketData = null
   fetchAllTickets()
+}
+
+
+// ── SHARED TAG COMPONENT ──────────────────────────────────────
+
+var _allTags = []     // {id, name} loaded from DB
+var _tagInstances = {}  // keyed by containerId -> { selectedIds: [], canCreate: bool }
+
+function loadAllTags(cb) {
+  sb.from('tags').select('id, name').order('name').then(function(res) {
+    _allTags = res.data || []
+    if (cb) cb()
+  })
+}
+
+function initTagInput(containerId, canCreate, initialNames) {
+  initialNames = initialNames || []
+  var selectedIds = []
+  // Match initial names to tag ids
+  initialNames.forEach(function(name) {
+    var tag = _allTags.find(function(t) { return t.name.toLowerCase() === name.toLowerCase() })
+    if (tag) selectedIds.push(tag.id)
+  })
+  _tagInstances[containerId] = { selectedIds: selectedIds, canCreate: canCreate }
+  renderTagInput(containerId)
+}
+
+function renderTagInput(containerId) {
+  var wrap = document.getElementById(containerId)
+  if (!wrap) return
+  var inst = _tagInstances[containerId]
+  if (!inst) return
+
+  wrap.innerHTML = ''
+  wrap.className = 'tag-input-wrap'
+  wrap.style.position = 'relative'
+
+  // Render selected chips
+  inst.selectedIds.forEach(function(id) {
+    var tag = _allTags.find(function(t) { return t.id === id })
+    if (!tag) return
+    var chip = document.createElement('span')
+    chip.className = 'tag-chip'
+    chip.innerHTML = escHtml(tag.name) + '<button class="tag-chip-remove" type="button">x</button>'
+    chip.querySelector('.tag-chip-remove').addEventListener('click', function(e) {
+      e.stopPropagation()
+      inst.selectedIds = inst.selectedIds.filter(function(x) { return x !== id })
+      renderTagInput(containerId)
+    })
+    wrap.appendChild(chip)
+  })
+
+  // Text input
+  var input = document.createElement('input')
+  input.className = 'tag-text-input'
+  input.placeholder = inst.selectedIds.length ? '' : 'Add tags...'
+  input.setAttribute('autocomplete', 'off')
+  wrap.appendChild(input)
+
+  // Dropdown container
+  var dropdown = document.createElement('div')
+  dropdown.className = 'tag-dropdown'
+  dropdown.style.display = 'none'
+  dropdown.style.position = 'absolute'
+  dropdown.style.top = (wrap.offsetHeight + 4) + 'px'
+  dropdown.style.left = '0'
+  dropdown.style.right = '0'
+  wrap.appendChild(dropdown)
+
+  input.addEventListener('input', function() {
+    showTagDropdown(containerId, input, dropdown)
+  })
+  input.addEventListener('keydown', function(e) {
+    if (e.keyCode === 27) { dropdown.style.display = 'none'; input.value = '' }
+    if (e.keyCode === 8 && !input.value && inst.selectedIds.length) {
+      inst.selectedIds.pop()
+      renderTagInput(containerId)
+    }
+  })
+  input.addEventListener('focus', function() {
+    showTagDropdown(containerId, input, dropdown)
+  })
+
+  document.addEventListener('click', function hideDD(e) {
+    if (!wrap.contains(e.target)) {
+      dropdown.style.display = 'none'
+      document.removeEventListener('click', hideDD)
+    }
+  })
+
+  wrap.addEventListener('click', function() { input.focus() })
+}
+
+function showTagDropdown(containerId, input, dropdown) {
+  var inst = _tagInstances[containerId]
+  var q = (input.value || '').trim().toLowerCase()
+  var available = _allTags.filter(function(t) {
+    if (inst.selectedIds.indexOf(t.id) !== -1) return false
+    if (q && t.name.toLowerCase().indexOf(q) === -1) return false
+    return true
+  })
+
+  dropdown.innerHTML = ''
+  if (!available.length && !q) { dropdown.style.display = 'none'; return }
+
+  available.forEach(function(tag) {
+    var item = document.createElement('div')
+    item.className = 'tag-dropdown-item'
+    item.textContent = tag.name
+    item.addEventListener('mousedown', function(e) {
+      e.preventDefault()
+      inst.selectedIds.push(tag.id)
+      input.value = ''
+      dropdown.style.display = 'none'
+      renderTagInput(containerId)
+    })
+    dropdown.appendChild(item)
+  })
+
+  // "Create" option — home office only
+  if (inst.canCreate && q && !_allTags.find(function(t) { return t.name.toLowerCase() === q })) {
+    var createItem = document.createElement('div')
+    createItem.className = 'tag-dropdown-item create'
+    createItem.textContent = 'Create tag "' + q + '"'
+    createItem.addEventListener('mousedown', function(e) {
+      e.preventDefault()
+      createTag(q, function(newTag) {
+        inst.selectedIds.push(newTag.id)
+        input.value = ''
+        dropdown.style.display = 'none'
+        renderTagInput(containerId)
+      })
+    })
+    dropdown.appendChild(createItem)
+  } else if (!available.length) {
+    var empty = document.createElement('div')
+    empty.className = 'tag-dropdown-empty'
+    empty.textContent = inst.canCreate ? 'Type to create a tag' : 'No matching tags'
+    dropdown.appendChild(empty)
+  }
+
+  dropdown.style.display = 'block'
+}
+
+function createTag(name, cb) {
+  sb.from('tags').insert({ name: name, created_by_user_id: currentUser.id, created_at: new Date().toISOString() }).select('id, name').then(function(res) {
+    if (res.error || !res.data || !res.data.length) { alert('Error creating tag'); return }
+    var newTag = res.data[0]
+    _allTags.push(newTag)
+    _allTags.sort(function(a,b) { return a.name.localeCompare(b.name) })
+    if (cb) cb(newTag)
+  })
+}
+
+function getTagIds(containerId) {
+  return (_tagInstances[containerId] || {}).selectedIds || []
+}
+
+function getTagNames(containerId) {
+  var ids = getTagIds(containerId)
+  return ids.map(function(id) {
+    var t = _allTags.find(function(x) { return x.id === id })
+    return t ? t.name : null
+  }).filter(Boolean)
+}
+
+function saveTicketTags(ticketId, tagIds, cb) {
+  // Delete existing then insert new
+  sb.from('ticket_tags').delete().eq('ticket_id', ticketId).then(function() {
+    if (!tagIds.length) { if (cb) cb(); return }
+    var rows = tagIds.map(function(tid) { return { ticket_id: ticketId, tag_id: tid } })
+    sb.from('ticket_tags').insert(rows).then(function() { if (cb) cb() })
+  })
+}
+
+function loadTicketTags(ticketId, cb) {
+  sb.from('ticket_tags').select('tag_id').eq('ticket_id', ticketId).then(function(res) {
+    var ids = (res.data || []).map(function(r) { return r.tag_id })
+    cb(ids)
+  })
 }
 
 // ── READ RECEIPTS ─────────────────────────────────────────────
