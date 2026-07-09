@@ -372,6 +372,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
         <option value="class">Class</option>
         <option value="camp">Camp</option>
       </select>
+      <button class="today-btn" onclick="openCampPickupModal()" style="background:#fff8e1;border-color:#ffcc80;color:#e65100">🏺 Camp Pickup Email</button>
       <div class="view-toggle">
         <button class="view-btn active" id="btn-day" onclick="setView('day')">Day</button>
         <button class="view-btn" id="btn-day2" onclick="setView('day2')" style="background:#fffbe6;color:#7a5800;border-color:#f0d060">Day v2 ✨</button>
@@ -380,6 +381,26 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
         <button class="view-btn" id="btn-info" onclick="setView('info')">Info</button>
         <button class="view-btn" id="btn-qr" onclick="setView('qr')">🔗 Quick Links</button>
         <button class="view-btn" id="btn-tickets" onclick="setView('tickets')" style="position:relative">📬 Tickets<span id="tickets-unread-badge" style="display:none;position:absolute;top:3px;right:3px;background:#c0392b;color:white;border-radius:50%;width:8px;height:8px;font-size:0"></span></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CAMP PICKUP EMAIL MODAL -->
+  <div id="camp-pickup-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;overflow:auto">
+    <div style="background:white;border-radius:14px;max-width:640px;margin:2.5rem auto;padding:1.75rem;box-shadow:0 8px 40px rgba(0,0,0,0.18)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+        <div style="font-size:17px;font-weight:600">🏺 Camp Pickup Email</div>
+        <button onclick="closeCampPickupModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">x</button>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:1rem">
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px">Camp week</div>
+        <input type="date" id="cp-week-date" onchange="cpLoadWeek(this.value)" style="padding:7px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px">
+        <div id="cp-week-label" style="font-size:13px;color:#555;font-weight:500"></div>
+      </div>
+
+      <div id="cp-body">
+        <div class="loading">Loading camp sessions…</div>
       </div>
     </div>
   </div>
@@ -6564,6 +6585,166 @@ function submitThreadReply(ticketId) {
       openTicket(ticketId)
     })
   })
+}
+// ── CAMP PICKUP EMAIL ─────────────────────────────────────────
+
+var cpState = { weekStart: null, weekEnd: null, recipients: [], sessions: [] }
+
+function cpMondayOf(d) {
+  var dt = new Date(d)
+  var day = dt.getDay() // 0=Sun..6=Sat
+  var diff = day === 0 ? -6 : 1 - day // shift back to Monday
+  dt.setDate(dt.getDate() + diff)
+  return dt
+}
+
+function openCampPickupModal() {
+  document.getElementById('camp-pickup-modal').style.display = 'block'
+  var monday = cpMondayOf(currentDate)
+  var dateInput = document.getElementById('cp-week-date')
+  dateInput.value = dateStr(monday)
+  cpLoadWeek(dateStr(monday))
+}
+
+function closeCampPickupModal() {
+  document.getElementById('camp-pickup-modal').style.display = 'none'
+}
+
+async function cpLoadWeek(anyDateInWeek) {
+  var body = document.getElementById('cp-body')
+  body.innerHTML = '<div class="loading">Loading camp sessions…</div>'
+
+  var monday = cpMondayOf(anyDateInWeek)
+  var friday = new Date(monday)
+  friday.setDate(friday.getDate() + 4)
+  var mondayStr = dateStr(monday)
+  var fridayStr = dateStr(friday)
+  cpState.weekStart = mondayStr
+  cpState.weekEnd = fridayStr
+
+  document.getElementById('cp-week-label').textContent =
+    monday.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) + ' – ' +
+    friday.toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' })
+
+  const { data: sessions, error: sessErr } = await sb.from('sessions')
+    .select('id, session_date, session_time, title')
+    .eq('studio_id', currentStudioId)
+    .eq('session_type', 'camp')
+    .gte('session_date', mondayStr)
+    .lte('session_date', fridayStr)
+    .order('session_date')
+
+  if (sessErr) { body.innerHTML = '<div style="color:#c00;font-size:13px">Error loading sessions: ' + sessErr.message + '</div>'; return }
+
+  cpState.sessions = sessions || []
+
+  if (!cpState.sessions.length) {
+    body.innerHTML = '<div style="font-size:13px;color:#888;padding:1rem 0">No camp sessions found for this week at this studio.</div>'
+    return
+  }
+
+  const sessionIds = cpState.sessions.map(function(s) { return s.id })
+  const { data: bookings, error: bookErr } = await sb.from('bookings')
+    .select('session_id, customer_name, customer_email, qty, returned_at')
+    .in('session_id', sessionIds)
+    .gt('qty', 0)
+    .is('returned_at', null)
+
+  if (bookErr) { body.innerHTML = '<div style="color:#c00;font-size:13px">Error loading registrations: ' + bookErr.message + '</div>'; return }
+
+  // Dedupe by customer_email (fallback to name if no email)
+  var seen = {}
+  var recipients = []
+  ;(bookings || []).forEach(function(b) {
+    var key = (b.customer_email || '').trim().toLowerCase()
+    if (!key) return // skip bookings with no email on file
+    if (!seen[key]) {
+      seen[key] = { email: b.customer_email, name: b.customer_name || '', count: 0 }
+      recipients.push(seen[key])
+    }
+    seen[key].count += 1
+  })
+  recipients.sort(function(a, b) { return (a.name || '').localeCompare(b.name || '') })
+  cpState.recipients = recipients
+
+  var skippedCount = (bookings || []).filter(function(b) { return !b.customer_email }).length
+
+  body.innerHTML =
+    '<div style="font-size:13px;color:#555;margin-bottom:10px">'
+      + cpState.sessions.length + ' camp session' + (cpState.sessions.length !== 1 ? 's' : '') + ' this week &middot; '
+      + '<strong>' + recipients.length + ' parent' + (recipients.length !== 1 ? 's' : '') + '</strong> to notify'
+      + (skippedCount ? ' <span style="color:#c00">(' + skippedCount + ' booking' + (skippedCount !== 1 ? 's' : '') + ' skipped — no email on file)</span>' : '')
+    + '</div>'
+    + '<div style="max-height:140px;overflow:auto;border:0.5px solid #e0e0d8;border-radius:8px;margin-bottom:14px">'
+      + (recipients.length
+        ? recipients.map(function(r, i) {
+            return '<label style="display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:13px;border-bottom:0.5px solid #f0f0e8;cursor:pointer">'
+              + '<input type="checkbox" class="cp-recipient-check" data-idx="' + i + '" checked>'
+              + '<span style="flex:1">' + escHtml(r.name) + ' <span style="color:#888">' + escHtml(r.email) + '</span></span>'
+              + (r.count > 1 ? '<span style="font-size:11px;color:#aaa">' + r.count + ' bookings</span>' : '')
+              + '</label>'
+          }).join('')
+        : '<div style="padding:12px;font-size:13px;color:#888">No registered parents with email addresses found for this week.</div>')
+    + '</div>'
+    + '<div style="margin-bottom:10px"><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Subject</div>'
+    + '<input id="cp-subject" type="text" value="Your camper\'s artwork is ready for pickup!" style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none"></div>'
+    + '<div style="margin-bottom:14px"><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Message</div>'
+    + '<textarea id="cp-message" placeholder="Paste the email copy here..." style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none;resize:vertical;min-height:160px;font-family:inherit"></textarea>'
+    + '<div style="font-size:11px;color:#aaa;margin-top:4px">Sent as plain paragraphs — line breaks become new paragraphs. No need to add a greeting/signature if you\'d like those added automatically.</div></div>'
+    + '<div style="display:flex;justify-content:flex-end;gap:8px">'
+    + '<button id="cp-send-btn" onclick="sendCampPickupEmails()" style="padding:10px 20px;background:#1a1a1a;color:white;border:none;border-radius:7px;font-size:14px;cursor:pointer;font-weight:500">Send to ' + recipients.length + ' Parent' + (recipients.length !== 1 ? 's' : '') + '</button>'
+    + '</div>'
+    + '<div id="cp-send-status" style="font-size:13px;margin-top:10px"></div>'
+}
+
+async function sendCampPickupEmails() {
+  var btn = document.getElementById('cp-send-btn')
+  var status = document.getElementById('cp-send-status')
+  var subject = (document.getElementById('cp-subject').value || '').trim()
+  var message = (document.getElementById('cp-message').value || '').trim()
+
+  if (!message) { alert('Please paste in the email message before sending.'); return }
+
+  var checks = document.querySelectorAll('.cp-recipient-check')
+  var selected = []
+  checks.forEach(function(c) {
+    if (c.checked) selected.push(cpState.recipients[parseInt(c.getAttribute('data-idx'))])
+  })
+
+  if (!selected.length) { alert('No recipients selected.'); return }
+  if (!confirm('Send this pickup email to ' + selected.length + ' parent' + (selected.length !== 1 ? 's' : '') + '?')) return
+
+  btn.textContent = 'Sending…'
+  btn.disabled = true
+  status.textContent = ''
+
+  try {
+    var studioName = document.getElementById('studio-name') ? document.getElementById('studio-name').textContent : ''
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/send-camp-pickup-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_KEY}` },
+      body: JSON.stringify({
+        studio_id: currentStudioId,
+        studio_name: studioName,
+        week_start: cpState.weekStart,
+        week_end: cpState.weekEnd,
+        subject: subject,
+        message: message,
+        recipients: selected.map(function(r) { return { email: r.email, name: r.name } })
+      })
+    })
+    const result = await res.json()
+    if (!result.success) throw new Error(result.error || 'Unknown error')
+
+    btn.textContent = 'Sent ✓'
+    status.style.color = '#2e7d32'
+    status.textContent = 'Sent to ' + (result.sent != null ? result.sent : selected.length) + ' parent(s).' + (result.failed ? ' ' + result.failed + ' failed to send.' : '')
+  } catch (e) {
+    btn.textContent = 'Send to ' + selected.length + ' Parent' + (selected.length !== 1 ? 's' : '')
+    btn.disabled = false
+    status.style.color = '#c00'
+    status.textContent = 'Error: ' + e.message
+  }
 }
 
 </script>
