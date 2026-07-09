@@ -6665,6 +6665,25 @@ async function cpLoadWeek(anyDateInWeek) {
     seen[key].count += 1
   })
   recipients.sort(function(a, b) { return (a.name || '').localeCompare(b.name || '') })
+
+  // Check send log for this studio + week to flag anyone already emailed
+  const { data: sentLog } = await sb.from('camp_pickup_emails')
+    .select('recipient_email, status, sent_at')
+    .eq('studio_id', currentStudioId)
+    .eq('week_start', mondayStr)
+    .eq('status', 'sent')
+    .order('sent_at', { ascending: false })
+
+  var sentMap = {}
+  ;(sentLog || []).forEach(function(row) {
+    var key = (row.recipient_email || '').trim().toLowerCase()
+    if (!sentMap[key]) sentMap[key] = row.sent_at // keep most recent (already sorted desc)
+  })
+  recipients.forEach(function(r) {
+    var key = (r.email || '').trim().toLowerCase()
+    r.alreadySentAt = sentMap[key] || null
+  })
+
   cpState.recipients = recipients
 
   var skippedCount = (bookings || []).filter(function(b) { return !b.customer_email }).length
@@ -6674,27 +6693,71 @@ async function cpLoadWeek(anyDateInWeek) {
       + cpState.sessions.length + ' camp session' + (cpState.sessions.length !== 1 ? 's' : '') + ' this week &middot; '
       + '<strong>' + recipients.length + ' parent' + (recipients.length !== 1 ? 's' : '') + '</strong> to notify'
       + (skippedCount ? ' <span style="color:#c00">(' + skippedCount + ' booking' + (skippedCount !== 1 ? 's' : '') + ' skipped — no email on file)</span>' : '')
+      + (recipients.length ? ' &middot; <a href="#" onclick="cpToggleAll(true);return false" style="color:#555">select all</a> / <a href="#" onclick="cpToggleAll(false);return false" style="color:#555">none</a>' : '')
     + '</div>'
     + '<div style="max-height:140px;overflow:auto;border:0.5px solid #e0e0d8;border-radius:8px;margin-bottom:14px">'
       + (recipients.length
         ? recipients.map(function(r, i) {
+            var sentBadge = r.alreadySentAt
+              ? '<span style="font-size:11px;color:#2e7d32;background:#eaf5ea;padding:1px 7px;border-radius:20px;white-space:nowrap">✓ sent ' + new Date(r.alreadySentAt).toLocaleDateString('en-CA',{month:'short',day:'numeric'}) + '</span>'
+              : ''
             return '<label style="display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:13px;border-bottom:0.5px solid #f0f0e8;cursor:pointer">'
-              + '<input type="checkbox" class="cp-recipient-check" data-idx="' + i + '" checked>'
+              + '<input type="checkbox" class="cp-recipient-check" data-idx="' + i + '"' + (r.alreadySentAt ? '' : ' checked') + ' onchange="cpUpdateSendBtnLabel()">'
               + '<span style="flex:1">' + escHtml(r.name) + ' <span style="color:#888">' + escHtml(r.email) + '</span></span>'
-              + (r.count > 1 ? '<span style="font-size:11px;color:#aaa">' + r.count + ' bookings</span>' : '')
+              + (r.count > 1 ? '<span style="font-size:11px;color:#aaa;margin-right:6px">' + r.count + ' bookings</span>' : '')
+              + sentBadge
               + '</label>'
           }).join('')
         : '<div style="padding:12px;font-size:13px;color:#888">No registered parents with email addresses found for this week.</div>')
     + '</div>'
     + '<div style="margin-bottom:10px"><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Subject</div>'
-    + '<input id="cp-subject" type="text" value="Your camper\'s artwork is ready for pickup!" style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none"></div>'
+    + '<input id="cp-subject" type="text" style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none"></div>'
     + '<div style="margin-bottom:14px"><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Message</div>'
-    + '<textarea id="cp-message" placeholder="Paste the email copy here..." style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none;resize:vertical;min-height:160px;font-family:inherit"></textarea>'
-    + '<div style="font-size:11px;color:#aaa;margin-top:4px">Sent as plain paragraphs — line breaks become new paragraphs. No need to add a greeting/signature if you\'d like those added automatically.</div></div>'
+    + '<textarea id="cp-message" placeholder="Message..." style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none;resize:vertical;min-height:160px;font-family:inherit"></textarea>'
+    + '<div style="font-size:11px;color:#aaa;margin-top:4px">A starter template is filled in below with this week\'s dates — edit it freely. Blank lines become paragraph breaks. Add <code>{{first_name}}</code> anywhere if you\'d like to address each parent by name.</div></div>'
     + '<div style="display:flex;justify-content:flex-end;gap:8px">'
-    + '<button id="cp-send-btn" onclick="sendCampPickupEmails()" style="padding:10px 20px;background:#1a1a1a;color:white;border:none;border-radius:7px;font-size:14px;cursor:pointer;font-weight:500">Send to ' + recipients.length + ' Parent' + (recipients.length !== 1 ? 's' : '') + '</button>'
+    + '<button id="cp-send-btn" onclick="sendCampPickupEmails()" style="padding:10px 20px;background:#1a1a1a;color:white;border:none;border-radius:7px;font-size:14px;cursor:pointer;font-weight:500">Send to ' + recipients.filter(function(r){return !r.alreadySentAt}).length + ' Parent' + (recipients.filter(function(r){return !r.alreadySentAt}).length !== 1 ? 's' : '') + '</button>'
     + '</div>'
     + '<div id="cp-send-status" style="font-size:13px;margin-top:10px"></div>'
+
+  var weekDatesLabel = cpWeekDatesLabel(monday, friday)
+  document.getElementById('cp-subject').value = cpDefaultSubject()
+  document.getElementById('cp-message').value = cpDefaultMessage(weekDatesLabel)
+}
+
+function cpWeekDatesLabel(monday, friday) {
+  var monthOpts = { month: 'long' }
+  var mMonth = monday.toLocaleDateString('en-CA', monthOpts)
+  var fMonth = friday.toLocaleDateString('en-CA', monthOpts)
+  var mDay = monday.getDate()
+  var fDay = friday.getDate()
+  return mMonth === fMonth ? (mMonth + ' ' + mDay + '–' + fDay) : (mMonth + ' ' + mDay + ' – ' + fMonth + ' ' + fDay)
+}
+
+function cpDefaultSubject() {
+  return '🎨 Great news—your camp artwork is ready for pickup!'
+}
+
+function cpDefaultMessage(weekDatesLabel) {
+  return "Hi,\n\n"
+    + "🎨 Great news—your camp artwork is ready for pickup!\n\n"
+    + "All artwork from camp " + weekDatesLabel + " has been completed and is ready to go home. If you haven't picked it up yet, we'd love for you to stop by as soon as you can.\n\n"
+    + "Our artwork shelves are filling up quickly, so we'd really appreciate you collecting your child's creations at your earliest convenience.\n\n"
+    + "Please check our Calendar page for upcoming studio hours before stopping by. If you're unable to make it during one of our open times, simply contact the studio through the contact form on our website and we'll do our best to arrange another pickup time.\n\n"
+    + "We can't wait for your artist to be reunited with everything they created!\n\n"
+    + "See you soon,\nThe 4Cats Team"
+}
+
+function cpToggleAll(checked) {
+  document.querySelectorAll('.cp-recipient-check').forEach(function(c) { c.checked = checked })
+  cpUpdateSendBtnLabel()
+}
+
+function cpUpdateSendBtnLabel() {
+  var btn = document.getElementById('cp-send-btn')
+  if (!btn) return
+  var n = document.querySelectorAll('.cp-recipient-check:checked').length
+  btn.textContent = 'Send to ' + n + ' Parent' + (n !== 1 ? 's' : '')
 }
 
 async function sendCampPickupEmails() {
