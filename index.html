@@ -393,9 +393,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
         <button onclick="closeCampPickupModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">x</button>
       </div>
 
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:1rem">
-        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px">Camp week</div>
-        <input type="date" id="cp-week-date" onchange="cpLoadWeek(this.value)" style="padding:7px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:1rem;flex-wrap:wrap">
+        <div style="display:inline-flex;border:0.5px solid #d0d0c8;border-radius:7px;overflow:hidden">
+          <button type="button" id="cp-mode-day" onclick="cpSetMode('day')" style="padding:6px 14px;border:none;font-size:13px;cursor:pointer;font-weight:500">Day</button>
+          <button type="button" id="cp-mode-week" onclick="cpSetMode('week')" style="padding:6px 14px;border:none;font-size:13px;cursor:pointer;font-weight:500">Week</button>
+        </div>
+        <input type="date" id="cp-week-date" onchange="cpLoadPeriod(this.value)" style="padding:7px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px">
         <div id="cp-week-label" style="font-size:13px;color:#555;font-weight:500"></div>
       </div>
 
@@ -6607,40 +6610,77 @@ function cpMondayOf(d) {
   return dt
 }
 
+cpState.mode = 'day' // default to single-day since that's the most common use case
+
 function openCampPickupModal() {
   document.getElementById('camp-pickup-modal').style.display = 'block'
-  var monday = cpMondayOf(currentDate)
+  cpApplyModeStyles()
   var dateInput = document.getElementById('cp-week-date')
-  dateInput.value = dateStr(monday)
-  cpLoadWeek(dateStr(monday))
+  var initialDate = cpState.mode === 'day' ? currentDate : cpMondayOf(currentDate)
+  dateInput.value = dateStr(initialDate)
+  cpLoadPeriod(dateInput.value)
+}
+
+function cpSetMode(mode) {
+  if (cpState.mode === mode) return
+  cpState.mode = mode
+  cpApplyModeStyles()
+  var dateInput = document.getElementById('cp-week-date')
+  var base = dateInput.value || dateStr(currentDate)
+  if (mode === 'week') {
+    dateInput.value = dateStr(cpMondayOf(base))
+  }
+  cpLoadPeriod(dateInput.value)
+}
+
+function cpApplyModeStyles() {
+  var dayBtn = document.getElementById('cp-mode-day')
+  var weekBtn = document.getElementById('cp-mode-week')
+  if (cpState.mode === 'day') {
+    dayBtn.style.background = '#1a1a1a'; dayBtn.style.color = 'white'
+    weekBtn.style.background = '#f5f5f0'; weekBtn.style.color = '#555'
+  } else {
+    weekBtn.style.background = '#1a1a1a'; weekBtn.style.color = 'white'
+    dayBtn.style.background = '#f5f5f0'; dayBtn.style.color = '#555'
+  }
 }
 
 function closeCampPickupModal() {
   document.getElementById('camp-pickup-modal').style.display = 'none'
 }
 
-async function cpLoadWeek(anyDateInWeek) {
+async function cpLoadPeriod(dateVal) {
   var body = document.getElementById('cp-body')
   body.innerHTML = '<div class="loading">Loading camp sessions…</div>'
 
-  var monday = cpMondayOf(anyDateInWeek)
-  var friday = new Date(monday)
-  friday.setDate(friday.getDate() + 4)
-  var mondayStr = dateStr(monday)
-  var fridayStr = dateStr(friday)
-  cpState.weekStart = mondayStr
-  cpState.weekEnd = fridayStr
+  var rangeStart, rangeEnd, label, periodNoun
+  if (cpState.mode === 'day') {
+    var d = new Date(dateVal + 'T00:00:00')
+    rangeStart = dateVal
+    rangeEnd = dateVal
+    label = d.toLocaleDateString('en-CA', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' })
+    periodNoun = 'today'
+  } else {
+    var monday = cpMondayOf(dateVal)
+    var friday = new Date(monday)
+    friday.setDate(friday.getDate() + 4)
+    rangeStart = dateStr(monday)
+    rangeEnd = dateStr(friday)
+    label = monday.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) + ' – ' +
+      friday.toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' })
+    periodNoun = 'this week'
+  }
+  cpState.weekStart = rangeStart
+  cpState.weekEnd = rangeEnd
 
-  document.getElementById('cp-week-label').textContent =
-    monday.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) + ' – ' +
-    friday.toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' })
+  document.getElementById('cp-week-label').textContent = label
 
   const { data: sessions, error: sessErr } = await sb.from('sessions')
     .select('id, session_date, session_time, title')
     .eq('studio_id', currentStudioId)
     .eq('session_type', 'camp')
-    .gte('session_date', mondayStr)
-    .lte('session_date', fridayStr)
+    .gte('session_date', rangeStart)
+    .lte('session_date', rangeEnd)
     .order('session_date')
 
   if (sessErr) { body.innerHTML = '<div style="color:#c00;font-size:13px">Error loading sessions: ' + sessErr.message + '</div>'; return }
@@ -6648,7 +6688,7 @@ async function cpLoadWeek(anyDateInWeek) {
   cpState.sessions = sessions || []
 
   if (!cpState.sessions.length) {
-    body.innerHTML = '<div style="font-size:13px;color:#888;padding:1rem 0">No camp sessions found for this week at this studio.</div>'
+    body.innerHTML = '<div style="font-size:13px;color:#888;padding:1rem 0">No camp sessions found for ' + periodNoun + ' at this studio.</div>'
     return
   }
 
@@ -6675,11 +6715,11 @@ async function cpLoadWeek(anyDateInWeek) {
   })
   recipients.sort(function(a, b) { return (a.name || '').localeCompare(b.name || '') })
 
-  // Check send log for this studio + week to flag anyone already emailed
+  // Check send log for this studio + period to flag anyone already emailed
   const { data: sentLog } = await sb.from('camp_pickup_emails')
     .select('recipient_email, status, sent_at')
     .eq('studio_id', currentStudioId)
-    .eq('week_start', mondayStr)
+    .eq('week_start', rangeStart)
     .eq('status', 'sent')
     .order('sent_at', { ascending: false })
 
@@ -6699,7 +6739,7 @@ async function cpLoadWeek(anyDateInWeek) {
 
   body.innerHTML =
     '<div style="font-size:13px;color:#555;margin-bottom:10px">'
-      + cpState.sessions.length + ' camp session' + (cpState.sessions.length !== 1 ? 's' : '') + ' this week &middot; '
+      + cpState.sessions.length + ' camp session' + (cpState.sessions.length !== 1 ? 's' : '') + ' ' + periodNoun + ' &middot; '
       + '<strong>' + recipients.length + ' parent' + (recipients.length !== 1 ? 's' : '') + '</strong> to notify'
       + (skippedCount ? ' <span style="color:#c00">(' + skippedCount + ' booking' + (skippedCount !== 1 ? 's' : '') + ' skipped — no email on file)</span>' : '')
       + (recipients.length ? ' &middot; <a href="#" onclick="cpToggleAll(true);return false" style="color:#555">select all</a> / <a href="#" onclick="cpToggleAll(false);return false" style="color:#555">none</a>' : '')
@@ -6717,21 +6757,20 @@ async function cpLoadWeek(anyDateInWeek) {
               + sentBadge
               + '</label>'
           }).join('')
-        : '<div style="padding:12px;font-size:13px;color:#888">No registered parents with email addresses found for this week.</div>')
+        : '<div style="padding:12px;font-size:13px;color:#888">No registered parents with email addresses found for ' + periodNoun + '.</div>')
     + '</div>'
     + '<div style="margin-bottom:10px"><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Subject</div>'
     + '<input id="cp-subject" type="text" style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none"></div>'
     + '<div style="margin-bottom:14px"><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Message</div>'
     + '<textarea id="cp-message" placeholder="Message..." style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none;resize:vertical;min-height:160px;font-family:inherit"></textarea>'
-    + '<div style="font-size:11px;color:#aaa;margin-top:4px">A starter template is filled in below with this week\'s dates — edit it freely. Blank lines become paragraph breaks. Add <code>{{first_name}}</code> to address each parent by name, or <code>{{calendar_link}}</code> to insert a clickable link to this studio\'s calendar page (already included below).</div></div>'
+    + '<div style="font-size:11px;color:#aaa;margin-top:4px">A starter template is filled in below with this ' + (cpState.mode === 'day' ? 'day\'s date' : 'week\'s dates') + ' — edit it freely. Blank lines become paragraph breaks. Add <code>{{first_name}}</code> to address each parent by name, or <code>{{calendar_link}}</code> to insert a clickable link to this studio\'s calendar page (already included below).</div></div>'
     + '<div style="display:flex;justify-content:flex-end;gap:8px">'
     + '<button id="cp-send-btn" onclick="sendCampPickupEmails()" style="padding:10px 20px;background:#1a1a1a;color:white;border:none;border-radius:7px;font-size:14px;cursor:pointer;font-weight:500">Send to ' + recipients.filter(function(r){return !r.alreadySentAt}).length + ' Parent' + (recipients.filter(function(r){return !r.alreadySentAt}).length !== 1 ? 's' : '') + '</button>'
     + '</div>'
     + '<div id="cp-send-status" style="font-size:13px;margin-top:10px"></div>'
 
-  var weekDatesLabel = cpWeekDatesLabel(monday, friday)
   document.getElementById('cp-subject').value = cpDefaultSubject()
-  document.getElementById('cp-message').value = cpDefaultMessage(weekDatesLabel)
+  document.getElementById('cp-message').value = cpDefaultMessage(label, cpState.mode)
 }
 
 function cpWeekDatesLabel(monday, friday) {
@@ -6747,10 +6786,11 @@ function cpDefaultSubject() {
   return '🎨 Great news— camp artwork is ready for pickup!'
 }
 
-function cpDefaultMessage(weekDatesLabel) {
+function cpDefaultMessage(dateLabel, mode) {
+  var periodPhrase = mode === 'day' ? ('camp today, ' + dateLabel + ',') : ('camp ' + dateLabel)
   return "Hi,\n\n"
     + "🎨 Great news—your child's camp artwork is ready for pickup!\n\n"
-    + "All artwork from camp " + weekDatesLabel + " has been completed and is ready to go home. If you haven't picked it up yet, we'd love for you to stop by as soon as you can.\n\n"
+    + "All artwork from " + periodPhrase + " has been completed and is ready to go home. If you haven't picked it up yet, we'd love for you to stop by as soon as you can.\n\n"
     + "Our artwork shelves are filling up quickly, so we'd really appreciate you collecting your child's creations at your earliest convenience.\n\n"
     + "Please check our {{calendar_link}} for upcoming studio hours before stopping by. If you're unable to make it during one of our open times, simply contact the studio through the contact form on our website and we'll do our best to arrange another pickup time.\n\n"
     + "We can't wait for your artist to be reunited with everything they created!\n\n"
