@@ -935,17 +935,20 @@ function loadDay() {
         ? sbGet('tally_registrations?select=*&shopify_order_name=in.(' + orderNames.map(function(n){ return encodeURIComponent(n) }).join(',') + ')')
         : Promise.resolve([])
 
+      var manualTallyPromise = sbGet('tally_registrations?select=*&is_manual=eq.true&event_date=eq.' + today + '&studio_id=eq.' + currentStudioId)
+
       var attPromise = sbGet('attendance?select=session_id,shopify_order_name,camper_name,attended,table_number,alternate_pickup,checked_out_by,aftercare&attended_date=eq.' + today + '&' + sessionIdFilter)
 
       var badgePromise = orderNames.length
         ? sbGet('camp_daily_badges?select=order_name,camper_name,badge_name,session_date&order_name=in.(' + orderNames.map(function(n){ return encodeURIComponent(n) }).join(',') + ')')
         : Promise.resolve([])
 
-      Promise.all([tallyPromise, attPromise, badgePromise, staffPromise]).then(function(results) {
+      Promise.all([tallyPromise, attPromise, badgePromise, staffPromise, manualTallyPromise]).then(function(results) {
         if (!results) { document.getElementById('checkin-content').textContent = 'Promise.all failed'; return }
-        var tallyRows  = Array.isArray(results[0]) ? results[0] : []
-        var attRows    = Array.isArray(results[1]) ? results[1] : []
-        var badgeRows  = Array.isArray(results[2]) ? results[2] : []
+        var tallyRows      = Array.isArray(results[0]) ? results[0] : []
+        var attRows        = Array.isArray(results[1]) ? results[1] : []
+        var badgeRows      = Array.isArray(results[2]) ? results[2] : []
+        var manualTallyRows = Array.isArray(results[4]) ? results[4] : []
 
         var tallyMap = {}
         tallyRows.forEach(function(t) {
@@ -1037,6 +1040,45 @@ function loadDay() {
                     awardedBadges: bHist.map(function(bh) { return bh.badge })
               })
             })
+          })
+        })
+
+        // Add manual walk-in kids from tally_registrations
+        manualTallyRows.forEach(function(t) {
+          var camperName = t.camper_name || ''
+          if (!camperName) return
+          var uid = makeUid('MANUAL-' + (t.shopify_order_name||'') + '-' + camperName)
+          var attKey = (t.shopify_order_name||'') + '|' + camperName.toLowerCase().trim()
+          var att = attendanceMap[attKey] || null
+          var sGroup = 'fd'
+          globalCampSessions.forEach(function(s) {
+            if (s.id === t.session_id) sGroup = sessionGroup(s.title)
+          })
+          allChildren.push({
+            _uid: uid,
+            name: camperName,
+            dob: null, age: null,
+            sessionId: t.session_id,
+            sessionTitle: 'Manual Walk-In',
+            sessionGroup: sGroup,
+            sessionNotes: '',
+            orderName: t.shopify_order_name || '',
+            registeredBy: t.parent_name || '',
+            phone: t.parent_phone || '',
+            emergency: (t.emergency_contact_name||'') + (t.emergency_contact_phone ? ' '+t.emergency_contact_phone : ''),
+            walkHome: t.walk_home || false,
+            medical: t.medical_notes || '',
+            aftercare: (att && att.aftercare != null) ? att.aftercare : (t.aftercare || false),
+            aftercareToday: (att && att.aftercare === true) ? true : false,
+            notes: t.notes || '',
+            tallyId: t.id,
+            attendanceChecked: att ? att.attended : false,
+            alternatePick: t.alternate_pickup || '',
+            checkedOutBy: (att && att.checked_out_by) ? att.checked_out_by : '',
+            table: (att && att.table_number) ? String(att.table_number) : '',
+            badge: '', awardedBadges: [],
+            isManual: true,
+            pickupPeople: t.alternate_pickup ? [t.alternate_pickup] : []
           })
         })
 
@@ -1580,48 +1622,27 @@ function submitAddChild() {
     isManual: true
   }
 
-  // Save to tally_registrations
+  // Save to tally_registrations with session_id so child persists on reload
   var tallyPayload = {
     shopify_order_name: orderName,
+    studio_id: currentStudioId,
     camper_name: name,
+    parent_name: parentName || null,
     walk_home: walkHome,
     medical_notes: medical || null,
     aftercare: aftercare,
     parent_phone: phone || null,
-    notes: notes || null
+    notes: notes || null,
+    session_id: targetSession ? targetSession.id : null,
+    event_date: dateStr(currentDate),
+    is_manual: true
   }
   sbPost('tally_registrations', tallyPayload).then(function(rows) {
     if (rows && rows.length && rows[0].id) newChild.tallyId = rows[0].id
   })
 
-  // Save a booking row so child persists on reload
+  // Save to tally_registrations with session_id so child persists on reload
   var sessionId = targetSession ? targetSession.id : null
-  var bookingPayload = {
-    studio_id: currentStudioId,
-    shopify_order_name: orderName,
-    customer_name: parentName || name,
-    customer_phone: phone || null,
-    qty: 1,
-    event_type: 'workshop',
-    event_date: dateStr(currentDate),
-    event_time: targetSession ? (sessionGroup === 'pm' ? '*1pm' : '*9am') : '*9am',
-    product_title: 'Manual Walk-In | ' + (targetSession ? targetSession.title : ''),
-    session_id: sessionId,
-    booked_at: new Date().toISOString(),
-    aftercare: aftercare,
-    early_arrival: false,
-    raw_payload: {
-      line_items: [{
-        title: 'Manual Walk-In',
-        properties: [
-          { name: 'Participant 1', value: name + (medical ? ' | Medical: ' + medical : '') }
-        ]
-      }]
-    }
-  }
-  sbPost('bookings', bookingPayload).then(function(r) {
-    console.log('booking save result:', JSON.stringify(r))
-  })
 
   // Also check in to attendance right away
   if (sessionId) {
