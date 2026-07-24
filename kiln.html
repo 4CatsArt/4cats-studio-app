@@ -393,12 +393,13 @@
             <th class="no-sort">Customer</th>
             <th class="no-sort">Email</th>
             <th class="no-sort">Guests</th>
+            <th class="no-sort">Last Email</th>
             <th class="no-sort">Status</th>
             <th class="no-sort">Action</th>
           </tr>
         </thead>
         <tbody id="party-table-body">
-          <tr class="empty-row"><td colspan="8">Loading...</td></tr>
+          <tr class="empty-row"><td colspan="10">Loading...</td></tr>
         </tbody>
       </table>
     </div>
@@ -1445,6 +1446,7 @@ async function submitAddTicket() {
 // ── TABS ──────────────────────────────────
 let currentTab = 'clay'
 let allPartyTickets = []
+let pendingPartyEmailIds = new Set()  // tickets currently mid-countdown (not yet failed/sent)
 
 function switchTab(tab) {
   currentTab = tab
@@ -1456,11 +1458,11 @@ function switchTab(tab) {
 }
 
 async function loadPartyTickets() {
-  document.getElementById('party-table-body').innerHTML = '<tr class="empty-row"><td colspan="8">Loading...</td></tr>'
+  document.getElementById('party-table-body').innerHTML = '<tr class="empty-row"><td colspan="10">Loading...</td></tr>'
   const stageF = document.getElementById('party-filter-stage').value
 
   let q = sb.from('party_tickets')
-    .select('id, ticket_number, studio_id, customer_name, customer_email, session_title, session_date, status, created_at, booking_id')
+    .select('id, ticket_number, studio_id, customer_name, customer_email, session_title, session_date, status, created_at, booking_id, pickup_email_sent_at')
     .order('created_at', { ascending: false })
     .limit(500)
 
@@ -1470,7 +1472,7 @@ async function loadPartyTickets() {
 
   const { data, error } = await q
   if (error) {
-    document.getElementById('party-table-body').innerHTML = `<tr class="empty-row"><td colspan="8" style="color:#c0392b">Error: ${error.message}</td></tr>`
+    document.getElementById('party-table-body').innerHTML = `<tr class="empty-row"><td colspan="10" style="color:#c0392b">Error: ${error.message}</td></tr>`
     return
   }
   allPartyTickets = data || []
@@ -1518,7 +1520,7 @@ function renderPartyTable() {
   if (search) tickets = tickets.filter(t => t.ticket_number.includes(search))
 
   if (!tickets.length) {
-    document.getElementById('party-table-body').innerHTML = '<tr class="empty-row"><td colspan="8">No active party tickets.</td></tr>'
+    document.getElementById('party-table-body').innerHTML = '<tr class="empty-row"><td colspan="10">No active party tickets.</td></tr>'
     return
   }
 
@@ -1526,8 +1528,20 @@ function renderPartyTable() {
     const statusLabel = t.status === 'ready' ? '🎉 Ready for Pickup' : 'Processing 🪴'
     const statusCls   = t.status === 'ready' ? 'stage-ready_pickup' : 'stage-processing'
     const sessionDate = t.session_date ? fmtDate(t.session_date) : '—'
+
+    const emailFailed = t.status === 'ready' && !t.pickup_email_sent_at && !pendingPartyEmailIds.has(t.id)
+    const isSending   = pendingPartyEmailIds.has(t.id)
     const action = t.status === 'ready'
-      ? `<span class="done-badge">✓ Ready for Pickup</span>`
+      ? (t.pickup_email_sent_at
+          ? `<span class="done-badge">✓ Ready for Pickup</span><br>
+             <button class="advance-btn" style="background:#555;margin-top:4px;font-size:10px;padding:3px 8px"
+               onclick="resendPartyPickupEmail('${t.id}')" ${!t.customer_email ? 'disabled title="No email on file"' : ''} ${isSending ? 'disabled' : ''}>
+               🔁 ${isSending ? 'Sending…' : 'Resend email'}
+             </button>`
+          : `<button class="advance-btn" style="background:${emailFailed ? '#c0392b' : '#888'}"
+               onclick="resendPartyPickupEmail('${t.id}')" ${!t.customer_email ? 'disabled title="No email on file"' : ''} ${isSending ? 'disabled' : ''}>
+               📧 ${isSending ? 'Sending…' : (emailFailed ? 'Email failed — Resend' : 'Send Pickup Email')}
+             </button>`)
       : `<button class="advance-btn" style="background:#2e7d32"
            onclick="promptPartyAdvance('${t.id}','${t.ticket_number}')">
            → Ready for Pickup
@@ -1540,6 +1554,14 @@ function renderPartyTable() {
     const checkinLink = t.booking_id
       ? `<br><a href="#" onclick="openCheckinPopup('${t.booking_id}','${(t.session_title||'').replace(/'/g, "\\'")}');return false" style="font-size:11px;color:#2d6a9f;text-decoration:none">👀 Check-in list</a>`
       : ''
+    const lastEmailCell = t.pickup_email_sent_at
+      ? `<span class="last-email">
+          <span class="email-label" style="color:#1565c0">📧 Ready for Pickup</span>
+          <span class="email-date">${fmtDate(t.pickup_email_sent_at)}</span>
+        </span>`
+      : (t.status === 'ready'
+          ? `<span style="color:#c0392b;font-size:11px;font-weight:600">⚠ Not sent</span>`
+          : `<span style="color:#ccc;font-size:11px">—</span>`)
     return `<tr>
       <td class="ticket-num">${t.ticket_number}</td>
       <td style="white-space:nowrap;color:#888;font-size:12px">${sessionDate}</td>
@@ -1548,6 +1570,7 @@ function renderPartyTable() {
       <td style="font-size:12px;color:#555">${t.customer_name || '—'}</td>
       <td style="font-size:12px;color:#555">${t.customer_email || '<span style="color:#bbb">—</span>'}</td>
       <td style="font-size:12px;text-align:center">${guestCell}${checkinLink}</td>
+      <td>${lastEmailCell}</td>
       <td><span class="stage-chip ${statusCls}">${statusLabel}</span></td>
       <td>${action}</td>
     </tr>`
@@ -1621,6 +1644,54 @@ function promptPartyAdvance(id, ticketNumber) {
 let pendingPartyEmailTimeout  = null
 let pendingPartyEmailInterval = null
 
+// Actually sends the pickup email and ONLY stamps pickup_email_sent_at if the
+// send genuinely succeeded. Returns true/false so callers can react.
+async function sendPartyPickupEmailNow(t) {
+  let res, ok = false
+  try {
+    res = await fetch(`${SUPABASE_URL}/functions/v1/send-party-pickup-email`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+      },
+      body: JSON.stringify({
+        email:        t.customer_email,
+        customerName: t.customer_name,
+        ticketNumber: t.ticket_number,
+        studioId:     t.studio_id,
+        sessionTitle: t.session_title,
+      }),
+    })
+    ok = res.ok
+    if (!ok) console.error('Party pickup email failed:', res.status, await res.text().catch(()=>'')) 
+  } catch (err) {
+    console.error('Party pickup email error:', err)
+  }
+
+  if (ok) {
+    const now = new Date().toISOString()
+    await sb.from('party_tickets').update({ pickup_email_sent_at: now }).eq('id', t.id)
+    t.pickup_email_sent_at = now
+    showToast(`📧 Pickup email sent to ${t.customer_email}`)
+  } else {
+    showToast(`⚠ Pickup email failed to send for ${t.ticket_number} — check the send-party-pickup-email function`, 4000)
+  }
+  pendingPartyEmailIds.delete(t.id)
+  renderPartyTable()
+  return ok
+}
+
+// Manual resend/send button — used for tickets already marked Ready whose
+// email never went out (e.g. the edge function errored or didn't exist yet).
+async function resendPartyPickupEmail(id) {
+  const t = allPartyTickets.find(t => t.id === id)
+  if (!t || !t.customer_email) return
+  pendingPartyEmailIds.add(id)
+  renderPartyTable()
+  await sendPartyPickupEmailNow(t)
+}
+
 // Override confirmAdvance to handle party tickets too
 const _originalConfirmAdvance = confirmAdvance
 window.confirmAdvance = async function() {
@@ -1641,6 +1712,7 @@ window.confirmAdvance = async function() {
 
     // 15-second countdown then send email
     if (t?.customer_email) {
+      pendingPartyEmailIds.add(id)
       if (pendingPartyEmailTimeout) {
         clearTimeout(pendingPartyEmailTimeout)
         clearInterval(pendingPartyEmailInterval)
@@ -1667,24 +1739,7 @@ window.confirmAdvance = async function() {
         b.style.display = 'none'
         pendingPartyEmailTimeout = null
         pendingPartyEmailInterval = null
-
-        fetch(`${SUPABASE_URL}/functions/v1/send-party-pickup-email`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${SUPABASE_KEY}`,
-          },
-          body: JSON.stringify({
-            email:        t.customer_email,
-            customerName: t.customer_name,
-            ticketNumber: t.ticket_number,
-            studioId:     t.studio_id,
-            sessionTitle: t.session_title,
-          }),
-        }).catch(err => console.error('Party pickup email error:', err))
-
-        await sb.from('party_tickets').update({ pickup_email_sent_at: new Date().toISOString() }).eq('id', id)
-        showToast('📧 Pickup email sent!')
+        await sendPartyPickupEmailNow(t)
       }, 15000)
     }
 
@@ -1703,6 +1758,7 @@ function undoPartyEmail(id) {
   }
   const b = document.getElementById('party-email-banner')
   b.style.display = 'none'
+  pendingPartyEmailIds.delete(id)
 
   // Revert status back to processing
   sb.from('party_tickets').update({ status: 'processing' }).eq('id', id)
