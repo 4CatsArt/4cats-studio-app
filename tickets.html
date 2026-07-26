@@ -432,7 +432,7 @@ function populateNewTicketAssigneeDropdown() {
 
 function fetchAllTickets() {
   sb.from('tickets')
-    .select('id, title, category, priority, status, created_at, updated_at, studio_id, customer_email, shopify_order_name, assigned_to_user_id, ticket_messages(id, created_at), ticket_tags(tag_id)')
+    .select('id, title, ticket_number, category, priority, status, created_at, updated_at, studio_id, customer_email, shopify_order_name, assigned_to_user_id, ticket_messages(id, created_at), ticket_tags(tag_id)')
     .order('updated_at', { ascending: false })
     .then(function(res) {
       allTickets = res.data || []
@@ -568,13 +568,14 @@ function renderList(tickets) {
     var icon = CATEGORY_ICONS[t.category] || '&#128172;'
     var msgCount = t.ticket_messages ? t.ticket_messages.length : 0
     var unread = isUnread(t)
+    var tNumLabel = t.ticket_number ? '<span style="font-size:11px;color:#bbb;margin-right:4px">#' + String(t.ticket_number).padStart(4,'0') + '</span>' : ''
     var assigneeName = t.assigned_to_user_id ? hoUserName(t.assigned_to_user_id) : ''
     var isMine = t.assigned_to_user_id === currentUser.id
 
     html += '<div class="ticket-row' + (unread ? ' unread' : '') + '" onclick="openThread(\'' + t.id + '\')">'
       + '<div class="ticket-icon">' + icon + '</div>'
       + '<div class="ticket-main">'
-      + '<div class="ticket-title">' + (unread ? '<strong>' : '') + escHtml(t.title) + (unread ? '</strong>' : '') + '</div>'
+      + '<div class="ticket-title">' + tNumLabel + (unread ? '<strong>' : '') + escHtml(t.title) + (unread ? '</strong>' : '') + '</div>'
       + '<div class="ticket-meta">'
       + '<span class="pill pill-studio">' + escHtml(studioName(t.studio_id)) + '</span>'
       + '<span class="pill" style="background:' + (PRIORITY_BG[t.priority]||'#f5f5f5') + ';color:' + (PRIORITY_COLORS[t.priority]||'#888') + '">' + capFirst(t.priority) + '</span>'
@@ -670,6 +671,20 @@ function clearSelectedBooking() {
   el.innerHTML = ''
 }
 
+
+// ── TICKET NOTIFICATIONS ──────────────────────────────────────
+
+function sendTicketNotification(type, ticketId, replyBody) {
+  fetch('https://snxibhbhhchjthfmjtaj.supabase.co/functions/v1/send-ticket-notification', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA'
+    },
+    body: JSON.stringify({ type: type, ticket_id: ticketId, reply_body: replyBody || null })
+  }).catch(function(e) { console.error('Ticket notification error:', e) })
+}
+
 function sendEmergencyEmail(ticketId, title, studioId, category, message, createdBy) {
   var studio = allStudios.find(function(s) { return s.id === studioId })
   var studioName = studio ? studio.name : studioId
@@ -760,7 +775,8 @@ function loadCustomerHistory(email, currentTicketId) {
 
 function renderThread(ticket, messages) {
   var icon = CATEGORY_ICONS[ticket.category] || '&#128172;'
-  document.getElementById('th-title').innerHTML = icon + ' ' + escHtml(ticket.title)
+  var tNum = ticket.ticket_number ? '<span style="font-size:12px;color:#aaa;font-weight:400;margin-left:6px">#' + String(ticket.ticket_number).padStart(4,'0') + '</span>' : ''
+  document.getElementById('th-title').innerHTML = icon + ' ' + escHtml(ticket.title) + tNum
 
   // Pills
   var pills = '<span class="pill pill-studio">' + escHtml(studioName(ticket.studio_id)) + '</span>'
@@ -897,13 +913,15 @@ function submitReply() {
   var body = (input.value || '').trim()
   if (!body || !openTicketData) return
   input.disabled = true
+  var _replyTicketId = openTicketData.id
   sb.from('ticket_messages').insert({
     ticket_id: openTicketData.id, author_user_id: currentUser.id,
     body: body, created_at: new Date().toISOString()
   }).then(function() {
-    sb.from('tickets').update({ updated_at: new Date().toISOString() }).eq('id', openTicketData.id).then(function() {
-      markRead(openTicketData.id)
-      openThread(openTicketData.id)
+    sb.from('tickets').update({ updated_at: new Date().toISOString() }).eq('id', _replyTicketId).then(function() {
+      sendTicketNotification('reply', _replyTicketId, body)
+      markRead(_replyTicketId)
+      openThread(_replyTicketId)
       fetchAllTickets()
     })
   })
