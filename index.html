@@ -327,6 +327,26 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .tag-dropdown-item.create { color: #6a1b9a; font-style: italic; }
 .tag-dropdown-empty { padding: 8px 12px; font-size: 13px; color: #aaa; }
 
+
+/* ATTACHMENTS */
+.attach-bar { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.attach-btn { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; border: 0.5px dashed #d0d0c8; border-radius: 6px; font-size: 12px; color: #888; cursor: pointer; background: white; transition: border-color 0.15s; }
+.attach-btn:hover { border-color: #888; color: #444; }
+.attach-btn input[type=file] { display: none; }
+.attach-preview { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.attach-thumb-wrap { position: relative; width: 60px; height: 60px; }
+.attach-thumb { width: 60px; height: 60px; object-fit: cover; border-radius: 6px; border: 0.5px solid #e0e0d8; cursor: pointer; }
+.attach-thumb-remove { position: absolute; top: -5px; right: -5px; width: 18px; height: 18px; background: #c0392b; color: white; border-radius: 50%; border: none; cursor: pointer; font-size: 11px; line-height: 18px; text-align: center; padding: 0; }
+.attach-uploading { font-size: 11px; color: #aaa; }
+.msg-attachments { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.msg-attach-thumb { width: 80px; height: 80px; object-fit: cover; border-radius: 8px; border: 0.5px solid #e0e0d8; cursor: pointer; transition: opacity 0.15s; }
+.msg-attach-thumb:hover { opacity: 0.85; }
+/* LIGHTBOX */
+#attach-lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.88); z-index: 9999; align-items: center; justify-content: center; }
+#attach-lightbox.open { display: flex; }
+#attach-lightbox img { max-width: 90vw; max-height: 88vh; border-radius: 8px; box-shadow: 0 8px 40px rgba(0,0,0,0.5); }
+#attach-lightbox-close { position: fixed; top: 20px; right: 24px; color: white; font-size: 28px; cursor: pointer; background: none; border: none; line-height: 1; }
+
 </style>
 </head>
 <body>
@@ -3020,7 +3040,14 @@ async function printAllGlazing() {
     </div>
     ${sectionsHtml}
     <script>window.onload=function(){window.print()}<\/script>
-    </body></html>`)
+    
+<!-- LIGHTBOX -->
+<div id="attach-lightbox" onclick="closeLightbox()">
+  <button id="attach-lightbox-close" onclick="closeLightbox()">&times;</button>
+  <img src="" alt="Attachment">
+</div>
+
+</body></html>`)
   printWin.document.close()
 }
 
@@ -3602,6 +3629,13 @@ async function printFullDay() {
       <div id="task-popup-status" style="font-size:12px"></div>
     </div>
   </div>
+</div>
+
+
+<!-- LIGHTBOX -->
+<div id="attach-lightbox" onclick="closeLightbox()">
+  <button id="attach-lightbox-close" onclick="closeLightbox()">&times;</button>
+  <img src="" alt="Attachment">
 </div>
 
 </body></html>`
@@ -6173,6 +6207,129 @@ function loadTicketTags(ticketId, cb) {
   })
 }
 
+
+// ── ATTACHMENT COMPONENT ──────────────────────────────────────
+
+var _attachInstances = {}
+// { containerId: { files: [File], urls: [string], uploading: false } }
+
+var SUPABASE_STORAGE_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co/storage/v1/object/public/ticket-attachments/'
+var SUPABASE_UPLOAD_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co/storage/v1/object/ticket-attachments/'
+var ATTACH_AUTH = 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA'
+var MAX_ATTACH = 5
+
+function initAttachments(containerId) {
+  _attachInstances[containerId] = { files: [], urls: [] }
+  renderAttachBar(containerId)
+}
+
+function renderAttachBar(containerId) {
+  var wrap = document.getElementById(containerId)
+  if (!wrap) return
+  var inst = _attachInstances[containerId]
+  if (!inst) return
+
+  var thumbsHtml = inst.urls.map(function(url, i) {
+    var safeUrl = url.replace(/"/g, '&quot;')
+    return '<div class="attach-thumb-wrap">'
+      + '<img class="attach-thumb" src="' + safeUrl + '" onclick="openLightbox(this.src)">'
+      + '<button class="attach-thumb-remove" onclick="removeAttachment(\'' + containerId + '\',' + i + ')">x</button>'
+      + '</div>'
+  }).join('')
+
+  var canAdd = inst.urls.length < MAX_ATTACH
+  wrap.innerHTML = (thumbsHtml ? '<div class="attach-preview">' + thumbsHtml + '</div>' : '')
+    + (canAdd ? '<label class="attach-btn"><input type="file" accept="image/*" multiple onchange="handleAttachFiles(\'' + containerId + '\',this)">📎 Add photos' + (inst.urls.length ? ' (' + inst.urls.length + '/' + MAX_ATTACH + ')' : '') + '</label>' : '<span style="font-size:12px;color:#aaa">Max ' + MAX_ATTACH + ' photos</span>')
+}
+
+function handleAttachFiles(containerId, input) {
+  var inst = _attachInstances[containerId]
+  if (!inst) return
+  var files = Array.prototype.slice.call(input.files || [])
+  var remaining = MAX_ATTACH - inst.urls.length
+  files = files.slice(0, remaining)
+  if (!files.length) return
+
+  // Validate types
+  var invalid = files.filter(function(f) { return !f.type.startsWith('image/') })
+  if (invalid.length) { alert('Only image files are supported.'); return }
+
+  var wrap = document.getElementById(containerId)
+  if (wrap) wrap.innerHTML += '<span class="attach-uploading">Uploading...</span>'
+
+  var promises = files.map(function(file) {
+    return uploadAttachment(file)
+  })
+
+  Promise.all(promises).then(function(urls) {
+    urls.forEach(function(url) { if (url) inst.urls.push(url) })
+    renderAttachBar(containerId)
+  }).catch(function(e) {
+    console.error('Upload error:', e)
+    alert('Upload failed. Please try again.')
+    renderAttachBar(containerId)
+  })
+
+  // Reset input
+  input.value = ''
+}
+
+function uploadAttachment(file) {
+  var ext = file.name.split('.').pop() || 'jpg'
+  var path = 'tickets/' + Date.now() + '-' + Math.random().toString(36).slice(2, 7) + '.' + ext
+  return fetch(SUPABASE_UPLOAD_URL + path, {
+    method: 'POST',
+    headers: {
+      'Authorization': ATTACH_AUTH,
+      'Content-Type': file.type,
+      'x-upsert': 'true'
+    },
+    body: file
+  }).then(function(res) {
+    if (!res.ok) return res.text().then(function(t) { throw new Error(t) })
+    return SUPABASE_STORAGE_URL + path
+  })
+}
+
+function removeAttachment(containerId, index) {
+  var inst = _attachInstances[containerId]
+  if (!inst) return
+  inst.urls.splice(index, 1)
+  renderAttachBar(containerId)
+}
+
+function getAttachmentUrls(containerId) {
+  return (_attachInstances[containerId] || {}).urls || []
+}
+
+function clearAttachments(containerId) {
+  if (_attachInstances[containerId]) _attachInstances[containerId].urls = []
+  renderAttachBar(containerId)
+}
+
+// Lightbox
+function openLightbox(urlOrEl) {
+  var url = typeof urlOrEl === 'string' ? urlOrEl : urlOrEl.src
+  var lb = document.getElementById('attach-lightbox')
+  if (!lb) return
+  lb.querySelector('img').src = url
+  lb.classList.add('open')
+}
+function closeLightbox() {
+  var lb = document.getElementById('attach-lightbox')
+  if (lb) lb.classList.remove('open')
+}
+
+// Render attachment thumbnails inside a message bubble
+function renderMsgAttachments(attachments) {
+  if (!attachments || !attachments.length) return ''
+  return '<div class="msg-attachments">'
+    + attachments.map(function(url) {
+      return '<img class="msg-attach-thumb" src="' + url + '" onclick="openLightbox(this.src)" loading="lazy">'
+    }).join('')
+    + '</div>'
+}
+
 // ── MAGICAL MOMENTS (studio view) ────────────────────────────
 
 function loadMomentsView() {
@@ -6501,7 +6658,8 @@ function renderNewTicketModal() {
     + '<div id="nt-selected-customer" style="display:none;margin-top:6px;padding:8px 11px;background:#f0f8ff;border:0.5px solid #b0d8f0;border-radius:7px;font-size:13px;display:flex;align-items:center;justify-content:space-between"></div>'
     + '</div>'
     + '<div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">First Message</div>'
-    + '<textarea id="nt-message" placeholder="Describe the issue in detail..." style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none;resize:vertical;min-height:90px;font-family:inherit"></textarea></div>'
+    + '<textarea id="nt-message" placeholder="Describe the issue in detail..." style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none;resize:vertical;min-height:90px;font-family:inherit"></textarea>'
+    + '<div id="nt-attach-bar" style="margin-top:6px"></div></div>'
     + '<div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Tags (optional)</div><div id="nt-tags-input" style="min-height:38px"></div></div>'
     + '<button onclick="submitNewTicket()" style="padding:10px;background:#1a1a1a;color:white;border:none;border-radius:7px;font-size:14px;cursor:pointer;font-weight:500">Create Ticket</button>'
     + '</div></div></div>'
@@ -6510,7 +6668,7 @@ function renderNewTicketModal() {
 function openNewTicketModal() {
   ticketState.selectedBooking = null
   document.getElementById('new-ticket-modal').style.display = 'block'
-  setTimeout(function() { initTagInput('nt-tags-input', false, []) }, 50)
+  setTimeout(function() { initTagInput('nt-tags-input', false, []); initAttachments('nt-attach-bar') }, 50)
 }
 function closeNewTicketModal() {
   document.getElementById('new-ticket-modal').style.display = 'none'
@@ -6626,15 +6784,18 @@ function submitNewTicket() {
     sb.from('tickets').insert(payload).select('id').then(function(r) {
     if (r.error || !r.data || !r.data.length) { alert('Error creating ticket: ' + (r.error ? r.error.message : 'no data returned')); return }
     var ticketId = r.data[0].id
+    var ntAttachUrls = getAttachmentUrls('nt-attach-bar')
     sb.from('ticket_messages').insert({
       ticket_id: ticketId,
       author_user_id: currentUser.id,
       body: message,
+      attachments: ntAttachUrls.length ? ntAttachUrls : null,
       created_at: new Date().toISOString()
     }).then(function() {
       var tagIds = getTagIds('nt-tags-input')
       saveTicketTags(ticketId, tagIds, function() {
         sendTicketNotification('new', ticketId, null)
+        clearAttachments('nt-attach-bar')
         closeNewTicketModal()
         markTicketRead(ticketId)
         fetchStudioTickets()
@@ -6655,7 +6816,7 @@ function openTicket(ticketId) {
 
   Promise.all([
     sb.from('tickets').select('*').eq('id', ticketId).single(),
-    sb.from('ticket_messages').select('id, ticket_id, author_user_id, body, created_at').eq('ticket_id', ticketId).order('created_at', { ascending: true }),
+    sb.from('ticket_messages').select('id, ticket_id, author_user_id, body, attachments, created_at').eq('ticket_id', ticketId).order('created_at', { ascending: true }),
     sb.from('ticket_tags').select('tag_id').eq('ticket_id', ticketId)
   ]).then(function(results) {
     var ticket = results[0].data
@@ -6711,7 +6872,7 @@ function renderThreadModal(ticket, messages) {
       var color = isMe ? 'white' : '#1a1a1a'
       html += '<div style="display:flex;flex-direction:column;align-items:' + (isMe ? 'flex-end' : 'flex-start') + '">'
         + '<div style="font-size:11px;color:#aaa;margin-bottom:3px">' + escHtml(authorLabel) + ' &bull; ' + fmtRelTime(m.created_at) + '</div>'
-        + '<div style="max-width:85%;padding:10px 14px;border-radius:12px;background:' + bg + ';color:' + color + ';font-size:13px;line-height:1.5;white-space:pre-wrap">' + escHtml(m.body) + '</div>'
+        + '<div style="max-width:85%;padding:10px 14px;border-radius:12px;background:' + bg + ';color:' + color + ';font-size:13px;line-height:1.5;white-space:pre-wrap">' + escHtml(m.body) + renderMsgAttachments(m.attachments) + '</div>'
         + '</div>'
     })
   }
@@ -6729,6 +6890,7 @@ function renderThreadModal(ticket, messages) {
   }
 
   content.innerHTML = html
+  setTimeout(function() { if (document.getElementById('thread-attach-bar')) initAttachments('thread-attach-bar') }, 50)
   // Scroll messages to bottom
   var msgEl = document.getElementById('thread-messages')
   if (msgEl) msgEl.scrollTop = msgEl.scrollHeight
@@ -6739,14 +6901,17 @@ function submitThreadReply(ticketId) {
   var body = (input.value || '').trim()
   if (!body) return
   input.disabled = true
+  var thrAttachUrls = getAttachmentUrls('thread-attach-bar')
   sb.from('ticket_messages').insert({
     ticket_id: ticketId,
     author_user_id: currentUser.id,
     body: body,
+    attachments: thrAttachUrls.length ? thrAttachUrls : null,
     created_at: new Date().toISOString()
   }).then(function() {
     sb.from('tickets').update({ updated_at: new Date().toISOString() }).eq('id', ticketId).then(function() {
       sendTicketNotification('reply', ticketId, body)
+      clearAttachments('thread-attach-bar')
       markTicketRead(ticketId)
       openTicket(ticketId)
     })
@@ -7032,6 +7197,13 @@ async function sendCampPickupEmails() {
 }
 
 </script>
+
+
+<!-- LIGHTBOX -->
+<div id="attach-lightbox" onclick="closeLightbox()">
+  <button id="attach-lightbox-close" onclick="closeLightbox()">&times;</button>
+  <img src="" alt="Attachment">
+</div>
 
 </body>
 </html>
