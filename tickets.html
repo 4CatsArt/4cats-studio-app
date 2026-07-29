@@ -127,6 +127,26 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .tag-dropdown-item.create { color: #6a1b9a; font-style: italic; }
 .tag-dropdown-empty { padding: 8px 12px; font-size: 13px; color: #aaa; }
 
+
+/* ATTACHMENTS */
+.attach-bar { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.attach-btn { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; border: 0.5px dashed #d0d0c8; border-radius: 6px; font-size: 12px; color: #888; cursor: pointer; background: white; transition: border-color 0.15s; }
+.attach-btn:hover { border-color: #888; color: #444; }
+.attach-btn input[type=file] { display: none; }
+.attach-preview { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.attach-thumb-wrap { position: relative; width: 60px; height: 60px; }
+.attach-thumb { width: 60px; height: 60px; object-fit: cover; border-radius: 6px; border: 0.5px solid #e0e0d8; cursor: pointer; }
+.attach-thumb-remove { position: absolute; top: -5px; right: -5px; width: 18px; height: 18px; background: #c0392b; color: white; border-radius: 50%; border: none; cursor: pointer; font-size: 11px; line-height: 18px; text-align: center; padding: 0; }
+.attach-uploading { font-size: 11px; color: #aaa; }
+.msg-attachments { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.msg-attach-thumb { width: 80px; height: 80px; object-fit: cover; border-radius: 8px; border: 0.5px solid #e0e0d8; cursor: pointer; transition: opacity 0.15s; }
+.msg-attach-thumb:hover { opacity: 0.85; }
+/* LIGHTBOX */
+#attach-lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.88); z-index: 9999; align-items: center; justify-content: center; }
+#attach-lightbox.open { display: flex; }
+#attach-lightbox img { max-width: 90vw; max-height: 88vh; border-radius: 8px; box-shadow: 0 8px 40px rgba(0,0,0,0.5); }
+#attach-lightbox-close { position: fixed; top: 20px; right: 24px; color: white; font-size: 28px; cursor: pointer; background: none; border: none; line-height: 1; }
+
 </style>
 </head>
 <body>
@@ -254,6 +274,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
     <div class="modal-field">
       <div class="modal-label">First Message</div>
       <textarea class="modal-textarea" id="nt-message" placeholder="Describe the issue in detail..."></textarea>
+      <div id="nt-attach-bar" style="margin-top:6px"></div>
     </div>
     <div class="modal-field">
       <div class="modal-label">Tags (optional)</div>
@@ -282,6 +303,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
     <div class="thread-messages" id="th-messages"></div>
     <div class="thread-reply" id="th-reply-area">
       <textarea id="th-reply-input" placeholder="Type your reply..."></textarea>
+      <div id="th-attach-bar" style="margin-bottom:8px"></div>
       <div style="display:flex;gap:8px;justify-content:flex-end">
         <button class="action-btn btn-secondary" onclick="submitReplyAndResolve()">Reply & Resolve</button>
         <button class="action-btn btn-primary" onclick="submitReply()">Send Reply</button>
@@ -606,6 +628,7 @@ function openNewTicketModal() {
   document.getElementById('nt-message').value = ''
   document.getElementById('new-ticket-modal').style.display = 'block'
   initTagInput('nt-tags-input', true, [])
+  initAttachments('nt-attach-bar')
 }
 function closeNewTicketModal() {
   document.getElementById('new-ticket-modal').style.display = 'none'
@@ -716,10 +739,13 @@ function submitNewTicket() {
   sb.from('tickets').insert(payload).select('id').then(function(r) {
     if (r.error || !r.data || !r.data.length) { alert('Error creating ticket.'); return }
     var ticketId = r.data[0].id
+    var ntAttachUrls = getAttachmentUrls('nt-attach-bar')
     sb.from('ticket_messages').insert({
       ticket_id: ticketId, author_user_id: currentUser.id,
-      body: message, created_at: new Date().toISOString()
+      body: message, attachments: ntAttachUrls.length ? ntAttachUrls : null,
+      created_at: new Date().toISOString()
     }).then(function() {
+      clearAttachments('nt-attach-bar')
       markRead(ticketId)
       closeNewTicketModal()
       fetchAllTickets()
@@ -738,7 +764,7 @@ function openThread(ticketId) {
 
   Promise.all([
     sb.from('tickets').select('*').eq('id', ticketId).single(),
-    sb.from('ticket_messages').select('id, ticket_id, author_user_id, body, created_at').eq('ticket_id', ticketId).order('created_at', { ascending: true })
+    sb.from('ticket_messages').select('id, ticket_id, author_user_id, body, attachments, created_at').eq('ticket_id', ticketId).order('created_at', { ascending: true })
   ]).then(function(results) {
     var ticket = results[0].data
     var messages = results[1].data || []
@@ -814,7 +840,7 @@ function renderThread(ticket, messages) {
       var side = isMe ? 'from-ho' : 'from-studio'
       msgHtml += '<div class="thread-msg ' + side + '">'
         + '<div class="thread-msg-meta">' + escHtml(authorLabel) + ' &bull; ' + fmtRelTime(m.created_at) + '</div>'
-        + '<div class="thread-msg-bubble">' + escHtml(m.body) + '</div>'
+        + '<div class="thread-msg-bubble">' + escHtml(m.body) + renderMsgAttachments(m.attachments) + '</div>'
         + '</div>'
     })
   }
@@ -833,10 +859,12 @@ function renderThread(ticket, messages) {
       + '<div style="text-align:center;padding-bottom:1.25rem"><button onclick="openSaveToKB()" style="padding:7px 18px;background:#f5f0ff;color:#6a1b9a;border:0.5px solid #ce93d8;border-radius:7px;font-size:13px;font-weight:500;cursor:pointer">&#128218; Save to Knowledge Base</button></div>'
   } else {
     replyArea.innerHTML = '<textarea id="th-reply-input" style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none;resize:vertical;min-height:70px;font-family:inherit;margin-bottom:8px" placeholder="Type your reply..."></textarea>'
+      + '<div id="th-attach-bar" style="margin-bottom:8px"></div>'
       + '<div style="display:flex;gap:8px;justify-content:flex-end">'
       + '<button class="action-btn btn-secondary" onclick="submitReplyAndResolve()">Reply &amp; Resolve</button>'
       + '<button class="action-btn btn-primary" onclick="submitReply()">Send Reply</button>'
       + '</div>'
+    setTimeout(function() { initAttachments('th-attach-bar') }, 50)
   }
   replyArea.style.display = 'block'
 }
@@ -914,13 +942,16 @@ function submitReply() {
   if (!body || !openTicketData) return
   input.disabled = true
   var _replyTicketId = openTicketData.id
+  var _replyAttachUrls = getAttachmentUrls('th-attach-bar')
   sb.from('ticket_messages').insert({
     ticket_id: openTicketData.id, author_user_id: currentUser.id,
-    body: body, created_at: new Date().toISOString()
+    body: body, attachments: _replyAttachUrls.length ? _replyAttachUrls : null,
+    created_at: new Date().toISOString()
   }).then(function() {
     sb.from('tickets').update({ updated_at: new Date().toISOString() }).eq('id', _replyTicketId).then(function() {
       sendTicketNotification('reply', _replyTicketId, body)
       markRead(_replyTicketId)
+      clearAttachments('th-attach-bar')
       openThread(_replyTicketId)
       fetchAllTickets()
     })
@@ -954,6 +985,129 @@ function closeThreadModal() {
   fetchAllTickets()
 }
 
+
+
+// ── ATTACHMENT COMPONENT ──────────────────────────────────────
+
+var _attachInstances = {}
+// { containerId: { files: [File], urls: [string], uploading: false } }
+
+var SUPABASE_STORAGE_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co/storage/v1/object/public/ticket-attachments/'
+var SUPABASE_UPLOAD_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co/storage/v1/object/ticket-attachments/'
+var ATTACH_AUTH = 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA'
+var MAX_ATTACH = 5
+
+function initAttachments(containerId) {
+  _attachInstances[containerId] = { files: [], urls: [] }
+  renderAttachBar(containerId)
+}
+
+function renderAttachBar(containerId) {
+  var wrap = document.getElementById(containerId)
+  if (!wrap) return
+  var inst = _attachInstances[containerId]
+  if (!inst) return
+
+  var thumbsHtml = inst.urls.map(function(url, i) {
+    var safeUrl = url.replace(/"/g, '&quot;')
+    return '<div class="attach-thumb-wrap">'
+      + '<img class="attach-thumb" src="' + safeUrl + '" onclick="openLightbox(this.src)">'
+      + '<button class="attach-thumb-remove" onclick="removeAttachment(\'' + containerId + '\',' + i + ')">x</button>'
+      + '</div>'
+  }).join('')
+
+  var canAdd = inst.urls.length < MAX_ATTACH
+  wrap.innerHTML = (thumbsHtml ? '<div class="attach-preview">' + thumbsHtml + '</div>' : '')
+    + (canAdd ? '<label class="attach-btn"><input type="file" accept="image/*" multiple onchange="handleAttachFiles(\'' + containerId + '\',this)">📎 Add photos' + (inst.urls.length ? ' (' + inst.urls.length + '/' + MAX_ATTACH + ')' : '') + '</label>' : '<span style="font-size:12px;color:#aaa">Max ' + MAX_ATTACH + ' photos</span>')
+}
+
+function handleAttachFiles(containerId, input) {
+  var inst = _attachInstances[containerId]
+  if (!inst) return
+  var files = Array.prototype.slice.call(input.files || [])
+  var remaining = MAX_ATTACH - inst.urls.length
+  files = files.slice(0, remaining)
+  if (!files.length) return
+
+  // Validate types
+  var invalid = files.filter(function(f) { return !f.type.startsWith('image/') })
+  if (invalid.length) { alert('Only image files are supported.'); return }
+
+  var wrap = document.getElementById(containerId)
+  if (wrap) wrap.innerHTML += '<span class="attach-uploading">Uploading...</span>'
+
+  var promises = files.map(function(file) {
+    return uploadAttachment(file)
+  })
+
+  Promise.all(promises).then(function(urls) {
+    urls.forEach(function(url) { if (url) inst.urls.push(url) })
+    renderAttachBar(containerId)
+  }).catch(function(e) {
+    console.error('Upload error:', e)
+    alert('Upload failed. Please try again.')
+    renderAttachBar(containerId)
+  })
+
+  // Reset input
+  input.value = ''
+}
+
+function uploadAttachment(file) {
+  var ext = file.name.split('.').pop() || 'jpg'
+  var path = 'tickets/' + Date.now() + '-' + Math.random().toString(36).slice(2, 7) + '.' + ext
+  return fetch(SUPABASE_UPLOAD_URL + path, {
+    method: 'POST',
+    headers: {
+      'Authorization': ATTACH_AUTH,
+      'Content-Type': file.type,
+      'x-upsert': 'true'
+    },
+    body: file
+  }).then(function(res) {
+    if (!res.ok) return res.text().then(function(t) { throw new Error(t) })
+    return SUPABASE_STORAGE_URL + path
+  })
+}
+
+function removeAttachment(containerId, index) {
+  var inst = _attachInstances[containerId]
+  if (!inst) return
+  inst.urls.splice(index, 1)
+  renderAttachBar(containerId)
+}
+
+function getAttachmentUrls(containerId) {
+  return (_attachInstances[containerId] || {}).urls || []
+}
+
+function clearAttachments(containerId) {
+  if (_attachInstances[containerId]) _attachInstances[containerId].urls = []
+  renderAttachBar(containerId)
+}
+
+// Lightbox
+function openLightbox(urlOrEl) {
+  var url = typeof urlOrEl === 'string' ? urlOrEl : urlOrEl.src
+  var lb = document.getElementById('attach-lightbox')
+  if (!lb) return
+  lb.querySelector('img').src = url
+  lb.classList.add('open')
+}
+function closeLightbox() {
+  var lb = document.getElementById('attach-lightbox')
+  if (lb) lb.classList.remove('open')
+}
+
+// Render attachment thumbnails inside a message bubble
+function renderMsgAttachments(attachments) {
+  if (!attachments || !attachments.length) return ''
+  return '<div class="msg-attachments">'
+    + attachments.map(function(url) {
+      return '<img class="msg-attach-thumb" src="' + url + '" onclick="openLightbox(this.src)" loading="lazy">'
+    }).join('')
+    + '</div>'
+}
 
 // ── SHARED TAG COMPONENT ──────────────────────────────────────
 
@@ -1226,7 +1380,7 @@ function submitSaveToKB() {
     closeSaveToKB()
     // Brief confirmation
     var btn = document.querySelector('[onclick="openSaveToKB()"]')
-    if (btn) { btn.textContent = '&#10003; Saved to Knowledge Base'; btn.style.background = '#e8f5e9'; btn.style.color = '#2e7d32'; btn.style.borderColor = '#a5d6a7'; btn.disabled = true }
+    if (btn) { btn.textContent = '\u2713 Saved to Knowledge Base'; btn.style.background = '#e8f5e9'; btn.style.color = '#2e7d32'; btn.style.borderColor = '#a5d6a7'; btn.disabled = true }
   })
 }
 
@@ -1280,6 +1434,13 @@ function submitSaveToKB() {
       <button class="action-btn btn-primary" style="flex:2;padding:10px;font-size:14px" onclick="submitSaveToKB()">Save to Knowledge Base</button>
     </div>
   </div>
+</div>
+
+
+<!-- LIGHTBOX -->
+<div id="attach-lightbox" onclick="closeLightbox()">
+  <button id="attach-lightbox-close" onclick="closeLightbox()">&times;</button>
+  <img src="" alt="Attachment">
 </div>
 
 </body>
