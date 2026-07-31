@@ -188,8 +188,8 @@ function calcShelvingTargets(bisqueCarts, pickupCarts) {
 
 // ---------- BASKET CALCULATOR CONFIG ----------
 // Fixed targets — same for every studio, regardless of shelving.
-const LARGE_BASKETS_TARGET = 28
-const SMALL_BASKETS_TARGET = 18
+const LARGE_BASKETS_TARGET = 14
+const SMALL_BASKETS_TARGET = 17
 
 // ---------- AUTH ----------
 sb.auth.getSession().then(({ data: { session } }) => { if (session) { currentUser = session.user; initApp() } })
@@ -306,7 +306,7 @@ function renderTemplateManager() {
       <div class="item-row">
         <div style="flex:1">
           <span class="item-title">${i.title}</span>
-          <span style="font-size:10px;color:#aaa;margin-left:6px">${i.item_type === 'shelving_calc' ? '(shelving calculator)' : i.item_type === 'basket_calc' ? '(basket calculator)' : '(checklist item)'}</span>
+          <span style="font-size:10px;color:#aaa;margin-left:6px">${i.item_type === 'shelving_calc' ? '(shelving calculator)' : i.item_type === 'basket_calc' ? '(basket calculator)' : i.item_type === 'dual_photo' ? '(2-photo upload)' : '(checklist item)'}</span>
         </div>
         <div class="item-actions">
           <button class="btn btn-sm" onclick="showItemModal('${section.id}', '${i.id}')">Edit</button>
@@ -495,6 +495,41 @@ function renderItem(item) {
     </div>`
   }
 
+  if (item.item_type === 'dual_photo') {
+    const status = getStatus(item.id)
+    const v = (status && status.value) || {}
+    const photo1 = v.photo1_url
+    const photo2 = v.photo2_url
+    const thumb = (url, slot) => url
+      ? `<img class="photo-thumb" src="${url}" alt="Photo ${slot}">`
+      : `<div class="photo-placeholder">No photo</div>`
+    return `<div class="item-row" style="display:block">
+      <div style="display:flex;align-items:center;gap:8px">
+        <div class="item-title" style="flex:1">${item.title}${item.link_url ? `<a href="${item.link_url}" target="_blank">How-to →</a>` : ''}</div>
+        ${mgmtItemBtns}
+      </div>
+      ${item.description ? `<div class="item-desc">${item.description}</div>` : ''}
+      <div style="display:flex;gap:20px;margin-top:10px;flex-wrap:wrap">
+        <div class="photo-area" style="border-top:none;padding-top:0;margin-top:0">
+          ${thumb(photo1, 1)}
+          <div>
+            <input type="file" accept="image/*" id="dphoto-input-${item.id}-1" style="display:none" onchange="uploadItemPhoto('${item.id}', 1, this)">
+            <button class="btn btn-sm" onclick="document.getElementById('dphoto-input-${item.id}-1').click()">${photo1 ? 'Replace' : 'Upload'} Photo 1</button>
+            <div class="photo-status" id="dphoto-status-${item.id}-1"></div>
+          </div>
+        </div>
+        <div class="photo-area" style="border-top:none;padding-top:0;margin-top:0">
+          ${thumb(photo2, 2)}
+          <div>
+            <input type="file" accept="image/*" id="dphoto-input-${item.id}-2" style="display:none" onchange="uploadItemPhoto('${item.id}', 2, this)">
+            <button class="btn btn-sm" onclick="document.getElementById('dphoto-input-${item.id}-2').click()">${photo2 ? 'Replace' : 'Upload'} Photo 2</button>
+            <div class="photo-status" id="dphoto-status-${item.id}-2"></div>
+          </div>
+        </div>
+      </div>
+    </div>`
+  }
+
   const status = getStatus(item.id)
   const checked = status && status.checked
   return `<div class="item-row">
@@ -636,6 +671,42 @@ async function uploadSectionPhoto(sectionId, inputEl) {
   }
 }
 
+async function uploadItemPhoto(itemId, slot, inputEl) {
+  const file = inputEl.files[0]
+  if (!file) return
+  const statusEl = document.getElementById(`dphoto-status-${itemId}-${slot}`)
+  statusEl.textContent = 'Uploading…'
+  try {
+    const ext = (file.name.split('.').pop() || 'jpg').toLowerCase()
+    const path = `${currentStudioId}/${itemId}-slot${slot}-${Date.now()}.${ext}`
+    const uploadRes = await fetch(`${SUPABASE_URL}/storage/v1/object/setup2026-photos/${path}`, {
+      method: 'POST',
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY, 'Content-Type': file.type },
+      body: file
+    })
+    if (!uploadRes.ok) throw new Error('Upload failed (' + uploadRes.status + ').')
+    const photoUrl = `${SUPABASE_URL}/storage/v1/object/public/setup2026-photos/${path}`
+
+    const existingStatus = getStatus(itemId)
+    const existingValue = (existingStatus && existingStatus.value) || {}
+    const newValue = Object.assign({}, existingValue, slot === 1 ? { photo1_url: photoUrl } : { photo2_url: photoUrl })
+    const res = await upsertStudioItem(currentStudioId, itemId, { value: newValue, checked: !!(newValue.photo1_url && newValue.photo2_url) })
+    if (!res || !res.ok) { statusEl.textContent = 'Save failed'; return }
+
+    const checked = !!(newValue.photo1_url && newValue.photo2_url)
+    if (existingStatus) { existingStatus.value = newValue; existingStatus.checked = checked }
+    else statusRows.push({ studio_id: currentStudioId, item_id: itemId, value: newValue, checked })
+    const allExisting = allStatusRows.find(r => r.studio_id === currentStudioId && r.item_id === itemId)
+    if (allExisting) { allExisting.value = newValue; allExisting.checked = checked }
+    else allStatusRows.push({ studio_id: currentStudioId, item_id: itemId, value: newValue, checked })
+
+    statusEl.textContent = ''
+    renderStudioDetail()
+  } catch (e) {
+    statusEl.textContent = e.message
+  }
+}
+
 // ---------- MANAGE MODE ----------
 function toggleManageMode() {
   manageMode = !manageMode
@@ -714,13 +785,15 @@ function showItemModal(sectionId, itemId) {
         </div>
         <div class="modal-field">
           <label>Item Type</label>
-          <select id="item-type" onchange="document.getElementById('shelf-note').style.display = this.value==='shelving_calc' ? '' : 'none'; document.getElementById('basket-note').style.display = this.value==='basket_calc' ? '' : 'none'">
+          <select id="item-type" onchange="document.getElementById('shelf-note').style.display = this.value==='shelving_calc' ? '' : 'none'; document.getElementById('basket-note').style.display = this.value==='basket_calc' ? '' : 'none'; document.getElementById('dualphoto-note').style.display = this.value==='dual_photo' ? '' : 'none'">
             <option value="checkbox" ${editing && editing.item_type==='checkbox' ? 'selected' : ''}>Checklist item</option>
             <option value="shelving_calc" ${editing && editing.item_type==='shelving_calc' ? 'selected' : ''}>Shelving calculator (carts → shelves & wheels)</option>
             <option value="basket_calc" ${editing && editing.item_type==='basket_calc' ? 'selected' : ''}>Basket calculator (fixed target per studio)</option>
+            <option value="dual_photo" ${editing && editing.item_type==='dual_photo' ? 'selected' : ''}>2-photo upload (no measurements)</option>
           </select>
           <div id="shelf-note" style="font-size:11px;color:#aaa;margin-top:4px;display:${editing && editing.item_type==='shelving_calc' ? '' : 'none'}">Shelves needed = ${FIXED_CARTS_TOTAL_SHELVES} (fixed carts) + (bisque carts + pickup carts) × ${SHELVES_PER_BISQUE_PICKUP_CART}. Wheel sets needed = ${FIXED_CARTS.length} (fixed carts) + bisque carts + pickup carts (1 set per cart).</div>
           <div id="basket-note" style="font-size:11px;color:#aaa;margin-top:4px;display:${editing && editing.item_type==='basket_calc' ? '' : 'none'}">Target for every studio: ${LARGE_BASKETS_TARGET} large baskets, ${SMALL_BASKETS_TARGET} small baskets.</div>
+          <div id="dualphoto-note" style="font-size:11px;color:#aaa;margin-top:4px;display:${editing && editing.item_type==='dual_photo' ? '' : 'none'}">Shows two independent photo upload slots per studio (e.g. Window/Front measurement photos). No number fields.</div>
         </div>
         <div class="modal-field">
           <label>Description (optional)</label>
