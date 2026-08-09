@@ -402,6 +402,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
         <button class="view-btn" id="btn-qr" onclick="setView('qr')">🔗 Quick Links</button>
         <button class="view-btn" id="btn-moments" onclick="setView('moments')" style="display:none">✨ Moments</button>
         <button class="view-btn" id="btn-tickets" onclick="setView('tickets')" style="position:relative">📬 Tickets<span id="tickets-unread-badge" style="display:none;position:absolute;top:3px;right:3px;background:#c0392b;color:white;border-radius:50%;width:8px;height:8px;font-size:0"></span></button>
+        <button class="view-btn" id="btn-community" onclick="setView('community')" style="display:none;background:#e8f5e9;color:#2e7d32;border-color:#a5d6a7">🌱 Community</button>
       </div>
     </div>
   </div>
@@ -447,6 +448,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
   <!-- MOMENTS VIEW -->
   <div id="moments-view" style="display:none;padding:1.5rem 0;max-width:860px">
     <div id="moments-view-content"></div>
+  </div>
+
+  <div id="community-view" style="display:none;padding:1.5rem 0;max-width:860px">
+    <div id="community-view-content"></div>
   </div>
 
   <div id="floor-view" style="display:none;padding:1rem 0">
@@ -501,6 +506,17 @@ let currentView = 'day'
 let curriculumData = []
 let todaySessionsMap = {} // session_id → {title, time} for today; used by realtime alerts
 let rtBookingChannel = null
+
+let isCommunityCoordinator = false
+let currentStudioTimezone = null        // null = unresolved; never a guessed zone
+let currentStudioProvince = null        // stored alongside for the "unmapped province" warning message
+let communityInteractionTypeIdByName = {}
+
+const PROVINCE_TIMEZONE = {
+  'BC': 'America/Vancouver',
+  'AB': 'America/Edmonton',
+  'ON': 'America/Toronto'
+}
 
 // ── ADD DROP-IN ──────────────────────────────────────────────
 async function addDropin(sessionId) {
@@ -2335,6 +2351,19 @@ async function loadApp() {
   currentStudioId = mapping.studio_id
   document.getElementById('studio-name').textContent = studio.name
   document.getElementById('studio-meta').textContent = studio.city + ', ' + studio.province
+
+  // ── Community Hub setup ────────────────────────────────────
+  currentStudioProvince = studio.province
+  // Deliberately NO fallback (e.g. `|| 'America/Toronto'`). An unmapped province leaves this
+  // null so "This Week"/"Today" fail with a clear message instead of a wrong number.
+  currentStudioTimezone = PROVINCE_TIMEZONE[studio.province] || null
+  const { data: coordRow } = await sb.from('community_coordinators')
+    .select('studio_id').eq('studio_id', currentStudioId).eq('user_id', currentUser.id).maybeSingle()
+  isCommunityCoordinator = !!coordRow
+  const communityBtn = document.getElementById('btn-community')
+  if (communityBtn) communityBtn.style.display = isCommunityCoordinator ? 'inline-block' : 'none'
+  // ── end Community Hub setup ─────────────────────────────────
+
   document.getElementById('login-screen').style.display = 'none'
   document.getElementById('app-screen').style.display = 'block'
   syncDatePicker()
@@ -2406,10 +2435,26 @@ function setView(v) {
     loadMomentsView()
     return
   }
+  if (v === 'community') {
+    document.getElementById('day-view').style.display = 'none'
+    document.getElementById('day2-view').style.display = 'none'
+    document.getElementById('table-view')?.style && (document.getElementById('table-view').style.display = 'none')
+    document.getElementById('floor-view')?.style && (document.getElementById('floor-view').style.display = 'none')
+    document.getElementById('info-view').style.display = 'none'
+    document.getElementById('qr-view').style.display = 'none'
+    document.getElementById('tickets-view').style.display = 'none'
+    document.getElementById('moments-view').style.display = 'none'
+    document.getElementById('community-view').style.display = 'block'
+    document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'))
+    document.getElementById('btn-community').classList.add('active')
+    loadCommunityView()
+    return
+  }
   document.getElementById('info-view').style.display = 'none'
   document.getElementById('qr-view').style.display = 'none'
   document.getElementById('tickets-view').style.display = 'none'
   document.getElementById('moments-view').style.display = 'none'
+  document.getElementById('community-view').style.display = 'none'
 
   currentView = v
   document.getElementById('day-view').style.display = v === 'day' ? 'block' : 'none'
@@ -2438,6 +2483,202 @@ async function loadCurrentView() {
   else if (currentView === 'day2') await loadDay2View()
   else if (currentView === 'table') await loadTableView()
   else if (currentView === 'floor') await loadFloorView()
+}
+
+// ═══════════════════════════════════════════════
+// COMMUNITY HUB
+// ═══════════════════════════════════════════════
+
+// Cached once per session — but only once it actually succeeds. A failed attempt leaves the
+// cache empty so the next view-load retries rather than being permanently stuck.
+async function loadCommunityInteractionTypes() {
+  if (Object.keys(communityInteractionTypeIdByName).length > 0) return
+  const { data, error } = await sb.from('community_interaction_types').select('id, name')
+  if (error) {
+    throw new Error('INTERACTION_TYPES_LOOKUP_FAILED: ' + error.message)
+  }
+  communityInteractionTypeIdByName = {}
+  ;(data || []).forEach(t => { communityInteractionTypeIdByName[t.name] = t.id })
+}
+
+// Delegates the actual "midnight Monday, in the studio's own timezone, as a correct UTC
+// instant" computation to Postgres (studio_local_week_start) rather than hand-rolling
+// DST-aware math here. NO fallback of any kind — throws if the timezone is unresolved or
+// the RPC call fails, so the caller can show a clear message instead of a guessed number.
+async function getStudioLocalWeekStartInstant() {
+  if (!currentStudioTimezone) {
+    throw new Error('TIMEZONE_UNRESOLVED')
+  }
+  const { data, error } = await sb.rpc('studio_local_week_start', { p_timezone: currentStudioTimezone })
+  if (error) {
+    throw new Error('WEEK_START_LOOKUP_FAILED: ' + error.message)
+  }
+  return data
+}
+
+async function countCommunityInteractionsThisWeek(studioId, typeName, weekStartInstant) {
+  const typeId = communityInteractionTypeIdByName[typeName]
+  if (!typeId) {
+    // A missing expected taxonomy row is a configuration/data problem, not "zero interactions
+    // logged" — throwing here (rather than returning 0) means the whole "This Week" block goes
+    // into the error state instead of silently showing 0/5 next to three otherwise-real numbers.
+    throw new Error('INTERACTION_TYPE_MISSING: ' + typeName)
+  }
+  const { count, error } = await sb.from('community_interactions')
+    .select('id', { count: 'exact', head: true })
+    .eq('studio_id', studioId)
+    .eq('interaction_type_id', typeId)
+    .gte('occurred_at', weekStartInstant)
+  if (error) {
+    throw new Error('INTERACTION_COUNT_FAILED: ' + typeName + ': ' + error.message)
+  }
+  // Safe here: this only guards against `count` being null/undefined on a *successful* query
+  // with zero matching rows — the error case above is already handled and never reaches this line.
+  return count || 0
+}
+
+async function loadThisWeekCounts(studioId) {
+  let weekStartInstant
+  try {
+    weekStartInstant = await getStudioLocalWeekStartInstant()
+  } catch (e) {
+    return { error: true, reason: e.message }
+  }
+
+  try {
+    await loadCommunityInteractionTypes()
+    const [newContacts, visits, followUps, collabAttempts] = await Promise.all([
+      countCommunityInteractionsThisWeek(studioId, 'New Contact', weekStartInstant),
+      countCommunityInteractionsThisWeek(studioId, 'In-Person Visit', weekStartInstant),
+      countCommunityInteractionsThisWeek(studioId, 'Follow-Up', weekStartInstant),
+      countCommunityInteractionsThisWeek(studioId, 'Collaboration Proposed', weekStartInstant)
+    ])
+    const TARGETS = { newContacts: 5, visits: 3, followUps: 5, collabAttempts: 1 }
+    return { error: false, newContacts, visits, followUps, collabAttempts, TARGETS }
+  } catch (e) {
+    return { error: true, reason: e.message }
+  }
+}
+
+function getStudioLocalDateStr() {
+  if (!currentStudioTimezone) return null
+  return new Date().toLocaleDateString('en-CA', { timeZone: currentStudioTimezone })
+}
+
+async function loadTodayFollowUps(studioId) {
+  const todayStr = getStudioLocalDateStr()
+  if (!todayStr) return { error: true, reason: 'TIMEZONE_UNRESOLVED' }
+  const { data, error } = await sb.from('community_actions')
+    .select('*')
+    .eq('studio_id', studioId)
+    .is('completed_at', null)
+    .lte('due_date', todayStr)
+    .order('due_date')
+  if (error) {
+    return { error: true, reason: 'TODAY_QUERY_FAILED: ' + error.message }
+  }
+  return {
+    error: false,
+    dueToday: (data || []).filter(a => a.due_date === todayStr),
+    overdue: (data || []).filter(a => a.due_date < todayStr)
+  }
+}
+
+function communityTimezoneWarningHtml() {
+  return `<div style="background:#fff8e1;border:0.5px solid #ffe082;border-radius:10px;padding:12px 14px;font-size:13px;color:#6d4c00;margin-bottom:14px">
+    ⚠️ This studio's timezone isn't configured yet (province: ${escHtml(currentStudioProvince || 'unknown')}).
+    "This Week" and "Today" can't be calculated until Home Office adds a mapping for it.
+    <a href="mailto:hello@4cats.com">Contact Home Office</a>.
+  </div>`
+}
+
+// Generic, non-technical warning for any failure that ISN'T the unresolved-timezone case
+// (taxonomy lookup failure, a count query failing, a missing expected interaction type, or the
+// "Today" query failing). Never renders the raw Supabase/DB error text — that's logged to the
+// console only.
+function communityGenericWarningHtml() {
+  return `<div style="background:#fdecea;border:0.5px solid #f5c6cb;border-radius:10px;padding:12px 14px;font-size:13px;color:#8a1f1f;margin-bottom:14px">
+    ⚠️ Some Community data couldn't be loaded right now. Try refreshing the page — if this keeps happening, let Home Office know.
+  </div>`
+}
+
+async function loadCommunityView() {
+  const container = document.getElementById('community-view-content')
+  container.innerHTML = '<div class="loading">Loading…</div>'
+
+  const weekResult = await loadThisWeekCounts(currentStudioId)
+  const todayResult = await loadTodayFollowUps(currentStudioId)
+
+  let html = '<h2 style="font-size:18px;font-weight:600;margin-bottom:14px">Community</h2>'
+
+  // Timezone-unresolved gets the specific, actionable banner (province + contact Home Office).
+  // Any other failure gets the generic banner — the raw reason is logged, never rendered.
+  const weekTzUnresolved = weekResult.error && weekResult.reason === 'TIMEZONE_UNRESOLVED'
+  const todayTzUnresolved = todayResult.error && todayResult.reason === 'TIMEZONE_UNRESOLVED'
+  const otherWeekError = weekResult.error && !weekTzUnresolved
+  const otherTodayError = todayResult.error && !todayTzUnresolved
+
+  if (weekTzUnresolved || todayTzUnresolved) {
+    html += communityTimezoneWarningHtml()
+  }
+  if (otherWeekError || otherTodayError) {
+    if (otherWeekError) console.error('Community "This Week" unavailable:', weekResult.reason)
+    if (otherTodayError) console.error('Community "Today" unavailable:', todayResult.reason)
+    html += communityGenericWarningHtml()
+  }
+
+  // ── This Week ──────────────────────────────────────────────
+  html += '<div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;padding:16px;margin-bottom:14px">'
+  html += '<div style="font-size:13px;font-weight:600;margin-bottom:10px">This Week</div>'
+  if (!weekResult.error) {
+    const rows = [
+      ['New Contacts', weekResult.newContacts, weekResult.TARGETS.newContacts],
+      ['In-Person Visits', weekResult.visits, weekResult.TARGETS.visits],
+      ['Follow-Ups', weekResult.followUps, weekResult.TARGETS.followUps],
+      ['Collaboration Attempts', weekResult.collabAttempts, weekResult.TARGETS.collabAttempts]
+    ]
+    html += rows.map(([label, actual, target]) =>
+      `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:13px">
+         <span>${escHtml(label)}</span><span>${actual} / ${target}</span>
+       </div>`).join('')
+  } else {
+    html += '<div style="font-size:12px;color:#aaa">Unavailable — see warning above.</div>'
+  }
+  html += '</div>'
+
+  // ── Today ──────────────────────────────────────────────────
+  html += '<div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;padding:16px;margin-bottom:14px">'
+  html += '<div style="font-size:13px;font-weight:600;margin-bottom:10px">Today</div>'
+  if (!todayResult.error) {
+    if (!todayResult.dueToday.length && !todayResult.overdue.length) {
+      html += '<div style="font-size:12px;color:#aaa">Nothing due today, nothing overdue.</div>'
+    } else {
+      todayResult.overdue.forEach(a => {
+        html += `<div style="font-size:13px;color:#c0392b;padding:3px 0">⚠ Overdue: ${escHtml(a.title)} (was due ${a.due_date})</div>`
+      })
+      todayResult.dueToday.forEach(a => {
+        html += `<div style="font-size:13px;padding:3px 0">• Due today: ${escHtml(a.title)}</div>`
+      })
+    }
+  } else {
+    html += '<div style="font-size:12px;color:#aaa">Unavailable — see warning above.</div>'
+  }
+  html += '</div>'
+
+  // ── Relationships — placeholder; wiring is a later, separately-reviewed step ──
+  html += '<div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;padding:16px;margin-bottom:14px">'
+  html += '<div style="font-size:13px;font-weight:600;margin-bottom:10px">Relationships</div>'
+  html += '<div style="font-size:12px;color:#aaa">Coming soon.</div>'
+  html += '</div>'
+
+  // ── Actions — buttons present, not yet wired to modals (later step) ──
+  html += `<div style="display:flex;gap:8px;flex-wrap:wrap">
+    <button disabled style="padding:8px 14px;border:0.5px solid #d0d0c8;border-radius:7px;background:#f5f5f0;color:#aaa;font-size:12px;cursor:not-allowed">+ Add Relationship</button>
+    <button disabled style="padding:8px 14px;border:0.5px solid #d0d0c8;border-radius:7px;background:#f5f5f0;color:#aaa;font-size:12px;cursor:not-allowed">+ Log Interaction</button>
+    <button disabled style="padding:8px 14px;border:0.5px solid #d0d0c8;border-radius:7px;background:#f5f5f0;color:#aaa;font-size:12px;cursor:not-allowed">+ Add Follow-Up</button>
+  </div>`
+
+  container.innerHTML = html
 }
 
 function applyDayDefaults() {
