@@ -3909,12 +3909,12 @@ async function openStaffModal(id = null) {
   buildStaffStudioList([])
   document.getElementById('staff-reset-pw-row').style.display = 'none'
   document.getElementById('staff-deactivate-btn-wrap').style.display = 'none'
+  document.getElementById('staff-access-setup-row').style.display = 'none'
   document.getElementById('staff-password-row').style.display = 'grid'
 
   if (id) {
     document.getElementById('staff-modal-title').textContent = 'Edit Staff Member'
     document.getElementById('staff-password-row').style.display = 'none'
-    document.getElementById('staff-reset-pw-row').style.display = 'block'
     document.getElementById('staff-deactivate-btn-wrap').style.display = 'block'
 
     const { data } = await sb.from('staff_profiles').select('*').eq('id', id).single()
@@ -3942,6 +3942,21 @@ async function openStaffModal(id = null) {
       deactivateBtn.textContent = data.is_active ? 'Deactivate' : 'Reactivate'
       deactivateBtn.style.color = data.is_active ? '#c0392b' : '#2e7d32'
       deactivateBtn.style.borderColor = data.is_active ? '#f5c6cb' : '#c8e6c9'
+
+      // ── Three dashboard-access states ──────────────────────
+      // 1. no user_id                        → "Create Login & Give Dashboard Access"
+      // 2. user_id set, no studio_users row   → "Finish Dashboard Access Setup"
+      // 3. both exist                         → normal reset-password/deactivate UI (unchanged)
+      if (!data.user_id) {
+        renderAccessSetupBlock('create', data)
+      } else {
+        const { data: su } = await sb.from('studio_users').select('studio_id').eq('user_id', data.user_id).maybeSingle()
+        if (su) {
+          document.getElementById('staff-reset-pw-row').style.display = 'block'
+        } else {
+          renderAccessSetupBlock('finish', data)
+        }
+      }
     }
   } else {
     document.getElementById('staff-modal-title').textContent = 'Add Staff Member'
@@ -4053,6 +4068,67 @@ async function resetStaffPassword() {
   if (result.error) { alert('Error: ' + result.error); return }
   document.getElementById('staff-new-password').value = ''
   alert('Password updated.')
+}
+
+// Renders the shared "no login" / "no dashboard access yet" block for the two incomplete
+// provisioning states. Same underlying action either way (link_login is idempotent/resumable —
+// see createLoginForStaff) — only the label and button copy change.
+function renderAccessSetupBlock(mode, data) {
+  const row = document.getElementById('staff-access-setup-row')
+  row.style.display = 'block'
+  document.getElementById('staff-access-setup-label').textContent =
+    mode === 'create' ? 'No Login Yet' : 'Dashboard Access Not Set Up'
+  document.getElementById('staff-access-setup-copy').textContent =
+    mode === 'create'
+      ? "This person has a staff profile but can't sign in anywhere yet. Choose which studio's dashboard they should access, then create their login."
+      : "This person already has a login, but it isn't connected to a studio dashboard yet. Choose which studio they should access, then finish setup."
+  document.getElementById('staff-access-setup-btn').textContent =
+    mode === 'create' ? 'Create Login & Give Dashboard Access' : 'Finish Dashboard Access Setup'
+
+  const studioSel = document.getElementById('staff-login-studio')
+  const opts = allStudios.map(s => `<option value="${s.id}">${getStudioName(s.id)}</option>`).join('')
+  studioSel.innerHTML = '<option value="">Select a studio…</option>' + opts
+  // Pre-select only when unambiguous (exactly one studio on the profile) — never guess otherwise;
+  // Home Office must explicitly choose for multi-studio/floater staff.
+  if (data.studio_ids && data.studio_ids.length === 1) studioSel.value = data.studio_ids[0]
+}
+
+async function createLoginForStaff() {
+  if (!editingStaffId) return
+  const studioId = document.getElementById('staff-login-studio').value
+  if (!studioId) { alert("Please choose which studio this person will access before continuing."); return }
+
+  // Never fall back to the anon key for this action — it's the one call on this endpoint that
+  // needs a real admin session for the server to verify. If the session has expired, stop here
+  // rather than sending a request that either fails opaquely or (worse) succeeds unauthenticated
+  // if the server-side check were ever weakened.
+  const { data: { session } } = await sb.auth.getSession()
+  if (!session?.access_token) {
+    alert('Your session has expired. Please sign out and sign back in, then try again.')
+    return
+  }
+
+  const btn = document.getElementById('staff-access-setup-btn')
+  const originalLabel = btn.textContent
+  btn.textContent = 'Working…'; btn.disabled = true
+
+  const res = await fetch(STAFF_URL, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${session.access_token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'link_login', staffId: editingStaffId, studioId })
+  })
+  const result = await res.json()
+
+  btn.textContent = originalLabel; btn.disabled = false
+
+  if (result.error) { alert('Error: ' + result.error); return }
+
+  editingUserId = result.userId
+  alert(result.invited
+    ? "Login created — an invite email has been sent so they can set their password."
+    : "Dashboard access has been set up.")
+  closeStaffModal()
+  loadStaffTab()
 }
 
 async function toggleStaffActive() {
@@ -6952,6 +7028,19 @@ function showAdminToast(msg, duration = 2500) {
       <div style="display:flex;gap:8px">
         <input id="staff-new-password" type="password" placeholder="New password" style="flex:1;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none">
         <button onclick="resetStaffPassword()" style="padding:8px 14px;background:#1a1a1a;color:white;border:none;border-radius:7px;font-size:12px;cursor:pointer">Set</button>
+      </div>
+    </div>
+
+    <!-- Shown for the two incomplete-provisioning states: no user_id yet, or user_id set but
+         no studio_users row yet. Label/copy/button text are set dynamically by renderAccessSetupBlock(). -->
+    <div id="staff-access-setup-row" style="display:none;margin-bottom:10px;padding:10px;background:#fff8e1;border:0.5px solid #ffe082;border-radius:8px">
+      <label id="staff-access-setup-label" style="font-size:11px;color:#6d4c00;text-transform:uppercase;display:block;margin-bottom:5px">No Login Yet</label>
+      <div id="staff-access-setup-copy" style="font-size:12px;color:#8a6200;margin-bottom:8px"></div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="staff-login-studio" style="flex:1;padding:8px 10px;border:0.5px solid #d0b040;border-radius:7px;font-size:13px;outline:none;background:white">
+          <option value="">Select a studio…</option>
+        </select>
+        <button id="staff-access-setup-btn" onclick="createLoginForStaff()" style="padding:8px 14px;background:#1a1a1a;color:white;border:none;border-radius:7px;font-size:12px;cursor:pointer;white-space:nowrap">Create Login &amp; Give Dashboard Access</button>
       </div>
     </div>
 
