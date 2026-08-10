@@ -3336,6 +3336,7 @@ async function loadCommunityView() {
   const weekResult = await loadThisWeekCounts(currentStudioId)
   const todayResult = await loadTodayFollowUps(currentStudioId)
   const relResult = await loadCommunityRelationships()
+  const instagramResult = await loadInstagramMetrics(currentStudioId)
 
   let html = '<h2 style="font-size:18px;font-weight:600;margin-bottom:14px">Community</h2>'
 
@@ -3387,6 +3388,9 @@ async function loadCommunityView() {
   }
   html += '</div>'
 
+  // ── Instagram (read-only) ─────────────────────────────────────
+  html += `<div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;padding:16px;margin-bottom:14px">${communityInstagramCardHtml(instagramResult)}</div>`
+
   // ── Actions — Add Relationship + Log Interaction enabled; Add Follow-Up remains
   //    disabled (later step, not part of this phase) ──
   html += `<div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -3413,6 +3417,82 @@ function communityWeekCardHtml(weekResult) {
        </div>`).join('')
   } else {
     html += '<div style="font-size:12px;color:#aaa">Unavailable — see warning above.</div>'
+  }
+  return html
+}
+
+// ── INSTAGRAM METRICS (read-only) ───────────────────────────
+// Reads only studio_social_accounts + social_metrics_snapshot, both already
+// studio-scoped by existing RLS (is_community_coordinator / is_home_office_admin).
+// Never selects vault_secret_id or anything Vault-related — the explicit column
+// list below is the actual enforcement, not just reliance on the column grant.
+async function loadInstagramMetrics(studioId) {
+  const { data: account, error: accountError } = await sb.from('studio_social_accounts')
+    .select('username, is_active, last_successful_sync_at, last_sync_error_at')
+    .eq('studio_id', studioId).eq('platform', 'instagram').maybeSingle()
+
+  if (accountError) {
+    console.error('Failed to load Instagram account info:', accountError.message)
+    return { state: 'error' }
+  }
+  if (!account || !account.is_active) {
+    return { state: 'not_connected' }
+  }
+
+  const { data: snapshot, error: snapshotError } = await sb.from('social_metrics_snapshot')
+    .select('followers_count, reach, profile_views, engagements, captured_at')
+    .eq('studio_id', studioId).eq('platform', 'instagram')
+    .order('captured_at', { ascending: false }).limit(1).maybeSingle()
+
+  if (snapshotError) {
+    console.error('Failed to load Instagram snapshot:', snapshotError.message)
+    return { state: 'error' }
+  }
+  if (!snapshot) {
+    return { state: 'no_snapshot_yet', username: account.username }
+  }
+
+  // Stale = a sync failure happened AFTER the last known success. Show the old
+  // snapshot regardless — never blank the card just because today's sync failed.
+  const isStale = account.last_sync_error_at &&
+    (!account.last_successful_sync_at || new Date(account.last_sync_error_at) > new Date(account.last_successful_sync_at))
+
+  return { state: isStale ? 'stale' : 'ok', username: account.username, ...snapshot }
+}
+
+function communityInstagramCardHtml(result) {
+  let html = '<div style="font-size:13px;font-weight:600;margin-bottom:10px">📷 Instagram</div>'
+
+  if (result.state === 'error') {
+    html += '<div style="font-size:12px;color:#aaa">Unavailable — could not load Instagram data. Try refreshing the page.</div>'
+  } else if (result.state === 'not_connected') {
+    html += '<div style="font-size:12px;color:#aaa">Instagram not connected yet.</div>'
+  } else if (result.state === 'no_snapshot_yet') {
+    html += `<div style="font-size:12px;color:#aaa">Connected as ${escHtml(result.username || '')} — waiting for the first sync.</div>`
+  } else {
+    if (result.state === 'stale') {
+      html += '<div style="font-size:11.5px;color:#b45309;margin-bottom:8px">⚠ Last update failed — showing the most recent good data below.</div>'
+    }
+    html += `<div style="font-size:13px;font-weight:500">${escHtml(result.username || '')}</div>`
+    html += `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:13px"><span>Followers</span><span>${result.followers_count ?? '—'}</span></div>`
+    if (result.reach != null) html += `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:13px"><span>Reach</span><span>${result.reach}</span></div>`
+    if (result.profile_views != null) html += `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:13px"><span>Profile Views</span><span>${result.profile_views}</span></div>`
+    if (result.engagements != null) html += `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:13px"><span>Engagements</span><span>${result.engagements}</span></div>`
+    if (currentStudioTimezone) {
+      const asOf = new Date(result.captured_at).toLocaleString('en-US', {
+        timeZone: currentStudioTimezone,
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit'
+      })
+      html += `<div style="font-size:11px;color:#aaa;margin-top:6px">As of ${asOf}</div>`
+    } else {
+      // Never fall back to browser/device time — same "fail clearly" principle as
+      // This Week/Today. An unresolved studio timezone means we don't know what
+      // "As of" would even mean, so say so rather than guess.
+      html += '<div style="font-size:11px;color:#aaa;margin-top:6px">As of — (studio timezone unavailable)</div>'
+    }
   }
   return html
 }
