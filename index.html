@@ -454,6 +454,42 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
     <div id="community-view-content"></div>
   </div>
 
+  <div id="relationship-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+    <div style="background:white;border-radius:12px;width:100%;max-width:420px;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
+        <h3 id="relationship-modal-title" style="font-size:15px;font-weight:600;margin:0">Add Relationship</h3>
+        <button onclick="closeRelationshipModal()" style="background:none;border:none;font-size:22px;cursor:pointer;color:#888;line-height:1">×</button>
+      </div>
+      <div style="margin-bottom:10px">
+        <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Relationship / Organization Name *</label>
+        <input id="relationship-name" type="text" placeholder="e.g. Oak Bay Elementary" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none">
+      </div>
+      <div style="margin-bottom:10px">
+        <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Category *</label>
+        <select id="relationship-category" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;background:white">
+          <option value="">Select a category…</option>
+        </select>
+      </div>
+      <div style="margin-bottom:10px">
+        <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Stage *</label>
+        <select id="relationship-stage" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;background:white">
+          <option value="">Select a stage…</option>
+        </select>
+      </div>
+      <div style="margin-bottom:10px">
+        <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Notes</label>
+        <textarea id="relationship-notes" rows="3" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;resize:vertical;font-family:inherit"></textarea>
+      </div>
+      <div id="relationship-error" style="display:none;font-size:12px;color:#c0392b;margin-bottom:10px"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;padding-top:0.5rem">
+        <button onclick="closeRelationshipModal()" style="padding:8px 16px;border:0.5px solid #d0d0c8;border-radius:6px;background:white;font-size:13px;cursor:pointer">Cancel</button>
+        <button id="relationship-save-btn" onclick="saveRelationship()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="community-toast" style="display:none;position:fixed;bottom:24px;right:24px;background:#1a1a1a;color:white;padding:10px 18px;border-radius:8px;font-size:13px;z-index:3000"></div>
+
   <div id="floor-view" style="display:none;padding:1rem 0">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:1rem;flex-wrap:wrap">
       <button id="fp-assign-btn" onclick="assignTablesForDay()" style="padding:6px 14px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer;font-weight:500">🪑 Assign Tables</button>
@@ -517,6 +553,11 @@ const PROVINCE_TIMEZONE = {
   'AB': 'America/Edmonton',
   'ON': 'America/Toronto'
 }
+
+let editingRelationshipId = null
+let communityRelationshipsCache = []
+let relationshipCategoriesCache = []
+let relationshipStagesCache = []
 
 // ── ADD DROP-IN ──────────────────────────────────────────────
 async function addDropin(sessionId) {
@@ -2602,12 +2643,199 @@ function communityGenericWarningHtml() {
   </div>`
 }
 
+let communityToastTimer = null
+function showCommunityToast(msg) {
+  const el = document.getElementById('community-toast')
+  el.textContent = msg
+  el.style.display = 'block'
+  clearTimeout(communityToastTimer)
+  communityToastTimer = setTimeout(() => { el.style.display = 'none' }, 2500)
+}
+
+// Studio-scoped, RLS is still the actual security boundary — this is just the same
+// belt-and-suspenders pattern already used elsewhere in this app: no error inspection
+// skipped, and the raw DB error never rendered directly to the studio user.
+async function loadCommunityRelationships() {
+  const { data, error } = await sb.from('community_relationships')
+    .select('id, name, notes, category_id, stage_id, updated_at, community_categories(name), community_relationship_stages(name)')
+    .eq('studio_id', currentStudioId)
+    .order('updated_at', { ascending: false })
+  if (error) {
+    console.error('Failed to load community relationships:', error.message)
+    return { error: true }
+  }
+  communityRelationshipsCache = data || []
+  return { error: false, relationships: communityRelationshipsCache }
+}
+
+// Cached once per session, same "only cache on success" convention as
+// loadCommunityInteractionTypes() — a failed attempt leaves the caches empty so the next
+// modal-open retries instead of being permanently stuck on a transient error.
+async function populateRelationshipTaxonomyDropdowns() {
+  if (!relationshipCategoriesCache.length || !relationshipStagesCache.length) {
+    const [catRes, stageRes] = await Promise.all([
+      sb.from('community_categories').select('id, name').eq('is_active', true).order('sort_order'),
+      sb.from('community_relationship_stages').select('id, name').eq('is_active', true).order('sort_order')
+    ])
+    if (catRes.error || stageRes.error) {
+      console.error('Community taxonomy load failed:', catRes.error?.message, stageRes.error?.message)
+      return false
+    }
+    relationshipCategoriesCache = catRes.data || []
+    relationshipStagesCache = stageRes.data || []
+  }
+
+  const catSel = document.getElementById('relationship-category')
+  catSel.innerHTML = '<option value="">Select a category…</option>' +
+    relationshipCategoriesCache.map(c => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('')
+
+  const stageSel = document.getElementById('relationship-stage')
+  stageSel.innerHTML = '<option value="">Select a stage…</option>' +
+    relationshipStagesCache.map(s => `<option value="${s.id}">${escHtml(s.name)}</option>`).join('')
+
+  return true
+}
+
+function closeRelationshipModal() {
+  document.getElementById('relationship-modal').style.display = 'none'
+  editingRelationshipId = null
+}
+
+async function openRelationshipModal(id) {
+  if (!isCommunityCoordinator) return   // defense-in-depth; RLS is the real boundary
+  editingRelationshipId = id || null
+
+  document.getElementById('relationship-modal-title').textContent = id ? 'Edit Relationship' : 'Add Relationship'
+  document.getElementById('relationship-name').value = ''
+  document.getElementById('relationship-notes').value = ''
+  document.getElementById('relationship-category').value = ''
+  document.getElementById('relationship-stage').value = ''
+  const errEl = document.getElementById('relationship-error')
+  errEl.style.display = 'none'
+  const saveBtn = document.getElementById('relationship-save-btn')
+  saveBtn.disabled = false
+  saveBtn.textContent = 'Save'
+
+  document.getElementById('relationship-modal').style.display = 'flex'
+
+  const taxonomyOk = await populateRelationshipTaxonomyDropdowns()
+  if (!taxonomyOk) {
+    // Clear, non-technical error. Save is disabled outright — no path to submit against
+    // dropdowns that failed to load.
+    errEl.textContent = 'Could not load categories/stages right now. Please close this and try again.'
+    errEl.style.display = 'block'
+    saveBtn.disabled = true
+    return
+  }
+
+  if (id) {
+    const rel = communityRelationshipsCache.find(r => r.id === id)
+    if (!rel) {
+      errEl.textContent = 'Could not load this relationship. Please close this and try again.'
+      errEl.style.display = 'block'
+      saveBtn.disabled = true
+      return
+    }
+    document.getElementById('relationship-name').value = rel.name || ''
+    document.getElementById('relationship-notes').value = rel.notes || ''
+    document.getElementById('relationship-category').value = rel.category_id || ''
+    document.getElementById('relationship-stage').value = rel.stage_id || ''
+  } else {
+    // Default to the active 'Prospect' stage ONLY if it's actually found among the active
+    // stages just loaded. Never substitute a different stage if it's missing/inactive —
+    // leave the dropdown unselected and require an explicit choice instead.
+    const prospect = relationshipStagesCache.find(s => s.name === 'Prospect')
+    document.getElementById('relationship-stage').value = prospect ? prospect.id : ''
+  }
+}
+
+async function saveRelationship() {
+  const name = document.getElementById('relationship-name').value.trim()
+  const categoryId = document.getElementById('relationship-category').value
+  const stageId = document.getElementById('relationship-stage').value
+  const notes = document.getElementById('relationship-notes').value.trim() || null
+  const errEl = document.getElementById('relationship-error')
+  errEl.style.display = 'none'
+
+  if (!name) { errEl.textContent = 'Please enter a relationship name.'; errEl.style.display = 'block'; return }
+  if (!categoryId) { errEl.textContent = 'Please select a category.'; errEl.style.display = 'block'; return }
+  if (!stageId) { errEl.textContent = 'Please select a stage.'; errEl.style.display = 'block'; return }
+
+  const btn = document.getElementById('relationship-save-btn')
+  btn.textContent = 'Saving…'; btn.disabled = true
+
+  let error
+  if (editingRelationshipId) {
+    // Belt-and-suspenders: RLS already enforces studio scoping on this update, but the
+    // client write is kept explicitly studio-scoped too, and studio_id is never included
+    // in the payload at all, so there's no path for it to change on edit.
+    const res = await sb.from('community_relationships')
+      .update({ category_id: categoryId, stage_id: stageId, name, notes })
+      .eq('id', editingRelationshipId)
+      .eq('studio_id', currentStudioId)
+    error = res.error
+  } else {
+    const res = await sb.from('community_relationships')
+      .insert({
+        studio_id: currentStudioId,   // always the session's own value — never a form field
+        category_id: categoryId,
+        stage_id: stageId,
+        name,
+        notes,
+        created_by: currentUser.id
+      })
+    error = res.error
+  }
+
+  btn.textContent = 'Save'; btn.disabled = false
+
+  if (error) {
+    console.error('Failed to save community relationship:', error.message)
+    errEl.textContent = 'Could not save this relationship. Please try again.'
+    errEl.style.display = 'block'
+    return   // modal stays open — never closes as if the save succeeded
+  }
+
+  const wasEdit = !!editingRelationshipId
+  closeRelationshipModal()
+  showCommunityToast(wasEdit ? 'Relationship updated.' : 'Relationship added.')
+  await loadCommunityRelationships()
+  renderCommunityRelationshipsList()
+}
+
+// Re-renders just the Relationships card in place, without reloading This Week/Today —
+// used after save/edit so the list refreshes without a full loadCommunityView() re-run.
+function renderCommunityRelationshipsList() {
+  const el = document.getElementById('community-relationships-card')
+  if (!el) return
+  el.innerHTML = communityRelationshipsListHtml()
+}
+
+function communityRelationshipsListHtml() {
+  let html = '<div style="font-size:13px;font-weight:600;margin-bottom:10px">Relationships</div>'
+  if (!communityRelationshipsCache.length) {
+    html += '<div style="font-size:12px;color:#aaa">No relationships yet. Use "+ Add Relationship" below to add your first one.</div>'
+  } else {
+    html += communityRelationshipsCache.map(r => {
+      const catName = r.community_categories?.name || '—'
+      const stageName = r.community_relationship_stages?.name || '—'
+      const updatedStr = new Date(r.updated_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+      return `<div onclick="openRelationshipModal('${r.id}')" style="padding:10px 0;border-bottom:0.5px solid #f0f0e8;cursor:pointer" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
+        <div style="font-size:13px;font-weight:500">${escHtml(r.name)}</div>
+        <div style="font-size:12px;color:#888;margin-top:2px">${escHtml(catName)} · ${escHtml(stageName)} · Updated ${updatedStr}</div>
+      </div>`
+    }).join('')
+  }
+  return html
+}
+
 async function loadCommunityView() {
   const container = document.getElementById('community-view-content')
   container.innerHTML = '<div class="loading">Loading…</div>'
 
   const weekResult = await loadThisWeekCounts(currentStudioId)
   const todayResult = await loadTodayFollowUps(currentStudioId)
+  const relResult = await loadCommunityRelationships()
 
   let html = '<h2 style="font-size:18px;font-weight:600;margin-bottom:14px">Community</h2>'
 
@@ -2665,15 +2893,19 @@ async function loadCommunityView() {
   }
   html += '</div>'
 
-  // ── Relationships — placeholder; wiring is a later, separately-reviewed step ──
-  html += '<div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;padding:16px;margin-bottom:14px">'
-  html += '<div style="font-size:13px;font-weight:600;margin-bottom:10px">Relationships</div>'
-  html += '<div style="font-size:12px;color:#aaa">Coming soon.</div>'
+  // ── Relationships ────────────────────────────────────────────
+  html += '<div id="community-relationships-card" style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;padding:16px;margin-bottom:14px">'
+  if (relResult.error) {
+    html += '<div style="font-size:13px;font-weight:600;margin-bottom:10px">Relationships</div>'
+    html += '<div style="font-size:12px;color:#aaa">Unavailable — could not load relationships. Try refreshing the page.</div>'
+  } else {
+    html += communityRelationshipsListHtml()
+  }
   html += '</div>'
 
-  // ── Actions — buttons present, not yet wired to modals (later step) ──
+  // ── Actions — Add Relationship enabled; the other two remain disabled (later steps) ──
   html += `<div style="display:flex;gap:8px;flex-wrap:wrap">
-    <button disabled style="padding:8px 14px;border:0.5px solid #d0d0c8;border-radius:7px;background:#f5f5f0;color:#aaa;font-size:12px;cursor:not-allowed">+ Add Relationship</button>
+    <button ${isCommunityCoordinator ? "onclick=\"openRelationshipModal(null)\"" : 'disabled'} style="padding:8px 14px;border:0.5px solid ${isCommunityCoordinator ? '#1a1a1a' : '#d0d0c8'};border-radius:7px;background:${isCommunityCoordinator ? '#1a1a1a' : '#f5f5f0'};color:${isCommunityCoordinator ? 'white' : '#aaa'};font-size:12px;cursor:${isCommunityCoordinator ? 'pointer' : 'not-allowed'}">+ Add Relationship</button>
     <button disabled style="padding:8px 14px;border:0.5px solid #d0d0c8;border-radius:7px;background:#f5f5f0;color:#aaa;font-size:12px;cursor:not-allowed">+ Log Interaction</button>
     <button disabled style="padding:8px 14px;border:0.5px solid #d0d0c8;border-radius:7px;background:#f5f5f0;color:#aaa;font-size:12px;cursor:not-allowed">+ Add Follow-Up</button>
   </div>`
