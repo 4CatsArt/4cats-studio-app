@@ -419,8 +419,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
         <div style="display:inline-flex;border:0.5px solid #d0d0c8;border-radius:7px;overflow:hidden">
           <button type="button" id="cp-mode-day" onclick="cpSetMode('day')" style="padding:6px 14px;border:none;font-size:13px;cursor:pointer;font-weight:500">Day</button>
           <button type="button" id="cp-mode-week" onclick="cpSetMode('week')" style="padding:6px 14px;border:none;font-size:13px;cursor:pointer;font-weight:500">Week</button>
+          <button type="button" id="cp-mode-range" onclick="cpSetMode('range')" style="padding:6px 14px;border:none;font-size:13px;cursor:pointer;font-weight:500">Range</button>
         </div>
-        <input type="date" id="cp-week-date" onchange="cpLoadPeriod(this.value)" style="padding:7px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px">
+        <input type="date" id="cp-week-date" onchange="cpLoadPeriod()" style="padding:7px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px">
+        <div id="cp-range-inputs" style="display:none;align-items:center;gap:6px">
+          <span style="font-size:12px;color:#888">From</span>
+          <input type="date" id="cp-range-from" onchange="cpLoadPeriod()" style="padding:7px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px">
+          <span style="font-size:12px;color:#888">to</span>
+          <input type="date" id="cp-range-to" onchange="cpLoadPeriod()" style="padding:7px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px">
+        </div>
         <div id="cp-week-label" style="font-size:13px;color:#555;font-weight:500"></div>
       </div>
 
@@ -8059,33 +8066,49 @@ cpState.mode = 'day' // default to single-day since that's the most common use c
 function openCampPickupModal() {
   document.getElementById('camp-pickup-modal').style.display = 'block'
   cpApplyModeStyles()
-  var dateInput = document.getElementById('cp-week-date')
-  var initialDate = cpState.mode === 'day' ? currentDate : cpMondayOf(currentDate)
-  dateInput.value = dateStr(initialDate)
-  cpLoadPeriod(dateInput.value)
+  if (cpState.mode !== 'range') {
+    var dateInput = document.getElementById('cp-week-date')
+    var initialDate = cpState.mode === 'day' ? currentDate : cpMondayOf(currentDate)
+    dateInput.value = dateStr(initialDate)
+  }
+  cpLoadPeriod()
 }
 
 function cpSetMode(mode) {
   if (cpState.mode === mode) return
   cpState.mode = mode
   cpApplyModeStyles()
-  var dateInput = document.getElementById('cp-week-date')
-  var base = dateInput.value || dateStr(currentDate)
   if (mode === 'week') {
+    var dateInput = document.getElementById('cp-week-date')
+    var base = dateInput.value || dateStr(currentDate)
     dateInput.value = dateStr(cpMondayOf(base))
+  } else if (mode === 'day') {
+    var dateInput2 = document.getElementById('cp-week-date')
+    if (!dateInput2.value) dateInput2.value = dateStr(currentDate)
+  } else if (mode === 'range') {
+    // Default the "to" date to today if empty; leave "from" blank on first
+    // switch-in — a blank "from" means "all past camps up to the to-date".
+    var toInput = document.getElementById('cp-range-to')
+    if (!toInput.value) toInput.value = dateStr(currentDate)
   }
-  cpLoadPeriod(dateInput.value)
+  cpLoadPeriod()
 }
 
 function cpApplyModeStyles() {
-  var dayBtn = document.getElementById('cp-mode-day')
-  var weekBtn = document.getElementById('cp-mode-week')
-  if (cpState.mode === 'day') {
-    dayBtn.style.background = '#1a1a1a'; dayBtn.style.color = 'white'
-    weekBtn.style.background = '#f5f5f0'; weekBtn.style.color = '#555'
+  var modeBtns = { day: document.getElementById('cp-mode-day'), week: document.getElementById('cp-mode-week'), range: document.getElementById('cp-mode-range') }
+  Object.keys(modeBtns).forEach(function(m) {
+    var btn = modeBtns[m]
+    if (m === cpState.mode) { btn.style.background = '#1a1a1a'; btn.style.color = 'white' }
+    else { btn.style.background = '#f5f5f0'; btn.style.color = '#555' }
+  })
+  var singleDate = document.getElementById('cp-week-date')
+  var rangeInputs = document.getElementById('cp-range-inputs')
+  if (cpState.mode === 'range') {
+    singleDate.style.display = 'none'
+    rangeInputs.style.display = 'inline-flex'
   } else {
-    weekBtn.style.background = '#1a1a1a'; weekBtn.style.color = 'white'
-    dayBtn.style.background = '#f5f5f0'; dayBtn.style.color = '#555'
+    singleDate.style.display = ''
+    rangeInputs.style.display = 'none'
   }
 }
 
@@ -8093,19 +8116,25 @@ function closeCampPickupModal() {
   document.getElementById('camp-pickup-modal').style.display = 'none'
 }
 
-async function cpLoadPeriod(dateVal) {
+async function cpLoadPeriod() {
   var body = document.getElementById('cp-body')
   body.innerHTML = '<div class="loading">Loading camp sessions…</div>'
 
   var rangeStart, rangeEnd, label, periodNoun
+  var openEnded = false // true only for Range mode with a blank "From" — means "all past camps up to rangeEnd"
+
   if (cpState.mode === 'day') {
+    var dateVal = document.getElementById('cp-week-date').value
+    if (!dateVal) return
     var d = new Date(dateVal + 'T00:00:00')
     rangeStart = dateVal
     rangeEnd = dateVal
     label = d.toLocaleDateString('en-CA', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' })
     periodNoun = 'today'
-  } else {
-    var monday = cpMondayOf(dateVal)
+  } else if (cpState.mode === 'week') {
+    var dateVal2 = document.getElementById('cp-week-date').value
+    if (!dateVal2) return
+    var monday = cpMondayOf(dateVal2)
     var friday = new Date(monday)
     friday.setDate(friday.getDate() + 4)
     rangeStart = dateStr(monday)
@@ -8113,19 +8142,42 @@ async function cpLoadPeriod(dateVal) {
     label = monday.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) + ' – ' +
       friday.toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' })
     periodNoun = 'this week'
+  } else {
+    // Range mode — "From" is optional. Left blank, it means "all past camp
+    // sessions up to and including the To date" rather than a bounded range.
+    var fromVal = document.getElementById('cp-range-from').value
+    var toVal = document.getElementById('cp-range-to').value
+    if (!toVal) {
+      body.innerHTML = '<div style="font-size:13px;color:#888;padding:1rem 0">Pick an end date to load camp sessions.</div>'
+      document.getElementById('cp-week-label').textContent = ''
+      return
+    }
+    rangeStart = fromVal || null
+    rangeEnd = toVal
+    openEnded = !fromVal
+    var toD = new Date(toVal + 'T00:00:00')
+    if (fromVal) {
+      var fromD = new Date(fromVal + 'T00:00:00')
+      label = fromD.toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' }) + ' – ' +
+        toD.toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' })
+      periodNoun = 'in this range'
+    } else {
+      label = 'All camps up to ' + toD.toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' })
+      periodNoun = 'up to this date'
+    }
   }
-  cpState.weekStart = rangeStart
-  cpState.weekEnd = rangeEnd
 
   document.getElementById('cp-week-label').textContent = label
 
-  const { data: sessions, error: sessErr } = await sb.from('sessions')
+  var sessQuery = sb.from('sessions')
     .select('id, session_date, session_time, title')
     .eq('studio_id', currentStudioId)
     .eq('session_type', 'camp')
-    .gte('session_date', rangeStart)
     .lte('session_date', rangeEnd)
     .order('session_date')
+  if (rangeStart) sessQuery = sessQuery.gte('session_date', rangeStart)
+
+  const { data: sessions, error: sessErr } = await sessQuery
 
   if (sessErr) { body.innerHTML = '<div style="color:#c00;font-size:13px">Error loading sessions: ' + sessErr.message + '</div>'; return }
 
@@ -8135,6 +8187,13 @@ async function cpLoadPeriod(dateVal) {
     body.innerHTML = '<div style="font-size:13px;color:#888;padding:1rem 0">No camp sessions found for ' + periodNoun + ' at this studio.</div>'
     return
   }
+
+  // For an open-ended Range (blank "From"), use the earliest session date
+  // actually loaded as the effective start — keeps week_start a real date
+  // for logging/dedup rather than null, and gives an honest label of what
+  // was actually found.
+  cpState.weekStart = openEnded ? cpState.sessions[0].session_date : rangeStart
+  cpState.weekEnd = rangeEnd
 
   const sessionIds = cpState.sessions.map(function(s) { return s.id })
   const { data: bookings, error: bookErr } = await sb.from('bookings')
@@ -8159,11 +8218,15 @@ async function cpLoadPeriod(dateVal) {
   })
   recipients.sort(function(a, b) { return (a.name || '').localeCompare(b.name || '') })
 
-  // Check send log for this studio + period to flag anyone already emailed
+  // Check send log for this studio + period to flag anyone already emailed.
+  // Note: for Range mode this only matches sends that were logged with this
+  // exact same week_start value, so the green "already sent" badge is a
+  // convenience hint rather than a guarantee for wide multi-week ranges —
+  // the server-side daily dedup guard is what actually prevents double-sends.
   const { data: sentLog } = await sb.from('camp_pickup_emails')
     .select('recipient_email, status, sent_at')
     .eq('studio_id', currentStudioId)
-    .eq('week_start', rangeStart)
+    .eq('week_start', cpState.weekStart)
     .eq('status', 'sent')
     .order('sent_at', { ascending: false })
 
@@ -8207,7 +8270,7 @@ async function cpLoadPeriod(dateVal) {
     + '<input id="cp-subject" type="text" style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none"></div>'
     + '<div style="margin-bottom:14px"><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Message</div>'
     + '<textarea id="cp-message" placeholder="Message..." style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none;resize:vertical;min-height:160px;font-family:inherit"></textarea>'
-    + '<div style="font-size:11px;color:#aaa;margin-top:4px">A starter template is filled in below with this ' + (cpState.mode === 'day' ? 'day\'s date' : 'week\'s dates') + ' — edit it freely. Blank lines become paragraph breaks. Add <code>{{first_name}}</code> to address each parent by name, or <code>{{calendar_link}}</code> to insert a clickable link to this studio\'s calendar page (already included below).</div></div>'
+    + '<div style="font-size:11px;color:#aaa;margin-top:4px">A starter template is filled in below with this ' + (cpState.mode === 'day' ? 'day\'s date' : cpState.mode === 'week' ? 'week\'s dates' : 'date range') + ' — edit it freely. Blank lines become paragraph breaks. Add <code>{{first_name}}</code> to address each parent by name, or <code>{{calendar_link}}</code> to insert a clickable link to this studio\'s calendar page (already included below).</div></div>'
     + '<div style="display:flex;justify-content:flex-end;gap:8px">'
     + '<button id="cp-send-btn" onclick="sendCampPickupEmails()" style="padding:10px 20px;background:#1a1a1a;color:white;border:none;border-radius:7px;font-size:14px;cursor:pointer;font-weight:500">Send to ' + recipients.filter(function(r){return !r.alreadySentAt}).length + ' Parent' + (recipients.filter(function(r){return !r.alreadySentAt}).length !== 1 ? 's' : '') + '</button>'
     + '</div>'
@@ -8231,7 +8294,9 @@ function cpDefaultSubject() {
 }
 
 function cpDefaultMessage(dateLabel, mode) {
-  var periodPhrase = mode === 'day' ? ('camp today, ' + dateLabel + ',') : ('camp ' + dateLabel)
+  var periodPhrase = mode === 'day' ? ('camp today, ' + dateLabel + ',')
+    : mode === 'week' ? ('camp ' + dateLabel)
+    : ('camp (' + dateLabel + ')')
   return "Hi,\n\n"
     + "🎨 Great news—your child's camp artwork is ready for pickup!\n\n"
     + "All artwork from " + periodPhrase + " has been completed and is ready to go home. If you haven't picked it up yet, we'd love for you to stop by as soon as you can.\n\n"
