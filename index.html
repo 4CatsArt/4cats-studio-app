@@ -455,6 +455,19 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
     </div>
   </div>
 
+  <!-- EMAIL HISTORY MODAL -->
+  <div id="email-history-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;overflow:auto">
+    <div style="background:white;border-radius:14px;max-width:640px;margin:2.5rem auto;padding:1.75rem;box-shadow:0 8px 40px rgba(0,0,0,0.18)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+        <div style="font-size:17px;font-weight:600">📜 Email History</div>
+        <button onclick="closeEmailHistoryModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">x</button>
+      </div>
+      <div id="eh-body">
+        <div class="loading">Loading history…</div>
+      </div>
+    </div>
+  </div>
+
   <!-- INFO VIEW -->
   <div id="info-view" style="display:none;padding:1.5rem;max-width:680px">
     <div id="info-view-content"><div class="loading">Loading…</div></div>
@@ -3651,6 +3664,31 @@ async function loadDay2View() {
   const preFiltered = (sessions || []).filter(s => matchesFilters(s, filters))
   const ids = preFiltered.map(s => s.id)
 
+  // Which classes have already been emailed today (for the "sent" badge).
+  const dayStart = new Date(currentDate); dayStart.setHours(0, 0, 0, 0)
+  const dayEnd = new Date(dayStart); dayEnd.setDate(dayEnd.getDate() + 1)
+  const { data: sendLog } = await sb.from('email_sends')
+    .select('recipient_type, session_ids, sent_at')
+    .eq('studio_id', currentStudioId)
+    .gte('sent_at', dayStart.toISOString())
+    .lt('sent_at', dayEnd.toISOString())
+    .order('sent_at', { ascending: false })
+
+  let daySentAt = null
+  const classSentMap = {}
+  ;(sendLog || []).forEach(row => {
+    if (row.recipient_type === 'day' && !daySentAt) daySentAt = row.sent_at
+    if (row.recipient_type === 'classes') {
+      (row.session_ids || []).forEach(sid => { if (!classSentMap[sid]) classSentMap[sid] = row.sent_at })
+    }
+  })
+  function d2SentBadge(sessionId) {
+    const ts = classSentMap[sessionId] || daySentAt
+    if (!ts) return ''
+    const time = new Date(ts).toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' })
+    return `<span style="margin-left:6px;font-size:11px;background:#eaf5ea;color:#2e7d32;padding:2px 7px;border-radius:10px;font-weight:500;white-space:nowrap">✉️ sent ${time}</span>`
+  }
+
   const staffDataD2 = {}, bookingCountsD2 = {}, dropinCountsD2 = {}, signinDataD2 = {}, aftercareCountsD2 = {}, hotChocCountsD2 = {}, candyBagCountsD2 = {}
 
   if (ids.length) {
@@ -3915,6 +3953,7 @@ async function loadDay2View() {
             ${aftercareCount ? `<span style="margin-left:6px;font-size:11px;background:#ede7f6;color:#5b4fcf;padding:2px 7px;border-radius:10px;font-weight:500">🌙 ${aftercareCount} aftercare</span>` : ''}
             ${hotChocCount ? `<span style="margin-left:6px;font-size:11px;background:#efe0d0;color:#7a4a1e;padding:2px 7px;border-radius:10px;font-weight:500">☕ ${hotChocCount}</span>` : ''}
             ${candyBagCount ? `<span style="margin-left:6px;font-size:11px;background:#fce8f0;color:#99354e;padding:2px 7px;border-radius:10px;font-weight:500">🍬 ${candyBagCount}</span>` : ''}
+            ${d2SentBadge(s.id)}
           </td>
           <td>${isDropinEligible ? `<div class="d2-dropin-wrap"><span class="d2-dropin-count" id="dropin-count-${s.id}">${dropins || '—'}</span><button class="d2-dropin-btn" onclick="addDropin('${s.id}')">+</button></div>` : '<span style="color:#ccc">—</span>'}</td>
           <td>${notesCellContent}</td>
@@ -3955,7 +3994,7 @@ async function loadDay2View() {
           <td class="d2-check-col">${idx === 0 ? `<input type="checkbox" class="d2-session-check" value="${s.id}" onchange="d2UpdateEmailBar()">` : ''}</td>
           <td class="d2-time">${idx === 0 ? time : ''}</td>
           <td>
-            ${idx === 0 ? `<span class="d2-title">${titleClean}</span><span class="d2-badge badge-party">party</span><br>` : ''}
+            ${idx === 0 ? `<span class="d2-title">${titleClean}</span><span class="d2-badge badge-party">party</span>${d2SentBadge(s.id)}<br>` : ''}
             ${nameLabel}
           </td>
           <td><span class="d2-party-time-pill">⏱ ${bookedTime}</span></td>
@@ -3998,6 +4037,7 @@ async function loadDay2View() {
     <button class="d2-email-bar-btn primary" id="d2-email-selected-btn" onclick="openEmailBlastModal('classes')" ${selectedCount ? '' : 'disabled'}>Selected Classes (<span id="d2-selected-count">${selectedCount}</span>)</button>
     <button class="d2-email-bar-btn" onclick="openEmailBlastModal('day')">Everyone Today</button>
     <button class="d2-email-bar-btn" onclick="openEmailBlastModal('all_customers')">All Studio Customers</button>
+    <button class="d2-email-bar-btn" onclick="openEmailHistoryModal()">📜 History</button>
   </div>`
 
   const emptyMsg = !filtered.length
@@ -4287,6 +4327,53 @@ async function sendEmailBlast() {
     status.style.color = '#c00'
     status.textContent = 'Error: ' + e.message
   }
+}
+
+function closeEmailHistoryModal() {
+  document.getElementById('email-history-modal').style.display = 'none'
+}
+
+async function openEmailHistoryModal() {
+  const modal = document.getElementById('email-history-modal')
+  const body = document.getElementById('eh-body')
+  body.innerHTML = '<div class="loading">Loading history…</div>'
+  modal.style.display = 'block'
+
+  const { data, error } = await sb.from('email_sends')
+    .select('recipient_type, recipient_count, subject, sent_at')
+    .eq('studio_id', currentStudioId)
+    .order('sent_at', { ascending: false })
+    .limit(50)
+
+  if (error || !data?.length) {
+    body.innerHTML = '<div style="padding:1rem;color:#888;font-size:13px">No emails sent yet from this studio.</div>'
+    return
+  }
+
+  const scopeLabel = t => t === 'classes' ? 'Selected Classes' : t === 'day' ? 'Everyone Today' : 'All Studio Customers'
+  const rows = data.map(r => {
+    const dt = new Date(r.sent_at)
+    const dateStr = dt.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })
+    const timeStr = dt.toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' })
+    return `<tr style="border-bottom:0.5px solid #f0f0e8">
+      <td style="padding:8px 10px;font-size:12px;color:#888;white-space:nowrap">${dateStr}, ${timeStr}</td>
+      <td style="padding:8px 10px;font-size:13px">${escHtml(r.subject || '(no subject)')}</td>
+      <td style="padding:8px 10px;font-size:12px;color:#5b4fcf;white-space:nowrap">${scopeLabel(r.recipient_type)}</td>
+      <td style="padding:8px 10px;font-size:12px;color:#555;text-align:right;white-space:nowrap">${r.recipient_count} sent</td>
+    </tr>`
+  }).join('')
+
+  body.innerHTML = `<div style="max-height:60vh;overflow:auto">
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr style="border-bottom:1px solid #e0e0d8">
+        <th style="padding:6px 10px;text-align:left;font-size:10px;color:#888;text-transform:uppercase">When</th>
+        <th style="padding:6px 10px;text-align:left;font-size:10px;color:#888;text-transform:uppercase">Subject</th>
+        <th style="padding:6px 10px;text-align:left;font-size:10px;color:#888;text-transform:uppercase">Scope</th>
+        <th style="padding:6px 10px;text-align:right;font-size:10px;color:#888;text-transform:uppercase">Recipients</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`
 }
 
 
