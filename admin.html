@@ -293,6 +293,7 @@ select:focus, input:focus { border-color: #888; }
       <div class="toolbar-group">
         <button class="btn btn-primary" onclick="openAddSessionModal()">+ Add Session</button>
         <button class="btn" id="btn-discover" onclick="discoverFromShopify()" style="background:#f0fdf4;color:#166534;border-color:#bbf7d0">🔍 Discover from Shopify</button>
+        <button class="btn" onclick="openSkipDatesModal()" style="background:#fff8e1;color:#7a6200;border-color:#f0d98e">📅 Skip Dates</button>
         <button class="btn" onclick="openCloseStudioModal()" style="background:#fff0f0;color:#c0392b;border-color:#f5c6cb">🔒 Close Studio Day</button>
         <button class="btn" onclick="openTransferModal()" style="background:#f0f4ff;color:#1a4fa0;border-color:#bed0f7">↔ Transfer Booking</button>
       </div>
@@ -2272,11 +2273,35 @@ async function submitMarkLineup() {
   btn.disabled = false; btn.textContent = 'Mark & Sync'
 }
 
+function detectWeekSeriesInTitle(title) {
+  const m = (title||'').match(/\s*\|?\s*(\d+)\s*[Ww]eek\s*[Ss]ession\s*$/)
+  return m ? { weeks: parseInt(m[1]), matchStart: m.index, full: m[0] } : null
+}
+
+function applyDetectedWeeks(weeks, matchStart) {
+  const titleEl = document.getElementById('asm-title')
+  titleEl.value = titleEl.value.slice(0, matchStart).trim()
+  document.getElementById('asm-weeks').value = weeks
+  document.getElementById('asm-series-detect-banner').style.display = 'none'
+  updateAsmWeeksPreview()
+}
+
 function updateAsmPreview() {
   const date = document.getElementById('asm-date').value, time = document.getElementById('asm-time').value
   const rawTitle = document.getElementById('asm-title').value.trim()
   const numWeeks = parseInt(document.getElementById('asm-weeks').value)||1
   const previewEl = document.getElementById('asm-shopify-preview')
+
+  // Warn if the typed title already looks like a multi-week series but Num Weeks is still 1
+  const banner = document.getElementById('asm-series-detect-banner')
+  const detected = detectWeekSeriesInTitle(rawTitle)
+  if (detected && numWeeks === 1) {
+    banner.style.display = 'flex'
+    banner.innerHTML = `<span>⚠ Looks like a <strong>${detected.weeks}-week series</strong> — Num Weeks is still set to 1.</span><button type="button" onclick="applyDetectedWeeks(${detected.weeks}, ${detected.matchStart})" style="white-space:nowrap;padding:4px 10px;background:#7a6200;color:white;border:none;border-radius:6px;font-size:11px;cursor:pointer">Fix: use ${detected.weeks} weeks</button>`
+  } else {
+    banner.style.display = 'none'
+  }
+
   if (!date||!time||!rawTitle) { previewEl.innerHTML = '<span style="color:#bbb">Fill in date, time and title to preview</span>'; return }
   // For series (numWeeks > 1), class 1 is stored as "Title | N Week Session"
   const titleForPreview = numWeeks > 1 ? `${rawTitle} | ${numWeeks} Week Session` : rawTitle
@@ -2298,9 +2323,26 @@ function updateAsmWeeksPreview() {
 }
 
 async function saveAddSessions() {
-  const date = document.getElementById('asm-date').value, time = document.getElementById('asm-time').value, title = document.getElementById('asm-title').value.trim()
+  const date = document.getElementById('asm-date').value, time = document.getElementById('asm-time').value
+  let title = document.getElementById('asm-title').value.trim()
   const type = document.getElementById('asm-type').value, capacity = parseInt(document.getElementById('asm-capacity').value)||0
-  const show = document.getElementById('asm-show').value==='true', numWeeks = parseInt(document.getElementById('asm-weeks').value)||1
+  const show = document.getElementById('asm-show').value==='true'
+  let numWeeks = parseInt(document.getElementById('asm-weeks').value)||1
+
+  // Safety net: catch "typed full series title but left Num Weeks at 1" before it silently
+  // creates a single orphaned class-1 row with no class 2+ rows behind it.
+  const detected = detectWeekSeriesInTitle(title)
+  if (detected && numWeeks === 1) {
+    const proceed = confirm(`This title looks like a ${detected.weeks}-week series ("${detected.full.trim()}") but Num Weeks is set to 1.\n\nClick OK to create all ${detected.weeks} classes (recommended), or Cancel to add just this one session as typed.`)
+    if (proceed) {
+      title = title.slice(0, detected.matchStart).trim()
+      numWeeks = detected.weeks
+      document.getElementById('asm-title').value = title
+      document.getElementById('asm-weeks').value = numWeeks
+      document.getElementById('asm-series-detect-banner').style.display = 'none'
+    }
+  }
+
   if (!date) { alert('Please select a date.'); return }
   if (!time) { alert('Please enter a time.'); return }
   if (!title) { alert('Please enter a session title.'); return }
@@ -2311,9 +2353,16 @@ async function saveAddSessions() {
   const sessionTime = time.length===5 ? time+':00' : time
 
   // Build rows: class 1 = "Title | N Week Session", class 2+ = "Title | Class N of Total"
+  // (skip dates auto-push a class to the following week — studio stays open, just no class that week)
+  const skipDateSet = numWeeks > 1 ? await fetchSkipDatesInRange(date, dateStr(addDays(new Date(date + 'T12:00:00'), (numWeeks + 2) * 7))) : new Set()
   const rows = []
+  let sessionDate = date
   for (let week = 0; week < numWeeks; week++) {
-    const sessionDate = week === 0 ? date : dateStr(addDays(new Date(date + 'T12:00:00'), week * 7))
+    if (week > 0) {
+      sessionDate = dateStr(addDays(new Date(sessionDate + 'T12:00:00'), 7))
+      let guard = 0
+      while (skipDateSet.has(sessionDate) && guard < 10) { sessionDate = dateStr(addDays(new Date(sessionDate + 'T12:00:00'), 7)); guard++ }
+    }
     const sessionTitle = numWeeks === 1 ? title
       : week === 0 ? `${title} | ${numWeeks} Week Session`
       : `${title} | Class ${week+1} of ${numWeeks}`
@@ -2764,6 +2813,67 @@ async function executeCloseStudio() {
 // DISCOVER FROM SHOPIFY
 // ═══════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════
+// CLASS SERIES SKIP DATES
+// ═══════════════════════════════════════════════
+function openSkipDatesModal() {
+  document.getElementById('skip-dates-modal').style.display = 'flex'
+  document.getElementById('skip-date-input').value = ''
+  document.getElementById('skip-date-note').value = ''
+  document.getElementById('skip-dates-status').textContent = ''
+  loadSkipDatesList()
+}
+
+function closeSkipDatesModal() {
+  document.getElementById('skip-dates-modal').style.display = 'none'
+}
+
+async function loadSkipDatesList() {
+  const listEl = document.getElementById('skip-dates-list')
+  listEl.innerHTML = '<div class="loading">Loading...</div>'
+  const today = dateStr(new Date())
+  const { data, error } = await sb.from('class_series_skip_dates').select('*').order('skip_date')
+  if (error) { listEl.innerHTML = `<div class="empty" style="color:#c0392b">Error: ${error.message}</div>`; return }
+  if (!data || !data.length) { listEl.innerHTML = '<div class="empty" style="padding:14px;font-size:12px;color:#aaa">No skip dates yet.</div>'; return }
+  listEl.innerHTML = data.map(row => {
+    const isPast = row.skip_date < today
+    return `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:0.5px solid #f0f0e8;${isPast ? 'opacity:0.45' : ''}">
+      <div>
+        <div style="font-size:13px;font-weight:600">${new Date(row.skip_date + 'T12:00:00').toLocaleDateString('en-CA', { weekday:'short', year:'numeric', month:'short', day:'numeric' })}</div>
+        ${row.note ? `<div style="font-size:11px;color:#888">${row.note}</div>` : ''}
+      </div>
+      <button onclick="deleteSkipDate('${row.id}')" style="padding:5px 10px;border:0.5px solid #f5c6cb;border-radius:6px;background:white;font-size:11px;cursor:pointer;color:#c0392b">Delete</button>
+    </div>`
+  }).join('')
+}
+
+async function addSkipDate() {
+  const date = document.getElementById('skip-date-input').value
+  const note = document.getElementById('skip-date-note').value.trim() || null
+  const statusEl = document.getElementById('skip-dates-status')
+  if (!date) { alert('Please pick a date.'); return }
+  statusEl.style.color = '#888'; statusEl.textContent = 'Adding...'
+  const { error } = await sb.from('class_series_skip_dates').insert({ skip_date: date, note })
+  if (error) { statusEl.style.color = '#c0392b'; statusEl.textContent = 'Error: ' + error.message; return }
+  statusEl.style.color = '#2e7d32'; statusEl.textContent = '✓ Added'
+  document.getElementById('skip-date-input').value = ''
+  document.getElementById('skip-date-note').value = ''
+  loadSkipDatesList()
+  setTimeout(() => { statusEl.textContent = '' }, 2000)
+}
+
+async function deleteSkipDate(id) {
+  if (!confirm('Remove this skip date? Future series generation will no longer skip it.')) return
+  const { error } = await sb.from('class_series_skip_dates').delete().eq('id', id)
+  if (error) { alert('Error: ' + error.message); return }
+  loadSkipDatesList()
+}
+
+async function fetchSkipDatesInRange(fromDate, toDate) {
+  const { data } = await sb.from('class_series_skip_dates').select('skip_date').gte('skip_date', fromDate).lte('skip_date', toDate)
+  return new Set((data || []).map(r => r.skip_date))
+}
+
 function discoverFromShopify() {
   // Default to Mon–Sun of the currently viewed date
   const currentDate = document.getElementById('sch-from').value || new Date().toISOString().slice(0,10)
@@ -2854,10 +2964,12 @@ function showDiscoverModal(allSessions, newSessions, existingCount) {
     const ampm = h<12?'am':'pm'
     const timeLabel = m===0?`${hour}${ampm}`:`${hour}:${String(m).padStart(2,'0')}${ampm}`
     const badge = {party:'badge-party',workshop:'badge-workshop',glazing:'badge-glazing',class:'badge-class',camp:'badge-camp'}[s.sessionType]||'badge-workshop'
+    const seriesDetected = detectWeekSeriesInTitle(s.sessionTitle)
+    const seriesNote = seriesDetected ? `<span style="margin-left:6px;font-size:10px;background:#fff8e1;color:#7a6200;padding:2px 7px;border-radius:10px;font-weight:500;white-space:nowrap">→ will create all ${seriesDetected.weeks} classes</span>` : ''
     rows += `<tr>
       <td style="padding:8px 12px;font-size:12px;white-space:nowrap">${dateLabel}</td>
       <td style="padding:8px 12px;font-size:12px;white-space:nowrap">${timeLabel}</td>
-      <td style="padding:8px 12px;font-size:13px;font-weight:500">${s.sessionTitle} <span class="badge ${badge}">${s.sessionType}</span></td>
+      <td style="padding:8px 12px;font-size:13px;font-weight:500">${s.sessionTitle} <span class="badge ${badge}">${s.sessionType}</span>${seriesNote}</td>
       <td style="padding:8px 12px;text-align:center"><input type="checkbox" checked data-idx="${i}" style="width:16px;height:16px;cursor:pointer;accent-color:#1a1a1a"></td>
     </tr>`
   })
@@ -2918,42 +3030,83 @@ async function createDiscoveredSessions(newSessions) {
     return
   }
 
-  let created = 0, errors = 0, lastError = ''
-  for (const s of selected) {
-    // Normalize session_time to HH:MM:SS (same as saveAddSessions does)
+  // Shopify only ever has a product for class 1 of a multi-week series — split out
+  // any discovered product whose title looks like "... | N Week Session" so we can
+  // generate the full class 2..N schedule rows behind it, per studio.
+  const seriesSelected = selected.filter(s => detectWeekSeriesInTitle(s.sessionTitle))
+  const singleSelected = selected.filter(s => !detectWeekSeriesInTitle(s.sessionTitle))
+
+  // Pre-fetch class-series skip dates (universal, all studios) covering the widest
+  // range any series here might need, so weekly classes auto-skip those dates
+  // instead of landing on them — the studio stays open, just no class that week.
+  const skipDateSet = new Set()
+  if (seriesSelected.length) {
+    const maxWeeks = Math.max(...seriesSelected.map(s => detectWeekSeriesInTitle(s.sessionTitle).weeks))
+    const earliestDate = seriesSelected.reduce((min, s) => s.sessionDate < min ? s.sessionDate : min, seriesSelected[0].sessionDate)
+    const latestDate = dateStr(addDays(new Date(earliestDate + 'T12:00:00'), (maxWeeks + 2) * 7))
+    const fetched = await fetchSkipDatesInRange(earliestDate, latestDate)
+    fetched.forEach(d => skipDateSet.add(d))
+  }
+
+  function nextOpenDate(candidateDate) {
+    let d = candidateDate, guard = 0
+    while (skipDateSet.has(d) && guard < 10) {
+      d = dateStr(addDays(new Date(d + 'T12:00:00'), 7))
+      guard++
+    }
+    return d
+  }
+
+  const allRows = []
+
+  // Non-series products — unchanged: one row per studio
+  singleSelected.forEach(s => {
     const rawTime = s.sessionTime || ''
     const sessionTime = rawTime.length === 5 ? rawTime + ':00' : rawTime
+    allStudioIds.forEach(studioId => {
+      allRows.push({ studio_id: studioId, session_date: s.sessionDate, session_time: sessionTime, title: s.sessionTitle, session_type: s.sessionType, capacity: 0, show: true, spaces_left_cache: null })
+    })
+  })
 
-    const rows = allStudioIds.map(studioId => ({
-      studio_id: studioId,
-      session_date: s.sessionDate,
-      session_time: sessionTime,
-      title: s.sessionTitle,
-      session_type: s.sessionType,
-      capacity: 0,
-      show: true,
-      spaces_left_cache: null
-    }))
-    const { data: insertedRows, error } = await sb.from('sessions').upsert(rows, { onConflict: 'studio_id,session_date,session_time,title', ignoreDuplicates: true }).select()
+  // Series products — generate class 1..N per studio, holiday-aware
+  seriesSelected.forEach(s => {
+    const detected = detectWeekSeriesInTitle(s.sessionTitle)
+    const baseTitle = s.sessionTitle.slice(0, detected.matchStart).trim()
+    const rawTime = s.sessionTime || ''
+    const sessionTime = rawTime.length === 5 ? rawTime + ':00' : rawTime
+    allStudioIds.forEach(studioId => {
+      let classDate = s.sessionDate
+      for (let week = 0; week < detected.weeks; week++) {
+        if (week > 0) classDate = nextOpenDate(dateStr(addDays(new Date(classDate + 'T12:00:00'), 7)))
+        const title = week === 0 ? `${baseTitle} | ${detected.weeks} Week Session` : `${baseTitle} | Class ${week + 1} of ${detected.weeks}`
+        allRows.push({ studio_id: studioId, session_date: classDate, session_time: sessionTime, title, session_type: s.sessionType, capacity: 0, show: true, spaces_left_cache: null })
+      }
+    })
+  })
+
+  let created = 0, errors = 0, lastError = ''
+  for (let i = 0; i < allRows.length; i += 500) {
+    const batch = allRows.slice(i, i + 500)
+    const { data: insertedRows, error } = await sb.from('sessions').upsert(batch, { onConflict: 'studio_id,session_date,session_time,title', ignoreDuplicates: true }).select()
     if (error) {
       errors++
       lastError = error.message || JSON.stringify(error)
-      console.error('Insert error for', s.sessionTitle, error)
+      console.error('Insert error for batch starting at', i, error)
     } else {
-      created += (insertedRows || []).length || rows.length
-      ;(insertedRows || rows).forEach(r => scheduleData.push({ ...r, reg: 0 }))
+      created += (insertedRows || []).length || batch.length
+      ;(insertedRows || batch).forEach(r => scheduleData.push({ ...r, reg: 0 }))
     }
-    statusEl.textContent = `Creating... ${selected.indexOf(s)+1}/${selected.length}`
+    statusEl.textContent = `Creating... ${Math.min(i + 500, allRows.length)}/${allRows.length}`
   }
 
   if (errors) {
     statusEl.style.color = '#c0392b'
-    statusEl.textContent = `${created} sessions created · ${errors} error${errors!==1?'s':''}${lastError ? ': ' + lastError : ''}`
+    statusEl.textContent = `${created} sessions created · ${errors} error${errors !== 1 ? 's' : ''}${lastError ? ': ' + lastError : ''}`
     btn.textContent = 'Done'; btn.disabled = true
-    // Don't auto-close on errors so the message is visible; user can close manually
   } else {
+    const seriesNote = seriesSelected.length ? ` (${seriesSelected.length} multi-week series expanded to all classes)` : ''
     statusEl.style.color = '#2e7d32'
-    statusEl.textContent = `✓ ${created} sessions created across all studios!`
+    statusEl.textContent = `✓ ${created} sessions created across all studios!${seriesNote}`
     btn.textContent = 'Done'; btn.disabled = true
     setTimeout(() => { document.getElementById('discover-modal').remove(); renderSchedule() }, 1500)
   }
@@ -6992,6 +7145,36 @@ function showAdminToast(msg, duration = 2500) {
   </div>
 </div>
 
+<!-- Class Series Skip Dates Modal -->
+<div id="skip-dates-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:white;border-radius:12px;width:100%;max-width:480px;max-height:85vh;overflow-y:auto;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem">
+      <h3 style="font-size:15px;font-weight:600;margin:0">📅 Class Series Skip Dates</h3>
+      <button onclick="closeSkipDatesModal()" style="background:none;border:none;font-size:22px;cursor:pointer;color:#888;line-height:1">×</button>
+    </div>
+    <div style="font-size:12px;color:#888;margin-bottom:14px">
+      Dates when weekly kids classes / clay wheel series skip a week (studio still open as normal — this only affects multi-week class series scheduling, both the Add Session series generator and Discover from Shopify). Applies to all studios.
+    </div>
+
+    <div style="display:flex;gap:8px;margin-bottom:14px;align-items:flex-end">
+      <div class="modal-field" style="flex:1">
+        <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Date</label>
+        <input id="skip-date-input" type="date" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;box-sizing:border-box">
+      </div>
+      <div class="modal-field" style="flex:2">
+        <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Note <span style="color:#bbb;text-transform:none">(optional)</span></label>
+        <input id="skip-date-note" type="text" placeholder="e.g. Thanksgiving weekend" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;box-sizing:border-box">
+      </div>
+      <button onclick="addSkipDate()" style="padding:8px 16px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer;white-space:nowrap">Add</button>
+    </div>
+    <div id="skip-dates-status" style="font-size:12px;min-height:16px;margin-bottom:8px"></div>
+
+    <div id="skip-dates-list" style="border:0.5px solid #e0e0d8;border-radius:8px;overflow:hidden">
+      <div class="loading">Loading...</div>
+    </div>
+  </div>
+</div>
+
 <!-- Add Session Modal -->
 <div id="add-session-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
   <div style="background:white;border-radius:12px;width:100%;max-width:580px;max-height:90vh;overflow-y:auto;padding:1.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
@@ -7027,6 +7210,7 @@ function showAdminToast(msg, duration = 2500) {
       <label>Session Title *</label>
       <input id="asm-title" type="text" placeholder="e.g. Mixed Media Kids  (no need to add '| 6 Week Session' — auto-added)" oninput="updateAsmPreview()">
     </div>
+    <div id="asm-series-detect-banner" style="display:none;background:#fff8e1;border:1px solid #f0d98e;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12px;color:#7a6200;display:none;align-items:center;justify-content:space-between;gap:10px"></div>
 
     <!-- Shopify preview -->
     <div style="background:#f5f5f0;border-radius:8px;padding:9px 12px;margin-bottom:14px;font-size:12px">
