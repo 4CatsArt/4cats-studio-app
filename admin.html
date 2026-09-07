@@ -230,6 +230,7 @@ select:focus, input:focus { border-color: #888; }
     <button class="tab-btn" onclick="switchTab('quality')">Data Quality<span id="quality-badge" class="tab-badge" style="display:none"></span></button>
     <button class="tab-btn" onclick="switchTab('tasks')">Tasks</button>
     <button class="tab-btn" onclick="switchTab('announcements')">Announcements</button>
+    <button class="tab-btn" onclick="switchTab('emailtemplates')">📧 Email Templates</button>
     <button class="tab-btn" onclick="switchTab('training')">Training</button>
     <button class="tab-btn" onclick="switchTab('staff')">Staff</button>
     <button class="tab-btn" onclick="switchTab('parties')">Parties</button>
@@ -513,6 +514,16 @@ select:focus, input:focus { border-color: #888; }
       <div class="toolbar-group" style="font-size:11px;color:#888">Messages shown at the top of the studio day view. Urgent messages appear as a red banner.</div>
     </div>
     <div id="announcements-container"><div class="loading">Loading...</div></div>
+  </div>
+  <div class="tab-content" id="tab-emailtemplates">
+    <div class="toolbar">
+      <div class="toolbar-group">
+        <button class="btn btn-primary" onclick="openEmailTemplateModal()">+ New Template</button>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group" style="font-size:11px;color:#888">Reusable templates studios can pick from when emailing a class, a day, or their full customer list. Use <code>{{first_name}}</code>, <code>{{studio_name}}</code>, <code>{{class_name}}</code>, <code>{{date}}</code>, or <code>{{calendar_link}}</code> — these get filled in per recipient when sent.</div>
+    </div>
+    <div id="email-templates-container"><div class="loading">Loading...</div></div>
   </div>
   <div class="tab-content" id="tab-training">
     <!-- Subtab bar -->
@@ -868,7 +879,7 @@ async function initApp() {
 }
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','training','staff','parties','users','clay','reviews','guide','setup','camps','referrals','tables','studiopages','kidsage'][i] === tab))
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','emailtemplates','training','staff','parties','users','clay','reviews','guide','setup','camps','referrals','tables','studiopages','kidsage'][i] === tab))
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'))
   document.getElementById(`tab-${tab}`).classList.add('active')
   if (tab === 'curriculum') loadCurriculum()
@@ -876,6 +887,7 @@ function switchTab(tab) {
   if (tab === 'users') loadUsers()
   if (tab === 'tasks') loadTasksTab()
   if (tab === 'announcements') loadAnnouncementsTab()
+  if (tab === 'emailtemplates') loadEmailTemplatesTab()
   if (tab === 'training') loadTrainingTab()
   if (tab === 'staff') loadStaffTab()
   if (tab === 'parties') loadPartyReport()
@@ -3496,6 +3508,135 @@ async function deleteAnnouncement(id) {
   if (!confirm('Delete this announcement?')) return
   await sb.from('announcements').delete().eq('id', id)
   loadAnnouncementsTab()
+}
+
+
+// ── Email Templates (Admin) ──────────────────────────────────
+
+let editingEmailTemplateId = null
+
+const EMAIL_TEMPLATE_CATEGORY_LABELS = {
+  general: 'General', camp: 'Camp', party: 'Party', closure: 'Closure / Weather',
+  reminder: 'Reminder', promo: 'Promo / Announcement', other: 'Other'
+}
+
+async function loadEmailTemplatesTab() {
+  const container = document.getElementById('email-templates-container')
+  const { data, error } = await sb.from('email_templates').select('*').order('category').order('name')
+  if (error || !data?.length) {
+    container.innerHTML = '<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No email templates yet. Create one to get started.</div>'
+    return
+  }
+
+  const studioName = id => {
+    for (const [k, v] of Object.entries(STUDIO_VARIANT_MAP)) { if (k === id) return v }
+    return id
+  }
+
+  const rows = data.map(t => {
+    const ids = t.studio_ids || []
+    const target = ids.length === 0
+      ? '<em style="color:#888">All studios</em>'
+      : ids.length <= 2 ? ids.map(studioName).join(', ')
+      : `${ids.slice(0,2).map(studioName).join(', ')} +${ids.length-2} more`
+    const catLabel = EMAIL_TEMPLATE_CATEGORY_LABELS[t.category] || t.category || 'General'
+    return `<tr style="border-bottom:0.5px solid #f5f5f0" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
+      <td style="padding:10px 14px"><strong style="font-size:13px">${t.name}</strong><div style="font-size:11px;color:#888;margin-top:2px">${(t.subject||'').slice(0,80)}${(t.subject||'').length>80?'…':''}</div></td>
+      <td style="padding:10px 14px"><span style="background:#e8e8f0;color:#5b4fcf;font-size:10px;padding:2px 6px;border-radius:4px">${catLabel}</span></td>
+      <td style="padding:10px 14px;font-size:12px">${target}</td>
+      <td style="padding:10px 14px;white-space:nowrap">
+        <button class="btn" onclick="openEmailTemplateModal('${t.id}')" style="font-size:11px;padding:4px 10px">Edit</button>
+      </td>
+    </tr>`
+  }).join('')
+
+  container.innerHTML = `<div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden">
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
+        <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Template</th>
+        <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Category</th>
+        <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Available To</th>
+        <th style="padding:10px 14px"></th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`
+}
+
+async function openEmailTemplateModal(id = null) {
+  editingEmailTemplateId = id
+  const modal = document.getElementById('email-template-modal')
+
+  if (id) {
+    document.getElementById('et-modal-title').textContent = 'Edit Email Template'
+    document.getElementById('et-delete-wrap').style.display = 'block'
+    const { data } = await sb.from('email_templates').select('*').eq('id', id).single()
+    if (data) {
+      document.getElementById('et-name').value = data.name || ''
+      document.getElementById('et-category').value = data.category || 'general'
+      document.getElementById('et-subject').value = data.subject || ''
+      document.getElementById('et-body').value = data.body || ''
+      buildStudioPicker('et-studio-picker', data.studio_ids || [])
+    }
+  } else {
+    document.getElementById('et-modal-title').textContent = 'New Email Template'
+    document.getElementById('et-delete-wrap').style.display = 'none'
+    document.getElementById('et-name').value = ''
+    document.getElementById('et-category').value = 'general'
+    document.getElementById('et-subject').value = ''
+    document.getElementById('et-body').value = ''
+    buildStudioPicker('et-studio-picker', [])
+  }
+
+  modal.style.display = 'flex'
+}
+
+function closeEmailTemplateModal() {
+  document.getElementById('email-template-modal').style.display = 'none'
+  editingEmailTemplateId = null
+}
+
+async function saveEmailTemplate() {
+  const btn = document.getElementById('et-save-btn')
+  const name = document.getElementById('et-name').value.trim()
+  const subject = document.getElementById('et-subject').value.trim()
+  const body = document.getElementById('et-body').value.trim()
+  if (!name) { alert('Please enter a template name.'); return }
+  if (!subject) { alert('Please enter a subject.'); return }
+  if (!body) { alert('Please enter a message.'); return }
+
+  const studioIds = getStudioPickerSelection('et-studio-picker')
+
+  const payload = {
+    name,
+    category: document.getElementById('et-category').value,
+    subject,
+    body,
+    studio_ids: studioIds,
+    updated_at: new Date().toISOString()
+  }
+
+  btn.textContent = 'Saving...'
+  btn.disabled = true
+
+  const { error } = editingEmailTemplateId
+    ? await sb.from('email_templates').update(payload).eq('id', editingEmailTemplateId)
+    : await sb.from('email_templates').insert({ ...payload, created_by: currentUser?.id })
+
+  btn.textContent = 'Save Template'
+  btn.disabled = false
+
+  if (error) { alert('Error saving: ' + error.message); return }
+  closeEmailTemplateModal()
+  loadEmailTemplatesTab()
+}
+
+async function deleteEmailTemplate() {
+  if (!editingEmailTemplateId) return
+  if (!confirm('Delete this email template? Studios will no longer see it in their template list.')) return
+  await sb.from('email_templates').delete().eq('id', editingEmailTemplateId)
+  closeEmailTemplateModal()
+  loadEmailTemplatesTab()
 }
 
 
@@ -6452,6 +6593,60 @@ function showAdminToast(msg, duration = 2500) {
     <div style="display:flex;gap:8px;margin-top:20px;justify-content:flex-end">
       <button onclick="closeTemplateModal()" style="padding:9px 18px;border:1px solid #d0d0c8;border-radius:8px;background:none;font-size:13px;cursor:pointer">Cancel</button>
       <button id="tmpl-save-btn" onclick="saveTemplate()" style="padding:9px 18px;background:#1a1a2e;color:white;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">Save Template</button>
+    </div>
+  </div>
+</div>
+
+<!-- Email Template Modal -->
+<div id="email-template-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:white;border-radius:14px;padding:24px;width:620px;max-width:95vw;max-height:90vh;overflow-y:auto">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+      <div id="et-modal-title" style="font-size:16px;font-weight:700">New Email Template</div>
+      <button onclick="closeEmailTemplateModal()" style="background:none;border:none;font-size:22px;color:#aaa;cursor:pointer;line-height:1">&#215;</button>
+    </div>
+    <div style="display:grid;gap:14px">
+
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Template Name *</div>
+        <input type="text" id="et-name" placeholder="e.g. Weather Closure Notice" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none">
+      </div>
+
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Category</div>
+        <select id="et-category" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:13px;outline:none;background:white">
+          <option value="general">General</option>
+          <option value="camp">Camp</option>
+          <option value="party">Party</option>
+          <option value="closure">Closure / Weather</option>
+          <option value="reminder">Reminder</option>
+          <option value="promo">Promo / Announcement</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Subject *</div>
+        <input type="text" id="et-subject" placeholder="e.g. Important update about your class" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none">
+      </div>
+
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Message *</div>
+        <textarea id="et-body" placeholder="Hi {{first_name}},..." style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none;resize:vertical;min-height:200px;font-family:inherit"></textarea>
+        <div style="font-size:11px;color:#aaa;margin-top:4px">Blank lines become paragraph breaks. Tokens: <code>{{first_name}}</code>, <code>{{studio_name}}</code>, <code>{{class_name}}</code>, <code>{{date}}</code>, <code>{{calendar_link}}</code>.</div>
+      </div>
+
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Available to</div>
+        <div id="et-studio-picker"></div>
+      </div>
+
+    </div>
+    <div id="et-delete-wrap" style="display:none;margin-top:16px;padding-top:16px;border-top:0.5px solid #f0f0e8">
+      <button onclick="deleteEmailTemplate()" style="padding:7px 14px;border:1px solid #ffccbc;background:#fff3e0;color:#e65100;border-radius:8px;font-size:12px;cursor:pointer">🗑 Delete Template</button>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:20px;justify-content:flex-end">
+      <button onclick="closeEmailTemplateModal()" style="padding:9px 18px;border:1px solid #d0d0c8;border-radius:8px;background:none;font-size:13px;cursor:pointer">Cancel</button>
+      <button id="et-save-btn" onclick="saveEmailTemplate()" style="padding:9px 18px;background:#1a1a2e;color:white;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">Save Template</button>
     </div>
   </div>
 </div>
