@@ -2481,6 +2481,25 @@ function isSeriesClass2Plus(title) {
   return /\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(title)
 }
 
+function isSeriesClass1(title) {
+  return !isSeriesClass2Plus(title) && /\|\s*\d+\s*week\s*session/i.test(title || '')
+}
+
+function getSeriesTotalWeeks(title) {
+  const m = (title || '').match(/(\d+)\s*week\s*session/i)
+  return m ? m[1] : null
+}
+
+// Display-only title that shows "Class 1 of N" instead of "N Week Session",
+// matching how class 2+ sessions already read "Class 2 of N", etc.
+function getSeriesDisplayTitle(title) {
+  if (isSeriesClass1(title)) {
+    const weeks = getSeriesTotalWeeks(title)
+    if (weeks) return title.replace(/\|\s*\d+\s*week\s*session/i, `| Class 1 of ${weeks}`)
+  }
+  return title
+}
+
 function getSeriesClass1Title(title) {
   return title.replace(/\s*-?\s*class\s+\d+\s+of\s+\d+/i, '').trim()
 }
@@ -2541,7 +2560,7 @@ function getListType(sessionType, sessionTitle) {
   if (sessionType === 'glazing') return 'glazing'
   if (sessionType === 'party') return 'party'
   if (t.includes('camp') || t.includes('pa day') || t.includes('pd day') || t.includes('pa/pd') || t.includes('no school')) return 'camp'
-  if (isSeriesClass2Plus(sessionTitle)) return 'series'
+  if (isSeriesClass2Plus(sessionTitle) || isSeriesClass1(sessionTitle)) return 'series'
   return 'workshop'
 }
 
@@ -3751,6 +3770,23 @@ async function loadDay2View() {
     })
   }
 
+  // Series class 2+ have no bookings of their own — copy the roster count from Class 1
+  // so the day view shows how many kids are actually enrolled in each subsequent class.
+  for (const s of preFiltered) {
+    if (isSeriesClass2Plus(s.title) && !bookingCountsD2[s.id]) {
+      const class1Title = getSeriesClass1Title(s.title)
+      const class1Id = await findClass1SessionId(currentStudioId, s.session_time, class1Title, s.session_date)
+      if (class1Id) {
+        if (bookingCountsD2[class1Id] !== undefined) {
+          bookingCountsD2[s.id] = bookingCountsD2[class1Id]
+        } else {
+          const { data: c1bookings } = await sb.from('bookings').select('qty').eq('session_id', class1Id).gt('qty', 0).is('returned_at', null)
+          if (c1bookings) bookingCountsD2[s.id] = c1bookings.reduce((sum, b) => sum + (b.qty || 0), 0)
+        }
+      }
+    }
+  }
+
   await Promise.all([loadTaskTemplates(currentStudioId), loadStudioStaff(currentStudioId)])
   await autoGenerateRepeatingTasks(currentStudioId, today)
 
@@ -3943,7 +3979,7 @@ async function loadDay2View() {
     const allRows = filtered.map(s => {
       const isParty = s.session_type === 'party'
       const time = fmtTime(s.session_time)
-      const titleClean = s.title.replace(/^\*?\d+[:\d]*[ap]m\s+\w+\s+\w+\s*\|\s*/i, '')
+      const titleClean = getSeriesDisplayTitle(s.title).replace(/^\*?\d+[:\d]*[ap]m\s+\w+\s+\w+\s*\|\s*/i, '')
       const badge = getBadgeClass(s.session_type)
 
       if (!isParty) {
@@ -5744,7 +5780,7 @@ async function showBookings(sessionId, title, dateLabel, sessionType, sessionTim
     overlay.innerHTML = `
       <div class="overlay-card">
         <div class="overlay-header">
-          <div><div class="overlay-title">${title}</div><div class="overlay-sub">${sessionTime ? fmtTime(sessionTime) + ' — ' : ''}${dateLabel}</div></div>
+          <div><div class="overlay-title">${getSeriesDisplayTitle(title)}</div><div class="overlay-sub">${sessionTime ? fmtTime(sessionTime) + ' — ' : ''}${dateLabel}</div></div>
           <button class="close-btn no-print" onclick="this.closest('.overlay').remove()">&#215;</button>
         </div>
         <p style="color:#888;padding:2rem 0;text-align:center">No bookings yet for this session.</p>
@@ -5767,7 +5803,7 @@ async function showBookings(sessionId, title, dateLabel, sessionType, sessionTim
     <div class="overlay-card" id="print-area">
       <div class="overlay-header">
         <div>
-          <div class="overlay-title">${title}</div>
+          <div class="overlay-title">${getSeriesDisplayTitle(title)}</div>
           <div class="overlay-sub">${sessionTime ? fmtTime(sessionTime) + ' — ' : ''}${dateLabel} &mdash; ${total} registered${campDayLabel ? ' &mdash; <strong>' + campDayLabel + '</strong>' : ''}</div>
         </div>
         <div style="display:flex;gap:8px;align-items:center">
