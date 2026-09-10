@@ -4112,8 +4112,9 @@ async function loadDay2View() {
     <strong style="font-size:12px;color:#555">✉️ Email:</strong>
     <button class="d2-email-bar-btn primary" id="d2-email-selected-btn" onclick="openEmailBlastModal('classes')" ${selectedCount ? '' : 'disabled'}>Selected Classes (<span id="d2-selected-count">${selectedCount}</span>)</button>
     <button class="d2-email-bar-btn" onclick="openEmailBlastModal('day')">Everyone Today</button>
-    <!-- All Studio Customers temporarily hidden — remove this comment and the style="display:none" below to bring it back -->
+    <!-- All Studio Customers (Shopify-tag based) temporarily hidden — remove this comment and the style="display:none" below to bring it back -->
     <button class="d2-email-bar-btn" onclick="openEmailBlastModal('all_customers')" style="display:none">All Studio Customers</button>
+    <button class="d2-email-bar-btn" onclick="openEmailBlastModal('studio_all')">📇 Anyone Who's Booked</button>
     <button class="d2-email-bar-btn" onclick="openEmailHistoryModal()">📜 History</button>
   </div>`
 
@@ -4256,6 +4257,10 @@ async function openEmailBlastModal(recipientType) {
     ebState.sessionIds = ids
     ebState.className = ''
     titleEl.textContent = '✉️ Email Everyone Today'
+  } else if (recipientType === 'studio_all') {
+    ebState.sessionIds = []
+    ebState.className = ''
+    titleEl.textContent = "✉️ Email Anyone Who's Booked"
   } else {
     ebState.sessionIds = []
     ebState.className = ''
@@ -4266,6 +4271,8 @@ async function openEmailBlastModal(recipientType) {
 
   if (recipientType === 'all_customers') {
     renderAllCustomersBody()
+  } else if (recipientType === 'studio_all') {
+    await loadAllTimeRecipients()
   } else {
     await loadClassDayRecipients()
   }
@@ -4310,6 +4317,60 @@ async function loadClassDayRecipients() {
     <div style="margin-bottom:14px"><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Message</div>
     <textarea id="eb-message" style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none;resize:vertical;min-height:160px;font-family:inherit">${ebDefaultMessage()}</textarea>
     <div style="font-size:11px;color:#aaa;margin-top:4px">Blank lines become paragraph breaks. <code>**text**</code> makes it bold. Tokens: <code>{{first_name}}</code>, <code>{{studio_name}}</code>, <code>{{class_name}}</code>, <code>{{date}}</code>, <code>{{calendar_link}}</code>. Any plain link you paste in gets automatically tagged and made clickable.</div></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+    <button id="eb-send-btn" onclick="sendEmailBlast()" style="padding:10px 20px;background:#1a1a1a;color:white;border:none;border-radius:7px;font-size:14px;cursor:pointer;font-weight:500">Send to ${recipients.length} Recipient${recipients.length !== 1 ? 's' : ''}</button>
+    </div>
+    <div id="eb-send-status" style="font-size:13px;margin-top:10px"></div>`
+}
+
+async function loadAllTimeRecipients() {
+  const body = document.getElementById('eb-body')
+  // Every booking ever placed at this studio — regardless of date, session,
+  // or whether it was later cancelled — since the point is identifying
+  // anyone who's ever been a customer here, not who's currently active.
+  // bookings has no direct studio_id column, so go via sessions first —
+  // same pattern used everywhere else in this file.
+  const { data: allSessions } = await sb.from('sessions').select('id').eq('studio_id', currentStudioId)
+  const allSessionIds = (allSessions || []).map(s => s.id)
+  if (!allSessionIds.length) {
+    body.innerHTML = '<div style="padding:12px;font-size:13px;color:#888">No sessions found for this studio.</div>'
+    return
+  }
+  const { data: bookings } = await sb.from('bookings')
+    .select('customer_email, customer_name')
+    .in('session_id', allSessionIds)
+
+  const seen = {}
+  const recipients = []
+  ;(bookings || []).forEach(b => {
+    const key = (b.customer_email || '').trim().toLowerCase()
+    if (!key) return
+    if (!seen[key]) { seen[key] = { email: b.customer_email, name: b.customer_name || '' }; recipients.push(seen[key]) }
+  })
+  recipients.sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+  ebState.recipients = recipients
+
+  const skippedCount = (bookings || []).filter(b => !b.customer_email).length
+
+  body.innerHTML = `<div style="font-size:13px;color:#555;margin-bottom:10px">
+      <strong>${recipients.length} recipient${recipients.length !== 1 ? 's' : ''}</strong> found — everyone who's ever booked at this studio
+      ${skippedCount ? ` <span style="color:#c00">(${skippedCount} booking${skippedCount !== 1 ? 's' : ''} skipped — no email on file)</span>` : ''}
+      ${recipients.length ? ` &middot; <a href="#" onclick="ebToggleAllRecipients(true);return false" style="color:#555">select all</a> / <a href="#" onclick="ebToggleAllRecipients(false);return false" style="color:#555">none</a>` : ''}
+    </div>
+    <div style="max-height:220px;overflow:auto;border:0.5px solid #e0e0d8;border-radius:8px;margin-bottom:14px">
+      ${recipients.length
+        ? recipients.map((r, i) => `<label style="display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:13px;border-bottom:0.5px solid #f0f0e8;cursor:pointer">
+            <input type="checkbox" class="eb-recipient-check" data-idx="${i}" checked onchange="ebUpdateSendLabel()">
+            <span style="flex:1">${escHtml(r.name)} <span style="color:#888">${escHtml(r.email)}</span></span>
+          </label>`).join('')
+        : '<div style="padding:12px;font-size:13px;color:#888">No bookings with an email on file found for this studio.</div>'}
+    </div>
+    ${ebTemplatePickerHtml()}
+    <div style="margin-bottom:10px"><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Subject</div>
+    <input id="eb-subject" type="text" value="${ebDefaultSubject(ebState.recipientType)}" style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none"></div>
+    <div style="margin-bottom:14px"><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Message</div>
+    <textarea id="eb-message" style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none;resize:vertical;min-height:160px;font-family:inherit">${ebDefaultMessage()}</textarea>
+    <div style="font-size:11px;color:#aaa;margin-top:4px">Blank lines become paragraph breaks. <code>**text**</code> makes it bold. Tokens: <code>{{first_name}}</code>, <code>{{studio_name}}</code>, <code>{{date}}</code>, <code>{{calendar_link}}</code>. Any plain link you paste in gets automatically tagged and made clickable.</div></div>
     <div style="display:flex;justify-content:flex-end;gap:8px">
     <button id="eb-send-btn" onclick="sendEmailBlast()" style="padding:10px 20px;background:#1a1a1a;color:white;border:none;border-radius:7px;font-size:14px;cursor:pointer;font-weight:500">Send to ${recipients.length} Recipient${recipients.length !== 1 ? 's' : ''}</button>
     </div>
