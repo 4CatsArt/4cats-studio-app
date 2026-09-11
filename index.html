@@ -2532,6 +2532,64 @@ async function findClass1SessionId(studioId, sessionTime, seriesTitle, sessionDa
   return bookings?.length ? bookings[0].session_id : candidates[0].id
 }
 
+// Which week number a session row represents within its series ("Class 3 of 12" -> 3,
+// the "N Week Session" week-1 row -> 1). Used to figure out which purchased anchor(s)
+// cover a given week.
+function getSeriesWeekNumber(title) {
+  if (isSeriesClass1(title)) return 1
+  const m = (title || '').match(/\bclass\s+(\d+)\s+of\s+\d+/i)
+  return m ? parseInt(m[1], 10) : null
+}
+
+// Returns the session_id(s) whose bookings belong on this row's roster.
+// Migrated series (series_id populated, e.g. Lawren Harris, or any future entry-point
+// series) sum every anchor row (enrollment_span_weeks not null) whose purchased span
+// covers this row's week — this is what lets a mid-series entry point's kids show up
+// starting at their entry week without appearing on earlier weeks, and what lets a
+// split series (Part 1 / Part 2 style) keep each half's kids on only their own weeks.
+// Series that haven't been migrated (series_id still null) fall back to the original
+// single class-1 lookup so existing classes keep behaving exactly as before.
+async function getSeriesAnchorSessionIds(s) {
+  if (!isSeriesClass2Plus(s.title) && !isSeriesClass1(s.title)) return [s.id]
+
+  if (s.series_id) {
+    const targetWeek = getSeriesWeekNumber(s.title)
+    if (targetWeek == null) return [s.id]
+    const { data: seriesSessions } = await sb
+      .from('sessions')
+      .select('id, title, enrollment_span_weeks')
+      .eq('series_id', s.series_id)
+    const anchors = (seriesSessions || []).filter(ss => ss.enrollment_span_weeks)
+    const covering = anchors.filter(a => {
+      const aw = getSeriesWeekNumber(a.title)
+      return aw != null && targetWeek >= aw && targetWeek < aw + a.enrollment_span_weeks
+    })
+    return covering.length ? covering.map(a => a.id) : [s.id]
+  }
+
+  if (!isSeriesClass2Plus(s.title)) return [s.id]
+  const class1Title = getSeriesClass1Title(s.title)
+  const class1Id = await findClass1SessionId(currentStudioId, s.session_time, class1Title, s.session_date)
+  return class1Id ? [class1Id] : []
+}
+
+// Sums booking qty across every anchor covering this row's week. Uses whatever's
+// already in bookingCountsMap (populated from the day/week's own bookings query)
+// to avoid an extra round-trip when the anchor is already in view.
+async function getSeriesRosterCount(s, bookingCountsMap) {
+  const ids = await getSeriesAnchorSessionIds(s)
+  let total = 0
+  for (const id of ids) {
+    if (bookingCountsMap[id] !== undefined) {
+      total += bookingCountsMap[id]
+    } else {
+      const { data } = await sb.from('bookings').select('qty').eq('session_id', id).gt('qty', 0).is('returned_at', null)
+      if (data) total += data.reduce((sum, b) => sum + (b.qty || 0), 0)
+    }
+  }
+  return total
+}
+
 function buildCurriculumLinks(sessionTitle, sessionDate, sessionTime) {
   const links = getCurriculumLinks(sessionTitle, sessionDate)
   const handle = buildShopifyHandle(sessionDate, sessionTime, sessionTitle)
@@ -3771,20 +3829,12 @@ async function loadDay2View() {
     })
   }
 
-  // Series class 2+ have no bookings of their own — copy the roster count from Class 1
-  // so the day view shows how many kids are actually enrolled in each subsequent class.
+  // Series class 2+ have no bookings of their own (unless they're an entry-point
+  // anchor) — sum in the roster count from whichever anchor(s) cover this week so
+  // the day view shows how many kids are actually enrolled in each subsequent class.
   for (const s of preFiltered) {
-    if (isSeriesClass2Plus(s.title) && !bookingCountsD2[s.id]) {
-      const class1Title = getSeriesClass1Title(s.title)
-      const class1Id = await findClass1SessionId(currentStudioId, s.session_time, class1Title, s.session_date)
-      if (class1Id) {
-        if (bookingCountsD2[class1Id] !== undefined) {
-          bookingCountsD2[s.id] = bookingCountsD2[class1Id]
-        } else {
-          const { data: c1bookings } = await sb.from('bookings').select('qty').eq('session_id', class1Id).gt('qty', 0).is('returned_at', null)
-          if (c1bookings) bookingCountsD2[s.id] = c1bookings.reduce((sum, b) => sum + (b.qty || 0), 0)
-        }
-      }
+    if (isSeriesClass2Plus(s.title) && (s.series_id || !bookingCountsD2[s.id])) {
+      bookingCountsD2[s.id] = await getSeriesRosterCount(s, bookingCountsD2)
     }
   }
 
@@ -4865,19 +4915,10 @@ async function loadDayView() {
       ((bookingCounts[s.id] || 0) > 0 || s.capacity === null || s.capacity > 0 || isSeriesClass2Plus(s.title))
     )
 
-    // Series class 2+ — copy booking count from class 1
+    // Series class 2+ — sum roster count from whichever anchor(s) cover this week
     for (const s of preFiltered) {
-      if (isSeriesClass2Plus(s.title) && !bookingCounts[s.id]) {
-        const class1Title = getSeriesClass1Title(s.title)
-        const class1Id = await findClass1SessionId(currentStudioId, s.session_time, class1Title, s.session_date)
-        if (class1Id) {
-          if (bookingCounts[class1Id] !== undefined) {
-            bookingCounts[s.id] = bookingCounts[class1Id]
-          } else {
-            const { data: c1bookings } = await sb.from('bookings').select('qty').eq('session_id', class1Id).gt('qty', 0).is('returned_at', null)
-            if (c1bookings) bookingCounts[s.id] = c1bookings.reduce((sum, b) => sum + (b.qty || 0), 0)
-          }
-        }
+      if (isSeriesClass2Plus(s.title) && (s.series_id || !bookingCounts[s.id])) {
+        bookingCounts[s.id] = await getSeriesRosterCount(s, bookingCounts)
       }
     }
   }
@@ -5340,19 +5381,10 @@ async function loadTableView() {
   const { data: bookings } = await sb.from('bookings').select('session_id, qty').in('session_id', sessionIds).gt('qty', 0).is('returned_at', null)
   if (bookings) bookings.forEach(b => { bookingCounts[b.session_id] = (bookingCounts[b.session_id] || 0) + (b.qty || 0) })
 
-  // For series class 2+, inherit reg count from class 1
+  // For series class 2+, sum reg count from whichever anchor(s) cover this week
   for (const s of allFiltered) {
-    if (isSeriesClass2Plus(s.title) && !bookingCounts[s.id]) {
-      const class1Title = getSeriesClass1Title(s.title)
-      const class1Id = await findClass1SessionId(currentStudioId, s.session_time, class1Title, s.session_date)
-      if (class1Id) {
-        if (bookingCounts[class1Id] !== undefined) {
-          bookingCounts[s.id] = bookingCounts[class1Id]
-        } else {
-          const { data: c1bookings } = await sb.from('bookings').select('qty').eq('session_id', class1Id).gt('qty', 0).is('returned_at', null)
-          if (c1bookings) bookingCounts[s.id] = c1bookings.reduce((sum, b) => sum + (b.qty || 0), 0)
-        }
-      }
+    if (isSeriesClass2Plus(s.title) && (s.series_id || !bookingCounts[s.id])) {
+      bookingCounts[s.id] = await getSeriesRosterCount(s, bookingCounts)
     }
   }
 
@@ -5779,15 +5811,17 @@ async function deleteSignin(entryId, sessionId) {
 }
 
 async function showBookings(sessionId, title, dateLabel, sessionType, sessionTime) {
-  let bookingSessionId = sessionId
-  if (isSeriesClass2Plus(title)) {
-    const class1Title = getSeriesClass1Title(title)
-    const class1Id = await findClass1SessionId(currentStudioId, sessionTime, class1Title, dateLabel)
-    if (class1Id) bookingSessionId = class1Id
+  let bookingSessionIds = [sessionId]
+  if (isSeriesClass2Plus(title) || isSeriesClass1(title)) {
+    const { data: thisSession } = await sb.from('sessions').select('id, title, series_id').eq('id', sessionId).single()
+    if (thisSession) {
+      bookingSessionIds = await getSeriesAnchorSessionIds(thisSession)
+      if (!bookingSessionIds.length) bookingSessionIds = [sessionId]
+    }
   }
   const { data: bookings } = await sb.from('bookings')
     .select('id, customer_name, customer_email, customer_phone, qty, estimated_attendance, shopify_order_name, booked_at, raw_payload, event_date, order_note, aftercare, early_arrival, returned_at, project_preference, reason_for_gathering, hot_chocolate_qty, candy_bag_qty, customer_booking_number')
-    .eq('session_id', bookingSessionId).order('booked_at')
+    .in('session_id', bookingSessionIds).order('booked_at')
 
   const seenOrders = new Set()
   const bookingsToUse = (bookings || []).filter(b => {
@@ -5818,7 +5852,7 @@ async function showBookings(sessionId, title, dateLabel, sessionType, sessionTim
   }
 
   const listType = getListType(sessionType, title)
-  const attendanceSessionId = listType === 'series' ? sessionId : bookingSessionId
+  const attendanceSessionId = sessionId
 
   // Load camp day from session_staff for camp sessions
   let campDayLabel = ''
