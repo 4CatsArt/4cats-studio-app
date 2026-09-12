@@ -1972,6 +1972,19 @@ function parseSeriesTitle(title) {
   return null // class 1 — base title with no class designation
 }
 
+// Like parseSeriesTitle, but also recognizes the week-1 form ("... | N Week Session")
+// and returns the trailing qualifier (e.g. "| Ages 9 -15") separately so it can be
+// reattached when generating further weeks. Used by entry-point detection during
+// Shopify discovery, where we need to read an EXISTING row's title (which could be
+// either form) to learn its true position/total within the original series.
+function parseAnyStructuredSeriesTitle(title) {
+  const classMatch = (title || '').match(/^(.+?)\s*\|\s*Class\s+(\d+)\s+of\s+(\d+)\s*(\|.*)?$/i)
+  if (classMatch) return { baseTitle: classMatch[1].trim(), weekNum: parseInt(classMatch[2]), totalWeeks: parseInt(classMatch[3]), suffix: (classMatch[4] || '').trim() }
+  const wk1Match = (title || '').match(/^(.+?)\s*\|\s*(\d+)\s*[Ww]eek\s*[Ss]ession\s*(\|.*)?$/i)
+  if (wk1Match) return { baseTitle: wk1Match[1].trim(), weekNum: 1, totalWeeks: parseInt(wk1Match[2]), suffix: (wk1Match[3] || '').trim() }
+  return null
+}
+
 // Find subsequent sessions in the same series (class N+1, N+2 … at same time, any studio)
 function findSubsequentSeriesSessions(baseTitle, fromClassNum, totalClasses, sessionTime, studioIds) {
   const results = []
@@ -3095,24 +3108,81 @@ async function createDiscoveredSessions(newSessions) {
     })
   })
 
-  // Series products — generate class 1..N per studio, holiday-aware
-  seriesSelected.forEach(s => {
+  // Series products — generate class 1..N per studio, holiday-aware. Also detects
+  // "entry point" collisions: if a target date+time+studio slot already has an existing
+  // session (left over from an earlier, larger series this product is actually continuing
+  // — e.g. a new "10 Week Session" product starting at week 3 of an existing 12-week
+  // class), we never insert a competing duplicate row there. We skip it and flag it for a
+  // manual roster-linking follow-up (assigning series_id + enrollment_span_weeks) rather
+  // than silently guessing at that wiring — same pattern used for Lawren Harris.
+  const entryPointFlags = []
+
+  for (const s of seriesSelected) {
     const detected = detectWeekSeriesInTitle(s.sessionTitle)
     const baseTitle = s.sessionTitle.slice(0, detected.matchStart).trim()
-    // Reattach any trailing qualifier (e.g. "| Ages 9 -15") to every week's title — without
-    // this, classes like Clay Wheel Session lose their age-group suffix on weeks 2+.
     const suffix = detected.suffix ? ` ${detected.suffix}` : ''
     const rawTime = s.sessionTime || ''
     const sessionTime = rawTime.length === 5 ? rawTime + ':00' : rawTime
+
+    // Compute the full target date sequence once — same calendar dates for every studio
+    const targetDates = []
+    let d = s.sessionDate
+    for (let week = 0; week < detected.weeks; week++) {
+      if (week > 0) d = nextOpenDate(dateStr(addDays(new Date(d + 'T12:00:00'), 7)))
+      targetDates.push(d)
+    }
+
+    // Look up any existing rows already sitting at these date+time slots, across all studios
+    const { data: existingAtSlots } = await sb.from('sessions')
+      .select('id, studio_id, session_date, title')
+      .eq('session_time', sessionTime)
+      .in('session_date', targetDates)
+    const existingByStudioDate = {}
+    ;(existingAtSlots || []).forEach(r => { existingByStudioDate[`${r.studio_id}|${r.session_date}`] = r })
+
     allStudioIds.forEach(studioId => {
-      let classDate = s.sessionDate
-      for (let week = 0; week < detected.weeks; week++) {
-        if (week > 0) classDate = nextOpenDate(dateStr(addDays(new Date(classDate + 'T12:00:00'), 7)))
-        const title = week === 0 ? `${baseTitle} | ${detected.weeks} Week Session${suffix}` : `${baseTitle} | Class ${week + 1} of ${detected.weeks}${suffix}`
-        allRows.push({ studio_id: studioId, session_date: classDate, session_time: sessionTime, title, session_type: s.sessionType, capacity: 0, show: true, spaces_left_cache: null })
+      const anchorExisting = existingByStudioDate[`${studioId}|${targetDates[0]}`]
+      const anchorGeneratedTitle = `${baseTitle} | ${detected.weeks} Week Session${suffix}`
+      const isEntryPoint = !!(anchorExisting && anchorExisting.title !== anchorGeneratedTitle)
+
+      let originalInfo = null
+      if (isEntryPoint) {
+        originalInfo = parseAnyStructuredSeriesTitle(anchorExisting.title)
+        if (!originalInfo) {
+          // Existing row at week 1's slot doesn't look like a recognizable series title —
+          // don't guess at the numbering, just skip this slot and flag for manual review.
+          entryPointFlags.push({ studioId, seriesTitle: s.sessionTitle, sessionTime, anchorDate: targetDates[0], existingTitle: anchorExisting.title, unrecognized: true })
+          return
+        }
+      }
+
+      let reusedCount = 0, createdCount = 0
+      targetDates.forEach((date, i) => {
+        const existing = existingByStudioDate[`${studioId}|${date}`]
+        if (isEntryPoint) {
+          if (existing) { reusedCount++; return } // already part of the original series — don't duplicate
+          // Extending past what currently exists — continue the ORIGINAL series' numbering,
+          // not this product's own 1..N count.
+          const originalWeekNum = originalInfo.weekNum + i
+          const oSuffix = originalInfo.suffix ? ` ${originalInfo.suffix}` : ''
+          const title = originalWeekNum === 1
+            ? `${originalInfo.baseTitle} | ${originalInfo.totalWeeks} Week Session${oSuffix}`
+            : `${originalInfo.baseTitle} | Class ${originalWeekNum} of ${originalInfo.totalWeeks}${oSuffix}`
+          allRows.push({ studio_id: studioId, session_date: date, session_time: sessionTime, title, session_type: s.sessionType, capacity: 0, show: true, spaces_left_cache: null })
+          createdCount++
+        } else {
+          if (existing) return // identical to what upsert dedup would collapse anyway
+          const title = i === 0 ? `${baseTitle} | ${detected.weeks} Week Session${suffix}` : `${baseTitle} | Class ${i + 1} of ${detected.weeks}${suffix}`
+          allRows.push({ studio_id: studioId, session_date: date, session_time: sessionTime, title, session_type: s.sessionType, capacity: 0, show: true, spaces_left_cache: null })
+          createdCount++
+        }
+      })
+
+      if (isEntryPoint) {
+        entryPointFlags.push({ studioId, seriesTitle: s.sessionTitle, sessionTime, anchorDate: targetDates[0], existingTitle: anchorExisting.title, reusedRowsCount: reusedCount, newRowsCreated: createdCount })
       }
     })
-  })
+  }
 
   let created = 0, errors = 0, lastError = ''
   for (let i = 0; i < allRows.length; i += 500) {
@@ -3138,7 +3208,23 @@ async function createDiscoveredSessions(newSessions) {
     statusEl.style.color = '#2e7d32'
     statusEl.textContent = `✓ ${created} sessions created across all studios!${seriesNote}`
     btn.textContent = 'Done'; btn.disabled = true
-    setTimeout(() => { document.getElementById('discover-modal').remove(); renderSchedule() }, 1500)
+
+    if (entryPointFlags.length) {
+      const studioNameFor = id => allStudios.find(x => x.id === id)?.name || id
+      const lines = entryPointFlags.map(f => {
+        const studioName = studioNameFor(f.studioId)
+        if (f.unrecognized) {
+          return `⚠️ ${studioName}: found an existing session at ${f.anchorDate} ${f.sessionTime} ("${f.existingTitle}") that doesn't look like a recognized series title — skipped entirely, needs manual review.`
+        }
+        return `🔗 ${studioName}: this looks like an entry point into an existing series (found "${f.existingTitle}" already at ${f.anchorDate}). Reused ${f.reusedRowsCount} existing week(s), created ${f.newRowsCreated} new week(s). Needs roster linking (series_id + enrollment_span_weeks) before it'll display correctly — flag this to Claude.`
+      })
+      const banner = document.createElement('div')
+      banner.style.cssText = 'margin-top:10px;padding:10px 12px;background:#fff8e1;border:1px solid #ffe082;border-radius:8px;font-size:12px;color:#6d4c00;white-space:pre-wrap'
+      banner.textContent = lines.join('\n\n')
+      statusEl.parentNode.insertBefore(banner, statusEl.nextSibling)
+    }
+
+    setTimeout(() => { document.getElementById('discover-modal').remove(); renderSchedule() }, entryPointFlags.length ? 999999999 : 1500)
   }
 }
 
