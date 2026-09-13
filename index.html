@@ -3859,6 +3859,43 @@ async function loadDay2View() {
   const nonPartySessions = filtered.filter(s => s.session_type !== 'party')
   const partySessions    = filtered.filter(s => s.session_type === 'party')
 
+  // ── Festival / Event banner ─────────────────────────────────
+  // Festival/Event rows are `sessions` with session_type='festival'. Pull from
+  // preFiltered (not `filtered`) so the banner shows regardless of the
+  // capacity/booking gating used for the regular session table — a festival
+  // with no capacity set should still be visible to staff.
+  const festivalSessionsD2 = preFiltered.filter(s => s.session_type === 'festival' && s.show !== false)
+  let eventBannerHtml = ''
+  if (festivalSessionsD2.length) {
+    const festIds = festivalSessionsD2.map(s => s.id)
+    const { data: fdetails } = await sb.from('session_event_details').select('*').in('session_id', festIds)
+    const fdMap = {}
+    ;(fdetails || []).forEach(r => { fdMap[r.session_id] = r })
+    const allStaffIds = [...new Set((fdetails || []).flatMap(r => r.staff_ids || []))]
+    let staffNameMap = {}
+    if (allStaffIds.length) {
+      const { data: staffRows } = await sb.from('staff_profiles').select('id,display_name').in('id', allStaffIds)
+      ;(staffRows || []).forEach(s => { staffNameMap[s.id] = s.display_name })
+    }
+    eventBannerHtml = festivalSessionsD2.map(s => {
+      const det = fdMap[s.id] || {}
+      const staffNames = (det.staff_ids || []).map(id => staffNameMap[id]).filter(Boolean)
+      const staffHtml = staffNames.length ? `<span style="font-size:13px;color:#1a4fa0">👥 ${staffNames.join(', ')}</span>` : ''
+      const projectHtml = det.project ? `<span style="font-size:13px;color:#1a4fa0">🎨 ${det.project.replace(/</g,'&lt;')}</span>` : ''
+      const safeDayPlan = (det.day_plan || '').replace(/</g, '&lt;')
+      return `<div style="background:#e3edfb;border:0.5px solid #b8cff0;border-radius:10px;padding:12px 18px;margin-bottom:0.6rem">
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+          <span style="font-size:15px;font-weight:700;color:#0d3a80">🎪 ${s.title.replace(/</g,'&lt;')}</span>
+          ${projectHtml}
+          ${staffHtml}
+        </div>
+        <textarea data-session-id="${s.id}" placeholder="Day plan — setup time, what to bring, schedule..."
+          style="width:100%;box-sizing:border-box;margin-top:10px;border:0.5px solid #b8cff0;border-radius:6px;padding:8px 10px;font-size:13px;font-family:inherit;resize:vertical;min-height:56px;outline:none;background:white"
+          onblur="saveEventDayPlan('${s.id}', this.value)">${safeDayPlan}</textarea>
+      </div>`
+    }).join('')
+  }
+
   // Fetch party bookings + details for party rows
   let partyBookingsMap = {}, partyDetailsMap = {}
   if (partySessions.length) {
@@ -4172,7 +4209,21 @@ async function loadDay2View() {
   const emptyMsg = !filtered.length
     ? '<div class="empty-state" style="padding:2rem"><h2>No sessions today</h2></div>' : ''
 
-  container.innerHTML = urgentHtml + themeBannerHtml + normalHtml + breakTasksHtml + emailBarHtml + countBannerHtml + staffPanel + unifiedTableHtml + emptyMsg
+  container.innerHTML = urgentHtml + themeBannerHtml + normalHtml + breakTasksHtml + emailBarHtml + countBannerHtml + staffPanel + eventBannerHtml + unifiedTableHtml + emptyMsg
+}
+
+// Save just the day-plan text for a festival/event session. Staff assignment and
+// project are set from the admin dashboard (Schedule / By Studio tabs) — this
+// only ever touches day_plan so it never clobbers those fields.
+async function saveEventDayPlan(sessionId, value) {
+  const day_plan = value.trim()
+  const now = new Date().toISOString()
+  const { data: existing } = await sb.from('session_event_details').select('session_id').eq('session_id', sessionId).maybeSingle()
+  if (existing) {
+    await sb.from('session_event_details').update({ day_plan, updated_at: now }).eq('session_id', sessionId)
+  } else {
+    await sb.from('session_event_details').insert({ session_id: sessionId, day_plan, updated_at: now })
+  }
 }
 
 // Save party teacher assignments from the compact row
