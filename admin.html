@@ -622,6 +622,13 @@ select:focus, input:focus { border-color: #888; }
           <option value="credit">🎁 Credit sent (gift card)</option>
           <option value="not_filled">⚠️ Not filled out</option>
         </select>
+        <select id="party-report-type" onchange="loadPartyReport()" style="height:32px;font-size:12px;border:0.5px solid #d0d0c8;border-radius:6px;padding:0 8px;outline:none;background:white">
+          <option value="">All types</option>
+          <option value="kids_party">🎂 Kids Party</option>
+          <option value="splatter">💦 Splatter Party</option>
+          <option value="team_building">🤝 Adult Team Building</option>
+          <option value="field_trip">🚌 Field Trip</option>
+        </select>
       </div>
     </div>
     <div id="party-report-container"><div class="loading">Loading...</div></div>
@@ -1148,9 +1155,8 @@ function eventBadgeHtml(studioId, date) {
   const fest = festivalIndex[studioId + '|' + date]
   if (!fest) return ''
   const det = eventDetailsCache[fest.sessionId] || {}
-  const safeTitle = (fest.title || '').replace(/"/g, '&quot;')
   const tip = det.project ? `${fest.title} · ${det.project}` : fest.title
-  return `<span class="event-badge" title="${tip.replace(/"/g, '&quot;')}" onclick="openEventModal('${fest.sessionId}','${studioId}','${date}')">🎪 ${safeTitle}</span>`
+  return `<span class="event-badge" title="${tip.replace(/"/g, '&quot;')}" onclick="openEventModal('${fest.sessionId}','${studioId}','${date}')">🎪 EVENT</span>`
 }
 
 async function openEventModal(sessionId, studioId, date) {
@@ -5974,6 +5980,19 @@ function partyReportSetWeek() {
   document.getElementById('party-report-to').value = sunday.toISOString().slice(0,10)
 }
 
+// Sessions of session_type='party' cover four actual products, distinguished
+// only by title text (there's no dedicated column) — classify accordingly.
+function classifyPartyType(title) {
+  const t = (title || '').toLowerCase()
+  if (t.includes('adult')) return 'team_building'
+  if (t.includes('splatter')) return 'splatter'
+  if (t.includes('field trip')) return 'field_trip'
+  return 'kids_party'
+}
+function partyTypeLabel(type) {
+  return { kids_party: '🎂 Kids Party', splatter: '💦 Splatter', team_building: '🤝 Team Building', field_trip: '🚌 Field Trip' }[type] || type
+}
+
 async function loadPartyReport() {
   const container = document.getElementById('party-report-container')
   container.innerHTML = '<div class="loading">Loading...</div>'
@@ -5986,6 +6005,7 @@ async function loadPartyReport() {
   const dateTo = toEl.value
   const studioFilter = document.getElementById('party-report-studio').value
   const statusFilter = document.getElementById('party-report-status').value
+  const typeFilter = document.getElementById('party-report-type')?.value || ''
 
   // Populate studio filter
   const studioSel = document.getElementById('party-report-studio')
@@ -6025,6 +6045,15 @@ async function loadPartyReport() {
   const pdMap = {}
   partyDetails.forEach(pd => { pdMap[pd.booking_id] = pd })
 
+  // Load session titles to classify party type (kids / splatter / field trip / team building)
+  const sessIds = [...new Set(bookings.map(b => b.session_id).filter(Boolean))]
+  let sessionTitleMap = {}
+  for (let i = 0; i < sessIds.length; i += 100) {
+    const chunk = sessIds.slice(i, i + 100)
+    const { data } = await sb.from('sessions').select('id, title').in('id', chunk)
+    if (data) data.forEach(s => { sessionTitleMap[s.id] = s.title })
+  }
+
   // Build report rows
   const rows = []
   for (const booking of bookings) {
@@ -6062,7 +6091,9 @@ async function loadPartyReport() {
     }
 
     if (statusFilter && status !== statusFilter) continue
-    rows.push({ booking, pd, status, statusHtml, studioName, rowBg })
+    const partyType = classifyPartyType(sessionTitleMap[booking.session_id])
+    if (typeFilter && partyType !== typeFilter) continue
+    rows.push({ booking, pd, status, statusHtml, studioName, rowBg, partyType })
   }
 
   if (!rows.length) {
@@ -6072,6 +6103,8 @@ async function loadPartyReport() {
 
   const counts = { all_good: 0, charge: 0, credit: 0, not_filled: 0 }
   rows.forEach(r => counts[r.status]++)
+  const typeCounts = { kids_party: 0, splatter: 0, team_building: 0, field_trip: 0 }
+  rows.forEach(r => typeCounts[r.partyType]++)
 
   // Sort by date then studio
   rows.sort((a, b) => a.booking.event_date.localeCompare(b.booking.event_date) || a.studioName.localeCompare(b.studioName))
@@ -6084,6 +6117,7 @@ async function loadPartyReport() {
         <strong>${r.booking.customer_name || '—'}</strong>
         <div style="font-size:11px;color:#888">${r.booking.shopify_order_name || ''}</div>
       </td>
+      <td style="padding:10px 14px;font-size:12px;white-space:nowrap">${partyTypeLabel(r.partyType)}</td>
       <td style="padding:10px 14px">${r.statusHtml}</td>
       <td style="padding:10px 14px;font-size:11px;color:#888;max-width:200px">${r.pd?.notes || ''}</td>
     </tr>`).join('')
@@ -6107,12 +6141,27 @@ async function loadPartyReport() {
         <strong style="color:${counts.not_filled ? '#c0392b' : '#555'}">${counts.not_filled}</strong>
       </div>
     </div>
+    <div style="display:flex;gap:10px;margin-bottom:1rem;flex-wrap:wrap">
+      <div style="background:white;border:0.5px solid #ffe0b2;border-radius:8px;padding:10px 18px;font-size:13px">
+        <span style="color:#e65100;font-size:11px;display:block">🎂 Kids Party</span><strong style="color:#e65100">${typeCounts.kids_party}</strong>
+      </div>
+      <div style="background:white;border:0.5px solid #b3e5fc;border-radius:8px;padding:10px 18px;font-size:13px">
+        <span style="color:#0277bd;font-size:11px;display:block">💦 Splatter Party</span><strong style="color:#0277bd">${typeCounts.splatter}</strong>
+      </div>
+      <div style="background:white;border:0.5px solid #b2dfdb;border-radius:8px;padding:10px 18px;font-size:13px">
+        <span style="color:#00695c;font-size:11px;display:block">🤝 Adult Team Building</span><strong style="color:#00695c">${typeCounts.team_building}</strong>
+      </div>
+      <div style="background:white;border:0.5px solid #d7ccc8;border-radius:8px;padding:10px 18px;font-size:13px">
+        <span style="color:#5d4037;font-size:11px;display:block">🚌 Field Trip</span><strong style="color:#5d4037">${typeCounts.field_trip}</strong>
+      </div>
+    </div>
     <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden">
       <table style="width:100%;border-collapse:collapse;font-size:12px">
         <thead><tr style="background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
           <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Date</th>
           <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Studio</th>
           <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Party / Host</th>
+          <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Type</th>
           <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Status</th>
           <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Notes</th>
         </tr></thead>
