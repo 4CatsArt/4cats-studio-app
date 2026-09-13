@@ -134,6 +134,8 @@ select:focus, input:focus { border-color: #888; }
 .note-modal textarea { width:100%; box-sizing:border-box; border:0.5px solid #d0d0c8; border-radius:6px; padding:10px; font-size:13px; font-family:inherit; resize:vertical; min-height:90px; outline:none; }
 .note-modal textarea:focus { border-color:#1a4fa0; }
 .note-modal-actions { display:flex; gap:8px; margin-top:12px; justify-content:flex-end; }
+.event-badge { display:inline-block; background:#e3edfb; color:#1a4fa0; font-size:10px; font-weight:700; padding:2px 8px; border-radius:10px; cursor:pointer; white-space:nowrap; max-width:130px; overflow:hidden; text-overflow:ellipsis; border:0.5px solid #b8cff0; }
+.event-badge:hover { background:#d2e2f7; }
 .split-list { overflow-y: auto; max-height: 70vh; }
 .split-item { padding: 10px 16px; border-bottom: 0.5px solid #f5f5f0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .split-item:last-child { border-bottom: none; }
@@ -703,6 +705,8 @@ const sb = createClient(SUPABASE_URL, SUPABASE_KEY)
 let currentUser = null, currentStudioId = null, allStudios = [], scheduleData = [], workshopData = [], highlightMode = null, gridStudios = []
 let studioViewVariantMap = {} // sessionId → inventory_item_id, populated by syncStudioInventory
 let scheduleNotesCache = {} // 'studioId|date' → note string
+let festivalIndex = {}      // 'studioId|date' → { sessionId, title, studioId, date }
+let eventDetailsCache = {}  // sessionId → { session_id, project, day_plan, staff_ids, updated_by, updated_at }
 
 const STUDIO_VARIANT_MAP = {
   'AB-YYC-ING':'AB / CALGARY - INGLEWOOD','AB-STA-STA':'AB / ST ALBERT',
@@ -1122,6 +1126,102 @@ async function saveNote(studioId, date) {
 }
 // ────────────────────────────────────────────────────────────────────────────
 
+// ── Festival / Event badges ─────────────────────────────────────────────────
+// Festival/Event rows are just `sessions` with session_type='festival' (no time,
+// no Shopify listing). `session_event_details` holds the extra fields for them
+// (project, day plan, assigned staff) keyed 1:1 by session_id. This is a
+// temporary stand-in for the future Community Hub event fields — same shape,
+// so migrating later is a data copy, not a rewrite.
+async function loadFestivalData(sessions) {
+  const festivalSessions = (sessions || []).filter(s => s.session_type === 'festival')
+  festivalIndex = {}
+  festivalSessions.forEach(s => { festivalIndex[s.studio_id + '|' + s.session_date] = { sessionId: s.id, title: s.title, studioId: s.studio_id, date: s.session_date } })
+  const ids = festivalSessions.map(s => s.id)
+  eventDetailsCache = {}
+  if (ids.length) {
+    const { data } = await sb.from('session_event_details').select('*').in('session_id', ids)
+    if (data) data.forEach(r => { eventDetailsCache[r.session_id] = r })
+  }
+}
+
+function eventBadgeHtml(studioId, date) {
+  const fest = festivalIndex[studioId + '|' + date]
+  if (!fest) return ''
+  const det = eventDetailsCache[fest.sessionId] || {}
+  const safeTitle = (fest.title || '').replace(/"/g, '&quot;')
+  const tip = det.project ? `${fest.title} · ${det.project}` : fest.title
+  return `<span class="event-badge" title="${tip.replace(/"/g, '&quot;')}" onclick="openEventModal('${fest.sessionId}','${studioId}','${date}')">🎪 ${safeTitle}</span>`
+}
+
+async function openEventModal(sessionId, studioId, date) {
+  const det = eventDetailsCache[sessionId] || {}
+  const fest = festivalIndex[studioId + '|' + date] || {}
+  const title = fest.title || 'Event'
+  const label = new Date(date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' })
+  const { data: staffList } = await sb.from('staff_profiles').select('id,display_name,nickname,studio_ids').eq('is_active', true).order('display_name')
+  const relevant = (staffList || []).filter(s => !s.studio_ids?.length || s.studio_ids.includes(studioId))
+  const selectedIds = det.staff_ids || []
+  const staffCheckboxes = relevant.map(s => `<label style="display:flex;align-items:center;gap:6px;padding:3px 0;font-size:12px"><input type="checkbox" value="${s.id}" ${selectedIds.includes(s.id) ? 'checked' : ''} class="event-staff-cb"> ${s.display_name}${s.nickname ? ' (' + s.nickname + ')' : ''}</label>`).join('')
+  let stampHtml = ''
+  if (det.updated_by) {
+    const atLabel = det.updated_at ? new Date(det.updated_at).toLocaleString('en-CA', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''
+    stampHtml = `<div style="font-size:11px;color:#aaa;margin-bottom:10px">Last edited by <strong>${det.updated_by}</strong>${atLabel ? ' · ' + atLabel : ''}</div>`
+  }
+  const el = document.createElement('div')
+  el.className = 'note-modal-overlay'
+  el.id = 'event-modal-overlay'
+  el.innerHTML = `<div class="note-modal" style="width:480px;max-height:88vh;overflow-y:auto">
+    <h3>🎪 ${title}</h3>
+    <div class="note-sub">${label} · ${getStudioName(studioId)}</div>
+    ${stampHtml}
+    <div style="margin-top:10px;margin-bottom:14px">
+      <label style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.4px">Project</label><br>
+      <input type="text" id="event-modal-project" value="${(det.project || '').replace(/"/g, '&quot;')}" placeholder="e.g. Mini pumpkins" style="width:100%;box-sizing:border-box;border:0.5px solid #d0d0c8;border-radius:6px;padding:8px 10px;font-size:13px;margin-top:4px;outline:none">
+    </div>
+    <div style="margin-bottom:14px">
+      <label style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.4px">Staff Assigned</label>
+      <div style="max-height:150px;overflow-y:auto;border:0.5px solid #e8e8e0;border-radius:6px;padding:6px 10px;margin-top:4px">
+        ${staffCheckboxes || '<div style="font-size:12px;color:#bbb">No staff found for this studio.</div>'}
+      </div>
+    </div>
+    <div>
+      <label style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.4px">Day Plan</label>
+      <textarea id="event-modal-dayplan" placeholder="What's the plan for the day — setup time, what to bring, schedule...">${det.day_plan || ''}</textarea>
+    </div>
+    <div class="note-modal-actions">
+      <button class="btn" onclick="closeEventModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveEventDetails('${sessionId}','${studioId}')">Save</button>
+    </div>
+  </div>`
+  el.addEventListener('click', e => { if (e.target === el) closeEventModal() })
+  document.body.appendChild(el)
+}
+
+function closeEventModal() {
+  const el = document.getElementById('event-modal-overlay')
+  if (el) el.remove()
+}
+
+async function saveEventDetails(sessionId, studioId) {
+  const project = document.getElementById('event-modal-project').value.trim()
+  const day_plan = document.getElementById('event-modal-dayplan').value.trim()
+  const staff_ids = Array.from(document.querySelectorAll('.event-staff-cb:checked')).map(cb => cb.value)
+  let userName = currentUser?.email || 'unknown'
+  if (currentUser?.id) {
+    const { data: nameRow } = await sb.from('studio_users').select('display_name').eq('user_id', currentUser.id).maybeSingle()
+    if (nameRow?.display_name) userName = nameRow.display_name
+  }
+  const now = new Date().toISOString()
+  const payload = { session_id: sessionId, project: project || null, day_plan: day_plan || null, staff_ids, updated_by: userName, updated_at: now }
+  const { error } = await sb.from('session_event_details').upsert(payload, { onConflict: 'session_id' })
+  if (error) { alert('Error saving event details: ' + error.message); return }
+  eventDetailsCache[sessionId] = payload
+  closeEventModal()
+  if (document.getElementById('grid-body') && scheduleData?.length) renderSchedule()
+  if (document.getElementById('bs-studio')?.value === studioId) loadStudioView()
+}
+// ────────────────────────────────────────────────────────────────────────────
+
 async function renderSchedule() {
   if (!scheduleData.length) return
   const search = document.getElementById('sch-search').value.toLowerCase().trim()
@@ -1149,6 +1249,7 @@ async function renderSchedule() {
   })
   // Load notes for all studio/date combos in view
   await loadScheduleNotes(gridStudios.map(s => s.id), Object.keys(byDate))
+  await loadFestivalData(scheduleData)
   let headHtml = '<tr><th class="session-col">Session</th><th class="total-col">Total</th>'
   gridStudios.forEach(s => { headHtml += `<th title="${s.name}">${getStudioName(s.id)}</th>` })
   headHtml += '</tr>'
@@ -1188,7 +1289,8 @@ async function renderSchedule() {
       const noteText = (scheduleNotesCache[noteKey] || {}).note || ''
       const noteHasNote = !!noteText
       const safeStudioName = getStudioName(studio.id).replace(/'/g, "\\'")
-      dayRowHtml += `<td style="text-align:center"><div style="display:flex;flex-direction:column;align-items:center;gap:2px">${t > 0 ? `<span class="day-studio-total">${t}</span>` : '<span style="color:#ddd">—</span>'}<span class="note-icon${noteHasNote?' has-note':''}" data-key="${noteKey}" title="${noteHasNote?'Note: '+noteText.replace(/"/g,'&quot;'):'Add day note'}" onclick="openNoteModal('${studio.id}','${date}','${safeStudioName}')">${noteIconSvg(noteHasNote)}</span></div></td>`
+      const evtBadge = eventBadgeHtml(studio.id, date)
+      dayRowHtml += `<td style="text-align:center"><div style="display:flex;flex-direction:column;align-items:center;gap:2px">${evtBadge}${t > 0 ? `<span class="day-studio-total">${t}</span>` : '<span style="color:#ddd">—</span>'}<span class="note-icon${noteHasNote?' has-note':''}" data-key="${noteKey}" title="${noteHasNote?'Note: '+noteText.replace(/"/g,'&quot;'):'Add day note'}" onclick="openNoteModal('${studio.id}','${date}','${safeStudioName}')">${noteIconSvg(noteHasNote)}</span></div></td>`
     })
     dayRowHtml += '</tr>'
     bodyHtml += dayRowHtml
@@ -1555,6 +1657,7 @@ async function loadStudioView() {
   // Load notes for this studio/date combo
   const bsDates = [...new Set((sessions||[]).map(s=>s.session_date))]
   await loadScheduleNotes([studioId], bsDates)
+  await loadFestivalData(sessions)
   const byDate = {}
   ;(sessions||[]).forEach(s => {
     if (!byDate[s.session_date]) byDate[s.session_date]={}
@@ -1578,7 +1681,8 @@ async function loadStudioView() {
       const bsNote = (scheduleNotesCache[bsNoteKey] || {}).note || ''
       const bsHasNote = !!bsNote
       const bsSafeName = (allStudios.find(st=>st.id===studioId)||{name:studioId}).name.replace(/'/g,"\\'")
-      rightHtml+=`<div style="padding:8px 16px;background:#f5f5f0;font-size:11px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.4px;display:flex;align-items:center;gap:8px">${fmtDate(s.session_date)}<span class="note-icon${bsHasNote?' has-note':''}" data-key="${bsNoteKey}" title="${bsHasNote?'Note: '+bsNote.replace(/"/g,'&quot;'):'Add day note'}" onclick="openNoteModal('${studioId}','${s.session_date}','${bsSafeName}')">${noteIconSvg(bsHasNote)}</span></div>`
+      const bsEvtBadge = eventBadgeHtml(studioId, s.session_date)
+      rightHtml+=`<div style="padding:8px 16px;background:#f5f5f0;font-size:11px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.4px;display:flex;align-items:center;gap:8px">${fmtDate(s.session_date)}${bsEvtBadge}<span class="note-icon${bsHasNote?' has-note':''}" data-key="${bsNoteKey}" title="${bsHasNote?'Note: '+bsNote.replace(/"/g,'&quot;'):'Add day note'}" onclick="openNoteModal('${studioId}','${s.session_date}','${bsSafeName}')">${noteIconSvg(bsHasNote)}</span></div>`
       lastDate=s.session_date
     }
     const isFull=s.capacity>0&&s.reg>=s.capacity, regColor=s.reg===0?'#bbb':isFull?'#2e7d32':'#1a4fa0', time=(s.session_time&&s.session_time!=='00:00:00')?s.session_time.substring(0,5):''
