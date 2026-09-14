@@ -4632,15 +4632,47 @@ async function loadAllTimeRecipients() {
   // anyone who's ever been a customer here, not who's currently active.
   // bookings has no direct studio_id column, so go via sessions first —
   // same pattern used everywhere else in this file.
-  const { data: allSessions } = await sb.from('sessions').select('id').eq('studio_id', currentStudioId)
-  const allSessionIds = (allSessions || []).map(s => s.id)
+  //
+  // An established studio can easily have 1000+ sessions, so this needs to:
+  //   1. Paginate the sessions fetch (Supabase caps a single request at 1000 rows)
+  //   2. Chunk the bookings .in() lookup (a huge id list makes an unworkably
+  //      long request URL that can fail outright)
+  //   3. Actually check for errors instead of treating a failed request the
+  //      same as "genuinely found nothing"
+  let allSessionIds = []
+  let sessFrom = 0
+  const PAGE = 1000
+  while (true) {
+    const { data: page, error: sessErr } = await sb.from('sessions')
+      .select('id')
+      .eq('studio_id', currentStudioId)
+      .range(sessFrom, sessFrom + PAGE - 1)
+    if (sessErr) {
+      body.innerHTML = `<div style="padding:12px;font-size:13px;color:#c00">Error loading sessions: ${escHtml(sessErr.message)}</div>`
+      return
+    }
+    allSessionIds.push(...(page || []).map(s => s.id))
+    if (!page || page.length < PAGE) break
+    sessFrom += PAGE
+  }
   if (!allSessionIds.length) {
     body.innerHTML = '<div style="padding:12px;font-size:13px;color:#888">No sessions found for this studio.</div>'
     return
   }
-  const { data: bookings } = await sb.from('bookings')
-    .select('customer_email, customer_name')
-    .in('session_id', allSessionIds)
+
+  const CHUNK = 200
+  let bookings = []
+  for (let i = 0; i < allSessionIds.length; i += CHUNK) {
+    const chunk = allSessionIds.slice(i, i + CHUNK)
+    const { data: chunkBookings, error: bookErr } = await sb.from('bookings')
+      .select('customer_email, customer_name')
+      .in('session_id', chunk)
+    if (bookErr) {
+      body.innerHTML = `<div style="padding:12px;font-size:13px;color:#c00">Error loading bookings: ${escHtml(bookErr.message)}</div>`
+      return
+    }
+    bookings.push(...(chunkBookings || []))
+  }
 
   const seen = {}
   const recipients = []
