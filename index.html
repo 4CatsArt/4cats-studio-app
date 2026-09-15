@@ -5680,7 +5680,7 @@ async function printFullDay() {
   const ids = regularSessions.map(s => s.id)
   const { data: bookings } = ids.length
     ? await sb.from('bookings')
-        .select('id, session_id, customer_name, qty, shopify_order_name, raw_payload, order_note, booked_at')
+        .select('id, session_id, customer_name, qty, shopify_order_name, shopify_line_item_id, raw_payload, order_note, booked_at')
         .in('session_id', ids).gt('qty', 0).order('booked_at')
     : { data: [] }
 
@@ -5690,13 +5690,15 @@ async function printFullDay() {
     bookingsBySession[b.session_id].push(b)
   })
 
-  // Deduplicate by order name within each session
+  // Dedup by order+line-item, not order alone — see showBookings for why: a multi-child
+  // order with separate line items per child must not collapse down to one printed row.
   Object.keys(bookingsBySession).forEach(sid => {
     const seen = new Set()
     bookingsBySession[sid] = bookingsBySession[sid].filter(b => {
       if (!b.shopify_order_name) return true
-      if (seen.has(b.shopify_order_name)) return false
-      seen.add(b.shopify_order_name); return true
+      const key = `${b.shopify_order_name}|${b.shopify_line_item_id || b.id}`
+      if (seen.has(key)) return false
+      seen.add(key); return true
     })
   })
 
@@ -6344,14 +6346,22 @@ async function showBookings(sessionId, title, dateLabel, sessionType, sessionTim
     if (!bookingSessionIds.length) bookingSessionIds = [sessionId]
   }
   const { data: bookings } = await sb.from('bookings')
-    .select('id, customer_name, customer_email, customer_phone, qty, estimated_attendance, shopify_order_name, booked_at, raw_payload, event_date, order_note, aftercare, early_arrival, returned_at, project_preference, reason_for_gathering, hot_chocolate_qty, candy_bag_qty, customer_booking_number')
+    .select('id, customer_name, customer_email, customer_phone, qty, estimated_attendance, shopify_order_name, shopify_line_item_id, booked_at, raw_payload, event_date, order_note, aftercare, early_arrival, returned_at, project_preference, reason_for_gathering, hot_chocolate_qty, candy_bag_qty, customer_booking_number')
     .in('session_id', bookingSessionIds).order('booked_at')
 
-  const seenOrders = new Set()
+  // Dedup by order+line-item, not order alone — a family booking multiple kids under one
+  // order (different projects, different participants) gets one Shopify line item per
+  // child, each its own booking row. Deduping by order_name alone collapsed those down to
+  // a single row and silently hid the other kids. Rows without a line_item_id (older data,
+  // predating that column) fall back to their own row id so we never risk hiding a real
+  // booking — the true webhook-retry case is already prevented at insert time by the
+  // (shopify_order_name, shopify_line_item_id) unique index.
+  const seenLineItems = new Set()
   const bookingsToUse = (bookings || []).filter(b => {
     if (!b.shopify_order_name) return true
-    if (seenOrders.has(b.shopify_order_name)) return false
-    seenOrders.add(b.shopify_order_name)
+    const key = `${b.shopify_order_name}|${b.shopify_line_item_id || b.id}`
+    if (seenLineItems.has(key)) return false
+    seenLineItems.add(key)
     return true
   })
 
