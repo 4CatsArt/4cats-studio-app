@@ -2616,11 +2616,231 @@ function getBadgeClass(type) {
 
 function getListType(sessionType, sessionTitle) {
   const t = (sessionTitle || '').toLowerCase()
+  if (t === 'catch up class') return 'catchup'
   if (sessionType === 'glazing') return 'glazing'
   if (sessionType === 'party') return 'party'
   if (t.includes('camp') || t.includes('pa day') || t.includes('pd day') || t.includes('pa/pd') || t.includes('no school')) return 'camp'
   if (isSeriesClass2Plus(sessionTitle) || isSeriesClass1(sessionTitle)) return 'series'
   return 'workshop'
+}
+
+// ── CATCH-UP CLASSES ────────────────────────────────────────────
+// One-week transfers: a child normally in session A joins session B (an existing
+// class, or a dedicated staff-only "Catch Up Class") for a single date only.
+// class_catchups: { origin_session_id, origin_booking_id, camper_name, target_session_id, note }
+
+function catchupKey(bookingId, camperName) {
+  return `${bookingId}|${(camperName || '').toLowerCase().trim()}`
+}
+
+// Kids leaving THIS session for elsewhere that date — keyed by booking_id|camper_name
+async function fetchCatchupsOriginatingHere(sessionId) {
+  const { data } = await sb.from('class_catchups')
+    .select('id, origin_booking_id, camper_name, note, target_session_id, sessions!class_catchups_target_session_id_fkey(title, session_time, session_date)')
+    .eq('origin_session_id', sessionId)
+  const map = {}
+  ;(data || []).forEach(c => { map[catchupKey(c.origin_booking_id, c.camper_name)] = c })
+  return map
+}
+
+// Kids joining THIS session from elsewhere that date
+async function fetchCatchupsArrivingHere(sessionId) {
+  const { data } = await sb.from('class_catchups')
+    .select('id, camper_name, note, origin_session_id, origin_booking_id, created_at, sessions!class_catchups_origin_session_id_fkey(title, session_time, session_date)')
+    .eq('target_session_id', sessionId)
+    .order('created_at')
+  return data || []
+}
+
+function catchupTargetLabel(row) {
+  const s = row.sessions
+  if (!s) return 'another class'
+  const d = s.session_date ? new Date(s.session_date + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : ''
+  return `${getSeriesDisplayTitle(s.title)} · ${fmtTime(s.session_time)}${d ? ' ' + d : ''}`
+}
+
+function buildCatchupIncomingRows(incoming) {
+  if (!incoming.length) return ''
+  const rows = incoming.map(c => `<tr style="background:#f0f7ff">
+    <td></td>
+    <td><strong>${c.camper_name || '&mdash;'}</strong> <span style="font-size:10px;color:#2d6a9f;background:#e0edfc;padding:1px 6px;border-radius:8px">catch-up</span></td>
+    <td colspan="6" style="font-size:12px;color:#666">from ${catchupTargetLabel(c)}${c.note ? ' — ' + c.note : ''}</td>
+    <td style="text-align:center">1</td><td style="color:#888">&mdash;</td><td class="note-cell"></td>
+    <td class="no-print"><button onclick="removeCatchupTransfer('${c.id}')" style="padding:4px 10px;background:none;border:0.5px solid #e0d0d0;border-radius:6px;font-size:11px;color:#c0392b;cursor:pointer">Remove</button></td>
+  </tr>`).join('')
+  return rows
+}
+
+// Roster overlay for a dedicated staff-only "Catch Up Class" session — built entirely
+// from class_catchups (no real bookings exist for these sessions).
+async function showCatchupClassRoster(sessionId, title, dateLabel, sessionTime) {
+  const incoming = await fetchCatchupsArrivingHere(sessionId)
+  const overlay = document.createElement('div')
+  overlay.className = 'overlay'
+  overlay.id = 'catchup-roster-overlay'
+  overlay.dataset.sessionId = sessionId
+  overlay.dataset.title = title
+  overlay.dataset.dateLabel = dateLabel
+  overlay.dataset.sessionTime = sessionTime || ''
+
+  const rows = incoming.length
+    ? incoming.map(c => `<tr>
+        <td><strong>${c.camper_name || '&mdash;'}</strong></td>
+        <td style="font-size:12px;color:#666">${catchupTargetLabel(c)}</td>
+        <td class="note-cell">${c.note || ''}</td>
+        <td class="no-print"><button onclick="removeCatchupTransfer('${c.id}', true)" style="padding:4px 10px;background:none;border:0.5px solid #e0d0d0;border-radius:6px;font-size:11px;color:#c0392b;cursor:pointer">Remove</button></td>
+      </tr>`).join('')
+    : `<tr><td colspan="4" style="color:#aaa;padding:2rem 0;text-align:center">No kids catching up here yet. Add one from their regular class's roster.</td></tr>`
+
+  overlay.innerHTML = `
+    <div class="overlay-card" id="print-area">
+      <div class="overlay-header">
+        <div>
+          <div class="overlay-title">🔁 Catch Up Class</div>
+          <div class="overlay-sub">${sessionTime ? fmtTime(sessionTime) + ' — ' : ''}${dateLabel} &mdash; ${incoming.length} joining</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="print-btn no-print" onclick="window.print()">🖨 Print</button>
+          <button class="close-btn no-print" onclick="this.closest('.overlay').remove()">&#215;</button>
+        </div>
+      </div>
+      <table class="booking-table"><thead><tr><th>Child</th><th>Coming from</th><th>Note</th><th class="no-print"></th></tr></thead><tbody>${rows}</tbody></table>
+    </div>`
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove() })
+  document.body.appendChild(overlay)
+}
+
+// ── CATCH-UP: add / remove a transfer ──────────────────────────
+
+function openCatchupModal(originSessionId, bookingId, camperName, dateLabel, originSessionTime) {
+  document.getElementById('catchup-modal')?.remove()
+  const modal = document.createElement('div')
+  modal.id = 'catchup-modal'
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9500;display:flex;align-items:center;justify-content:center;padding:1rem'
+  modal.innerHTML = `
+    <div style="background:#fff;border-radius:12px;padding:1.8rem;width:420px;max-width:95vw;max-height:88vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,0.2)">
+      <h3 style="margin:0 0 4px;font-size:16px;font-weight:700;color:#2d6a9f">🔁 Catch-up: ${camperName || 'this child'}</h3>
+      <div style="font-size:12px;color:#888;margin-bottom:16px">Move them into another class for one date only — their regular class will show them as absent and note where they went.</div>
+      <input type="hidden" id="cu-origin-session" value="${originSessionId}">
+      <input type="hidden" id="cu-booking-id" value="${bookingId}">
+      <input type="hidden" id="cu-camper-name" value="${(camperName||'').replace(/"/g,'&quot;')}">
+      <div style="margin-bottom:12px">
+        <label style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.4px">Date they're catching up</label><br>
+        <input type="date" id="cu-date" value="${dateStr(currentDate)}" onchange="cuLoadSessionsForDate()" style="width:100%;box-sizing:border-box;border:0.5px solid #d0d0c8;border-radius:6px;padding:8px 10px;font-size:13px;margin-top:4px;outline:none">
+      </div>
+      <div style="margin-bottom:8px">
+        <label style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.4px">Join which class</label><br>
+        <select id="cu-target-session" style="width:100%;box-sizing:border-box;border:0.5px solid #d0d0c8;border-radius:6px;padding:8px 10px;font-size:13px;margin-top:4px;outline:none">
+          <option value="">Loading sessions...</option>
+        </select>
+      </div>
+      <button onclick="cuCreateCatchupClass()" style="margin-bottom:14px;padding:6px 12px;background:#f0f6ff;border:0.5px solid #c5d8f0;border-radius:6px;font-size:12px;color:#2d6a9f;cursor:pointer">+ New Catch Up Class on this date</button>
+      <div style="margin-bottom:16px">
+        <label style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.4px">Note <span style="font-weight:400;color:#bbb;text-transform:none">(optional)</span></label><br>
+        <input type="text" id="cu-note" placeholder="e.g. away for the weekend" style="width:100%;box-sizing:border-box;border:0.5px solid #d0d0c8;border-radius:6px;padding:8px 10px;font-size:13px;margin-top:4px;outline:none">
+      </div>
+      <div id="cu-error" style="color:#c00;font-size:12px;margin-bottom:10px;display:none"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn" onclick="document.getElementById('catchup-modal').remove()">Cancel</button>
+        <button class="btn btn-primary" id="cu-save-btn" onclick="saveCatchupTransfer()">Save Catch-up</button>
+      </div>
+    </div>`
+  document.body.appendChild(modal)
+  cuLoadSessionsForDate()
+}
+
+async function cuLoadSessionsForDate() {
+  const date = document.getElementById('cu-date')?.value
+  const sel = document.getElementById('cu-target-session')
+  const originSessionId = document.getElementById('cu-origin-session')?.value
+  if (!date || !sel) return
+  sel.innerHTML = '<option value="">Loading sessions...</option>'
+  const { data: sessions } = await sb.from('sessions')
+    .select('id, title, session_time, session_type')
+    .eq('studio_id', currentStudioId).eq('session_date', date)
+    .order('session_time')
+  const options = (sessions || [])
+    .filter(s => s.id !== originSessionId)
+    .map(s => `<option value="${s.id}">${fmtTime(s.session_time)} · ${getSeriesDisplayTitle(s.title)}${s.title === 'Catch Up Class' ? ' 🔁' : ''}</option>`)
+    .join('')
+  sel.innerHTML = `<option value="">Select a class...</option>${options}`
+}
+
+async function cuCreateCatchupClass() {
+  const date = document.getElementById('cu-date')?.value
+  if (!date) { alert('Pick a date first.'); return }
+  const time = prompt('What time is the Catch Up Class? (e.g. 4:00 PM)')
+  if (!time) return
+  // Normalize a few common formats to HH:MM:SS; fall back to raw entry if unparseable
+  let time24 = time.trim()
+  const m = time24.match(/^(\d{1,2}):?(\d{2})?\s*(am|pm)?$/i)
+  if (m) {
+    let h = parseInt(m[1], 10)
+    const min = m[2] || '00'
+    const ap = (m[3] || '').toLowerCase()
+    if (ap === 'pm' && h < 12) h += 12
+    if (ap === 'am' && h === 12) h = 0
+    time24 = `${String(h).padStart(2,'0')}:${min}:00`
+  } else if (!/^\d{2}:\d{2}(:\d{2})?$/.test(time24)) {
+    alert('Please enter a time like "4:00 PM" or "16:00".'); return
+  }
+  const { data: inserted, error } = await sb.from('sessions')
+    .insert({ studio_id: currentStudioId, session_date: date, session_time: time24, title: 'Catch Up Class', session_type: 'class', capacity: 0, show: true, is_staff_only: true, spaces_left_cache: null })
+    .select('id').single()
+  if (error) { alert('Error creating Catch Up Class: ' + error.message); return }
+  await cuLoadSessionsForDate()
+  const sel = document.getElementById('cu-target-session')
+  if (sel) sel.value = inserted.id
+}
+
+async function saveCatchupTransfer() {
+  const errEl = document.getElementById('cu-error')
+  errEl.style.display = 'none'
+  const originSessionId = document.getElementById('cu-origin-session').value
+  const bookingId = document.getElementById('cu-booking-id').value
+  const camperName = document.getElementById('cu-camper-name').value
+  const targetSessionId = document.getElementById('cu-target-session').value
+  const note = document.getElementById('cu-note').value.trim()
+
+  if (!targetSessionId) { errEl.textContent = 'Please pick which class they are joining.'; errEl.style.display = 'block'; return }
+
+  const btn = document.getElementById('cu-save-btn')
+  btn.disabled = true; btn.textContent = 'Saving...'
+
+  let userName = currentUser?.email || 'unknown'
+  if (currentUser?.id) {
+    const { data: nameRow } = await sb.from('studio_users').select('display_name').eq('user_id', currentUser.id).maybeSingle()
+    if (nameRow?.display_name) userName = nameRow.display_name
+  }
+
+  const { error } = await sb.from('class_catchups').insert({
+    studio_id: currentStudioId, origin_session_id: originSessionId, origin_booking_id: bookingId,
+    camper_name: camperName, target_session_id: targetSessionId, note: note || null, created_by: userName
+  })
+
+  if (error) {
+    btn.disabled = false; btn.textContent = 'Save Catch-up'
+    errEl.textContent = 'Error: ' + error.message
+    errEl.style.display = 'block'
+    return
+  }
+
+  document.getElementById('catchup-modal')?.remove()
+  // Refresh whichever roster overlay is open so the absence badge shows immediately
+  const openOverlay = document.querySelector('.overlay:not(#catchup-modal)')
+  if (openOverlay) {
+    const title = openOverlay.querySelector('.overlay-title')?.textContent || ''
+    openOverlay.remove()
+  }
+  loadCurrentView()
+}
+
+async function removeCatchupTransfer(id, isCatchupClassView = false) {
+  if (!confirm('Remove this catch-up transfer?')) return
+  const { error } = await sb.from('class_catchups').delete().eq('id', id)
+  if (error) { alert('Error removing: ' + error.message); return }
+  document.querySelectorAll('.overlay').forEach(o => o.remove())
+  loadCurrentView()
 }
 
 // ── AUTH ──────────────────────────────────────────────────────
@@ -5192,10 +5412,18 @@ async function loadDayView() {
       }
     }
 
+    // Catch Up Class sessions have no real bookings — their "registered" count
+    // comes from class_catchups instead
+    const catchupClassIds = preFiltered.filter(s => s.title === 'Catch Up Class').map(s => s.id)
+    if (catchupClassIds.length) {
+      const { data: cuRows } = await sb.from('class_catchups').select('target_session_id').in('target_session_id', catchupClassIds)
+      ;(cuRows || []).forEach(r => { bookingCounts[r.target_session_id] = (bookingCounts[r.target_session_id] || 0) + 1 })
+    }
+
     // Apply show/hide logic: hide if show=false AND 0 reg, OR if 0 reg AND capacity explicitly 0
     filtered = preFiltered.filter(s =>
       (s.show !== false || (bookingCounts[s.id] || 0) > 0) &&
-      ((bookingCounts[s.id] || 0) > 0 || s.capacity === null || s.capacity > 0 || isSeriesClass2Plus(s.title))
+      ((bookingCounts[s.id] || 0) > 0 || s.capacity === null || s.capacity > 0 || isSeriesClass2Plus(s.title) || s.title === 'Catch Up Class')
     )
 
     // Series class 2+ — sum roster count from whichever anchor(s) cover this week
@@ -6094,6 +6322,9 @@ async function deleteSignin(entryId, sessionId) {
 }
 
 async function showBookings(sessionId, title, dateLabel, sessionType, sessionTime) {
+  if (getListType(sessionType, title) === 'catchup') {
+    return showCatchupClassRoster(sessionId, title, dateLabel, sessionTime)
+  }
   let bookingSessionIds = [sessionId]
   if (isSeriesClass2Plus(title) || isSeriesClass1(title)) {
     const { data: thisSession } = await sb.from('sessions').select('id, title, series_id').eq('id', sessionId).single()
@@ -6152,10 +6383,18 @@ async function showBookings(sessionId, title, dateLabel, sessionType, sessionTim
     })
   }
 
+  let catchupOriginMap = {}, incomingCatchups = []
+  if (listType === 'series') {
+    ;[catchupOriginMap, incomingCatchups] = await Promise.all([
+      fetchCatchupsOriginatingHere(sessionId),
+      fetchCatchupsArrivingHere(sessionId)
+    ])
+  }
+
   const overlay = document.createElement('div')
   overlay.className = 'overlay'
 
-  if (!bookingsToUse.length) {
+  if (!bookingsToUse.length && !incomingCatchups.length) {
     overlay.innerHTML = `
       <div class="overlay-card">
         <div class="overlay-header">
@@ -6169,13 +6408,13 @@ async function showBookings(sessionId, title, dateLabel, sessionType, sessionTim
     return
   }
 
-  const total = bookingsToUse.reduce((sum, b) => (!b.returned_at && (b.qty || 0) > 0) ? sum + b.qty : sum, 0)
+  const total = bookingsToUse.reduce((sum, b) => (!b.returned_at && (b.qty || 0) > 0) ? sum + b.qty : sum, 0) + incomingCatchups.length
   let tableHtml = ''
 
   if (listType === 'glazing') tableHtml = buildGlazingTable(bookingsToUse, dateLabel)
   else if (listType === 'workshop') tableHtml = buildWorkshopTable(bookingsToUse, title)
   else if (listType === 'camp') tableHtml = buildCampTable(bookingsToUse, tallyData, attendanceData, sessionId, dateLabel, childrenData)
-  else if (listType === 'series') tableHtml = buildSeriesTable(bookingsToUse, tallyData, attendanceData, sessionId, dateLabel, currentStudioId, sessionTime, childrenData)
+  else if (listType === 'series') tableHtml = buildSeriesTable(bookingsToUse, tallyData, attendanceData, sessionId, dateLabel, currentStudioId, sessionTime, childrenData, catchupOriginMap, incomingCatchups, title)
   else tableHtml = buildWorkshopTable(bookingsToUse, title)
 
   overlay.innerHTML = `
@@ -6404,9 +6643,18 @@ function sortSeriesTable(col) {
   })
 }
 
-function buildSeriesTable(bookings, tallyData, attendanceData, sessionId, dateLabel, studioId, sessionTime, childrenData = {}) {
+function buildSeriesTable(bookings, tallyData, attendanceData, sessionId, dateLabel, studioId, sessionTime, childrenData = {}, catchupOriginMap = {}, incomingCatchups = [], sessionTitle = '') {
   seriesTableRows = []
   seriesTableSort = { col: null, dir: 1 }
+
+  function catchupControl(bookingId, camperName) {
+    const cu = catchupOriginMap[catchupKey(bookingId, camperName)]
+    if (cu) {
+      return { rowStyle: 'opacity:0.55;background:#fff8ec', html: `<div style="font-size:11px;color:#b06a00;margin-top:4px;white-space:normal">will be absent — joining ${catchupTargetLabel(cu)}${cu.note ? ' (' + cu.note + ')' : ''} <button onclick="removeCatchupTransfer('${cu.id}')" style="margin-left:4px;padding:1px 6px;background:none;border:0.5px solid #e0c8a0;border-radius:5px;font-size:10px;color:#b06a00;cursor:pointer">✕</button></div>` }
+    }
+    return { rowStyle: '', html: `<button onclick="openCatchupModal('${sessionId}','${bookingId}','${(camperName||'').replace(/'/g,"\\'")}','${dateLabel.replace(/'/g,"\\'")}','${sessionTime||''}')" style="margin-top:4px;padding:3px 8px;background:#f0f6ff;border:0.5px solid #c5d8f0;border-radius:6px;font-size:11px;color:#2d6a9f;cursor:pointer;white-space:nowrap">Catch-up →</button>` }
+  }
+
   bookings.forEach(b => {
     const note = getOrderNote(b)
     const orderUid = (b.shopify_order_name||'').replace('#','') || Math.random().toString(36).slice(2)
@@ -6428,7 +6676,8 @@ function buildSeriesTable(bookings, tallyData, attendanceData, sessionId, dateLa
       const uid = orderUid
       const attKey = `${b.shopify_order_name}|`
       const att = attendanceData[attKey]
-      seriesTableRows.push({ name:'', age:'', registeredBy: b.customer_name||'', html: `<tr${cancelStyle}>
+      const cu0 = catchupControl(b.id, '')
+      seriesTableRows.push({ name:'', age:'', registeredBy: b.customer_name||'', html: `<tr${cancelStyle || (cu0.rowStyle ? ` style="${cu0.rowStyle}"` : '')}>
         <td style="text-align:center"><input type="checkbox" class="attended-check" ${att?.attended?'checked':''} onchange="saveAttendance('${sessionId}','${b.shopify_order_name}','',this.checked)"></td>
         <td>${editInput('scn-'+uid,'','Child name')}</td><td>${editInput('sca-'+uid,'','Age','short')}</td>
         <td>${editCheck('swh-'+uid,false)}</td><td>${editInput('smn-'+uid,'','Medical notes')}</td>
@@ -6436,7 +6685,7 @@ function buildSeriesTable(bookings, tallyData, attendanceData, sessionId, dateLa
         <td>${editInput('sec-'+uid,'','Emergency contact')}</td>
         <td style="color:#888">${b.customer_name||'&mdash;'}${bookingCountBadge(b)}</td><td style="text-align:center">${b.qty}</td>
         <td style="color:#888">${shopifyOrderLink(b.shopify_order_name)}</td><td class="note-cell">${note||''}</td>
-        <td class="no-print"><button class="row-save-btn" onclick="saveSeriesRow(null,'${b.shopify_order_name}','${uid}','${sessionId}','${studioId}','${sessionTime}')">Save</button></td>
+        <td class="no-print"><button class="row-save-btn" onclick="saveSeriesRow(null,'${b.shopify_order_name}','${uid}','${sessionId}','${studioId}','${sessionTime}')">Save</button>${cu0.html}</td>
       </tr>` })
       return
     }
@@ -6448,7 +6697,8 @@ function buildSeriesTable(bookings, tallyData, attendanceData, sessionId, dateLa
       const att = attendanceData[attKey]
       const ageDisplay = p.dob ? formatDOB(p.dob, dateLabel) : (p.age ? `Age ${p.age}` : '')
       const ageSortVal = p.dob ? p.dob : (p.age ? String(p.age).padStart(3,'0') : '')
-      seriesTableRows.push({ name: camperName, age: ageSortVal, registeredBy: i===0?(b.customer_name||''):'', html: `<tr${cancelStyle}>
+      const cuP = catchupControl(b.id, camperName)
+      seriesTableRows.push({ name: camperName, age: ageSortVal, registeredBy: i===0?(b.customer_name||''):'', html: `<tr${cancelStyle || (cuP.rowStyle ? ` style="${cuP.rowStyle}"` : '')}>
         <td style="text-align:center"><input type="checkbox" class="attended-check" ${att?.attended?'checked':''} onchange="saveAttendance('${sessionId}','${b.shopify_order_name}','${camperName.replace(/'/g,"\\'")}',this.checked)"></td>
         <td>${editInput('scn-'+uid,camperName,'Child name')}</td><td style="font-size:12px;color:#666">${ageDisplay}</td>
         <td>${editCheck('swh-'+uid,t?.walk_home||false)}</td><td>${editInput('smn-'+uid,t?.medical_notes||'','Medical notes')}</td>
@@ -6456,7 +6706,7 @@ function buildSeriesTable(bookings, tallyData, attendanceData, sessionId, dateLa
         <td>${editInput('sec-'+uid,t?(t.emergency_contact_name||'')+(t.emergency_contact_phone?' '+t.emergency_contact_phone:''):'','Emergency contact')}</td>
         <td style="color:#888">${i===0?(b.customer_name||'&mdash;')+bookingCountBadge(b):''}</td><td style="text-align:center">1</td>
         <td style="color:#888">${shopifyOrderLink(b.shopify_order_name)}</td><td class="note-cell">${i===0?(note||''):''}</td>
-        <td class="no-print"><button class="row-save-btn" onclick="saveSeriesRow('${t?.id||null}','${b.shopify_order_name}','${uid}','${sessionId}','${studioId}','${sessionTime}')">Save</button></td>
+        <td class="no-print"><button class="row-save-btn" onclick="saveSeriesRow('${t?.id||null}','${b.shopify_order_name}','${uid}','${sessionId}','${studioId}','${sessionTime}')">Save</button>${cuP.html}</td>
       </tr>` })
     })
     const existingChildren = childrenData[b.id] || []
@@ -6467,7 +6717,8 @@ function buildSeriesTable(bookings, tallyData, attendanceData, sessionId, dateLa
       const cid = `${b.id}-child-${childIndex}`
       const attKey = `${b.shopify_order_name}|${(existing?.child_name||'').toLowerCase().trim()}`
       const att = existing?.child_name ? attendanceData[attKey] : null
-      seriesTableRows.push({ name: existing?.child_name||'', age: existing?.child_age||'', registeredBy: b.customer_name||'', html: `<tr style="background:#fafaf8${isCancelled ? ';opacity:0.4;text-decoration:line-through;color:#888' : ''}">
+      const cuC = catchupControl(b.id, existing?.child_name || '')
+      seriesTableRows.push({ name: existing?.child_name||'', age: existing?.child_age||'', registeredBy: b.customer_name||'', html: `<tr style="background:#fafaf8${isCancelled ? ';opacity:0.4;text-decoration:line-through;color:#888' : (cuC.rowStyle ? ';'+cuC.rowStyle : '')}">
         <td style="text-align:center"><input type="checkbox" class="attended-check" ${att?.attended?'checked':''} onchange="saveAttendance('${sessionId}','${b.shopify_order_name}','${(existing?.child_name||'').replace(/'/g,"\\'")}',this.checked)"></td>
         <td>${editInput('scn-'+cid,existing?.child_name||'','Child name')}</td><td>${editInput('sca-'+cid,existing?.child_age||'','Age','short')}</td>
         <td>${editCheck('swh-'+cid,existing?.walk_home||false)}</td><td>${editInput('smn-'+cid,existing?.medical||'','Medical notes')}</td>
@@ -6475,12 +6726,13 @@ function buildSeriesTable(bookings, tallyData, attendanceData, sessionId, dateLa
         <td>${editInput('sec-'+cid,existing?.emergency_contact||'','Emergency contact')}</td>
         <td style="color:#888">${b.customer_name||'&mdash;'}${bookingCountBadge(b)}</td><td style="text-align:center"></td>
         <td style="color:#888">${shopifyOrderLink(b.shopify_order_name)}</td><td></td>
-        <td class="no-print"><button class="row-save-btn" onclick="saveChildRow('${existing?.id||null}','${b.id}',${childIndex},'${cid}','sc')">Save</button></td>
+        <td class="no-print"><button class="row-save-btn" onclick="saveChildRow('${existing?.id||null}','${b.id}',${childIndex},'${cid}','sc')">Save</button>${cuC.html}</td>
       </tr>` })
     }
   })
   const sortBtn = col => `<button class="series-sort-btn no-print" data-col="${col}" onclick="sortSeriesTable('${col}')" style="background:none;border:none;cursor:pointer;font-size:10px;color:#888;padding:0;margin-left:2px;opacity:0.3"> ⇅</button>`
-  return `<table class="booking-table"><thead><tr><th>✓</th><th>Participant${sortBtn('name')}</th><th>Age / DOB${sortBtn('age')}</th><th>Walk home?</th><th>Medical</th><th>Parent phone</th><th>Emergency contact</th><th>Registered by${sortBtn('registeredBy')}</th><th style="text-align:center">Qty</th><th>Order</th><th>Notes</th><th class="no-print"></th></tr></thead><tbody id="series-table-body">${seriesTableRows.map(r=>r.html).join('')}</tbody></table>`
+  const incomingRowsHtml = buildCatchupIncomingRows(incomingCatchups)
+  return `<table class="booking-table"><thead><tr><th>✓</th><th>Participant${sortBtn('name')}</th><th>Age / DOB${sortBtn('age')}</th><th>Walk home?</th><th>Medical</th><th>Parent phone</th><th>Emergency contact</th><th>Registered by${sortBtn('registeredBy')}</th><th style="text-align:center">Qty</th><th>Order</th><th>Notes</th><th class="no-print"></th></tr></thead><tbody id="series-table-body">${seriesTableRows.map(r=>r.html).join('')}${incomingRowsHtml}</tbody></table>`
 }
 
 // ── SAVE FUNCTIONS ─────────────────────────────────────────────
