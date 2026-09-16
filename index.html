@@ -682,6 +682,9 @@ sb.auth.getSession().then(({ data: { session } }) => {
 })
 
 let currentStudioId = null
+let dayViewSessionsCache = {}
+let eligibleAdjustStaffCache = null // populated on demand: [{id, display_name, manager_pin, role, can_adjust_spaces}]
+let pinVerifiedStaff = null // the staff row whose PIN was last accepted, for the active adjust flow
 let isAdminUser = false
 let allStudiosListCache = null
 let currentUser = null
@@ -5552,6 +5555,9 @@ async function loadDayView() {
       </div>
     </div>`
 
+  dayViewSessionsCache = {}
+  filtered.forEach(s => { dayViewSessionsCache[s.id] = { id: s.id, title: s.title, session_date: s.session_date, session_time: s.session_time, capacity: s.capacity, reg: bookingCounts[s.id] || 0 } })
+
   container.innerHTML = urgentHtml + themeBannerHtml + normalHtml + daySummaryHtml + bannerHtml + defaultsBar + filtered.map(s => {
     const staff = staffData[s.id] || {}
     const reg = bookingCounts[s.id] || 0
@@ -5595,8 +5601,12 @@ async function loadDayView() {
           <div class="stat-value">${reg}</div>
           <div class="stat-label">registered ↗</div>
         </div>
-        <div class="stat">
-          <div class="stat-value">${Math.max(0, s.capacity - reg)}</div>
+        <div class="stat no-print" style="cursor:default">
+          <div style="display:flex;align-items:center;gap:5px">
+            <span class="stat-value">${Math.max(0, s.capacity - reg)}</span>
+            <button onclick="openAdjustSpacesPin('${s.id}')" title="Adjust spaces left"
+              style="width:20px;height:20px;border-radius:50%;background:#5b4fcf;color:white;border:none;font-size:11px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:0">✎</button>
+          </div>
           <div class="stat-label">spaces left</div>
         </div>
         ${isDropinEligible ? `<div class="stat no-print" style="cursor:default">
@@ -6974,7 +6984,7 @@ async function syncShopifyInventory() {
       const matchingSessions = sessionsWithReg.filter(s => s.session_date===item.session_date && s.session_time===item.session_time && buildShopifyTitle(s.session_date, s.session_time||'00:00:00', s.title)===item.shopifyTitle)
       for (const session of matchingSessions) {
         const newCapacity = variant.inventory_quantity + session.reg
-        await sb.from('sessions').update({ capacity: newCapacity }).eq('id', session.id)
+        await sb.from('sessions').update({ capacity: newCapacity, spaces_left_cache: variant.inventory_quantity }).eq('id', session.id)
         const cell = document.getElementById(`spaces-${session.id}`)
         if (cell) { const spacesLeft = variant.inventory_quantity; cell.textContent = spacesLeft; cell.style.color = spacesLeft===0?'#99354e':spacesLeft<=2?'#e65100':'#2e7d32' }
         updated++
@@ -6984,6 +6994,179 @@ async function syncShopifyInventory() {
   }
   btn.textContent = `✓ ${updated} synced`
   setTimeout(() => { btn.textContent = '🔄 Sync Shopify'; btn.disabled = false }, 3000)
+}
+
+// ── ADJUST SPACES (PIN-gated) ────────────────────────────────
+
+function closeAdjustSpacesPinModal() {
+  const el = document.getElementById('asp-pin-modal')
+  if (el) el.remove()
+}
+
+function openAdjustSpacesPin(sessionId) {
+  closeAdjustSpacesPinModal()
+  pinVerifiedStaff = null
+  const overlay = document.createElement('div')
+  overlay.id = 'asp-pin-modal'
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9500;display:flex;align-items:center;justify-content:center'
+  overlay.innerHTML = `
+    <div style="background:#fff;border-radius:12px;padding:1.6rem;width:300px;max-width:92vw;box-shadow:0 8px 40px rgba(0,0,0,0.18)">
+      <div style="font-size:15px;font-weight:700;margin-bottom:4px">Manager PIN Required</div>
+      <div style="font-size:12px;color:#888;margin-bottom:14px">Enter your 4-digit PIN to adjust spaces left.</div>
+      <input id="asp-pin-input" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off"
+        style="width:100%;box-sizing:border-box;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:20px;letter-spacing:8px;text-align:center;outline:none;margin-bottom:10px">
+      <div id="asp-pin-error" style="font-size:12px;color:#c0392b;min-height:14px;margin-bottom:8px"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn" onclick="closeAdjustSpacesPinModal()">Cancel</button>
+        <button class="btn btn-primary" id="asp-pin-submit" onclick="submitAdjustSpacesPin('${sessionId}')">Unlock</button>
+      </div>
+    </div>`
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeAdjustSpacesPinModal() })
+  document.body.appendChild(overlay)
+  const input = document.getElementById('asp-pin-input')
+  input.focus()
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') submitAdjustSpacesPin(sessionId) })
+}
+
+async function submitAdjustSpacesPin(sessionId) {
+  const input = document.getElementById('asp-pin-input')
+  const errEl = document.getElementById('asp-pin-error')
+  const submitBtn = document.getElementById('asp-pin-submit')
+  const pin = (input.value || '').trim()
+  if (!/^\d{4}$/.test(pin)) { errEl.textContent = 'Enter a 4-digit PIN.'; return }
+  submitBtn.disabled = true
+  errEl.textContent = ''
+
+  const { data: staffRows } = await sb.from('staff_profiles')
+    .select('id, display_name, manager_pin, role, can_adjust_spaces, studio_ids, is_active')
+    .eq('manager_pin', pin).eq('is_active', true)
+
+  const match = (staffRows || []).find(s =>
+    (!s.studio_ids?.length || s.studio_ids.includes(currentStudioId)) &&
+    (s.role === 'admin' || (s.role === 'manager' && s.can_adjust_spaces))
+  )
+
+  if (!match) {
+    errEl.textContent = 'PIN not recognized or not authorized for this action.'
+    submitBtn.disabled = false
+    input.value = ''
+    input.focus()
+    return
+  }
+
+  pinVerifiedStaff = match
+  closeAdjustSpacesPinModal()
+  openAdjustSpacesModal(sessionId)
+}
+
+function closeAdjustSpacesModal() {
+  const el = document.getElementById('asp-modal')
+  if (el) el.remove()
+}
+
+function openAdjustSpacesModal(sessionId) {
+  const s = dayViewSessionsCache[sessionId]
+  if (!s) { alert('Session data not found — try refreshing.'); return }
+  closeAdjustSpacesModal()
+  const spacesLeft = Math.max(0, s.capacity - s.reg)
+  const timeStr = fmtTime(s.session_time)
+  const overlay = document.createElement('div')
+  overlay.id = 'asp-modal'
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9500;display:flex;align-items:center;justify-content:center'
+  overlay.innerHTML = `
+    <div style="background:#fff;border-radius:12px;padding:1.6rem;width:340px;max-width:92vw;box-shadow:0 8px 40px rgba(0,0,0,0.18)">
+      <div style="font-size:15px;font-weight:700;margin-bottom:2px">${s.title}</div>
+      <div style="font-size:12px;color:#888;margin-bottom:14px">${timeStr} &middot; verified as ${pinVerifiedStaff.display_name}</div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;color:#666;margin-bottom:12px"><span>Registered</span><span style="font-weight:700;color:#1a1a1a">${s.reg}</span></div>
+      <label style="font-size:12px;color:#666;display:block;margin-bottom:6px">Spaces left</label>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+        <button class="btn" onclick="adjustAspSpots(-1)" style="width:36px">−</button>
+        <input id="asp-spots-input" type="number" min="0" value="${spacesLeft}" style="flex:1;text-align:center;height:34px;border:1px solid #ddd;border-radius:6px;font-size:15px;box-sizing:border-box">
+        <button class="btn" onclick="adjustAspSpots(1)" style="width:36px">+</button>
+      </div>
+      <div style="font-size:11px;color:#aaa;margin-bottom:10px;line-height:1.5">Saves directly to Shopify. Only available for sessions with a live Shopify product.</div>
+      <div id="asp-modal-status" style="font-size:11px;color:#888;min-height:14px;margin-bottom:8px"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn" onclick="closeAdjustSpacesModal()">Cancel</button>
+        <button class="btn btn-primary" id="asp-modal-save-btn" onclick="saveAdjustedSpaces('${sessionId}')">Save</button>
+      </div>
+    </div>`
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeAdjustSpacesModal() })
+  document.body.appendChild(overlay)
+}
+
+function adjustAspSpots(delta) {
+  const input = document.getElementById('asp-spots-input')
+  let v = parseInt(input.value); if (isNaN(v)) v = 0
+  input.value = Math.max(0, v + delta)
+}
+
+async function saveAdjustedSpaces(sessionId) {
+  const s = dayViewSessionsCache[sessionId]
+  if (!s || !pinVerifiedStaff) return
+  const newQty = parseInt(document.getElementById('asp-spots-input').value)
+  const statusEl = document.getElementById('asp-modal-status')
+  const saveBtn = document.getElementById('asp-modal-save-btn')
+  if (isNaN(newQty) || newQty < 0) { statusEl.textContent = 'Enter a valid number.'; return }
+  statusEl.textContent = 'Checking Shopify…'
+  if (saveBtn) saveBtn.disabled = true
+
+  const shopifyTitle = buildShopifyTitle(s.session_date, s.session_time || '00:00:00', s.title)
+  if (!shopifyTitle || shopifyTitle === 'OVERRIDE') {
+    statusEl.textContent = 'No live Shopify product for this session — not editable here.'
+    if (saveBtn) saveBtn.disabled = false
+    return
+  }
+
+  const variantTitle = STUDIO_VARIANT_MAP[currentStudioId]
+  let variant = null
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/shopify-inventory`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_KEY}` }, body: JSON.stringify({ action: 'get_all', product_title: shopifyTitle }) })
+    const data = await res.json()
+    if (!data.error && data.variants) variant = data.variants.find(v => v.variant_title === variantTitle) || null
+  } catch (e) { variant = null }
+
+  if (!variant) {
+    statusEl.textContent = 'No live Shopify product found for this studio — could not save.'
+    if (saveBtn) saveBtn.disabled = false
+    return
+  }
+
+  const oldSpacesLeft = Math.max(0, s.capacity - s.reg)
+  statusEl.textContent = 'Saving…'
+  let setData
+  try {
+    const setRes = await fetch(`${SUPABASE_URL}/functions/v1/shopify-inventory`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_KEY}` }, body: JSON.stringify({ action: 'set', inventory_item_id: variant.inventory_item_id, quantity: newQty }) })
+    setData = await setRes.json()
+  } catch (e) { setData = null }
+
+  if (!setData || !setData.inventory_level) {
+    statusEl.textContent = 'Shopify update failed — try again.'
+    if (saveBtn) saveBtn.disabled = false
+    return
+  }
+
+  const newCapacity = s.reg + newQty
+  const { error } = await sb.from('sessions').update({ capacity: newCapacity, spaces_left_cache: newQty }).eq('id', sessionId)
+  if (error) { statusEl.textContent = 'Synced to Shopify, but dashboard update failed — refresh to confirm.'; if (saveBtn) saveBtn.disabled = false; return }
+
+  await sb.from('spaces_adjustment_log').insert({
+    session_id: sessionId,
+    studio_id: currentStudioId,
+    session_title: s.title,
+    session_date: s.session_date,
+    session_time: s.session_time,
+    staff_id: pinVerifiedStaff.id,
+    staff_name: pinVerifiedStaff.display_name,
+    old_spaces_left: oldSpacesLeft,
+    new_spaces_left: newQty
+  })
+
+  s.capacity = newCapacity
+  dayViewSessionsCache[sessionId] = s
+  statusEl.textContent = 'Saved — synced to Shopify ✓'
+  pinVerifiedStaff = null
+  setTimeout(() => { closeAdjustSpacesModal(); loadDayView() }, 800)
 }
 
 async function saveWalkins() {
