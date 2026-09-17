@@ -818,7 +818,7 @@ function renderFridayFillRateBody(f) {
     <div class="friday-summary">${upcomingTile}${recentTile}</div>
     <div id="friday-chart-view" class="friday-chart-scroll">${fridayChartSvg(f.history, f.bonusThresholdPct)}</div>
     <div id="friday-list-view" class="friday-list" style="display:none">${fridayListHtml(f.history, f.bonusThresholdPct)}</div>
-    <div class="source-tag">via ${esc(f.sourceLabel)} · history from Sep 4, 2026</div>`;
+    <div class="source-tag">via ${esc(f.sourceLabel)} · history from Sep 4, 2026 · upcoming auto-updates every ${FRIDAY_REFRESH_MS / 1000}s</div>`;
 }
 
 function setFridayView(view) {
@@ -842,6 +842,15 @@ function renderDashboardPinGate(errorMsg) {
 
 let _pendingDashboardPin = null;
 
+// Kept in memory only, for this tab's session — used solely to auto-refresh
+// the "Upcoming Friday" live tile without asking for the PIN again. Never
+// persisted (no localStorage/sessionStorage), never sent anywhere except
+// the same community-dashboard-data Edge Function call used at login.
+let _sessionPin = null;
+let _sessionStudioId = null;
+let _fridayRefreshTimer = null;
+const FRIDAY_REFRESH_MS = 60000; // 60s — adjust if you want it faster/slower
+
 function renderDashboardStudioPicker(studioIds) {
   const buttonsHtml = studioIds.map(id => `
     <button class="gate-studio-btn" onclick="chooseDashboardStudio('${esc(id)}')">${esc(STUDIO_NAMES[id] || id)}</button>`).join('');
@@ -854,6 +863,8 @@ async function chooseDashboardStudio(studioId) {
   if (!_pendingDashboardPin) { renderDashboardPinGate('Session expired — enter your PIN again.'); return; }
   try {
     const data = await fetchFridayFillRateWithPin(_pendingDashboardPin, studioId);
+    _sessionPin = _pendingDashboardPin;
+    _sessionStudioId = studioId;
     _pendingDashboardPin = null;
     unlockDashboard(data);
   } catch (e) {
@@ -873,6 +884,8 @@ async function submitDashboardPin() {
       renderDashboardStudioPicker(data.studios);
       return;
     }
+    _sessionPin = pin;
+    _sessionStudioId = null; // single-studio manager — Edge Function resolves it automatically
     unlockDashboard(data);
   } catch (e) {
     renderDashboardPinGate('Invalid PIN or not authorized for this view.');
@@ -883,6 +896,21 @@ function unlockDashboard(fridayData) {
   document.getElementById('dashboard-gate').style.display = 'none';
   document.getElementById('dashboard-shell').style.display = 'flex';
   initDashboard(fridayData);
+  if (_fridayRefreshTimer) clearInterval(_fridayRefreshTimer);
+  _fridayRefreshTimer = setInterval(refreshFridayFillRate, FRIDAY_REFRESH_MS);
+}
+
+async function refreshFridayFillRate() {
+  if (!_sessionPin) return;
+  try {
+    const data = await fetchFridayFillRateWithPin(_sessionPin, _sessionStudioId);
+    renderFridayFillRateBody(data);
+  } catch (e) {
+    console.error('Friday fill rate auto-refresh failed:', e);
+    // Deliberately not surfacing this to the UI — a transient failed refresh
+    // shouldn't yank the dashboard away from someone mid-use. It'll just
+    // retry on the next interval.
+  }
 }
 
 /* ==========================================================================
