@@ -261,6 +261,15 @@ button { font-family: inherit; cursor: pointer; }
 .friday-list-row .fl-pct { width: 44px; text-align: right; font-family: 'IBM Plex Mono', monospace; font-weight: 700; flex-shrink: 0; }
 .friday-list-row .fl-detail { width: 90px; text-align: right; color: var(--ink-soft); font-size: 11px; flex-shrink: 0; }
 
+.friday-pin-gate { padding: 6px 2px 4px; }
+.friday-pin-gate .detail { font-size: 12.5px; color: var(--ink-soft); margin-bottom: 10px; }
+.friday-pin-gate .pin-row { display: flex; gap: 8px; }
+.friday-pin-gate input {
+  flex: 1; max-width: 140px; padding: 9px 10px; border: 1px solid var(--border);
+  border-radius: 9px; font-size: 14px; letter-spacing: 0.1em; font-family: 'IBM Plex Mono', monospace;
+}
+.friday-pin-gate .pin-error { font-size: 12px; color: var(--red); font-weight: 600; margin-bottom: 8px; }
+
 /* ---------- three-up cards ---------- */
 .trio { display: grid; grid-template-columns: 1.1fr 1fr 1.1fr; gap: 16px; margin-top: 26px; }
 .card {
@@ -484,20 +493,45 @@ button { font-family: inherit; cursor: pointer; }
    LIVE CONFIG — connection details for the one real card on this page so
    far: Friday Event Fill Rate. Every other card on this page is still mock
    until its own entry gets swapped the same way.
+
+   This card is PIN-gated: the studio isn't hardcoded or read from the
+   browser — a manager's PIN is sent to the community-dashboard-data Edge
+   Function, which verifies it against staff_profiles (can_view_community_
+   dashboard) using the service role key server-side, resolves their studio,
+   and returns only that studio's data. The anon key below is only used to
+   pass Supabase's API gateway; it grants no table access on its own —
+   friday_event_fill_rate has no anon/authenticated policies at all.
    ========================================================================== */
 const SUPABASE_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co';
-const SUPABASE_ANON_KEY = 'PASTE_FULL_ANON_KEY_HERE'; // copy exactly from index.html/admin.html
-const CURRENT_STUDIO_ID = 'BC-YYJ-OB'; // TODO: replace with real studio_id once coordinator login exists — see note below
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA'; // copied from admin.html
 
-async function supabaseFetch(path) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+const STUDIO_NAMES = {
+  'BC-RICH-GC':'Richmond - Garden City','BC-RICH-STV':'Richmond - Steveston','BC-SUR-SSR':'Surrey - South',
+  'BC-YVR-KIT':'Vancouver - Kitsilano','BC-YVR-MS':'Vancouver - Main Street','BC-YVR-UBC':'Vancouver - UBC',
+  'BC-YYJ-CSV':'Victoria - Cook Street Village','BC-YYJ-ESQ':'Victoria - Esquimalt','BC-YYJ-OB':'Victoria - Oak Bay',
+  'BC-YYJ-VIC':'Victoria - Uptown','AB-YYC-ING':'Calgary - Inglewood','AB-STA-STA':'St Albert',
+  'ON-BRL-BRL':'Burlington - South','ON-CMB-GLT':'Cambridge - Galt','ON-ERN-ERN':'Erin',
+  'ON-HAM-OS':'Hamilton - Ottawa Street','ON-HAM-WD':'Hamilton - Waterdown','ON-HAM-WH':'Hamilton - West Harbour',
+  'ON-KGN-AP':'Kingston - Arlington Park','ON-LDN-BYR':'London - Byron','ON-LDN-WVG':'London - Wortley Village',
+  'ON-MIS-PC':'Mississauga - Port Credit','ON-OAK-OAK':'Oakville - North','ON-OAK-WST':'Oakville - West',
+  'ON-YOW-GLB':'Ottawa - The Glebe','ON-STC-STC':'St Catharines','ON-YYZ-AVE':'Toronto - Avenue Road',
+  'ON-YYZ-BP':'Toronto - Baby Point','ON-YYZ-LEA':'Toronto - Leaside','ON-YYZ-BEA':'Toronto - The Beaches',
+  'ON-WTR-WTR':'Waterloo - Uptown'
+};
+
+async function fetchFridayFillRateWithPin(pin, studioId) {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/community-dashboard-data`, {
+    method: 'POST',
     headers: {
+      'Content-Type': 'application/json',
       apikey: SUPABASE_ANON_KEY,
       Authorization: `Bearer ${SUPABASE_ANON_KEY}`
-    }
+    },
+    body: JSON.stringify(studioId ? { pin, studioId } : { pin })
   });
-  if (!res.ok) throw new Error(`Supabase fetch failed (${res.status}): ${path}`);
-  return res.json();
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
 }
 
 
@@ -672,96 +706,15 @@ async function renderWeatherCard() {
 }
 
 // ---- FRIDAY EVENT FILL RATE ----
-// Normalized shape every source must return:
+// Normalized shape returned by the Edge Function:
 //   { capacityKnown:boolean,
 //     upcoming: { dateLabel:string, projectedAttendance:number, capacity:number,
 //                 turns:number, pct:number } | null,
 //     mostRecent: { dateLabel:string, attendance:number, capacity:number, pct:number } | null,
 //     history: [ { date:string, dateLabel:string, attendance:number, capacity:number, pct:number } ],
 //     bonusThresholdPct:number, sourceLabel:string }
-async function getFridayFillRate_mock() {
-  const history = [
-    { date: '2026-09-04', dateLabel: 'Sep 4',  attendance: 43, capacity: 132, pct: 16.3 },
-    { date: '2026-09-11', dateLabel: 'Sep 11', attendance: 61, capacity: 132, pct: 23.1 }
-  ];
-  return {
-    capacityKnown: true,
-    upcoming: { dateLabel: 'Sep 18 (in progress)', projectedAttendance: 38, capacity: 132, turns: 2, pct: 14.4 },
-    mostRecent: history[history.length - 1],
-    history,
-    bonusThresholdPct: 80,
-    sourceLabel: 'Manual entry (mock)'
-  };
-}
-
-function nextFridayISO(from) {
-  const d = new Date(from || new Date());
-  const diff = (5 - d.getDay() + 7) % 7; // 0 if today is already Friday
-  d.setDate(d.getDate() + diff);
-  return d.toISOString().slice(0, 10);
-}
-
-function shortDateLabel(iso) {
-  const [y, m, day] = iso.split('-').map(Number);
-  return new Date(y, m - 1, day).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
-
-// Real source — reads studios.friday_event_capacity + friday_event_fill_rate
-// for history, and does a live sum of active bookings for next Friday's three
-// sessions for the "upcoming" projection (that table is only written by the
-// Saturday-morning cron job, so upcoming has to be computed fresh here).
-async function getFridayFillRate_supabase(studioId) {
-  const [studioRows, historyRows] = await Promise.all([
-    supabaseFetch(`studios?id=eq.${studioId}&select=friday_event_capacity`),
-    supabaseFetch(`friday_event_fill_rate?studio_id=eq.${studioId}&select=session_date,total_attendance,capacity,fill_rate&order=session_date.asc`)
-  ]);
-
-  const capacity = studioRows[0] && studioRows[0].friday_event_capacity;
-  if (capacity == null) {
-    return { capacityKnown: false, upcoming: null, mostRecent: null, history: [], bonusThresholdPct: 80, sourceLabel: 'Supabase (live)' };
-  }
-
-  const history = historyRows.map(r => ({
-    date: r.session_date,
-    dateLabel: shortDateLabel(r.session_date),
-    attendance: r.total_attendance,
-    capacity: r.capacity,
-    pct: Number(r.fill_rate) * 100
-  }));
-
-  const targetDate = nextFridayISO();
-  let upcoming = null;
-  try {
-    const sessionRows = await supabaseFetch(
-      `sessions?studio_id=eq.${studioId}&session_date=eq.${targetDate}&session_time=in.(17:30:00,18:30:00,19:30:00)&select=id`
-    );
-    if (sessionRows.length > 0) {
-      const ids = sessionRows.map(r => r.id).join(',');
-      const bookingRows = await supabaseFetch(
-        `bookings?session_id=in.(${ids})&returned_at=is.null&qty=gt.0&select=qty`
-      );
-      const projectedAttendance = bookingRows.reduce((sum, b) => sum + (b.qty || 0), 0);
-      upcoming = {
-        dateLabel: `${shortDateLabel(targetDate)} (in progress)`,
-        projectedAttendance, capacity, turns: 2,
-        pct: (projectedAttendance / (capacity * 2)) * 100
-      };
-    }
-  } catch (e) {
-    console.error('Upcoming Friday lookup failed:', e);
-  }
-
-  return {
-    capacityKnown: true,
-    upcoming,
-    mostRecent: history.length ? history[history.length - 1] : null,
-    history,
-    bonusThresholdPct: 80,
-    sourceLabel: 'Supabase (live)'
-  };
-}
-
-const FRIDAY_FILLRATE_SOURCE = () => getFridayFillRate_supabase(CURRENT_STUDIO_ID);
+// This card is PIN-gated (see fetchFridayFillRateWithPin above) — nothing
+// renders here until a valid manager PIN comes back with data.
 
 function fridayPctClass(pct, threshold) { return pct >= threshold ? 'hit' : ''; }
 
@@ -797,9 +750,7 @@ function fridayListHtml(history, thresholdPct) {
     </div>`).join('');
 }
 
-async function renderFridayFillRate() {
-  const f = await FRIDAY_FILLRATE_SOURCE();
-
+function renderFridayFillRateBody(f) {
   if (!f.capacityKnown) {
     document.getElementById('card-friday-fillrate').innerHTML = `
       <div class="card-head"><div class="title">🎨 Friday Event Fill Rate</div></div>
@@ -844,6 +795,68 @@ function setFridayView(view) {
   document.getElementById('friday-list-view').style.display = view === 'list' ? 'block' : 'none';
   document.getElementById('friday-view-chart').classList.toggle('active', view === 'chart');
   document.getElementById('friday-view-list').classList.toggle('active', view === 'list');
+}
+
+// PIN kept in memory only for this page load — never persisted, never sent
+// anywhere except this one Edge Function call.
+function renderFridayPinGate(errorMsg) {
+  document.getElementById('card-friday-fillrate').innerHTML = `
+    <div class="card-head"><div class="title">🎨 Friday Event Fill Rate</div></div>
+    <div class="friday-pin-gate">
+      <div class="detail">Enter your manager PIN to view this studio's Friday event fill rate.</div>
+      ${errorMsg ? `<div class="pin-error">${esc(errorMsg)}</div>` : ''}
+      <div class="pin-row">
+        <input type="password" inputmode="numeric" maxlength="6" id="friday-pin-input"
+               placeholder="PIN" onkeydown="if(event.key==='Enter') submitFridayPin()" />
+        <button class="card-cta dark" style="width:auto;padding:9px 16px" onclick="submitFridayPin()">Unlock</button>
+      </div>
+    </div>`;
+}
+
+// Only used transiently, in-memory, while a multi-studio manager picks which
+// studio to view — cleared as soon as the second request resolves.
+let _pendingFridayPin = null;
+
+function renderFridayStudioPicker(studioIds) {
+  const buttonsHtml = studioIds.map(id => `
+    <button class="card-cta" style="margin-top:8px" onclick="chooseFridayStudio('${esc(id)}')">
+      ${esc(STUDIO_NAMES[id] || id)}
+    </button>`).join('');
+  document.getElementById('card-friday-fillrate').innerHTML = `
+    <div class="card-head"><div class="title">🎨 Friday Event Fill Rate</div></div>
+    <div class="friday-pin-gate">
+      <div class="detail">You're assigned to more than one studio — which one do you want to view?</div>
+      ${buttonsHtml}
+    </div>`;
+}
+
+async function chooseFridayStudio(studioId) {
+  if (!_pendingFridayPin) { renderFridayPinGate('Session expired — enter your PIN again.'); return; }
+  try {
+    const data = await fetchFridayFillRateWithPin(_pendingFridayPin, studioId);
+    _pendingFridayPin = null;
+    renderFridayFillRateBody(data);
+  } catch (e) {
+    _pendingFridayPin = null;
+    renderFridayPinGate('Invalid PIN or not authorized for this view.');
+  }
+}
+
+async function submitFridayPin() {
+  const input = document.getElementById('friday-pin-input');
+  const pin = input ? input.value.trim() : '';
+  if (!pin) return;
+  try {
+    const data = await fetchFridayFillRateWithPin(pin);
+    if (data.needsStudioSelection) {
+      _pendingFridayPin = pin;
+      renderFridayStudioPicker(data.studios);
+      return;
+    }
+    renderFridayFillRateBody(data);
+  } catch (e) {
+    renderFridayPinGate('Invalid PIN or not authorized for this view.');
+  }
 }
 
 /* ==========================================================================
@@ -1046,13 +1059,7 @@ async function initDashboard() {
   await renderStatRow('row-studio-social', 'studioSocial');
   await renderStatRow('row-goals', 'weeklyGoals');
   await renderStatRow('row-performance', 'performance');
-  try {
-    await renderFridayFillRate();
-  } catch (e) {
-    console.error('Friday fill rate failed to load:', e);
-    document.getElementById('card-friday-fillrate').innerHTML =
-      `<div class="card-head"><div class="title">🎨 Friday Event Fill Rate</div></div><div class="no-cap">Couldn't load fill rate data — check console.</div>`;
-  }
+  renderFridayPinGate();
   await renderLeaderboard();
   await renderRewards();
   await renderEarned();
