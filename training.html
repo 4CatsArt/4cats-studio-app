@@ -94,6 +94,31 @@
     font-family: -apple-system, sans-serif;
     margin-bottom: 28px;
   }
+  .studio-pick-btn {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+    background: var(--white);
+    border: 1.5px solid var(--border);
+    border-radius: 10px;
+    font-size: 15px;
+    font-family: Georgia, serif;
+    color: var(--dark);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-transition: border-color 0.15s;
+    transition: border-color 0.15s;
+  }
+  .studio-pick-btn:active { border-color: var(--orange); background: #fdf1ec; }
+  .studio-pick-sub {
+    display: block;
+    font-size: 11px;
+    color: var(--soft);
+    font-family: -apple-system, sans-serif;
+    margin-top: 2px;
+  }
   .form-group { margin-bottom: 20px; }
   .form-label {
     display: block;
@@ -855,17 +880,9 @@
   <div class="login-wrap">
     <div class="login-card">
       <div class="login-headline">Manager Sign In</div>
-      <div class="login-sub">Select your studio and enter your 4-digit PIN</div>
+      <div class="login-sub">Enter your 4-digit PIN</div>
 
       <div class="form-group">
-        <label class="form-label">Studio</label>
-        <select class="form-select" id="login-studio-select">
-          <option value="">— Select studio —</option>
-        </select>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">Manager PIN</label>
         <div class="pin-display" id="pin-display">
           <div class="pin-dot" id="dot-0"></div>
           <div class="pin-dot" id="dot-1"></div>
@@ -888,6 +905,21 @@
           <button class="key key-del" onclick="keyDel()">⌫</button>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════
+     SCREEN 1B: STUDIO DISAMBIGUATION
+     (only shown when the PIN matches more than one studio/manager)
+══════════════════════════════════════════ -->
+<div class="screen" id="screen-studio-pick">
+  <div class="login-wrap">
+    <div class="login-card">
+      <div class="login-headline">Which Studio?</div>
+      <div class="login-sub">Your PIN matches more than one — pick one</div>
+      <div id="studio-pick-list"></div>
+      <button class="btn-switch" onclick="cancelStudioPick()" style="margin-top:14px">Cancel</button>
     </div>
   </div>
 </div>
@@ -1015,21 +1047,8 @@ var aiSuggestions = [];       // last batch of AI-generated suggestions
 
 // ── INIT ─────────────────────────────────────────────────────
 window.addEventListener('load', function() {
-  populateStudioDropdown();
+  // No studio pre-selection needed anymore — PIN alone resolves it.
 });
-
-function populateStudioDropdown() {
-  var sel = document.getElementById('login-studio-select');
-  var keys = Object.keys(STUDIO_NAMES).sort(function(a, b) {
-    return STUDIO_NAMES[a].localeCompare(STUDIO_NAMES[b]);
-  });
-  for (var i = 0; i < keys.length; i++) {
-    var opt = document.createElement('option');
-    opt.value = keys[i];
-    opt.textContent = STUDIO_NAMES[keys[i]];
-    sel.appendChild(opt);
-  }
-}
 
 // ── PIN KEYPAD ────────────────────────────────────────────────
 function keyPress(digit) {
@@ -1077,13 +1096,10 @@ function showError(msg) {
 }
 
 // ── LOGIN ─────────────────────────────────────────────────────
+// PIN-first: look up who this PIN belongs to, then only ask which
+// studio if that's actually ambiguous (a floater with multiple
+// studios, or — rarely — two different people sharing a PIN).
 function attemptLogin() {
-  var studioId = document.getElementById('login-studio-select').value;
-  if (!studioId) {
-    showError('Please select a studio first');
-    return;
-  }
-
   var url = SUPABASE_URL + '/rest/v1/staff_profiles'
     + '?select=id,display_name,nickname,studio_ids,role,manager_pin'
     + '&is_active=eq.true'
@@ -1103,30 +1119,70 @@ function attemptLogin() {
       return;
     }
 
-    // Find one whose studio_ids overlaps the selected studio
-    var match = null;
+    // Build the full list of {manager, studioId} choices this PIN could mean.
+    // Usually there's exactly one — either a single-studio manager or an
+    // admin — and we skip straight to the picker. Only ask when there's
+    // genuinely more than one option (a multi-studio manager, or a rare
+    // PIN collision between two different people).
+    var choices = [];
     for (var i = 0; i < data.length; i++) {
       var m = data[i];
       var ids = m.studio_ids || [];
-      // admins with empty studio_ids can access any studio
-      if (ids.length === 0 || ids.indexOf(studioId) !== -1) {
-        match = m;
-        break;
+      if (m.role === 'admin' || ids.length === 0) {
+        choices.push({ manager: m, studioId: '', label: (m.nickname || m.display_name) + ' — Admin (All Studios)' });
+      } else {
+        for (var j = 0; j < ids.length; j++) {
+          var label = data.length > 1
+            ? (m.nickname || m.display_name) + ' — ' + (STUDIO_NAMES[ids[j]] || ids[j])
+            : (STUDIO_NAMES[ids[j]] || ids[j]);
+          choices.push({ manager: m, studioId: ids[j], label: label });
+        }
       }
     }
 
-    if (!match) {
-      showError('PIN not valid for this studio');
+    if (choices.length === 1) {
+      currentManager = choices[0].manager;
+      currentStudio = choices[0].studioId;
+      showPickerScreen();
       return;
     }
 
-    currentManager = match;
-    currentStudio = studioId;
-    showPickerScreen();
+    showStudioPickScreen(choices);
   })
   .catch(function() {
     showError('Connection error — try again');
   });
+}
+
+var studioPickChoices = [];
+function showStudioPickScreen(choices) {
+  studioPickChoices = choices;
+  var list = document.getElementById('studio-pick-list');
+  var html = '';
+  for (var i = 0; i < choices.length; i++) {
+    html += '<button class="studio-pick-btn" data-pick-idx="' + i + '">' + escHtml(choices[i].label) + '</button>';
+  }
+  list.innerHTML = html;
+
+  var btns = list.querySelectorAll('[data-pick-idx]');
+  for (var k = 0; k < btns.length; k++) {
+    btns[k].addEventListener('click', function(e) {
+      var idx = parseInt(e.currentTarget.getAttribute('data-pick-idx'), 10);
+      var choice = studioPickChoices[idx];
+      currentManager = choice.manager;
+      currentStudio = choice.studioId;
+      showPickerScreen();
+    });
+  }
+
+  showScreen('screen-studio-pick');
+}
+
+function cancelStudioPick() {
+  pinBuffer = '';
+  updatePinDots(false);
+  clearError();
+  showScreen('screen-login');
 }
 
 // ── PICKER SCREEN ─────────────────────────────────────────────
@@ -1732,7 +1788,6 @@ function doLock() {
   pinBuffer = '';
   updatePinDots(false);
   clearError();
-  document.getElementById('login-studio-select').value = '';
   document.getElementById('admin-studio-select').value = '';
   document.getElementById('admin-studio-filter-row').style.display = 'none';
   document.getElementById('btn-lock').style.display = 'none';
