@@ -239,7 +239,6 @@ body.preview-mode .rank-widget.dev-only { display: block !important; }
 body.preview-mode .profile-chip.dev-only { display: flex !important; }
 body.preview-mode .helptext.dev-only { display: block !important; }
 body.preview-mode .section-head.dev-only { display: flex !important; }
-body.preview-mode .sales-card.dev-only { display: block !important; }
 
 .admin-switcher-bar {
   display: flex; align-items: center; gap: 10px; background: var(--amber-bg); border: 1px solid #f5d99a;
@@ -321,7 +320,7 @@ body.preview-mode .sales-card.dev-only { display: block !important; }
 .friday-list-row .fl-pct { width: 44px; text-align: right; font-family: 'IBM Plex Mono', monospace; font-weight: 700; flex-shrink: 0; }
 .friday-list-row .fl-detail { width: 90px; text-align: right; color: var(--ink-soft); font-size: 11px; flex-shrink: 0; }
 
-/* ---------- studio sales (admin-only, real data, gated behind dev-only) ---------- */
+/* ---------- studio sales (live for everyone, per-studio) ---------- */
 .sales-card { padding: 18px 18px 14px; }
 .sales-yoy { font-size: 13px; margin-top: 4px; }
 .sales-yoy-detail { color: var(--ink-soft); font-size: 11.5px; }
@@ -539,12 +538,12 @@ body.preview-mode .sales-card.dev-only { display: block !important; }
     <div class="section-head ops">Friday Night Events — Fill Rate</div>
     <div class="card friday-card" id="card-friday-fillrate"></div>
 
-    <!-- Studio sales — real data (studio_sales_line_items), but NOT a live
-         feature yet: dev-only keeps it hidden from managers until Renée is
-         ready to flip it on. Enforcement doesn't rely on this CSS alone —
-         community-sales-data refuses to return data to non-admins server-side. -->
-    <div class="section-head ops dev-only">💰 Studio Sales</div>
-    <div class="card sales-card dev-only" id="card-studio-sales"></div>
+    <!-- Studio sales — LIVE for everyone now. Each manager sees only their
+         own studio's numbers (enforced server-side in community-sales-data,
+         not just by what the frontend requests). Admins can still switch
+         studios via the dropdown above, same as Friday. -->
+    <div class="section-head ops">💰 Studio Sales</div>
+    <div class="card sales-card" id="card-studio-sales"></div>
 
     <!-- leaderboard / points&rewards / points earned -->
     <div class="trio dev-only">
@@ -991,29 +990,41 @@ function renderStudioSalesCard(data) {
   const container = document.getElementById('card-studio-sales');
   if (!container) return;
 
-  if (!data || data.isAdmin === false) {
-    // Shouldn't normally render at all for non-admins (dev-only hides the
-    // container), but if it ever does, fail safely with no data shown.
+  if (!data || data.error || !data.studioId) {
+    // Genuine failure (missing/error response) — fail safely, no data shown.
     container.innerHTML = '';
     return;
   }
 
   const studioName = STUDIO_NAMES[data.studioId] || data.studioId;
-  const label = monthLabel(data.month);
   const isCurrent = !!data.isCurrentMonth;
-  const canGoNext = !isCurrent; // can't navigate past the current month
 
-  const todayTile = isCurrent ? `
+  const todayTile = `
     <div class="friday-tile">
       <div class="eyebrow">Today</div>
       <div class="pct">${formatCurrency(data.todayTotal)}</div>
-    </div>` : '';
+    </div>`;
 
-  const mtdTile = isCurrent ? `
+  const mtdTile = `
     <div class="friday-tile live">
       <div class="eyebrow"><span class="live-dot"></span> Month to Date</div>
       <div class="pct">${formatCurrency(data.mtdTotal)}</div>
-    </div>` : '';
+    </div>`;
+
+  // Managers: Today + MTD only, no history, no navigation, no YoY.
+  if (!data.isAdmin) {
+    container.innerHTML = `
+      <div class="card-head">
+        <div class="title">💰 Studio Sales — ${esc(studioName)}</div>
+      </div>
+      <div class="friday-summary">${todayTile}${mtdTile}</div>
+      <div class="sales-admin-note">Excludes orders paid fully or partially with a gift card. Store credit exclusion pending.</div>`;
+    return;
+  }
+
+  // Admins: full history — month navigation + YoY, same as before.
+  const label = monthLabel(data.month);
+  const canGoNext = !isCurrent; // can't navigate past the current month
 
   const monthTile = `
     <div class="friday-tile">
@@ -1043,7 +1054,7 @@ function renderStudioSalesCard(data) {
     ${isCurrent ? `<div class="friday-summary">${todayTile}${mtdTile}</div>` : ''}
     <div style="margin-bottom:14px">${monthTile}</div>
     <div class="sales-yoy">${yoyHtml}</div>
-    <div class="sales-admin-note">Excludes orders paid fully or partially with a gift card. Store credit exclusion pending. Admin-only — not yet visible to managers.</div>`;
+    <div class="sales-admin-note">Excludes orders paid fully or partially with a gift card. Store credit exclusion pending.</div>`;
 }
 
 let _salesMonth = null; // null = current month; else 'YYYY-MM'
@@ -1078,7 +1089,7 @@ function renderDashboardPinGate(errorMsg) {
   document.getElementById('dashboard-gate-body').innerHTML = `
     <div class="gate-detail">Enter your manager PIN to access the dashboard.</div>
     ${errorMsg ? `<div class="gate-error">${esc(errorMsg)}</div>` : ''}
-    <input type="password" inputmode="numeric" maxlength="6" id="dashboard-pin-input" class="gate-pin-input"
+    <input type="password" inputmode="numeric" maxlength="4" id="dashboard-pin-input" class="gate-pin-input"
            placeholder="PIN" onkeydown="if(event.key==='Enter') submitDashboardPin()"
            oninput="if(this.value.length===this.maxLength) submitDashboardPin()" autofocus />
     <button class="gate-btn" onclick="submitDashboardPin()">Unlock Dashboard</button>`;
@@ -1144,11 +1155,12 @@ function unlockDashboard(data) {
   initDashboard(data);
   if (_fridayRefreshTimer) clearInterval(_fridayRefreshTimer);
   _fridayRefreshTimer = setInterval(refreshFridayFillRate, FRIDAY_REFRESH_MS);
-  // Studio Sales — separate PIN call, admin-only, not on the Friday refresh
-  // timer (sales data doesn't need 60s polling like a live Friday count).
-  // Explicitly pass Friday's resolved studioId so both cards show the same
-  // studio from the start, rather than letting sales resolve its own default.
-  if (data.isAdmin && _sessionPin) {
+  // Studio Sales — separate PIN call, not on the Friday refresh timer
+  // (sales data doesn't need 60s polling like a live Friday count). LIVE for
+  // everyone now — community-sales-data scopes managers to their own studio
+  // server-side. Explicitly pass Friday's resolved studioId so both cards
+  // show the same studio from the start.
+  if (_sessionPin) {
     _salesMonth = null;
     loadStudioSales(_sessionPin, data.studioId, null);
   }
