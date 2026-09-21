@@ -239,6 +239,7 @@ body.preview-mode .rank-widget.dev-only { display: block !important; }
 body.preview-mode .profile-chip.dev-only { display: flex !important; }
 body.preview-mode .helptext.dev-only { display: block !important; }
 body.preview-mode .section-head.dev-only { display: flex !important; }
+body.preview-mode .sales-card.dev-only { display: block !important; }
 
 .admin-switcher-bar {
   display: flex; align-items: center; gap: 10px; background: var(--amber-bg); border: 1px solid #f5d99a;
@@ -544,6 +545,15 @@ body.preview-mode .section-head.dev-only { display: flex !important; }
          studios via the dropdown above, same as Friday. -->
     <div class="section-head ops">💰 Studio Sales</div>
     <div class="card sales-card" id="card-studio-sales"></div>
+
+    <!-- Kids Parties (incl. Splatter) + Team Building — admin-only/hidden
+         for now, same as Sales started. Per-studio, follows the admin
+         studio switcher. -->
+    <div class="section-head ops dev-only">🎉 Kids Parties</div>
+    <div class="card sales-card dev-only" id="card-kids-parties"></div>
+
+    <div class="section-head ops dev-only">🏢 Team Building</div>
+    <div class="card sales-card dev-only" id="card-team-building"></div>
 
     <!-- leaderboard / points&rewards / points earned -->
     <div class="trio dev-only">
@@ -1039,7 +1049,7 @@ function renderStudioSalesCard(data) {
     const arrow = pct > 0.5 ? '↑' : pct < -0.5 ? '↓' : '→';
     yoyHtml = `<span class="sales-mom ${cls}">${arrow} ${Math.abs(pct).toFixed(0)}% vs ${esc(yoyLabel)}</span> <span class="sales-yoy-detail">(${esc(yoyLabel)}: ${formatCurrency(data.yoyMonthTotal)}${data.yoyHasManualEntry ? ' · incl. backfilled' : ''})</span>`;
   } else {
-    yoyHtml = `<span class="sales-mom flat">No data for ${esc(yoyLabel)} yet to compare</span>`;
+    yoyHtml = null; // no prior-year data — omit the line rather than say so
   }
 
   container.innerHTML = `
@@ -1052,7 +1062,7 @@ function renderStudioSalesCard(data) {
     </div>
     ${isCurrent ? `<div class="friday-summary">${todayTile}${mtdTile}</div>` : ''}
     <div style="margin-bottom:14px">${monthTile}</div>
-    <div class="sales-yoy">${yoyHtml}</div>`;
+    ${yoyHtml ? `<div class="sales-yoy">${yoyHtml}</div>` : ''}`;
 }
 
 let _salesMonth = null; // null = current month; else 'YYYY-MM'
@@ -1078,6 +1088,93 @@ function salesNextMonth() {
   const next = shiftMonth(_salesMonth, 1);
   _salesMonth = next === currentMonthStr() ? null : next;
   loadStudioSales(_sessionPin, _sessionStudioId, _salesMonth);
+}
+
+// ---------- Kids Parties / Team Building (admin-only for now) ----------
+
+async function fetchBookingBucketStatsWithPin(pin, studioId, bucket, monthsBack) {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/community-booking-bucket-data`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+    },
+    body: JSON.stringify({ pin, studioId, bucket, monthsBack: monthsBack || 6 })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+function shortMonthLabel(yyyyMm) {
+  const [y, m] = yyyyMm.split('-').map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'short' });
+}
+
+function bucketTrendChartSvg(trend) {
+  const barW = 26, gap = 14, chartH = 110, padTop = 10, padBottom = 22;
+  const w = Math.max(1, trend.length) * (barW + gap) + gap;
+  const h = chartH + padTop + padBottom;
+  const maxVal = Math.max(1, ...trend.map(d => d.bookingCount));
+  const bars = trend.map((d, i) => {
+    const x = gap + i * (barW + gap);
+    const barH = Math.max(2, chartH * (d.bookingCount / maxVal));
+    const y = padTop + chartH - barH;
+    return `
+      <rect x="${x}" y="${y}" width="${barW}" height="${barH}" rx="4" fill="var(--accent)"/>
+      <text x="${x + barW / 2}" y="${padTop + chartH + 14}" text-anchor="middle" font-family="Inter, sans-serif" font-size="9.5" fill="var(--ink-soft)">${esc(shortMonthLabel(d.month))}</text>
+      <text x="${x + barW / 2}" y="${y - 5}" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" font-weight="700" fill="var(--ink)">${d.bookingCount}</text>`;
+  }).join('');
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${bars}</svg>`;
+}
+
+function renderBookingBucketCard(containerId, title, emoji, data) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  if (!data || data.error || data.isAdmin === false || !data.studioId) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const studioName = STUDIO_NAMES[data.studioId] || data.studioId;
+  const tm = data.thisMonth;
+
+  container.innerHTML = `
+    <div class="card-head">
+      <div class="title">${emoji} ${esc(title)} — ${esc(studioName)}</div>
+    </div>
+    <div class="friday-summary">
+      <div class="friday-tile">
+        <div class="eyebrow">This Month — Bookings</div>
+        <div class="pct">${tm.bookingCount}</div>
+      </div>
+      <div class="friday-tile">
+        <div class="eyebrow">This Month — Attendance</div>
+        <div class="pct">${tm.totalAttendance}</div>
+      </div>
+    </div>
+    <div style="margin:14px 0" class="friday-tile">
+      <div class="eyebrow">Avg. Party Size</div>
+      <div class="pct">${tm.avgAttendance !== null ? tm.avgAttendance : '—'}</div>
+    </div>
+    ${data.trend.length ? `<div class="friday-chart-scroll">${bucketTrendChartSvg(data.trend)}</div>` : '<div class="no-cap">No bookings yet in this range.</div>'}`;
+}
+
+async function loadBookingBucketStats(pin, studioId, bucket, containerId, title, emoji) {
+  try {
+    const data = await fetchBookingBucketStatsWithPin(pin, studioId, bucket);
+    renderBookingBucketCard(containerId, title, emoji, data);
+  } catch (e) {
+    console.error(`Booking bucket (${bucket}) load failed:`, e);
+    // Fail quietly — same non-critical treatment as the other admin-only cards.
+  }
+}
+
+function loadAllBookingBuckets(pin, studioId) {
+  loadBookingBucketStats(pin, studioId, 'kids_party', 'card-kids-parties', 'Kids Parties', '🎉');
+  loadBookingBucketStats(pin, studioId, 'team_building', 'card-team-building', 'Team Building', '🏢');
 }
 
 // PIN kept in memory only for this page load — never persisted, never sent
@@ -1162,6 +1259,10 @@ function unlockDashboard(data) {
     _salesMonth = null;
     loadStudioSales(_sessionPin, data.studioId, null);
   }
+  // Kids Parties / Team Building — admin-only/hidden for now.
+  if (data.isAdmin && _sessionPin) {
+    loadAllBookingBuckets(_sessionPin, data.studioId);
+  }
 }
 
 // Admin-only: a studio dropdown pinned above the Friday card. Changing it
@@ -1195,6 +1296,7 @@ async function changeAdminStudio(studioId) {
     renderWeatherCard(studioId);
     _salesMonth = null; // reset to current month when switching studios
     loadStudioSales(_sessionPin, studioId, null);
+    loadAllBookingBuckets(_sessionPin, studioId);
   } catch (e) {
     console.error('Failed to switch admin studio view:', e);
   }
