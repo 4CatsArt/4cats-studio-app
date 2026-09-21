@@ -323,13 +323,8 @@ body.preview-mode .sales-card.dev-only { display: block !important; }
 
 /* ---------- studio sales (admin-only, real data, gated behind dev-only) ---------- */
 .sales-card { padding: 18px 18px 14px; }
-.sales-chart-scroll { overflow-x: auto; padding-bottom: 4px; }
-.sales-chart-scroll svg { display: block; }
-.sales-table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 12.5px; }
-.sales-table th { text-align: left; font-size: 10px; font-weight: 700; letter-spacing: 0.05em; color: var(--ink-soft); text-transform: uppercase; padding: 0 8px 6px; border-bottom: 1px solid var(--border); }
-.sales-table td { padding: 7px 8px; border-bottom: 1px solid var(--border); }
-.sales-table td.num { font-family: 'IBM Plex Mono', monospace; text-align: right; }
-.sales-table tr:last-child td { border-bottom: none; }
+.sales-yoy { font-size: 13px; margin-top: 4px; }
+.sales-yoy-detail { color: var(--ink-soft); font-size: 11.5px; }
 .sales-mom.up { color: var(--green); font-weight: 700; }
 .sales-mom.down { color: var(--red); font-weight: 700; }
 .sales-mom.flat { color: var(--ink-soft); }
@@ -660,12 +655,10 @@ async function fetchFridayFillRateWithPin(pin, studioId) {
   return data;
 }
 
-// Studio Sales — admin-only, separate Edge Function, separate PIN call.
-// Not tied to the Friday studio switcher: this shows all studios at once
-// (it's a home-office overview, not a per-manager view), so it's fetched
-// once on unlock rather than re-fetched when the Friday studio dropdown
-// changes.
-async function fetchStudioSalesWithPin(pin, monthsBack) {
+// Studio Sales — admin-only for now, separate Edge Function/PIN call, but
+// NOW per-studio (v2) — same shape of request as Friday's fetch, tied to
+// the same admin studio switcher. month is 'YYYY-MM' or omitted for current.
+async function fetchStudioSalesWithPin(pin, studioId, month) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/community-sales-data`, {
     method: 'POST',
     headers: {
@@ -673,7 +666,7 @@ async function fetchStudioSalesWithPin(pin, monthsBack) {
       apikey: SUPABASE_ANON_KEY,
       Authorization: `Bearer ${SUPABASE_ANON_KEY}`
     },
-    body: JSON.stringify({ pin, monthsBack: monthsBack || 6 })
+    body: JSON.stringify({ pin, studioId, month: month || null })
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Request failed');
@@ -971,50 +964,27 @@ function setFridayView(view) {
   document.getElementById('friday-view-list').classList.toggle('active', view === 'list');
 }
 
-// ---------- Studio Sales (admin-only) ----------
+// ---------- Studio Sales (admin-only for now; per-studio, like Friday) ----------
 
 function formatCurrency(n) {
-  return '$' + (n || 0).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  if (n === null || n === undefined) return '—';
+  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 }
 
-function salesChartSvg(studioTotals) {
-  const barW = 30, gap = 16, chartH = 140, padTop = 10, padBottom = 34;
-  const top = studioTotals.slice(0, 12); // keep it readable — top 12 studios by latest month
-  const maxVal = Math.max(1, ...top.map(s => s.latestMonthTotal));
-  const w = top.length * (barW + gap) + gap;
-  const h = chartH + padTop + padBottom;
-
-  const bars = top.map((s, i) => {
-    const x = gap + i * (barW + gap);
-    const barH = Math.max(2, chartH * (s.latestMonthTotal / maxVal));
-    const y = padTop + chartH - barH;
-    const label = STUDIO_NAMES[s.studioId] || s.studioId;
-    const shortLabel = label.length > 14 ? label.slice(0, 13) + '…' : label;
-    return `
-      <rect x="${x}" y="${y}" width="${barW}" height="${barH}" rx="4" fill="var(--accent)"/>
-      <text x="${x + barW / 2}" y="${y - 5}" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="9.5" font-weight="700" fill="var(--ink)">${formatCurrency(s.latestMonthTotal)}</text>
-      <text x="${x + barW / 2}" y="${padTop + chartH + 13}" text-anchor="middle" font-family="Inter, sans-serif" font-size="8.5" fill="var(--ink-soft)" transform="rotate(35 ${x + barW / 2} ${padTop + chartH + 13})">${esc(shortLabel)}</text>`;
-  }).join('');
-
-  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${bars}</svg>`;
+function monthLabel(yyyyMm) {
+  const [y, m] = yyyyMm.split('-').map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 }
 
-function salesTableRows(studioTotals) {
-  return studioTotals.map(s => {
-    const name = STUDIO_NAMES[s.studioId] || s.studioId;
-    let momHtml = '<span class="sales-mom flat">—</span>';
-    if (s.momPct !== null && s.momPct !== undefined) {
-      const cls = s.momPct > 0.5 ? 'up' : s.momPct < -0.5 ? 'down' : 'flat';
-      const arrow = s.momPct > 0.5 ? '↑' : s.momPct < -0.5 ? '↓' : '→';
-      momHtml = `<span class="sales-mom ${cls}">${arrow} ${Math.abs(s.momPct).toFixed(0)}%</span>`;
-    }
-    return `<tr>
-      <td>${esc(name)}</td>
-      <td class="num">${formatCurrency(s.latestMonthTotal)}</td>
-      <td class="num">${momHtml}</td>
-      <td class="num">${formatCurrency(s.rangeTotal)}</td>
-    </tr>`;
-  }).join('');
+function shiftMonth(yyyyMm, delta) {
+  const [y, m] = yyyyMm.split('-').map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+
+function currentMonthStr() {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
 }
 
 function renderStudioSalesCard(data) {
@@ -1028,42 +998,77 @@ function renderStudioSalesCard(data) {
     return;
   }
 
-  if (!data.studioTotals || data.studioTotals.length === 0) {
-    container.innerHTML = `
-      <div class="card-head"><div class="title">💰 Studio Sales</div></div>
-      <div class="no-cap">No sales data yet for the selected range.</div>`;
-    return;
-  }
+  const studioName = STUDIO_NAMES[data.studioId] || data.studioId;
+  const label = monthLabel(data.month);
+  const isCurrent = !!data.isCurrentMonth;
+  const canGoNext = !isCurrent; // can't navigate past the current month
 
-  const latestLabel = data.latestMonth ? monthLabel(data.latestMonth) : '';
+  const todayTile = isCurrent ? `
+    <div class="friday-tile">
+      <div class="eyebrow">Today</div>
+      <div class="pct">${formatCurrency(data.todayTotal)}</div>
+    </div>` : '';
+
+  const mtdTile = isCurrent ? `
+    <div class="friday-tile live">
+      <div class="eyebrow"><span class="live-dot"></span> Month to Date</div>
+      <div class="pct">${formatCurrency(data.mtdTotal)}</div>
+    </div>` : '';
+
+  const monthTile = `
+    <div class="friday-tile">
+      <div class="eyebrow">${esc(label)}${data.hasManualEntryThisMonth ? ' · incl. backfilled' : ''}</div>
+      <div class="pct">${formatCurrency(data.monthTotal)}</div>
+    </div>`;
+
+  const yoyLabel = monthLabel(data.yoyMonth);
+  let yoyHtml;
+  if (data.yoyMonthTotal > 0) {
+    const pct = ((data.monthTotal - data.yoyMonthTotal) / data.yoyMonthTotal) * 100;
+    const cls = pct > 0.5 ? 'up' : pct < -0.5 ? 'down' : 'flat';
+    const arrow = pct > 0.5 ? '↑' : pct < -0.5 ? '↓' : '→';
+    yoyHtml = `<span class="sales-mom ${cls}">${arrow} ${Math.abs(pct).toFixed(0)}% vs ${esc(yoyLabel)}</span> <span class="sales-yoy-detail">(${esc(yoyLabel)}: ${formatCurrency(data.yoyMonthTotal)}${data.yoyHasManualEntry ? ' · incl. backfilled' : ''})</span>`;
+  } else {
+    yoyHtml = `<span class="sales-mom flat">No data for ${esc(yoyLabel)} yet to compare</span>`;
+  }
 
   container.innerHTML = `
     <div class="card-head">
-      <div class="title">💰 Studio Sales — ${esc(latestLabel)}</div>
+      <div class="title">💰 Studio Sales — ${esc(studioName)}</div>
+      <div class="friday-toggle">
+        <button onclick="salesPrevMonth()">← Prev</button>
+        <button onclick="salesNextMonth()" ${canGoNext ? '' : 'disabled'}>Next →</button>
+      </div>
     </div>
-    <div class="sales-chart-scroll">${salesChartSvg(data.studioTotals)}</div>
-    <table class="sales-table">
-      <thead><tr><th>Studio</th><th style="text-align:right">${esc(latestLabel)}</th><th style="text-align:right">vs prior mo.</th><th style="text-align:right">Range total</th></tr></thead>
-      <tbody>${salesTableRows(data.studioTotals)}</tbody>
-    </table>
-    <div class="sales-admin-note">Excludes orders paid fully or partially with a gift card. Store credit exclusion pending. Admin-only — not yet visible to managers.</div>
-    <div class="source-tag">via ${esc(data.sourceLabel || 'Supabase')}</div>`;
+    ${isCurrent ? `<div class="friday-summary">${todayTile}${mtdTile}</div>` : ''}
+    <div style="margin-bottom:14px">${monthTile}</div>
+    <div class="sales-yoy">${yoyHtml}</div>
+    <div class="sales-admin-note">Excludes orders paid fully or partially with a gift card. Store credit exclusion pending. Admin-only — not yet visible to managers.</div>`;
 }
 
-function monthLabel(yyyyMm) {
-  const [y, m] = yyyyMm.split('-').map(Number);
-  return new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-}
+let _salesMonth = null; // null = current month; else 'YYYY-MM'
 
-async function loadStudioSales(pin) {
+async function loadStudioSales(pin, studioId, month) {
   try {
-    const data = await fetchStudioSalesWithPin(pin);
+    const data = await fetchStudioSalesWithPin(pin, studioId, month);
     renderStudioSalesCard(data);
   } catch (e) {
     console.error('Studio sales load failed:', e);
     // Fail quietly — this card is dev-only/admin-only and non-critical to
     // the rest of the dashboard; don't disrupt anything else on failure.
   }
+}
+
+function salesPrevMonth() {
+  _salesMonth = shiftMonth(_salesMonth || currentMonthStr(), -1);
+  loadStudioSales(_sessionPin, _sessionStudioId, _salesMonth);
+}
+
+function salesNextMonth() {
+  if (!_salesMonth) return; // already at current month
+  const next = shiftMonth(_salesMonth, 1);
+  _salesMonth = next === currentMonthStr() ? null : next;
+  loadStudioSales(_sessionPin, _sessionStudioId, _salesMonth);
 }
 
 // PIN kept in memory only for this page load — never persisted, never sent
@@ -1140,7 +1145,12 @@ function unlockDashboard(data) {
   _fridayRefreshTimer = setInterval(refreshFridayFillRate, FRIDAY_REFRESH_MS);
   // Studio Sales — separate PIN call, admin-only, not on the Friday refresh
   // timer (sales data doesn't need 60s polling like a live Friday count).
-  if (data.isAdmin && _sessionPin) loadStudioSales(_sessionPin);
+  // Explicitly pass Friday's resolved studioId so both cards show the same
+  // studio from the start, rather than letting sales resolve its own default.
+  if (data.isAdmin && _sessionPin) {
+    _salesMonth = null;
+    loadStudioSales(_sessionPin, data.studioId, null);
+  }
 }
 
 // Admin-only: a studio dropdown pinned above the Friday card. Changing it
@@ -1172,6 +1182,8 @@ async function changeAdminStudio(studioId) {
     const data = await fetchFridayFillRateWithPin(_sessionPin, studioId);
     renderFridayFillRateBody(data);
     renderWeatherCard(studioId);
+    _salesMonth = null; // reset to current month when switching studios
+    loadStudioSales(_sessionPin, studioId, null);
   } catch (e) {
     console.error('Failed to switch admin studio view:', e);
   }
