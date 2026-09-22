@@ -6358,63 +6358,87 @@ function partyBirdsEyeStudioTableHtml(byStudioThisMonth, capacityByStudio) {
 }
 
 // ---------- Party Slot Schedule editor ----------
+// Grid layout matches the reference sheet: one row per studio, one column
+// per specific bookable slot (day_of_week + time), not just a per-day total.
 
-const PARTY_SLOT_DAYS = [
-  { dow: 0, label: 'Sun' }, { dow: 1, label: 'Mon' }, { dow: 2, label: 'Tue' },
-  { dow: 3, label: 'Wed' }, { dow: 4, label: 'Thu' }, { dow: 5, label: 'Fri' }, { dow: 6, label: 'Sat' }
+const PARTY_SLOT_DEFS = [
+  { dow: 5, time: '18:00', label: 'Fri 6pm' },
+  { dow: 6, time: '11:00', label: 'Sat 11am' },
+  { dow: 6, time: '13:00', label: 'Sat 1pm' },
+  { dow: 6, time: '15:00', label: 'Sat 3pm' },
+  { dow: 0, time: '11:00', label: 'Sun 11am' },
+  { dow: 0, time: '13:00', label: 'Sun 1pm' },
+  { dow: 0, time: '15:00', label: 'Sun 3pm' }
 ]
 
 function togglePartySlotEditor() {
   const panel = document.getElementById('party-slot-editor')
   const isOpen = panel.style.display !== 'none'
   panel.style.display = isOpen ? 'none' : 'block'
-  if (!isOpen) renderPartySlotEditorShell()
+  if (!isOpen) loadPartySlotScheduleGrid()
 }
 
-function renderPartySlotEditorShell() {
+async function loadPartySlotScheduleGrid() {
   const panel = document.getElementById('party-slot-editor')
-  const options = Object.entries(STUDIO_VARIANT_MAP).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')
+  panel.innerHTML = '<div class="loading">Loading...</div>'
+
+  const { data, error } = await sb.from('party_slot_schedule').select('studio_id, day_of_week, time_slot, slots')
+  if (error) { panel.innerHTML = `<div style="color:#c0392b;font-size:12px">Failed to load: ${error.message}</div>`; return }
+
+  const slotsByStudio = {} // studio_id -> "dow-time" -> slots
+  ;(data || []).forEach(r => {
+    if (!slotsByStudio[r.studio_id]) slotsByStudio[r.studio_id] = {}
+    slotsByStudio[r.studio_id][`${r.day_of_week}-${r.time_slot.slice(0, 5)}`] = r.slots
+  })
+
+  const studioIds = Object.keys(STUDIO_VARIANT_MAP).sort((a, b) => (STUDIO_VARIANT_MAP[a] || a).localeCompare(STUDIO_VARIANT_MAP[b] || b))
+
+  const headerCells = PARTY_SLOT_DEFS.map(d => `<th style="padding:6px 8px;font-size:10px;color:#888;text-transform:uppercase">${d.label}</th>`).join('')
+  const rows = studioIds.map(studioId => {
+    const cells = PARTY_SLOT_DEFS.map(d => {
+      const key = `${d.dow}-${d.time}`
+      const val = (slotsByStudio[studioId] && slotsByStudio[studioId][key]) || 0
+      return `<td style="padding:4px"><input type="number" min="0" data-studio="${studioId}" data-dow="${d.dow}" data-time="${d.time}" value="${val}" style="width:48px;height:30px;text-align:center;border:1px solid #d0d0c8;border-radius:6px;font-size:13px"></td>`
+    }).join('')
+    return `<tr style="border-bottom:0.5px solid #f5f5f0">
+      <td style="padding:6px 10px;font-size:12px;white-space:nowrap">${STUDIO_VARIANT_MAP[studioId] || studioId}</td>
+      ${cells}
+    </tr>`
+  }).join('')
+
   panel.innerHTML = `
     <h3 style="margin:0 0 10px;font-size:13px;font-weight:600">Weekly Party Slot Schedule</h3>
-    <div style="font-size:11px;color:#888;margin-bottom:12px">Set how many party slots a studio has on each day of the week. Used to compute % full — closures on studio_closures automatically zero out that specific date.</div>
-    <select id="pse-studio-select" onchange="loadPartySlotScheduleForStudio(this.value)" style="height:34px;padding:0 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:13px;margin-bottom:14px">
-      <option value="">Select a studio…</option>${options}
-    </select>
-    <div id="pse-grid-container"></div>`
-}
-
-async function loadPartySlotScheduleForStudio(studioId) {
-  const gridEl = document.getElementById('pse-grid-container')
-  if (!studioId) { gridEl.innerHTML = ''; return }
-  gridEl.innerHTML = '<div class="loading">Loading...</div>'
-
-  const { data, error } = await sb.from('party_slot_schedule').select('day_of_week, slots').eq('studio_id', studioId)
-  if (error) { gridEl.innerHTML = `<div style="color:#c0392b;font-size:12px">Failed to load: ${error.message}</div>`; return }
-
-  const slotsByDay = {}
-  ;(data || []).forEach(r => { slotsByDay[r.day_of_week] = r.slots })
-
-  gridEl.innerHTML = `
-    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
-      ${PARTY_SLOT_DAYS.map(d => `
-        <div style="text-align:center">
-          <label style="font-size:11px;color:#888;display:block;margin-bottom:4px">${d.label}</label>
-          <input type="number" min="0" id="pse-day-${d.dow}" value="${slotsByDay[d.dow] || 0}" style="width:54px;height:34px;text-align:center;border:1px solid #d0d0c8;border-radius:8px;font-size:14px">
-        </div>`).join('')}
+    <div style="font-size:11px;color:#888;margin-bottom:12px">Set how many party slots each studio has for each bookable time. Used to compute % full — closures on studio_closures automatically zero out that specific date.</div>
+    <div style="overflow-x:auto;max-height:480px;overflow-y:auto">
+      <table style="border-collapse:collapse;font-size:12px">
+        <thead style="position:sticky;top:0;background:#fafaf8;z-index:1"><tr>
+          <th style="padding:6px 10px;text-align:left;font-size:10px;color:#888;text-transform:uppercase">Studio</th>
+          ${headerCells}
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
     </div>
-    <button onclick="savePartySlotSchedule('${studioId}')" style="height:34px;padding:0 16px;border-radius:8px;border:none;background:#333;color:white;font-size:12px;cursor:pointer">Save Schedule</button>
-    <span id="pse-save-status" style="margin-left:10px;font-size:12px;color:#2e7d32"></span>`
+    <div style="margin-top:14px">
+      <button onclick="saveAllPartySlotSchedules()" style="height:34px;padding:0 16px;border-radius:8px;border:none;background:#333;color:white;font-size:12px;cursor:pointer">Save All Changes</button>
+      <span id="pse-save-status" style="margin-left:10px;font-size:12px;color:#2e7d32"></span>
+    </div>`
 }
 
-async function savePartySlotSchedule(studioId) {
-  const rows = PARTY_SLOT_DAYS.map(d => ({
-    studio_id: studioId,
-    day_of_week: d.dow,
-    slots: parseInt(document.getElementById(`pse-day-${d.dow}`).value) || 0,
+async function saveAllPartySlotSchedules() {
+  const inputs = document.querySelectorAll('#party-slot-editor input[data-studio]')
+  const rows = Array.from(inputs).map(el => ({
+    studio_id: el.dataset.studio,
+    day_of_week: parseInt(el.dataset.dow),
+    time_slot: el.dataset.time,
+    slots: parseInt(el.value) || 0,
     updated_at: new Date().toISOString()
   }))
-  const { error } = await sb.from('party_slot_schedule').upsert(rows, { onConflict: 'studio_id,day_of_week' })
+
   const statusEl = document.getElementById('pse-save-status')
+  statusEl.style.color = '#888'
+  statusEl.textContent = `Saving ${rows.length} rows...`
+
+  const { error } = await sb.from('party_slot_schedule').upsert(rows, { onConflict: 'studio_id,day_of_week,time_slot' })
   if (error) {
     statusEl.style.color = '#c0392b'
     statusEl.textContent = `Save failed: ${error.message}`
