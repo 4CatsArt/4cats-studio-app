@@ -660,6 +660,10 @@ select:focus, input:focus { border-color: #888; }
     <div id="staff-container"><div class="loading">Loading...</div></div>
   </div>
   <div class="tab-content" id="tab-parties">
+    <div style="display:flex;justify-content:flex-end;margin-bottom:8px">
+      <button onclick="togglePartySlotEditor()" style="height:30px;font-size:12px;padding:0 12px;border-radius:6px;border:0.5px solid #d0d0c8;cursor:pointer;background:white;color:#333">⚙️ Edit Party Slot Schedule</button>
+    </div>
+    <div id="party-slot-editor" style="display:none;background:white;border:0.5px solid #e0e0d8;border-radius:12px;padding:16px;margin-bottom:1.5rem"></div>
     <div id="party-birdseye-container" style="margin-bottom:1.5rem"><div class="loading">Loading overview...</div></div>
     <div class="toolbar">
       <div class="toolbar-group" style="gap:8px">
@@ -6312,13 +6316,16 @@ function partyBirdsEyeChartSvg(months, monthly) {
   return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${groups}</svg>`
 }
 
-function partyBirdsEyeStudioTableHtml(byStudioThisMonth) {
+function partyBirdsEyeStudioTableHtml(byStudioThisMonth, capacityByStudio) {
   const rows = Object.entries(byStudioThisMonth)
     .map(([studioId, c]) => ({ studioId, ...c, total: c.kids_party + c.splatter + c.team_building }))
     .filter(r => r.total > 0)
     .sort((a, b) => b.total - a.total)
 
   if (!rows.length) return '<div style="padding:1rem;color:#888;font-size:12px">No parties booked this month yet.</div>'
+
+  const showFillCol = !!capacityByStudio
+  const fillColHeader = showFillCol ? '<th style="padding:8px 12px;text-align:right;font-size:10px;color:#5e35b1;text-transform:uppercase">% Full</th>' : ''
 
   return `<table style="width:100%;border-collapse:collapse;font-size:12px">
     <thead><tr style="background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
@@ -6327,16 +6334,97 @@ function partyBirdsEyeStudioTableHtml(byStudioThisMonth) {
       <th style="padding:8px 12px;text-align:right;font-size:10px;color:#0277bd;text-transform:uppercase">💦 Splatter</th>
       <th style="padding:8px 12px;text-align:right;font-size:10px;color:#00695c;text-transform:uppercase">🤝 Team Bldg</th>
       <th style="padding:8px 12px;text-align:right;font-size:10px;color:#888;text-transform:uppercase">Total</th>
+      ${fillColHeader}
     </tr></thead>
-    <tbody>${rows.map(r => `
+    <tbody>${rows.map(r => {
+      let fillCol = ''
+      if (showFillCol) {
+        const cap = capacityByStudio[r.studioId]
+        const kidsFilled = r.kids_party + r.splatter
+        fillCol = cap > 0
+          ? `<td style="padding:7px 12px;text-align:right;color:#5e35b1;font-weight:600">${Math.round((kidsFilled / cap) * 100)}%</td>`
+          : `<td style="padding:7px 12px;text-align:right;color:#ccc;font-size:11px">—</td>`
+      }
+      return `
       <tr style="border-bottom:0.5px solid #f5f5f0">
         <td style="padding:7px 12px">${STUDIO_VARIANT_MAP[r.studioId] || r.studioId}</td>
         <td style="padding:7px 12px;text-align:right">${r.kids_party}</td>
         <td style="padding:7px 12px;text-align:right">${r.splatter}</td>
         <td style="padding:7px 12px;text-align:right">${r.team_building}</td>
         <td style="padding:7px 12px;text-align:right;font-weight:700">${r.total}</td>
-      </tr>`).join('')}
+        ${fillCol}
+      </tr>`}).join('')}
     </tbody></table>`
+}
+
+// ---------- Party Slot Schedule editor ----------
+
+const PARTY_SLOT_DAYS = [
+  { dow: 0, label: 'Sun' }, { dow: 1, label: 'Mon' }, { dow: 2, label: 'Tue' },
+  { dow: 3, label: 'Wed' }, { dow: 4, label: 'Thu' }, { dow: 5, label: 'Fri' }, { dow: 6, label: 'Sat' }
+]
+
+function togglePartySlotEditor() {
+  const panel = document.getElementById('party-slot-editor')
+  const isOpen = panel.style.display !== 'none'
+  panel.style.display = isOpen ? 'none' : 'block'
+  if (!isOpen) renderPartySlotEditorShell()
+}
+
+function renderPartySlotEditorShell() {
+  const panel = document.getElementById('party-slot-editor')
+  const options = Object.entries(STUDIO_VARIANT_MAP).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')
+  panel.innerHTML = `
+    <h3 style="margin:0 0 10px;font-size:13px;font-weight:600">Weekly Party Slot Schedule</h3>
+    <div style="font-size:11px;color:#888;margin-bottom:12px">Set how many party slots a studio has on each day of the week. Used to compute % full — closures on studio_closures automatically zero out that specific date.</div>
+    <select id="pse-studio-select" onchange="loadPartySlotScheduleForStudio(this.value)" style="height:34px;padding:0 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:13px;margin-bottom:14px">
+      <option value="">Select a studio…</option>${options}
+    </select>
+    <div id="pse-grid-container"></div>`
+}
+
+async function loadPartySlotScheduleForStudio(studioId) {
+  const gridEl = document.getElementById('pse-grid-container')
+  if (!studioId) { gridEl.innerHTML = ''; return }
+  gridEl.innerHTML = '<div class="loading">Loading...</div>'
+
+  const { data, error } = await sb.from('party_slot_schedule').select('day_of_week, slots').eq('studio_id', studioId)
+  if (error) { gridEl.innerHTML = `<div style="color:#c0392b;font-size:12px">Failed to load: ${error.message}</div>`; return }
+
+  const slotsByDay = {}
+  ;(data || []).forEach(r => { slotsByDay[r.day_of_week] = r.slots })
+
+  gridEl.innerHTML = `
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+      ${PARTY_SLOT_DAYS.map(d => `
+        <div style="text-align:center">
+          <label style="font-size:11px;color:#888;display:block;margin-bottom:4px">${d.label}</label>
+          <input type="number" min="0" id="pse-day-${d.dow}" value="${slotsByDay[d.dow] || 0}" style="width:54px;height:34px;text-align:center;border:1px solid #d0d0c8;border-radius:8px;font-size:14px">
+        </div>`).join('')}
+    </div>
+    <button onclick="savePartySlotSchedule('${studioId}')" style="height:34px;padding:0 16px;border-radius:8px;border:none;background:#333;color:white;font-size:12px;cursor:pointer">Save Schedule</button>
+    <span id="pse-save-status" style="margin-left:10px;font-size:12px;color:#2e7d32"></span>`
+}
+
+async function savePartySlotSchedule(studioId) {
+  const rows = PARTY_SLOT_DAYS.map(d => ({
+    studio_id: studioId,
+    day_of_week: d.dow,
+    slots: parseInt(document.getElementById(`pse-day-${d.dow}`).value) || 0,
+    updated_at: new Date().toISOString()
+  }))
+  const { error } = await sb.from('party_slot_schedule').upsert(rows, { onConflict: 'studio_id,day_of_week' })
+  const statusEl = document.getElementById('pse-save-status')
+  if (error) {
+    statusEl.style.color = '#c0392b'
+    statusEl.textContent = `Save failed: ${error.message}`
+  } else {
+    statusEl.style.color = '#2e7d32'
+    statusEl.textContent = '✓ Saved'
+    _partyCapacityCache = {} // schedule changed — invalidate cached capacity so it recomputes
+    setTimeout(() => { statusEl.textContent = '' }, 3000)
+    if (document.getElementById('party-birdseye-container')) renderPartyBirdsEye()
+  }
 }
 
 let _partyBirdsEyeData = null // { bookings, sessionTitleMap } — fetched once, re-bucketed on toggle
@@ -6401,7 +6489,21 @@ async function loadPartyBirdsEye() {
   renderPartyBirdsEye()
 }
 
-function renderPartyBirdsEye() {
+let _partyCapacityCache = {} // month -> { total, byStudio: { studio_id: capacity } }
+
+async function getPartyCapacityForMonth(month) {
+  if (_partyCapacityCache[month]) return _partyCapacityCache[month]
+  const { data, error } = await sb.rpc('get_party_capacity_for_month_all', { p_month: month })
+  if (error) { console.error('Party capacity load failed:', error); return null }
+  const byStudio = {}
+  let total = 0
+  ;(data || []).forEach(r => { byStudio[r.studio_id] = r.capacity; total += (r.capacity || 0) })
+  const result = { total, byStudio }
+  _partyCapacityCache[month] = result
+  return result
+}
+
+async function renderPartyBirdsEye() {
   const container = document.getElementById('party-birdseye-container')
   if (!container || !_partyBirdsEyeData) return
 
@@ -6436,6 +6538,29 @@ function renderPartyBirdsEye() {
   const months = Object.keys(monthly).sort()
   const toggleBtn = (m, label) => `<button onclick="setPartyBirdsEyeMode('${m}')" style="height:28px;font-size:11px;padding:0 12px;border-radius:6px;border:0.5px solid #d0d0c8;cursor:pointer;background:${_partyBirdsEyeMode === m ? '#333' : 'white'};color:${_partyBirdsEyeMode === m ? 'white' : '#333'}">${label}</button>`
 
+  // % full only makes sense in "By Party Date" mode — capacity is slots
+  // available for parties HAPPENING this month, which doesn't correspond
+  // to a "purchased this month" count (a purchase this month could be for
+  // a party happening in a totally different month).
+  let fillRateHtml = ''
+  let capacityData = null
+  if (!isPurchase) {
+    capacityData = await getPartyCapacityForMonth(thisMonthStr)
+    if (capacityData && capacityData.total > 0) {
+      const kidsFilled = totalsThisMonth.kids_party + totalsThisMonth.splatter
+      const pct = Math.round((kidsFilled / capacityData.total) * 100)
+      fillRateHtml = `
+      <div style="background:white;border:0.5px solid #d1c4e9;border-radius:8px;padding:10px 18px;font-size:13px">
+        <span style="color:#5e35b1;font-size:11px;display:block">📊 Kids Parties — % Full</span><strong style="color:#5e35b1">${pct}%</strong> <span style="color:#888;font-size:11px">(${kidsFilled} / ${capacityData.total} slots)</span>
+      </div>`
+    } else if (capacityData) {
+      fillRateHtml = `
+      <div style="background:white;border:0.5px solid #e0e0d8;border-radius:8px;padding:10px 18px;font-size:12px;color:#888">
+        📊 No party slot schedule set yet — <a href="#" onclick="togglePartySlotEditor();return false" style="color:#5e35b1">set one up</a> to see % full
+      </div>`
+    }
+  }
+
   container.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
       <div style="font-size:11px;color:#888">${isPurchase ? 'Showing when parties were purchased' : 'Showing when parties are/were happening'}</div>
@@ -6451,6 +6576,7 @@ function renderPartyBirdsEye() {
       <div style="background:white;border:0.5px solid #b2dfdb;border-radius:8px;padding:10px 18px;font-size:13px">
         <span style="color:#00695c;font-size:11px;display:block">🤝 Team Building — This Month</span><strong style="color:#00695c">${totalsThisMonth.team_building}</strong>
       </div>
+      ${fillRateHtml}
     </div>
     <div style="display:flex;gap:1.5rem;flex-wrap:wrap;align-items:flex-start">
       <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;padding:16px;flex:1;min-width:340px">
@@ -6459,7 +6585,7 @@ function renderPartyBirdsEye() {
       </div>
       <div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;padding:16px;flex:1;min-width:340px">
         <h3 style="margin:0 0 10px;font-size:13px;font-weight:600">By studio — this month</h3>
-        ${partyBirdsEyeStudioTableHtml(byStudioThisMonth)}
+        ${partyBirdsEyeStudioTableHtml(byStudioThisMonth, capacityData ? capacityData.byStudio : null)}
       </div>
     </div>`
 }
