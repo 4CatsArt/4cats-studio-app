@@ -239,6 +239,7 @@ body.preview-mode .rank-widget.dev-only { display: block !important; }
 body.preview-mode .profile-chip.dev-only { display: flex !important; }
 body.preview-mode .helptext.dev-only { display: block !important; }
 body.preview-mode .section-head.dev-only { display: flex !important; }
+body.preview-mode .sales-card.dev-only { display: block !important; }
 
 .admin-switcher-bar {
   display: flex; align-items: center; gap: 10px; background: var(--amber-bg); border: 1px solid #f5d99a;
@@ -545,14 +546,19 @@ body.preview-mode .section-head.dev-only { display: flex !important; }
     <div class="section-head ops">💰 Studio Sales</div>
     <div class="card sales-card" id="card-studio-sales"></div>
 
-    <!-- Kids Parties (incl. Splatter) + Team Building — admin-only/hidden
-         for now, same as Sales started. Per-studio, follows the admin
-         studio switcher. -->
+    <!-- Kids Parties + Team Building are now live for everyone (matches Sales). -->
     <div class="section-head ops">🎉 Kids Parties</div>
     <div class="card sales-card" id="card-kids-parties"></div>
 
     <div class="section-head ops">🏢 Team Building</div>
     <div class="card sales-card" id="card-team-building"></div>
+
+    <!-- Daily Check-Ins — new, admin-only/hidden for now (default for any
+         new card until explicitly flipped live). Provisional simple count,
+         not a compliance % — that comes once real staff schedule/time-punch
+         data exists to know who was actually expected to submit. -->
+    <div class="section-head ops dev-only">📋 Daily Check-Ins</div>
+    <div class="card sales-card dev-only" id="card-checkins"></div>
 
     <!-- leaderboard / points&rewards / points earned -->
     <div class="trio dev-only">
@@ -1201,6 +1207,55 @@ function loadAllBookingBuckets(pin, studioId) {
   loadBookingBucketStats(pin, studioId, 'team_building');
 }
 
+// ---------- Daily Check-Ins (admin-only for now, simple count) ----------
+
+async function fetchCheckinCountWithPin(pin, studioId) {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/community-checkin-data`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+    },
+    body: JSON.stringify({ pin, studioId })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+function renderCheckinCard(data) {
+  const container = document.getElementById('card-checkins');
+  if (!container) return;
+
+  if (!data || data.error || !data.studioId) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const studioName = STUDIO_NAMES[data.studioId] || data.studioId;
+  const label = monthLabel(data.month);
+
+  container.innerHTML = `
+    <div class="card-head">
+      <div class="title">📋 Daily Check-Ins — ${esc(studioName)}</div>
+    </div>
+    <div class="friday-tile">
+      <div class="eyebrow">${esc(label)} — Submissions</div>
+      <div class="pct">${data.count}</div>
+    </div>
+    <div class="sales-yoy-detail" style="margin-top:10px">Provisional count only — not yet compared against a target. Will become a compliance % once staff time-punch data exists.</div>`;
+}
+
+async function loadCheckinCount(pin, studioId) {
+  try {
+    const data = await fetchCheckinCountWithPin(pin, studioId);
+    renderCheckinCard(data);
+  } catch (e) {
+    console.error('Check-in count load failed:', e);
+  }
+}
+
 // PIN kept in memory only for this page load — never persisted, never sent
 // anywhere except this one Edge Function call. Gates the WHOLE dashboard,
 // not just this card — matches the can_view_community_dashboard checkbox.
@@ -1288,6 +1343,10 @@ function unlockDashboard(data) {
   if (_sessionPin) {
     loadAllBookingBuckets(_sessionPin, data.studioId);
   }
+  // Daily Check-Ins — admin-only/hidden for now.
+  if (data.isAdmin && _sessionPin) {
+    loadCheckinCount(_sessionPin, data.studioId);
+  }
 }
 
 // Admin-only: a studio dropdown pinned above the Friday card. Changing it
@@ -1322,6 +1381,7 @@ async function changeAdminStudio(studioId) {
     _salesMonth = null; // reset to current month when switching studios
     loadStudioSales(_sessionPin, studioId, null);
     loadAllBookingBuckets(_sessionPin, studioId);
+    loadCheckinCount(_sessionPin, studioId);
   } catch (e) {
     console.error('Failed to switch admin studio view:', e);
   }
