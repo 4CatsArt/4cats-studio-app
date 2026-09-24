@@ -1550,6 +1550,37 @@ function getOrderNoteFromPayload(rawPayload) {
   } catch { return '' }
 }
 
+// Parse the "Party Notes" cart property from the Kids Party / Splatter Party
+// booking widgets ("Anything else you'd like to share to help us make this
+// party extra special?"). Read from raw_payload on demand — no DB column needed.
+function getPartyNotesFromPayload(rawPayload) {
+  try {
+    const payload = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload
+    if (!payload?.line_items) return ''
+    for (const li of payload.line_items) {
+      const props = li.properties || []
+      for (const p of props) {
+        if ((p.name || '').toLowerCase().trim() === 'party notes') {
+          return (p.value || '').trim()
+        }
+      }
+    }
+    return ''
+  } catch(e) { return '' }
+}
+
+// Combine the widget's Party Notes answer + the Shopify order note into one
+// prefill for the Special Notes box. Only used until staff save the block —
+// once party_details.notes has a value, that wins.
+function buildPartyNotesPrefill(rawPayload) {
+  const partyNotes = getPartyNotesFromPayload(rawPayload)
+  const orderNote = (getOrderNoteFromPayload(rawPayload) || '').trim()
+  const parts = []
+  if (partyNotes) parts.push(partyNotes)
+  if (orderNote && orderNote !== partyNotes) parts.push('Order note: ' + orderNote)
+  return parts.join('\n\n')
+}
+
 function getBillingName(rawPayload) {
   try {
     const p = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload
@@ -1721,6 +1752,11 @@ function buildPartyBookingBlock(booking, partyDetail, subtype, blockIdx, session
 
   const outcomeVal = pd.outcome || ''
 
+  // Special Notes: saved value wins; otherwise prefill from the booking
+  // widget's Party Notes answer + the Shopify order note
+  const notesPrefillFromShopify = pd.notes ? '' : buildPartyNotesPrefill(booking.raw_payload)
+  const notesValue = pd.notes || notesPrefillFromShopify
+
   return `
   <div class="party-booking-block${pd.actual_guests ? ' party-closed' : ''}" id="block-${uid}">
     <div class="party-booking-header">
@@ -1767,8 +1803,8 @@ function buildPartyBookingBlock(booking, partyDetail, subtype, blockIdx, session
       </div>
       ${typeSpecificFields}
       <div class="field-group full">
-        <div class="field-label">Special Notes</div>
-        <textarea id="${uid}-notes" placeholder="Allergies, special requests...">${pd.notes||''}</textarea>
+        <div class="field-label">Special Notes${notesPrefillFromShopify ? ' <span style="color:#c06080;font-weight:normal;font-size:10px">(from booking)</span>' : ''}</div>
+        <textarea id="${uid}-notes" placeholder="Allergies, special requests...">${escHtml(notesValue)}</textarea>
       </div>
     </div>
 
