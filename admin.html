@@ -247,6 +247,7 @@ select:focus, input:focus { border-color: #888; }
     <button class="tab-btn" onclick="switchTab('tables')">🪑 Tables</button>
     <button class="tab-btn" onclick="switchTab('studiopages')">🌐 Studio Pages</button>
     <button class="tab-btn" onclick="switchTab('kidsage')">🔓 Age Exceptions</button>
+    <button class="tab-btn" onclick="switchTab('points')">🏆 Community Points<span id="cp-badge" class="tab-badge" style="display:none"></span></button>
     <a class="tab-btn" href="studio-setup-2026.html" target="_blank" style="text-decoration:none;display:inline-flex;align-items:center">🚚 2026 Rollout</a>
     <a class="tab-btn" href="community-admin.html" target="_blank" style="text-decoration:none;display:inline-flex;align-items:center">🌱 Community Coordinators</a>
     <div class="top-bar-right"><button class="signout-btn" onclick="signOut()">Sign out</button></div>
@@ -951,10 +952,11 @@ async function initApp() {
   loadCampFormsBadge()
   loadSpacesBadge()
   loadNamesBadge()
+  if (typeof cpLoadBadge === 'function') cpLoadBadge()
 }
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','emailtemplates','training','staff','parties','users','clay','reviews','guide','setup','camps','referrals','tables','studiopages','kidsage'][i] === tab))
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','emailtemplates','training','staff','parties','users','clay','reviews','guide','setup','camps','referrals','tables','studiopages','kidsage','points'][i] === tab))
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'))
   document.getElementById(`tab-${tab}`).classList.add('active')
   if (tab === 'curriculum') loadCurriculum()
@@ -974,6 +976,7 @@ function switchTab(tab) {
   if (tab === 'studiopages') initStudioPagesTab()
   if (tab === 'kidsage') loadAgeExceptionsTab()
   if (tab === 'inventory') initSpacesLog()
+  if (tab === 'points') loadPointsTab()
 }
 
 async function loadQualityBadge() {
@@ -11312,6 +11315,566 @@ async function removeAgeException(id, name) {
 
   <div id="kidsage-table-wrap"></div>
 </div>
+
+<!-- ═══════════════════════════════════════════════
+     COMMUNITY POINTS TAB
+     ═══════════════════════════════════════════════ -->
+<div class="tab-content" id="tab-points" style="padding:1.5rem;max-width:1000px">
+  <h3 style="margin-bottom:0.5rem">🏆 Community Points</h3>
+  <p style="color:#888;font-size:13px;margin-bottom:1rem">
+    Set what coordinators earn, manage prizes and levels, and handle redemptions.
+    Points are awarded automatically at month end — nothing here changes a month that's already closed.
+  </p>
+
+  <div style="display:flex;gap:0;border-bottom:0.5px solid #e0e0d8;margin-bottom:1.25rem;flex-wrap:wrap">
+    <button id="cp-subbtn-rules" onclick="cpSwitchSub('rules')" class="cp-subbtn">Earning Rules</button>
+    <button id="cp-subbtn-prizes" onclick="cpSwitchSub('prizes')" class="cp-subbtn">Prizes</button>
+    <button id="cp-subbtn-levels" onclick="cpSwitchSub('levels')" class="cp-subbtn">Levels</button>
+    <button id="cp-subbtn-redemptions" onclick="cpSwitchSub('redemptions')" class="cp-subbtn">Redemptions<span id="cp-sub-badge" class="tab-badge" style="display:none;margin-left:6px"></span></button>
+    <button id="cp-subbtn-wallets" onclick="cpSwitchSub('wallets')" class="cp-subbtn">Wallets &amp; Adjustments</button>
+  </div>
+
+  <div id="cp-body"><div class="empty">Loading…</div></div>
+  <div id="cp-modal-root"></div>
+</div>
+
+<style>
+.cp-subbtn { padding:8px 18px; font-size:13px; border:none; background:none; cursor:pointer; border-bottom:2px solid transparent; color:#888; }
+.cp-subbtn.active { border-bottom-color:#1a1a1a; font-weight:600; color:#1a1a1a; }
+.cp-card { background:white; border:0.5px solid #e0e0d8; border-radius:12px; padding:1rem 1.25rem; margin-bottom:1rem; }
+.cp-summary { display:flex; gap:1rem; flex-wrap:wrap; margin-bottom:1rem; }
+.cp-stat { background:white; border:0.5px solid #e0e0d8; border-radius:12px; padding:0.85rem 1.1rem; flex:1; min-width:180px; }
+.cp-stat-label { font-size:11px; color:#888; text-transform:uppercase; letter-spacing:0.4px; }
+.cp-stat-value { font-size:22px; font-weight:600; margin-top:4px; }
+.cp-stat-sub { font-size:12px; color:#888; margin-top:2px; }
+.cp-pill { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:500; }
+.cp-pill-result { background:#e8f5e9; color:#2e7d32; }
+.cp-pill-effort { background:#e3f2fd; color:#1565c0; }
+.cp-pill-bonus { background:#fff3e0; color:#e65100; }
+.cp-pill-off { background:#f0f0ea; color:#999; }
+.cp-pill-requested { background:#fff8e1; color:#f57f17; }
+.cp-pill-approved { background:#e3f2fd; color:#1565c0; }
+.cp-pill-fulfilled { background:#e8f5e9; color:#2e7d32; }
+.cp-pill-cancelled { background:#f0f0ea; color:#999; }
+.cp-note { font-size:12px; color:#888; margin:0.5rem 0 1rem; }
+.cp-muted { color:#aaa; font-size:11px; }
+.cp-row-off td { opacity:0.5; }
+.cp-check { display:flex; align-items:center; gap:8px; font-size:13px; }
+.cp-check input { width:auto !important; }
+</style>
+
+<script>
+// ═══════════════════════════════════════════════
+// COMMUNITY POINTS TAB
+// All reads/writes go through the community-points-admin Edge Function
+// (community_* tables are service-role only).
+// ═══════════════════════════════════════════════
+const CP_URL = SUPABASE_URL + '/functions/v1/community-points-admin'
+let cpData = null
+let cpSub = 'rules'
+let cpRedemptionFilter = 'open'
+let cpModalSaveFn = null
+
+function cpEsc(s) {
+  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
+}
+function cpFmt(n) { return (n == null ? 0 : Number(n)).toLocaleString('en-CA') }
+function cpMonthLabel(m) { return m ? new Date(m + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', year: 'numeric' }) : '' }
+function cpDateLabel(ts) { return ts ? new Date(ts).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' }) : '' }
+
+async function cpRequest(action, payload) {
+  const { data: { session } } = await sb.auth.getSession()
+  if (!session) throw new Error('Your session expired — please sign in again.')
+  const res = await fetch(CP_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${session.access_token}`, apikey: SUPABASE_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(Object.assign({ action }, payload || {}))
+  })
+  let data
+  try { data = await res.json() } catch (e) { throw new Error(`Server error (${res.status}). Is the community-points-admin function deployed?`) }
+  if (!res.ok || data.error) {
+    const msg = data.error || data.message || `Server error (${res.status})`
+    if (/does not exist|relation/i.test(msg)) throw new Error('The points tables don\'t exist yet — run community_points_schema.sql first.')
+    throw new Error(msg)
+  }
+  return data
+}
+
+async function loadPointsTab() {
+  document.getElementById('cp-body').innerHTML = '<div class="empty">Loading…</div>'
+  try {
+    cpData = await cpRequest('get_all')
+    cpUpdateBadges()
+    cpSwitchSub(cpSub)
+  } catch (e) {
+    document.getElementById('cp-body').innerHTML = `<div class="empty" style="color:#c0392b">Failed to load: ${cpEsc(e.message)}</div>`
+  }
+}
+
+async function cpRefresh() {
+  cpData = await cpRequest('get_all')
+  cpUpdateBadges()
+  cpRender()
+}
+
+async function cpLoadBadge() {
+  try { cpData = await cpRequest('get_all'); cpUpdateBadges() } catch (e) { /* schema or function not live yet — stay quiet */ }
+}
+
+function cpUpdateBadges() {
+  const n = cpData ? cpData.redemptions.filter(r => r.status === 'requested').length : 0
+  ;['cp-badge', 'cp-sub-badge'].forEach(id => {
+    const el = document.getElementById(id)
+    if (!el) return
+    if (n > 0) { el.textContent = n; el.style.display = 'inline-block' } else { el.style.display = 'none' }
+  })
+}
+
+function cpSwitchSub(sub) {
+  cpSub = sub
+  document.querySelectorAll('.cp-subbtn').forEach(b => b.classList.toggle('active', b.id === `cp-subbtn-${sub}`))
+  cpRender()
+}
+
+function cpRender() {
+  if (!cpData) return
+  const body = document.getElementById('cp-body')
+  if (cpSub === 'rules') body.innerHTML = cpRenderRules()
+  if (cpSub === 'prizes') body.innerHTML = cpRenderPrizes()
+  if (cpSub === 'levels') body.innerHTML = cpRenderLevels()
+  if (cpSub === 'redemptions') body.innerHTML = cpRenderRedemptions()
+  if (cpSub === 'wallets') { body.innerHTML = cpRenderWallets(); cpAdjPersonChanged() }
+}
+
+// ── Lookups ─────────────────────────────────────
+function cpStaff(id) { return (cpData.staff || []).find(s => s.id === id) }
+function cpStaffName(id) { const s = cpStaff(id); return s ? (s.display_name || s.nickname || 'Unnamed') : 'Unknown person' }
+function cpPrize(id) { return (cpData.prizes || []).find(p => p.id === id) }
+function cpTier(id) { return (cpData.tiers || []).find(t => t.id === id) }
+function cpBalance(id) { return (cpData.balances || []).find(b => b.staff_profile_id === id) || { wallet: 0, lifetime: 0, level_name: null, badge_emoji: null } }
+
+// ── Rule helpers ────────────────────────────────
+function cpRuleMax(r) {
+  if (r.calc_method === 'scaled') { const full = Math.round(100 * Number(r.multiplier || 0)); return r.monthly_cap != null ? Math.min(full, r.monthly_cap) : full }
+  if (r.calc_method === 'per_unit') return r.monthly_cap != null ? r.monthly_cap : null
+  return r.flat_points
+}
+function cpRuleWorth(r) {
+  if (r.calc_method === 'scaled') return `Score × ${Number(r.multiplier)} <span class="cp-muted">(0–100% score → up to ${cpFmt(Math.round(100 * Number(r.multiplier)))})</span>`
+  if (r.calc_method === 'per_unit') return `${cpFmt(r.points_per_unit)} each`
+  return `${cpFmt(r.flat_points)} pts`
+}
+
+// ═══ EARNING RULES ═══════════════════════════════
+function cpRenderRules() {
+  const rules = cpData.rules || []
+  const earning = rules.filter(r => r.is_active && r.kind !== 'bonus')
+  let resultMax = 0, effortMax = 0, uncapped = false
+  earning.forEach(r => {
+    const m = cpRuleMax(r)
+    if (m == null) { uncapped = true; return }
+    if (r.kind === 'result') resultMax += m; else effortMax += m
+  })
+  const total = resultMax + effortMax
+  const resultPct = total ? Math.round(resultMax / total * 100) : 0
+  const tier1 = (cpData.tiers || []).filter(t => t.is_active).sort((a, b) => a.points_cost - b.points_cost)[0]
+
+  let html = `<div class="cp-summary">
+    <div class="cp-stat"><div class="cp-stat-label">Max per month</div>
+      <div class="cp-stat-value">${cpFmt(total)}${uncapped ? '+' : ''}</div>
+      <div class="cp-stat-sub">results + effort, before bonuses${uncapped ? ' · some categories uncapped' : ''}</div></div>
+    <div class="cp-stat"><div class="cp-stat-label">Results vs effort</div>
+      <div class="cp-stat-value">${resultPct}% / ${total ? 100 - resultPct : 0}%</div>
+      <div class="cp-stat-sub">${cpFmt(resultMax)} results · ${cpFmt(effortMax)} effort</div></div>
+    ${tier1 ? `<div class="cp-stat"><div class="cp-stat-label">Cheapest prize tier</div>
+      <div class="cp-stat-value">${cpFmt(tier1.points_cost)}</div>
+      <div class="cp-stat-sub">${cpEsc(tier1.name)} · ${total ? Math.round(tier1.points_cost / total * 100) : '–'}% of a max month</div></div>` : ''}
+  </div>
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
+    <div class="cp-note" style="margin:0">Changes apply from <strong>${cpMonthLabel(cpData.current_month)}</strong>. Closed months keep the values they were earned under.</div>
+    <button class="btn btn-primary" onclick="cpOpenRuleModal(null)">+ Add Category</button>
+  </div>
+  <div class="users-table-wrap" style="margin-top:0.75rem"><table class="users-table"><thead><tr>
+    <th>Category</th><th>Type</th><th>Worth</th><th>Monthly cap</th><th>Leaderboard</th><th>Since</th><th></th>
+  </tr></thead><tbody>`
+  if (!rules.length) html += `<tr><td colspan="7"><div class="empty">No categories yet.</div></td></tr>`
+  rules.forEach(r => {
+    html += `<tr class="${r.is_active ? '' : 'cp-row-off'}">
+      <td><div style="font-weight:500;font-size:13px">${cpEsc(r.name)}${r.is_active ? '' : ' <span class="cp-pill cp-pill-off">Off</span>'}</div>
+        <div class="cp-muted">${cpEsc(r.code)}${r.source_notes ? ' · ' + cpEsc(r.source_notes) : ''}</div></td>
+      <td><span class="cp-pill cp-pill-${r.kind}">${r.kind}</span></td>
+      <td>${cpRuleWorth(r)}</td>
+      <td>${r.monthly_cap != null ? cpFmt(r.monthly_cap) : '<span class="cp-muted">—</span>'}</td>
+      <td>${r.has_leaderboard ? '✓' : ''}</td>
+      <td>${cpMonthLabel(r.effective_from)}</td>
+      <td><button class="btn" style="font-size:11px" onclick="cpOpenRuleModal('${r.code}')">Edit</button></td>
+    </tr>`
+  })
+  return html + '</tbody></table></div>'
+}
+
+function cpOpenRuleModal(code) {
+  const r = code ? (cpData.rules || []).find(x => x.code === code) : null
+  const isNew = !r
+  const v = r || { name: '', code: '', kind: 'result', calc_method: 'scaled', multiplier: 3, points_per_unit: 5, flat_points: 50, monthly_cap: '', has_leaderboard: true, is_active: true, source_notes: '', sort_order: ((cpData.rules || []).length + 1) * 10 }
+  const html = `
+    <div class="modal-field"><label>Name (shown to coordinators)</label>
+      <input id="cpr-name" value="${cpEsc(v.name)}" oninput="cpRuleNameInput(${isNew})"></div>
+    <div class="modal-field"><label>Code</label>
+      <input id="cpr-code" value="${cpEsc(v.code)}" ${isNew ? '' : 'disabled'} placeholder="e.g. camp_registrations">
+      <div class="modal-hint">${isNew ? 'Used by the monthly points job to find the data. Lowercase and underscores.' : 'Codes can\'t change once created.'}</div></div>
+    <div style="display:flex;gap:1rem">
+      <div class="modal-field" style="flex:1"><label>Type</label>
+        <select id="cpr-kind" onchange="cpRulePreview()">
+          <option value="result" ${v.kind === 'result' ? 'selected' : ''}>Result</option>
+          <option value="effort" ${v.kind === 'effort' ? 'selected' : ''}>Effort</option>
+          <option value="bonus" ${v.kind === 'bonus' ? 'selected' : ''}>Bonus</option>
+        </select></div>
+      <div class="modal-field" style="flex:1.4"><label>How points are calculated</label>
+        <select id="cpr-method" onchange="cpRuleMethodChanged()">
+          <option value="scaled" ${v.calc_method === 'scaled' ? 'selected' : ''}>Scaled from a 0–100% score</option>
+          <option value="per_unit" ${v.calc_method === 'per_unit' ? 'selected' : ''}>Points for each one</option>
+          <option value="flat" ${v.calc_method === 'flat' ? 'selected' : ''}>Flat bonus</option>
+        </select></div>
+    </div>
+    <div style="display:flex;gap:1rem">
+      <div class="modal-field" style="flex:1" id="cpr-mult-wrap"><label>Multiplier</label>
+        <input id="cpr-mult" type="number" step="0.1" min="0" value="${cpEsc(v.multiplier == null ? 3 : v.multiplier)}" oninput="cpRulePreview()"></div>
+      <div class="modal-field" style="flex:1" id="cpr-ppu-wrap"><label>Points each</label>
+        <input id="cpr-ppu" type="number" step="1" min="1" value="${cpEsc(v.points_per_unit == null ? 5 : v.points_per_unit)}" oninput="cpRulePreview()"></div>
+      <div class="modal-field" style="flex:1" id="cpr-flat-wrap"><label>Bonus points</label>
+        <input id="cpr-flat" type="number" step="1" min="1" value="${cpEsc(v.flat_points == null ? 50 : v.flat_points)}" oninput="cpRulePreview()"></div>
+      <div class="modal-field" style="flex:1"><label>Monthly cap</label>
+        <input id="cpr-cap" type="number" step="1" min="0" value="${cpEsc(v.monthly_cap == null ? '' : v.monthly_cap)}" placeholder="No cap" oninput="cpRulePreview()"></div>
+    </div>
+    <div id="cpr-preview" style="background:#fafaf8;border-radius:8px;padding:10px 12px;font-size:13px;margin-bottom:1rem"></div>
+    <div class="modal-field"><label>Where the number comes from (admin note)</label>
+      <input id="cpr-notes" value="${cpEsc(v.source_notes || '')}" placeholder="e.g. camp registrations vs. camp capacity"></div>
+    <div style="display:flex;gap:1.5rem;align-items:center;margin-bottom:1rem">
+      <label class="cp-check"><input type="checkbox" id="cpr-lb" ${v.has_leaderboard ? 'checked' : ''}> Monthly category leader</label>
+      <label class="cp-check"><input type="checkbox" id="cpr-active" ${v.is_active ? 'checked' : ''}> Active</label>
+      <div class="modal-field" style="margin:0 0 0 auto;width:110px"><label>Sort order</label>
+        <input id="cpr-sort" type="number" step="1" value="${cpEsc(v.sort_order)}"></div>
+    </div>
+    <div class="modal-hint">Saving applies from ${cpMonthLabel(cpData.current_month)} onward.</div>`
+  cpOpenModal(isNew ? 'Add Category' : 'Edit ' + v.name, isNew ? 'A new way for coordinators to earn' : 'Earning rule', html, () => cpSaveRule(isNew, v.code))
+  cpRuleMethodChanged()
+}
+
+function cpRuleNameInput(isNew) {
+  if (isNew) {
+    document.getElementById('cpr-code').value = document.getElementById('cpr-name').value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40)
+  }
+}
+function cpRuleMethodChanged() {
+  const m = document.getElementById('cpr-method').value
+  document.getElementById('cpr-mult-wrap').style.display = m === 'scaled' ? '' : 'none'
+  document.getElementById('cpr-ppu-wrap').style.display = m === 'per_unit' ? '' : 'none'
+  document.getElementById('cpr-flat-wrap').style.display = m === 'flat' ? '' : 'none'
+  cpRulePreview()
+}
+function cpRulePreview() {
+  const m = document.getElementById('cpr-method').value
+  const capRaw = document.getElementById('cpr-cap').value
+  const cap = capRaw === '' ? null : Number(capRaw)
+  let text = ''
+  if (m === 'scaled') {
+    const mult = Number(document.getElementById('cpr-mult').value) || 0
+    const at = pct => { const p = Math.round(pct * mult); return cap != null ? Math.min(p, cap) : p }
+    text = `A 50% score earns <strong>${cpFmt(at(50))}</strong>, 75% earns <strong>${cpFmt(at(75))}</strong>, 100% earns <strong>${cpFmt(at(100))}</strong>.`
+  } else if (m === 'per_unit') {
+    const ppu = Number(document.getElementById('cpr-ppu').value) || 0
+    text = `Each one earns <strong>${cpFmt(ppu)}</strong>.` + (cap != null ? ` Stops counting at <strong>${cpFmt(cap)}</strong> for the month (${Math.floor(cap / (ppu || 1))} of them).` : ' <span style="color:#e65100">No cap — consider one for self-reported activity.</span>')
+  } else {
+    const flat = Number(document.getElementById('cpr-flat').value) || 0
+    text = `Earns <strong>${cpFmt(flat)}</strong> each time it's achieved in a month.`
+  }
+  document.getElementById('cpr-preview').innerHTML = text
+}
+
+async function cpSaveRule(isNew, originalCode) {
+  const rule = {
+    is_new: isNew,
+    code: isNew ? document.getElementById('cpr-code').value.trim() : originalCode,
+    name: document.getElementById('cpr-name').value.trim(),
+    kind: document.getElementById('cpr-kind').value,
+    calc_method: document.getElementById('cpr-method').value,
+    multiplier: document.getElementById('cpr-mult').value,
+    points_per_unit: document.getElementById('cpr-ppu').value,
+    flat_points: document.getElementById('cpr-flat').value,
+    monthly_cap: document.getElementById('cpr-cap').value,
+    has_leaderboard: document.getElementById('cpr-lb').checked,
+    is_active: document.getElementById('cpr-active').checked,
+    source_notes: document.getElementById('cpr-notes').value.trim(),
+    sort_order: document.getElementById('cpr-sort').value
+  }
+  await cpRequest('save_rule', { rule })
+}
+
+// ═══ PRIZES ═══════════════════════════════════════
+function cpRenderPrizes() {
+  const tiers = cpData.tiers || []
+  let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;gap:1rem;flex-wrap:wrap">
+    <div class="cp-note" style="margin:0">Coordinators spend wallet points on these. Changing a tier's cost doesn't affect redemptions already made.</div>
+    <button class="btn btn-primary" onclick="cpOpenTierModal(null)">+ Add Tier</button></div>`
+  if (!tiers.length) return html + '<div class="empty">No prize tiers yet.</div>'
+  tiers.forEach(t => {
+    const prizes = (cpData.prizes || []).filter(p => p.tier_id === t.id)
+    html += `<div class="cp-card" style="${t.is_active ? '' : 'opacity:0.55'}">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;margin-bottom:0.75rem">
+        <div><div style="font-size:15px;font-weight:600">${cpEsc(t.name)} ${t.is_active ? '' : '<span class="cp-pill cp-pill-off">Hidden</span>'}</div>
+          <div style="font-size:13px;color:#888">Tier ${t.tier_number} · <strong style="color:#1a1a1a">${cpFmt(t.points_cost)} points</strong></div></div>
+        <div style="display:flex;gap:6px"><button class="btn" onclick="cpOpenTierModal('${t.id}')">Edit Tier</button>
+          <button class="btn" onclick="cpOpenPrizeModal(null,'${t.id}')">+ Add Prize</button></div>
+      </div>`
+    if (!prizes.length) html += '<div class="cp-muted" style="padding:0.5rem 0">No prizes in this tier yet.</div>'
+    else {
+      html += '<table class="users-table"><thead><tr><th style="width:56px"></th><th>Prize</th><th>Stock</th><th>Status</th><th></th></tr></thead><tbody>'
+      prizes.forEach(p => {
+        html += `<tr class="${p.is_active ? '' : 'cp-row-off'}">
+          <td>${p.image_url ? `<img src="${cpEsc(p.image_url)}" style="width:40px;height:40px;object-fit:cover;border-radius:6px" onerror="this.style.display='none'">` : ''}</td>
+          <td><div style="font-weight:500;font-size:13px">${cpEsc(p.name)}</div><div class="cp-muted">${cpEsc(p.description || '')}</div></td>
+          <td>${p.stock == null ? '<span class="cp-muted">Unlimited</span>' : (p.stock === 0 ? '<span style="color:#c0392b">Out</span>' : p.stock)}</td>
+          <td>${p.is_active ? 'Available' : '<span class="cp-pill cp-pill-off">Hidden</span>'}</td>
+          <td><button class="btn" style="font-size:11px" onclick="cpOpenPrizeModal('${p.id}')">Edit</button></td></tr>`
+      })
+      html += '</tbody></table>'
+    }
+    html += '</div>'
+  })
+  return html
+}
+
+function cpOpenTierModal(id) {
+  const t = id ? cpTier(id) : null
+  const next = Math.max(0, ...(cpData.tiers || []).map(x => x.tier_number)) + 1
+  const v = t || { tier_number: next, name: 'Tier ' + next, points_cost: '', is_active: true }
+  const html = `
+    <div style="display:flex;gap:1rem">
+      <div class="modal-field" style="width:100px"><label>Tier #</label><input id="cpt-num" type="number" min="1" value="${cpEsc(v.tier_number)}"></div>
+      <div class="modal-field" style="flex:1"><label>Name</label><input id="cpt-name" value="${cpEsc(v.name)}"></div>
+      <div class="modal-field" style="width:140px"><label>Points cost</label><input id="cpt-cost" type="number" min="1" value="${cpEsc(v.points_cost)}"></div>
+    </div>
+    <label class="cp-check"><input type="checkbox" id="cpt-active" ${v.is_active ? 'checked' : ''}> Visible to coordinators</label>`
+  cpOpenModal(t ? 'Edit Tier' : 'Add Tier', 'Prize tier', html, () => cpRequest('save_tier', { tier: {
+    id: t ? t.id : null,
+    tier_number: document.getElementById('cpt-num').value,
+    name: document.getElementById('cpt-name').value.trim(),
+    points_cost: document.getElementById('cpt-cost').value,
+    is_active: document.getElementById('cpt-active').checked
+  } }))
+}
+
+function cpOpenPrizeModal(id, tierId) {
+  const p = id ? cpPrize(id) : null
+  const v = p || { tier_id: tierId, name: '', description: '', image_url: '', stock: '', is_active: true }
+  const tierOpts = (cpData.tiers || []).map(t => `<option value="${t.id}" ${t.id === v.tier_id ? 'selected' : ''}>${cpEsc(t.name)} (${cpFmt(t.points_cost)} pts)</option>`).join('')
+  const html = `
+    <div class="modal-field"><label>Name</label><input id="cpp-name" value="${cpEsc(v.name)}" placeholder="e.g. 4Cats hoodie"></div>
+    <div class="modal-field"><label>Tier</label><select id="cpp-tier">${tierOpts}</select></div>
+    <div class="modal-field"><label>Description</label><textarea id="cpp-desc">${cpEsc(v.description || '')}</textarea></div>
+    <div style="display:flex;gap:1rem">
+      <div class="modal-field" style="flex:1"><label>Image URL (optional)</label><input id="cpp-img" value="${cpEsc(v.image_url || '')}" placeholder="https://…"></div>
+      <div class="modal-field" style="width:130px"><label>Stock</label><input id="cpp-stock" type="number" min="0" value="${cpEsc(v.stock == null ? '' : v.stock)}" placeholder="Unlimited"></div>
+    </div>
+    <label class="cp-check"><input type="checkbox" id="cpp-active" ${v.is_active ? 'checked' : ''}> Available to redeem</label>`
+  cpOpenModal(p ? 'Edit Prize' : 'Add Prize', 'Leave stock blank for unlimited', html, () => cpRequest('save_prize', { prize: {
+    id: p ? p.id : null,
+    tier_id: document.getElementById('cpp-tier').value,
+    name: document.getElementById('cpp-name').value.trim(),
+    description: document.getElementById('cpp-desc').value.trim(),
+    image_url: document.getElementById('cpp-img').value.trim(),
+    stock: document.getElementById('cpp-stock').value,
+    is_active: document.getElementById('cpp-active').checked
+  } }))
+}
+
+// ═══ LEVELS ═══════════════════════════════════════
+function cpRenderLevels() {
+  const levels = (cpData.levels || []).slice().sort((a, b) => a.lifetime_required - b.lifetime_required)
+  let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;gap:1rem;flex-wrap:wrap">
+    <div class="cp-note" style="margin:0">Levels are based on lifetime points, which never go down when someone redeems.</div>
+    <button class="btn btn-primary" onclick="cpOpenLevelModal(null)">+ Add Level</button></div>
+  <div class="users-table-wrap"><table class="users-table"><thead><tr><th>Level</th><th>Lifetime points needed</th><th>People at this level</th><th></th></tr></thead><tbody>`
+  if (!levels.length) html += '<tr><td colspan="4"><div class="empty">No levels yet.</div></td></tr>'
+  levels.forEach(l => {
+    const count = (cpData.balances || []).filter(b => b.level_name === l.name).length
+    html += `<tr><td style="font-size:13px;font-weight:500">${cpEsc(l.badge_emoji || '')} ${cpEsc(l.name)}</td>
+      <td>${cpFmt(l.lifetime_required)}</td><td>${count}</td>
+      <td style="white-space:nowrap"><button class="btn" style="font-size:11px" onclick="cpOpenLevelModal('${l.id}')">Edit</button>
+        <button class="btn" style="font-size:11px;color:#c0392b;border-color:#f5c6cb" onclick="cpDeleteLevel('${l.id}')">Delete</button></td></tr>`
+  })
+  return html + '</tbody></table></div>'
+}
+
+function cpOpenLevelModal(id) {
+  const l = id ? (cpData.levels || []).find(x => x.id === id) : null
+  const v = l || { name: '', lifetime_required: '', badge_emoji: '' }
+  const html = `
+    <div style="display:flex;gap:1rem">
+      <div class="modal-field" style="width:90px"><label>Badge</label><input id="cpl-emoji" value="${cpEsc(v.badge_emoji || '')}" placeholder="🥇"></div>
+      <div class="modal-field" style="flex:1"><label>Name</label><input id="cpl-name" value="${cpEsc(v.name)}"></div>
+      <div class="modal-field" style="width:170px"><label>Lifetime points</label><input id="cpl-req" type="number" min="0" value="${cpEsc(v.lifetime_required)}"></div>
+    </div>`
+  cpOpenModal(l ? 'Edit Level' : 'Add Level', 'Coordinator level', html, () => cpRequest('save_level', { level: {
+    id: l ? l.id : null,
+    name: document.getElementById('cpl-name').value.trim(),
+    lifetime_required: document.getElementById('cpl-req').value,
+    badge_emoji: document.getElementById('cpl-emoji').value.trim()
+  } }))
+}
+
+async function cpDeleteLevel(id) {
+  const l = (cpData.levels || []).find(x => x.id === id)
+  if (!l || !confirm(`Delete the ${l.name} level? People at this level will show the next level down.`)) return
+  try { await cpRequest('delete_level', { id }); await cpRefresh() } catch (e) { alert(e.message) }
+}
+
+// ═══ REDEMPTIONS ══════════════════════════════════
+function cpRenderRedemptions() {
+  const all = cpData.redemptions || []
+  const f = cpRedemptionFilter
+  const rows = all.filter(r => f === 'all' ? true : f === 'open' ? (r.status === 'requested' || r.status === 'approved') : r.status === f)
+  const opt = (val, label) => `<option value="${val}" ${f === val ? 'selected' : ''}>${label}</option>`
+  let html = `<div class="toolbar" style="margin-bottom:1rem"><div class="toolbar-group"><label>Show</label>
+    <select onchange="cpRedemptionFilter=this.value;cpRender()">
+      ${opt('open', 'Open (requested + approved)')}${opt('requested', 'Requested')}${opt('approved', 'Approved')}${opt('fulfilled', 'Fulfilled')}${opt('cancelled', 'Cancelled')}${opt('all', 'All')}
+    </select></div></div>
+  <div class="users-table-wrap"><table class="users-table"><thead><tr><th>Requested</th><th>Person</th><th>Prize</th><th>Points</th><th>Status</th><th>Notes</th><th></th></tr></thead><tbody>`
+  if (!rows.length) html += '<tr><td colspan="7"><div class="empty">Nothing here.</div></td></tr>'
+  rows.forEach(r => {
+    const p = cpPrize(r.prize_id), t = p ? cpTier(p.tier_id) : null
+    let actions = ''
+    if (r.status === 'requested') actions += `<button class="btn" style="font-size:11px" onclick="cpSetRedemption('${r.id}','approved')">Approve</button> `
+    if (r.status === 'requested' || r.status === 'approved') actions += `<button class="btn" style="font-size:11px" onclick="cpSetRedemption('${r.id}','fulfilled')">Fulfilled</button>
+      <button class="btn" style="font-size:11px;color:#c0392b;border-color:#f5c6cb" onclick="cpSetRedemption('${r.id}','cancelled')">Cancel</button>`
+    html += `<tr><td>${cpDateLabel(r.requested_at)}</td>
+      <td style="font-size:13px;font-weight:500">${cpEsc(cpStaffName(r.staff_profile_id))}</td>
+      <td>${cpEsc(p ? p.name : 'Deleted prize')}${t ? `<div class="cp-muted">${cpEsc(t.name)}</div>` : ''}</td>
+      <td>${cpFmt(r.points_spent)}</td>
+      <td><span class="cp-pill cp-pill-${r.status}">${r.status}</span>${r.fulfilled_at ? `<div class="cp-muted">${cpDateLabel(r.fulfilled_at)}</div>` : ''}</td>
+      <td style="color:#888;font-size:12px">${cpEsc(r.notes || '')}</td>
+      <td style="white-space:nowrap">${actions}</td></tr>`
+  })
+  return html + '</tbody></table></div>'
+}
+
+async function cpSetRedemption(id, status) {
+  const r = (cpData.redemptions || []).find(x => x.id === id)
+  if (!r) return
+  const who = cpStaffName(r.staff_profile_id)
+  if (status === 'cancelled' && !confirm(`Cancel this redemption? ${cpFmt(r.points_spent)} points go back to ${who}'s wallet.`)) return
+  if (status === 'fulfilled' && !confirm(`Mark as fulfilled for ${who}?`)) return
+  try { await cpRequest('set_redemption_status', { id, status }); await cpRefresh() } catch (e) { alert(e.message) }
+}
+
+// ═══ WALLETS & ADJUSTMENTS ════════════════════════
+function cpWalletPeople() {
+  const ids = new Set((cpData.balances || []).map(b => b.staff_profile_id))
+  return (cpData.staff || []).filter(s => ids.has(s.id) || (s.is_active && s.can_view_community_dashboard))
+}
+
+function cpRenderWallets() {
+  const people = cpWalletPeople()
+  const others = (cpData.staff || []).filter(s => s.is_active && !people.some(p => p.id === s.id))
+  const personOpts = `<option value="">Choose a person…</option>
+    <optgroup label="Coordinators">${people.map(s => `<option value="${s.id}">${cpEsc(s.display_name || s.nickname)}</option>`).join('')}</optgroup>
+    <optgroup label="Other active staff">${others.map(s => `<option value="${s.id}">${cpEsc(s.display_name || s.nickname)}</option>`).join('')}</optgroup>`
+  const studioOpts = '<option value="">No studio</option>' + (typeof allStudios !== 'undefined' ? allStudios : []).map(s => `<option value="${s.id}">${cpEsc(getStudioName(s.id))}</option>`).join('')
+
+  let html = `<div class="cp-card">
+    <div style="font-size:14px;font-weight:600;margin-bottom:0.25rem">Manual adjustment</div>
+    <div class="cp-note" style="margin-top:0">For corrections or one-off recognition. Use a negative number to remove points. Every adjustment is logged with your name and note.</div>
+    <div class="toolbar" style="flex-wrap:wrap;gap:0.75rem">
+      <div class="toolbar-group"><label>Person</label><select id="cpa-person" onchange="cpAdjPersonChanged()" style="min-width:200px">${personOpts}</select></div>
+      <div class="toolbar-group"><label>Studio</label><select id="cpa-studio">${studioOpts}</select></div>
+      <div class="toolbar-group"><label>Points</label><input id="cpa-points" type="number" step="1" placeholder="e.g. 100 or -50" style="width:130px"></div>
+    </div>
+    <div class="toolbar" style="margin-top:0.75rem">
+      <div class="toolbar-group" style="flex:1"><label>Note</label><input id="cpa-note" placeholder="Required — why?" style="width:100%"></div>
+      <div class="toolbar-group"><button class="btn btn-primary" onclick="cpApplyAdjustment()">Apply</button></div>
+    </div>
+    <div id="cpa-wallet-info" class="cp-muted" style="margin-top:0.5rem"></div>
+    <div id="cpa-status" style="font-size:13px;margin-top:0.5rem"></div>
+  </div>
+
+  <h4 style="margin:1.25rem 0 0.5rem;font-size:14px">Wallets</h4>
+  <div class="users-table-wrap"><table class="users-table"><thead><tr><th>Person</th><th>Level</th><th>Wallet</th><th>Lifetime</th></tr></thead><tbody>`
+  const sorted = people.slice().sort((a, b) => cpBalance(b.id).lifetime - cpBalance(a.id).lifetime)
+  if (!sorted.length) html += '<tr><td colspan="4"><div class="empty">No coordinators yet. Tick "Can access Community Dashboard" on a staff profile to add them.</div></td></tr>'
+  sorted.forEach(s => {
+    const b = cpBalance(s.id)
+    html += `<tr><td style="font-size:13px;font-weight:500">${cpEsc(s.display_name || s.nickname)}${s.is_active ? '' : ' <span class="cp-pill cp-pill-off">Inactive</span>'}</td>
+      <td>${b.level_name ? cpEsc((b.badge_emoji || '') + ' ' + b.level_name) : '<span class="cp-muted">—</span>'}</td>
+      <td style="font-weight:500">${cpFmt(b.wallet)}</td><td>${cpFmt(b.lifetime)}</td></tr>`
+  })
+  html += `</tbody></table></div>
+
+  <h4 style="margin:1.25rem 0 0.5rem;font-size:14px">Recent adjustments</h4>
+  <div class="users-table-wrap"><table class="users-table"><thead><tr><th>Date</th><th>Person</th><th>Points</th><th>Note</th><th>By</th></tr></thead><tbody>`
+  const adj = cpData.adjustments || []
+  if (!adj.length) html += '<tr><td colspan="5"><div class="empty">No adjustments yet.</div></td></tr>'
+  adj.forEach(a => {
+    html += `<tr><td>${cpDateLabel(a.created_at)}</td><td>${cpEsc(cpStaffName(a.staff_profile_id))}</td>
+      <td style="font-weight:500;color:${a.points < 0 ? '#c0392b' : '#2e7d32'}">${a.points > 0 ? '+' : ''}${cpFmt(a.points)}</td>
+      <td style="color:#888;font-size:12px">${cpEsc(a.note || '')}</td><td class="cp-muted">${cpEsc(a.created_by)}</td></tr>`
+  })
+  return html + '</tbody></table></div>'
+}
+
+function cpAdjPersonChanged() {
+  const sel = document.getElementById('cpa-person')
+  if (!sel) return
+  const s = cpStaff(sel.value)
+  const info = document.getElementById('cpa-wallet-info')
+  if (!s) { info.textContent = ''; return }
+  const b = cpBalance(s.id)
+  info.textContent = `Current wallet: ${cpFmt(b.wallet)} · Lifetime: ${cpFmt(b.lifetime)}`
+  const firstStudio = Array.isArray(s.studio_ids) && s.studio_ids.length ? s.studio_ids[0] : ''
+  const studioSel = document.getElementById('cpa-studio')
+  if (firstStudio && [...studioSel.options].some(o => o.value === firstStudio)) studioSel.value = firstStudio
+}
+
+async function cpApplyAdjustment() {
+  const staffId = document.getElementById('cpa-person').value
+  const points = parseInt(document.getElementById('cpa-points').value, 10)
+  const note = document.getElementById('cpa-note').value.trim()
+  const statusEl = document.getElementById('cpa-status')
+  if (!staffId || !points || !note) { statusEl.style.color = '#c0392b'; statusEl.textContent = 'Person, a non-zero number of points, and a note are all required.'; return }
+  const who = cpStaffName(staffId)
+  if (!confirm(`${points > 0 ? 'Add' : 'Remove'} ${cpFmt(Math.abs(points))} points ${points > 0 ? 'to' : 'from'} ${who}?`)) return
+  statusEl.style.color = '#888'; statusEl.textContent = 'Saving…'
+  try {
+    await cpRequest('adjust_points', { staff_profile_id: staffId, studio_id: document.getElementById('cpa-studio').value || null, points, note })
+    await cpRefresh()
+    const s2 = document.getElementById('cpa-status')
+    s2.style.color = '#2e7d32'; s2.textContent = `Done — ${points > 0 ? '+' : ''}${cpFmt(points)} for ${who}.`
+  } catch (e) { statusEl.style.color = '#c0392b'; statusEl.textContent = e.message }
+}
+
+// ═══ SHARED MODAL ═════════════════════════════════
+function cpOpenModal(title, sub, innerHtml, saveFn) {
+  cpModalSaveFn = saveFn
+  document.getElementById('cp-modal-root').innerHTML = `
+    <div class="modal-overlay"><div class="modal-box">
+      <div class="modal-header"><div><div class="modal-title">${cpEsc(title)}</div><div class="modal-sub">${cpEsc(sub)}</div></div>
+        <button class="modal-close" onclick="cpCloseModal()">×</button></div>
+      ${innerHtml}
+      <div id="cp-modal-error" style="color:#c0392b;font-size:13px;margin-top:0.75rem"></div>
+      <div class="modal-actions"><button class="btn" onclick="cpCloseModal()">Cancel</button>
+        <button class="btn btn-primary" id="cp-modal-save" onclick="cpModalSave()">Save</button></div>
+    </div></div>`
+}
+function cpCloseModal() { document.getElementById('cp-modal-root').innerHTML = ''; cpModalSaveFn = null }
+async function cpModalSave() {
+  if (!cpModalSaveFn) return
+  const btn = document.getElementById('cp-modal-save'), err = document.getElementById('cp-modal-error')
+  btn.disabled = true; btn.textContent = 'Saving…'; err.textContent = ''
+  try { await cpModalSaveFn(); cpCloseModal(); await cpRefresh() }
+  catch (e) { err.textContent = e.message; btn.disabled = false; btn.textContent = 'Save' }
+}
+</script>
+
 
 </body>
 </html>
