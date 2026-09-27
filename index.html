@@ -1424,24 +1424,6 @@ function getSpecificProjectFromPayload(rawPayload) {
   } catch(e) { return null }
 }
 
-// Splatter Party colour theme ("Colour Theme" cart property, e.g.
-// "Tangerine Dream" or "Custom: rainbow") — read from raw_payload, no DB column.
-function getColourThemeFromPayload(rawPayload) {
-  try {
-    const payload = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload
-    if (!payload?.line_items) return null
-    for (const li of payload.line_items) {
-      const props = li.properties || []
-      for (const p of props) {
-        if ((p.name || '').toLowerCase().trim() === 'colour theme') {
-          return p.value || null
-        }
-      }
-    }
-    return null
-  } catch(e) { return null }
-}
-
 // Check if order has member discount
 function isMemberOrder(rawPayload) {
   try {
@@ -1568,37 +1550,6 @@ function getOrderNoteFromPayload(rawPayload) {
   } catch { return '' }
 }
 
-// Parse the "Party Notes" cart property from the Kids Party / Splatter Party
-// booking widgets ("Anything else you'd like to share to help us make this
-// party extra special?"). Read from raw_payload on demand — no DB column needed.
-function getPartyNotesFromPayload(rawPayload) {
-  try {
-    const payload = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload
-    if (!payload?.line_items) return ''
-    for (const li of payload.line_items) {
-      const props = li.properties || []
-      for (const p of props) {
-        if ((p.name || '').toLowerCase().trim() === 'party notes') {
-          return (p.value || '').trim()
-        }
-      }
-    }
-    return ''
-  } catch(e) { return '' }
-}
-
-// Combine the widget's Party Notes answer + the Shopify order note into one
-// prefill for the Special Notes box. Only used until staff save the block —
-// once party_details.notes has a value, that wins.
-function buildPartyNotesPrefill(rawPayload) {
-  const partyNotes = getPartyNotesFromPayload(rawPayload)
-  const orderNote = (getOrderNoteFromPayload(rawPayload) || '').trim()
-  const parts = []
-  if (partyNotes) parts.push(partyNotes)
-  if (orderNote && orderNote !== partyNotes) parts.push('Order note: ' + orderNote)
-  return parts.join('\n\n')
-}
-
 function getBillingName(rawPayload) {
   try {
     const p = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload
@@ -1715,19 +1666,14 @@ function buildPartyBookingBlock(booking, partyDetail, subtype, blockIdx, session
         <input type="text" id="${uid}-project" value="${projectPrefillKids.replace(/"/g,'&quot;')}" placeholder="What they're making...">
       </div>`
   } else if (subtype === 'splatter') {
-    const reasonPrefillSp = pd.party_reason || booking.reason_for_gathering || ''
-    const reasonFromShopifySp = !pd.party_reason && booking.reason_for_gathering
-    const colourFromShopify = getColourThemeFromPayload(booking.raw_payload)
-    const colourPrefill = pd.colour_choice || colourFromShopify || ''
-    const colourFromShopifyTag = !pd.colour_choice && colourFromShopify
     typeSpecificFields = `
       <div class="field-group">
-        <div class="field-label">Party Reason${reasonFromShopifySp ? ' <span style="color:#c06080;font-weight:normal;font-size:10px">(from booking)</span>' : ''}</div>
-        <input type="text" id="${uid}-party_reason" value="${reasonPrefillSp.replace(/"/g,'&quot;')}" placeholder="Birthday, celebration...">
+        <div class="field-label">Party Reason</div>
+        <input type="text" id="${uid}-party_reason" value="${(pd.party_reason||'').replace(/"/g,'&quot;')}" placeholder="Birthday, celebration...">
       </div>
       <div class="field-group">
-        <div class="field-label">Colour Choice${colourFromShopifyTag ? ' <span style="color:#c06080;font-weight:normal;font-size:10px">(from booking)</span>' : ''}</div>
-        <input type="text" id="${uid}-colour_choice" value="${colourPrefill.replace(/"/g,'&quot;')}" placeholder="e.g. blues and greens...">
+        <div class="field-label">Colour Choice</div>
+        <input type="text" id="${uid}-colour_choice" value="${(pd.colour_choice||'').replace(/"/g,'&quot;')}" placeholder="e.g. blues and greens...">
       </div>`
   } else if (subtype === 'adult') {
     const adultMedium = pd.medium || 'clay'
@@ -1775,11 +1721,6 @@ function buildPartyBookingBlock(booking, partyDetail, subtype, blockIdx, session
 
   const outcomeVal = pd.outcome || ''
 
-  // Special Notes: saved value wins; otherwise prefill from the booking
-  // widget's Party Notes answer + the Shopify order note
-  const notesPrefillFromShopify = pd.notes ? '' : buildPartyNotesPrefill(booking.raw_payload)
-  const notesValue = pd.notes || notesPrefillFromShopify
-
   return `
   <div class="party-booking-block${pd.actual_guests ? ' party-closed' : ''}" id="block-${uid}">
     <div class="party-booking-header">
@@ -1826,8 +1767,8 @@ function buildPartyBookingBlock(booking, partyDetail, subtype, blockIdx, session
       </div>
       ${typeSpecificFields}
       <div class="field-group full">
-        <div class="field-label">Special Notes${notesPrefillFromShopify ? ' <span style="color:#c06080;font-weight:normal;font-size:10px">(from booking)</span>' : ''}</div>
-        <textarea id="${uid}-notes" placeholder="Allergies, special requests...">${escHtml(notesValue)}</textarea>
+        <div class="field-label">Special Notes</div>
+        <textarea id="${uid}-notes" placeholder="Allergies, special requests...">${pd.notes||''}</textarea>
       </div>
     </div>
 
@@ -4792,7 +4733,9 @@ function ebDefaultMessage() {
 
 async function ebLoadTemplates() {
   const { data } = await sb.from('email_templates').select('*').order('category').order('name')
-  ebState.templates = (data || []).filter(t => !t.studio_ids || t.studio_ids.length === 0 || t.studio_ids.includes(currentStudioId))
+  ebState.templates = (data || [])
+    .filter(t => !t.studio_ids || t.studio_ids.length === 0 || t.studio_ids.includes(currentStudioId))
+    .filter(t => t.category !== 'marketing_seasonal') // seasonal marketing templates live in the coordinator's dashboard suggestion tool, not this ad-hoc picker
 }
 
 function ebTemplatePickerHtml() {
@@ -4920,118 +4863,30 @@ async function loadClassDayRecipients() {
     <div id="eb-send-status" style="font-size:13px;margin-top:10px"></div>`
 }
 
-function ebYmd(d) {
-  var m = d.getMonth() + 1, day = d.getDate()
-  return d.getFullYear() + '-' + (m < 10 ? '0' : '') + m + '-' + (day < 10 ? '0' : '') + day
-}
-
-function ebFmtRangeDate(ymd) {
-  return new Date(ymd + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' })
-}
-
-function ebSetStudioMode(mode) {
-  ebState.studioMode = mode
-  var rangeRow = document.getElementById('eb-range-row')
-  var allBtn = document.getElementById('eb-mode-all')
-  var rangeBtn = document.getElementById('eb-mode-range')
-  if (rangeRow) rangeRow.style.display = mode === 'range' ? 'flex' : 'none'
-  var on = 'background:#1a1a1a;color:white;border-color:#1a1a1a'
-  var off = 'background:white;color:#555;border-color:#d0d0c8'
-  var base = 'padding:7px 14px;border:0.5px solid;font-size:13px;cursor:pointer;'
-  if (allBtn) allBtn.setAttribute('style', base + 'border-radius:7px 0 0 7px;' + (mode === 'all' ? on : off))
-  if (rangeBtn) rangeBtn.setAttribute('style', base + 'border-radius:0 7px 7px 0;border-left:none;' + (mode === 'range' ? on : off))
-  if (mode === 'all') ebLoadStudioRecipients()
-  else {
-    // Don't auto-load in range mode — wait for dates to be confirmed
-    var area = document.getElementById('eb-recipient-area')
-    if (area) area.innerHTML = '<div style="padding:12px;font-size:13px;color:#888;border:0.5px solid #e0e0d8;border-radius:8px;margin-bottom:14px">Pick a date range and tap <strong>Find Recipients</strong>.</div>'
-    ebState.recipients = []
-    ebState.className = ''
-    ebUpdateSendLabel()
-  }
-}
-
-function ebApplyRange() {
-  var from = document.getElementById('eb-range-from').value
-  var to = document.getElementById('eb-range-to').value
-  if (!from || !to) { alert('Pick both a start and end date.'); return }
-  if (from > to) { alert('The start date is after the end date.'); return }
-  ebLoadStudioRecipients()
-}
-
 async function loadAllTimeRecipients() {
-  // Renders the shell once (mode toggle + recipient area + compose fields),
-  // so switching modes / re-running a range doesn't wipe a message in progress.
   const body = document.getElementById('eb-body')
-  const defFrom = ebYmd(currentDate)
-  const toD = new Date(currentDate.getTime()); toD.setDate(toD.getDate() + 6)
-  const defTo = ebYmd(toD)
-  ebState.studioMode = 'all'
-
-  body.innerHTML = `<div style="margin-bottom:12px">
-      <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Who to email</div>
-      <div style="display:flex">
-        <button id="eb-mode-all" onclick="ebSetStudioMode('all')">All time</button>
-        <button id="eb-mode-range" onclick="ebSetStudioMode('range')">Booked between dates</button>
-      </div>
-      <div id="eb-range-row" style="display:none;align-items:flex-end;gap:8px;flex-wrap:wrap;margin-top:10px">
-        <div><div style="font-size:11px;color:#888;margin-bottom:3px">From</div>
-          <input id="eb-range-from" type="date" value="${defFrom}" style="padding:7px 9px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px"></div>
-        <div><div style="font-size:11px;color:#888;margin-bottom:3px">To</div>
-          <input id="eb-range-to" type="date" value="${defTo}" style="padding:7px 9px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px"></div>
-        <button onclick="ebApplyRange()" style="padding:8px 14px;background:#5b4fcf;color:white;border:none;border-radius:7px;font-size:13px;cursor:pointer;font-weight:500">Find Recipients</button>
-      </div>
-      <div id="eb-range-hint" style="font-size:11px;color:#aaa;margin-top:6px"></div>
-    </div>
-    <div id="eb-recipient-area"><div class="loading">Loading recipients…</div></div>
-    ${ebTemplatePickerHtml()}
-    <div style="margin-bottom:10px"><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Subject</div>
-    <input id="eb-subject" type="text" value="${ebDefaultSubject(ebState.recipientType)}" style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none"></div>
-    <div style="margin-bottom:14px"><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Message</div>
-    <textarea id="eb-message" style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none;resize:vertical;min-height:160px;font-family:inherit">${ebDefaultMessage()}</textarea>
-    <div style="font-size:11px;color:#aaa;margin-top:4px">Blank lines become paragraph breaks. <code>**text**</code> makes it bold. Tokens: <code>{{first_name}}</code>, <code>{{studio_name}}</code>, <code>{{date}}</code>, <code>{{calendar_link}}</code>. Any plain link you paste in gets automatically tagged and made clickable.</div></div>
-    <div style="display:flex;justify-content:flex-end;gap:8px">
-    <button id="eb-send-btn" onclick="sendEmailBlast()" style="padding:10px 20px;background:#1a1a1a;color:white;border:none;border-radius:7px;font-size:14px;cursor:pointer;font-weight:500">Send to 0 Recipients</button>
-    </div>
-    <div id="eb-send-status" style="font-size:13px;margin-top:10px"></div>`
-
-  ebSetStudioMode('all')
-}
-
-async function ebLoadStudioRecipients() {
-  const area = document.getElementById('eb-recipient-area')
-  const hint = document.getElementById('eb-range-hint')
-  if (!area) return
-  const isRange = ebState.studioMode === 'range'
-  const from = isRange ? document.getElementById('eb-range-from').value : null
-  const to = isRange ? document.getElementById('eb-range-to').value : null
-  const loadToken = Date.now()
-  ebState.loadToken = loadToken
-  area.innerHTML = '<div class="loading">Loading recipients…</div>'
-  ebState.recipients = []
-  ebUpdateSendLabel()
-  if (hint) hint.textContent = isRange
-    ? 'Based on the class/party date (not the purchase date). Returned/cancelled bookings are left out.'
-    : ''
-
-  // All-time mode: every booking ever placed at this studio, including
-  // cancelled ones — the point is "anyone who's ever been a customer here".
-  // Range mode: only live bookings for sessions dated within the range.
+  // Every booking ever placed at this studio — regardless of date, session,
+  // or whether it was later cancelled — since the point is identifying
+  // anyone who's ever been a customer here, not who's currently active.
+  // bookings has no direct studio_id column, so go via sessions first —
+  // same pattern used everywhere else in this file.
   //
-  // bookings has no direct studio_id column, so go via sessions first.
-  // Paginate sessions (1000-row cap) and chunk the bookings .in() lookup.
+  // An established studio can easily have 1000+ sessions, so this needs to:
+  //   1. Paginate the sessions fetch (Supabase caps a single request at 1000 rows)
+  //   2. Chunk the bookings .in() lookup (a huge id list makes an unworkably
+  //      long request URL that can fail outright)
+  //   3. Actually check for errors instead of treating a failed request the
+  //      same as "genuinely found nothing"
   let allSessionIds = []
   let sessFrom = 0
   const PAGE = 1000
   while (true) {
-    let q = sb.from('sessions')
+    const { data: page, error: sessErr } = await sb.from('sessions')
       .select('id')
       .eq('studio_id', currentStudioId)
-    if (isRange) q = q.gte('session_date', from).lte('session_date', to)
-    const { data: page, error: sessErr } = await q.range(sessFrom, sessFrom + PAGE - 1)
-    if (ebState.loadToken !== loadToken) return
+      .range(sessFrom, sessFrom + PAGE - 1)
     if (sessErr) {
-      area.innerHTML = `<div style="padding:12px;font-size:13px;color:#c00">Error loading sessions: ${escHtml(sessErr.message)}</div>`
+      body.innerHTML = `<div style="padding:12px;font-size:13px;color:#c00">Error loading sessions: ${escHtml(sessErr.message)}</div>`
       return
     }
     allSessionIds.push(...(page || []).map(s => s.id))
@@ -5039,7 +4894,7 @@ async function ebLoadStudioRecipients() {
     sessFrom += PAGE
   }
   if (!allSessionIds.length) {
-    area.innerHTML = `<div style="padding:12px;font-size:13px;color:#888;border:0.5px solid #e0e0d8;border-radius:8px;margin-bottom:14px">No sessions found ${isRange ? 'in that date range' : 'for this studio'}.</div>`
+    body.innerHTML = '<div style="padding:12px;font-size:13px;color:#888">No sessions found for this studio.</div>'
     return
   }
 
@@ -5047,14 +4902,11 @@ async function ebLoadStudioRecipients() {
   let bookings = []
   for (let i = 0; i < allSessionIds.length; i += CHUNK) {
     const chunk = allSessionIds.slice(i, i + CHUNK)
-    let bq = sb.from('bookings')
+    const { data: chunkBookings, error: bookErr } = await sb.from('bookings')
       .select('customer_email, customer_name')
       .in('session_id', chunk)
-    if (isRange) bq = bq.gt('qty', 0).is('returned_at', null)
-    const { data: chunkBookings, error: bookErr } = await bq
-    if (ebState.loadToken !== loadToken) return
     if (bookErr) {
-      area.innerHTML = `<div style="padding:12px;font-size:13px;color:#c00">Error loading bookings: ${escHtml(bookErr.message)}</div>`
+      body.innerHTML = `<div style="padding:12px;font-size:13px;color:#c00">Error loading bookings: ${escHtml(bookErr.message)}</div>`
       return
     }
     bookings.push(...(chunkBookings || []))
@@ -5062,24 +4914,18 @@ async function ebLoadStudioRecipients() {
 
   const seen = {}
   const recipients = []
-  bookings.forEach(b => {
+  ;(bookings || []).forEach(b => {
     const key = (b.customer_email || '').trim().toLowerCase()
     if (!key) return
     if (!seen[key]) { seen[key] = { email: b.customer_email, name: b.customer_name || '' }; recipients.push(seen[key]) }
   })
   recipients.sort((a, b) => (a.name || '').localeCompare(b.name || ''))
   ebState.recipients = recipients
-  ebState.className = isRange
-    ? 'Booked ' + ebFmtRangeDate(from) + ' – ' + ebFmtRangeDate(to)
-    : ''
 
-  const skippedCount = bookings.filter(b => !b.customer_email).length
-  const scopeText = isRange
-    ? `with bookings ${escHtml(ebFmtRangeDate(from))} – ${escHtml(ebFmtRangeDate(to))}`
-    : `— everyone who's ever booked at this studio`
+  const skippedCount = (bookings || []).filter(b => !b.customer_email).length
 
-  area.innerHTML = `<div style="font-size:13px;color:#555;margin-bottom:10px">
-      <strong>${recipients.length} recipient${recipients.length !== 1 ? 's' : ''}</strong> found ${scopeText}
+  body.innerHTML = `<div style="font-size:13px;color:#555;margin-bottom:10px">
+      <strong>${recipients.length} recipient${recipients.length !== 1 ? 's' : ''}</strong> found — everyone who's ever booked at this studio
       ${skippedCount ? ` <span style="color:#c00">(${skippedCount} booking${skippedCount !== 1 ? 's' : ''} skipped — no email on file)</span>` : ''}
       ${recipients.length ? ` &middot; <a href="#" onclick="ebToggleAllRecipients(true);return false" style="color:#555">select all</a> / <a href="#" onclick="ebToggleAllRecipients(false);return false" style="color:#555">none</a>` : ''}
     </div>
@@ -5089,12 +4935,18 @@ async function ebLoadStudioRecipients() {
             <input type="checkbox" class="eb-recipient-check" data-idx="${i}" checked onchange="ebUpdateSendLabel()">
             <span style="flex:1">${escHtml(r.name)} <span style="color:#888">${escHtml(r.email)}</span></span>
           </label>`).join('')
-        : `<div style="padding:12px;font-size:13px;color:#888">No bookings with an email on file found ${isRange ? 'in that date range' : 'for this studio'}.</div>`}
-    </div>`
-  ebUpdateSendLabel()
-  // Reset a previous "Sent ✓" state if they re-run a range after sending
-  const sendBtn = document.getElementById('eb-send-btn')
-  if (sendBtn) sendBtn.disabled = false
+        : '<div style="padding:12px;font-size:13px;color:#888">No bookings with an email on file found for this studio.</div>'}
+    </div>
+    ${ebTemplatePickerHtml()}
+    <div style="margin-bottom:10px"><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Subject</div>
+    <input id="eb-subject" type="text" value="${ebDefaultSubject(ebState.recipientType)}" style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none"></div>
+    <div style="margin-bottom:14px"><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Message</div>
+    <textarea id="eb-message" style="width:100%;padding:9px 11px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:14px;outline:none;resize:vertical;min-height:160px;font-family:inherit">${ebDefaultMessage()}</textarea>
+    <div style="font-size:11px;color:#aaa;margin-top:4px">Blank lines become paragraph breaks. <code>**text**</code> makes it bold. Tokens: <code>{{first_name}}</code>, <code>{{studio_name}}</code>, <code>{{date}}</code>, <code>{{calendar_link}}</code>. Any plain link you paste in gets automatically tagged and made clickable.</div></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+    <button id="eb-send-btn" onclick="sendEmailBlast()" style="padding:10px 20px;background:#1a1a1a;color:white;border:none;border-radius:7px;font-size:14px;cursor:pointer;font-weight:500">Send to ${recipients.length} Recipient${recipients.length !== 1 ? 's' : ''}</button>
+    </div>
+    <div id="eb-send-status" style="font-size:13px;margin-top:10px"></div>`
 }
 
 function renderAllCustomersBody() {
@@ -5114,7 +4966,7 @@ function renderAllCustomersBody() {
 
 function closeEmailBlastModal() {
   document.getElementById('email-blast-modal').style.display = 'none'
-  ebState = { recipientType: null, sessionIds: [], recipients: [], templates: [], className: '', studioMode: 'all', loadToken: 0 }
+  ebState = { recipientType: null, sessionIds: [], recipients: [], templates: [], className: '' }
 }
 
 async function sendEmailBlast() {
@@ -5233,12 +5085,12 @@ async function openEmailHistoryModal(sessionId, sessionTitle) {
   }
 
   ehState.history = data
-  const scopeLabel = t => t === 'classes' ? 'Selected Classes' : t === 'day' ? 'Everyone Today' : t === 'studio_all' ? "Anyone Who's Booked" : 'All Studio Customers'
+  const scopeLabel = t => t === 'classes' ? 'Selected Classes' : t === 'day' ? 'Everyone Today' : 'All Studio Customers'
   const rows = data.map((r, i) => {
     const dt = new Date(r.sent_at)
     const dateStr = dt.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })
     const timeStr = dt.toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' })
-    const hasClassDetail = (r.recipient_type === 'classes' || r.recipient_type === 'studio_all') && r.class_name
+    const hasClassDetail = r.recipient_type === 'classes' && r.class_name
     const hasRecipients = r.recipient_emails && r.recipient_emails.length
     const hasMessage = !!r.message_html
     return `<tr style="border-bottom:0.5px solid #f0f0e8">
@@ -5250,7 +5102,7 @@ async function openEmailHistoryModal(sessionId, sessionTitle) {
     <tr id="eh-detail-${i}" style="display:none">
       <td colspan="4" style="padding:0 10px 10px;background:#fafaf8">
         <div style="font-size:12px;color:#555;padding:8px 10px;border:0.5px solid #e0e0d8;border-radius:8px;background:white">
-          ${hasClassDetail ? `<div style="margin-bottom:6px"><strong>${r.recipient_type === 'studio_all' ? 'Range' : 'Classes'}:</strong> ${escHtml(r.class_name)}</div>` : ''}
+          ${hasClassDetail ? `<div style="margin-bottom:6px"><strong>Classes:</strong> ${escHtml(r.class_name)}</div>` : ''}
           ${hasMessage ? `<div style="margin-bottom:6px"><strong>Message:</strong><div style="margin-top:4px;padding:10px 12px;background:#fafaf8;border-radius:6px;font-size:13px;color:#222">${r.message_html}</div></div>` : ''}
           ${hasRecipients ? `<div><strong>Recipients:</strong> ${r.recipient_emails.map(p => escHtml(p.name || '') + (p.name ? ' ' : '') + '<span style="color:#888">&lt;' + escHtml(p.email) + '&gt;</span>').join(', ')}</div>` : ''}
         </div>
