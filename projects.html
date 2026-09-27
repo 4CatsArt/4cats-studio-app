@@ -122,6 +122,12 @@ button.pill { cursor: pointer; }
 .mini-tiles { display: flex; gap: 10px; }
 .mini-tiles .tile { width: var(--tile); }
 
+.lock-banner { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 16px; margin-bottom: 1rem; border-radius: 10px; background: #efeee7; border: 0.5px solid var(--line-2); font-size: 12px; }
+.lock-banner strong { font-size: 13px; }
+.locked .tile { cursor: default; }
+.locked .tile:hover { border-color: var(--line); }
+.theme-preview { margin-top: 6px; font-size: 12px; color: var(--muted); }
+.theme-preview strong { color: var(--ink); }
 .save-state { font-size: 11px; color: var(--muted); min-width: 60px; text-align: right; }
 
 /* ---------- Library ---------- */
@@ -411,6 +417,15 @@ function anchorInWeek(startStr, m, d) {
   for (let i = 0; i < 7; i++) { const x = addDays(s, i); if (x.getMonth() + 1 === m && x.getDate() === d) return true }
   return false
 }
+function themeLabel(name, detail) {
+  if (!name) return ''
+  detail = (detail || '').trim()
+  if (!detail) return name
+  if (name.indexOf('...') >= 0) return name.replace('...', ' ' + detail)
+  if (name.indexOf('…') >= 0) return name.replace('…', ' ' + detail)
+  return name + ': ' + detail
+}
+function lockedDate(ts) { const d = new Date(ts); return shortDate(d) + ', ' + d.getFullYear() }
 function anchorLabel(t) { return t && t.anchor_month ? MONTHS[t.anchor_month - 1] + ' ' + t.anchor_day : '' }
 
 /* ---------- misc helpers ---------- */
@@ -464,7 +479,9 @@ async function signOut() {
   document.getElementById('app-screen').style.display = 'none'
 }
 
+let currentUserId = null
 async function initApp(user) {
+  currentUserId = user.id
   const { data: mapping } = await sb.from('studio_users').select('role').eq('user_id', user.id).maybeSingle()
   if (!mapping || mapping.role !== 'admin') {
     const errEl = document.getElementById('error-msg')
@@ -571,8 +588,17 @@ async function goToWeek(start) {
     ;(s.data || []).forEach(x => { week.slots[x.weekday + '-' + x.slot] = x.project_id })
     ;(m.data || []).forEach(x => { week.minis[x.slot] = x.project_id })
   }
+  await loadLastYear()
   if (req !== weekReq) return
   renderPlanner()
+}
+async function loadLastYear() {
+  week.lastYear = null
+  const r = week.row, t = r && r.theme_id ? themeById[r.theme_id] : null
+  if (!t || !t.changes_yearly) return
+  const { data } = await sb.from('project_weeks').select('week_start, theme_detail').eq('theme_id', t.id)
+    .lt('week_start', week.start).order('week_start', { ascending: false }).limit(1)
+  if (data && data[0]) week.lastYear = data[0]
 }
 function shiftWeek(n) { if (week) goToWeek(fd(addDays(pd(week.start), 7 * n))) }
 
@@ -580,6 +606,8 @@ function dayRow(wd) { return week.days[wd] || { weekday: wd, title: null, notes:
 
 function renderPlanner() {
   const r = week.row, theme = r && r.theme_id ? themeById[r.theme_id] : null
+  const locked = !!(r && r.locked_at)
+  const dis = locked ? ' disabled' : ''
   const today = todayStr()
   const pubCount = [1, 2, 3, 4, 5, 6, 7].filter(wd => dayRow(wd).is_published).length
   let note = ''
@@ -596,9 +624,15 @@ function renderPlanner() {
 
   let html = '<div class="panel week-head">' +
     '<div><label class="field-label" for="wk-theme">Week ' + isoWeek(pd(week.start)).week + ' theme</label>' +
-      '<select id="wk-theme" class="theme-select" onchange="setWeekTheme(this.value)">' + themeOpts + '</select>' + note + '</div>' +
+      '<select id="wk-theme" class="theme-select" onchange="setWeekTheme(this.value)"' + dis + '>' + themeOpts + '</select>' +
+      (theme && (theme.changes_yearly || (r && r.theme_detail))
+        ? '<label class="field-label" for="wk-detail" style="margin-top:10px">This year' + (theme.changes_yearly ? ' (changes every year)' : '') + '</label>' +
+          '<input type="text" id="wk-detail" style="width:100%" value="' + esc(r.theme_detail || '') + '" placeholder="' +
+            esc(week.lastYear && week.lastYear.theme_detail ? 'Last year: ' + week.lastYear.theme_detail : 'e.g. Fire Horse') + '" onchange="setWeekDetail(this.value)"' + dis + '>' +
+          '<div class="theme-preview">Shows as <strong>' + esc(themeLabel(theme.name, r.theme_detail) || theme.name) + '</strong></div>'
+        : '') + note + '</div>' +
     '<div><label class="field-label" for="wk-notes">Notes for this week</label>' +
-      '<textarea id="wk-notes" placeholder="Anything specific to this year\'s week" onchange="setWeekNotes(this.value)">' + esc(r ? r.notes || '' : '') + '</textarea></div>' +
+      '<textarea id="wk-notes" placeholder="Anything specific to this year\'s week" onchange="setWeekNotes(this.value)"' + dis + '>' + esc(r ? r.notes || '' : '') + '</textarea></div>' +
     '<div class="week-actions">' +
       '<div><span class="field-label">Status</span>' +
         (r ? '<button class="pill ' + (r.status === 'reviewed' ? 'pub' : 'draft') + '" onclick="toggleWeekStatus()" title="Click to change">' + (r.status === 'reviewed' ? 'Reviewed' : 'Draft') + '</button>'
@@ -606,32 +640,39 @@ function renderPlanner() {
         ' <span class="pill ' + (pubCount === 7 ? 'pub' : pubCount ? 'draft' : 'off') + '">' + pubCount + ' of 7 days published</span></div>' +
       '<button class="btn" onclick="publishWeek(true)">Publish all 7 days</button>' +
       (pubCount ? '<button class="btn" onclick="publishWeek(false)">Unpublish all</button>' : '') +
+      (r && !locked ? '<button class="btn" onclick="setWeekLock(true)" title="Keeps this week\'s projects as history">Lock week</button>' : '') +
     '</div></div>'
+  if (locked) html = '<div class="lock-banner"><strong>Locked</strong><span>Locked on ' + esc(lockedDate(r.locked_at)) + '. This week is kept as history, so its theme and projects can\'t change. Publishing still works.</span><button class="btn btn-small" onclick="setWeekLock(false)">Unlock to edit</button></div>' + html
 
-  html += '<div class="days-scroll"><div class="days-grid">'
+  html += '<div class="days-scroll' + (locked ? ' locked' : '') + '"><div class="days-grid">'
   for (let wd = 1; wd <= 7; wd++) {
     const date = fd(addDays(pd(week.start), wd - 1)), dr = dayRow(wd)
     html += '<div class="day-col' + (date === today ? ' today' : date < today ? ' past' : '') + '">' +
       '<div class="day-top"><span class="day-name">' + DAY_NAMES[wd - 1] + '</span><span class="day-date">' + shortDate(pd(date)) + '</span></div>' +
       '<button class="pill ' + (dr.is_published ? 'pub' : 'off') + '" onclick="toggleDayPublished(' + wd + ')" title="Published days show on the community dashboard">' + (dr.is_published ? 'Published' : 'Not published') + '</button>'
     if (wd === EVENT_DAY) {
-      html += '<input type="text" class="day-title" placeholder="Friday event name" value="' + esc(dr.title || '') + '" onchange="setDayField(' + wd + ',\'title\',this.value)" aria-label="Friday event name">'
-      for (let s = 1; s <= 3; s++) html += slotTile(week.events[wd + '-' + s], "openPicker({kind:'event',weekday:" + wd + ",slot:" + s + "})", "clearSlot({kind:'event',weekday:" + wd + ",slot:" + s + "})")
+      html += '<input type="text" class="day-title" placeholder="Friday event name" value="' + esc(dr.title || '') + '" onchange="setDayField(' + wd + ',\'title\',this.value)" aria-label="Friday event name"' + dis + '>'
+      for (let s = 1; s <= 3; s++) html += slotTile(week.events[wd + '-' + s], "openPicker({kind:'event',weekday:" + wd + ",slot:" + s + "})", "clearSlot({kind:'event',weekday:" + wd + ",slot:" + s + "})", locked)
     } else {
-      for (let s = 1; s <= 3; s++) html += slotTile(week.slots[wd + '-' + s], "openPicker({kind:'day',weekday:" + wd + ",slot:" + s + "})", "clearSlot({kind:'day',weekday:" + wd + ",slot:" + s + "})")
+      for (let s = 1; s <= 3; s++) html += slotTile(week.slots[wd + '-' + s], "openPicker({kind:'day',weekday:" + wd + ",slot:" + s + "})", "clearSlot({kind:'day',weekday:" + wd + ",slot:" + s + "})", locked)
     }
-    html += '<textarea placeholder="Notes" onchange="setDayField(' + wd + ',\'notes\',this.value)" aria-label="' + DAY_NAMES[wd - 1] + ' notes">' + esc(dr.notes || '') + '</textarea></div>'
+    html += '<textarea placeholder="Notes" onchange="setDayField(' + wd + ',\'notes\',this.value)" aria-label="' + DAY_NAMES[wd - 1] + ' notes"' + dis + '>' + esc(dr.notes || '') + '</textarea></div>'
   }
   html += '</div></div>'
 
-  html += '<div class="panel mini-section"><div class="mini-intro"><h3>Mini Make this week</h3><p class="muted small" style="line-height:1.45">Up to 3 projects, running all week.</p></div><div class="mini-tiles">'
-  for (let s = 1; s <= 3; s++) html += slotTile(week.minis[s], "openPicker({kind:'mini',slot:" + s + "})", "clearSlot({kind:'mini',slot:" + s + "})")
+  html += '<div class="panel mini-section' + (locked ? ' locked' : '') + '"><div class="mini-intro"><h3>Mini Make this week</h3><p class="muted small" style="line-height:1.45">Up to 3 projects, running all week.</p></div><div class="mini-tiles">'
+  for (let s = 1; s <= 3; s++) html += slotTile(week.minis[s], "openPicker({kind:'mini',slot:" + s + "})", "clearSlot({kind:'mini',slot:" + s + "})", locked)
   html += '</div></div>'
 
   document.getElementById('planner-body').innerHTML = html
 }
 
-function slotTile(projectId, onPick, onClear) {
+function slotTile(projectId, onPick, onClear, locked) {
+  if (locked) {
+    if (!projectId) return '<div class="tile empty-tile"><div class="ph-empty"></div><div class="nm">Nothing chosen</div></div>'
+    const lp = libById[projectId], ln = lp ? lp.name : 'Unknown project'
+    return '<div class="tile">' + imgTag(lp && lp.image_url, 'ph', ln) + '<div class="nm">' + esc(ln) + '</div></div>'
+  }
   if (!projectId) return '<button class="tile empty-tile" onclick="' + onPick + '"><div class="ph-empty">+</div><div class="nm">Choose project</div></button>'
   const p = libById[projectId]
   const name = p ? p.name : 'Unknown project'
@@ -661,6 +702,25 @@ function setWeekTheme(themeId) {
   run(async () => {
     const r = await ensureWeek()
     const { data, error } = await sb.from('project_weeks').update({ theme_id: themeId || null }).eq('id', r.id).select().single()
+    if (error) throw error
+    week.row = data
+    await loadLastYear()
+    renderPlanner()
+  })
+}
+function setWeekDetail(v) {
+  run(async () => {
+    const r = await ensureWeek()
+    const { data, error } = await sb.from('project_weeks').update({ theme_detail: nz(v) }).eq('id', r.id).select().single()
+    if (error) throw error
+    week.row = data; renderPlanner()
+  })
+}
+function setWeekLock(on) {
+  if (!on && !confirm('Unlock this week? Its theme and projects will be editable again. Lock it again when you\'re done so the history stays accurate.')) return
+  run(async () => {
+    const r = await ensureWeek()
+    const { data, error } = await sb.from('project_weeks').update(on ? { locked_at: new Date().toISOString(), locked_by: currentUserId } : { locked_at: null, locked_by: null }).eq('id', r.id).select().single()
     if (error) throw error
     week.row = data; renderPlanner()
   })
@@ -883,15 +943,15 @@ document.getElementById('ed-tag-entry').addEventListener('change', e => {
 
 async function loadUsage(projectId) {
   const [d, m, ev] = await Promise.all([
-    sb.from('project_day_slots').select('weekday, project_weeks(week_start, unplaced_year, theme_id)').eq('project_id', projectId),
-    sb.from('mini_make_slots').select('project_weeks(week_start, unplaced_year, theme_id)').eq('project_id', projectId),
-    sb.from('project_event_slots').select('weekday, project_weeks(week_start, unplaced_year, theme_id)').eq('project_id', projectId)
+    sb.from('project_day_slots').select('weekday, project_weeks(week_start, unplaced_year, theme_id, theme_detail)').eq('project_id', projectId),
+    sb.from('mini_make_slots').select('project_weeks(week_start, unplaced_year, theme_id, theme_detail)').eq('project_id', projectId),
+    sb.from('project_event_slots').select('weekday, project_weeks(week_start, unplaced_year, theme_id, theme_detail)').eq('project_id', projectId)
   ])
   if (!editing || editing.id !== projectId) return
   const byWeek = {}
-  ;(d.data || []).forEach(x => { const w = x.project_weeks; if (!w || !w.week_start) return; (byWeek[w.week_start] = byWeek[w.week_start] || { theme: w.theme_id, days: new Set(), mini: false }).days.add(x.weekday) })
-  ;(m.data || []).forEach(x => { const w = x.project_weeks; if (!w || !w.week_start) return; (byWeek[w.week_start] = byWeek[w.week_start] || { theme: w.theme_id, days: new Set(), mini: false }).mini = true })
-  ;(ev.data || []).forEach(x => { const w = x.project_weeks; if (!w || !w.week_start) return; (byWeek[w.week_start] = byWeek[w.week_start] || { theme: w.theme_id, days: new Set(), mini: false }).event = true })
+  ;(d.data || []).forEach(x => { const w = x.project_weeks; if (!w || !w.week_start) return; (byWeek[w.week_start] = byWeek[w.week_start] || { theme: w.theme_id, detail: w.theme_detail, days: new Set(), mini: false }).days.add(x.weekday) })
+  ;(m.data || []).forEach(x => { const w = x.project_weeks; if (!w || !w.week_start) return; (byWeek[w.week_start] = byWeek[w.week_start] || { theme: w.theme_id, detail: w.theme_detail, days: new Set(), mini: false }).mini = true })
+  ;(ev.data || []).forEach(x => { const w = x.project_weeks; if (!w || !w.week_start) return; (byWeek[w.week_start] = byWeek[w.week_start] || { theme: w.theme_id, detail: w.theme_detail, days: new Set(), mini: false }).event = true })
   const weeks = Object.keys(byWeek).sort().reverse()
   const usage = document.getElementById('ed-usage')
   usage.style.display = 'block'
@@ -902,7 +962,7 @@ async function loadUsage(projectId) {
     if (u.event) days.push('Friday event')
     if (u.mini) days.push('Mini Make')
     return '<a href="#planner/' + ws + '" onclick="closeModal(\'editor-modal\');switchTab(\'planner\',true);goToWeek(\'' + ws + '\')">Week ' + isoWeek(pd(ws)).week + ', ' + esc(rangeLabel(ws)) + '</a>' +
-      (t ? ', ' + esc(t.name) : '') + ' <span class="muted">(' + days.join(', ') + ')</span>'
+      (t ? ', ' + esc(themeLabel(t.name, u.detail)) : '') + ' <span class="muted">(' + days.join(', ') + ')</span>'
   }).join('<br>')
 }
 
@@ -1079,7 +1139,7 @@ async function renderThemes() {
     ? (a, b) => a.name.localeCompare(b.name)
     : (a, b) => firstWeek(a) - firstWeek(b) || a.name.localeCompare(b.name))
   const monthOpts = sel => '<option value="">No date</option>' + MONTHS.map((m, i) => '<option value="' + (i + 1) + '"' + (sel === i + 1 ? ' selected' : '') + '>' + m + '</option>').join('')
-  body.innerHTML = '<table class="theme-table"><thead><tr><th style="width:24%">Theme</th><th style="width:140px">Weeks this year</th><th style="width:200px">Anchor date (optional)<br><span style="font-weight:400">month + day, e.g. Oct 31</span></th><th>Scheduling note (optional, shown every year)</th><th style="width:90px">Active</th><th style="width:70px"></th></tr></thead><tbody>' +
+  body.innerHTML = '<table class="theme-table"><thead><tr><th style="width:24%">Theme</th><th style="width:140px">Weeks this year</th><th style="width:200px">Anchor date (optional)<br><span style="font-weight:400">month + day, e.g. Oct 31</span></th><th>Scheduling note (optional, shown every year)</th><th style="width:110px">Changes every year</th><th style="width:70px">Active</th><th style="width:70px"></th></tr></thead><tbody>' +
     sorted.map(t => '<tr>' +
       '<td><input type="text" value="' + esc(t.name) + '" onchange="saveTheme(\'' + t.id + '\',{name:this.value.trim()})" aria-label="Theme name"></td>' +
       '<td class="small">' + ((themeWeeks[t.id] || []).length
@@ -1088,6 +1148,7 @@ async function renderThemes() {
       '<td><div class="anchor-cell"><select onchange="saveAnchor(\'' + t.id + '\',this)" data-part="m" aria-label="Anchor month">' + monthOpts(t.anchor_month) + '</select>' +
         '<input type="number" min="1" max="31" value="' + (t.anchor_day || '') + '" placeholder="Day" onchange="saveAnchor(\'' + t.id + '\',this)" data-part="d" aria-label="Anchor day"></div></td>' +
       '<td><textarea placeholder="Optional" onchange="saveTheme(\'' + t.id + '\',{scheduling_note:this.value.trim()||null})">' + esc(t.scheduling_note || '') + '</textarea></td>' +
+      '<td><input type="checkbox"' + (t.changes_yearly ? ' checked' : '') + ' onchange="saveTheme(\'' + t.id + '\',{changes_yearly:this.checked})" aria-label="Changes every year" title="Rollover brings only the theme; you pick new projects and the detail each year"></td>' +
       '<td><input type="checkbox"' + (t.is_active ? ' checked' : '') + ' onchange="saveTheme(\'' + t.id + '\',{is_active:this.checked})" aria-label="Active"></td>' +
       '<td><button class="link-btn" style="color:var(--warn)" onclick="deleteTheme(\'' + t.id + '\')">Delete</button></td>' +
     '</tr>').join('') + '</tbody></table>'
@@ -1129,7 +1190,7 @@ async function deleteTheme(id) {
   const msg = count ? '"' + t.name + '" is used on ' + count + ' week' + (count === 1 ? '' : 's') + '. Those weeks will lose their theme. Uncheck Active instead to hide it from the list. Delete anyway?' : 'Delete "' + t.name + '"?'
   if (!confirm(msg)) return
   const { error } = await sb.from('project_themes').delete().eq('id', id)
-  if (error) { toast(friendlyError(error), true); return }
+  if (error) { toast(/locked/i.test(error.message || '') ? 'This theme is on locked weeks, so it can\'t be deleted. Uncheck Active to hide it instead.' : friendlyError(error), true); return }
   themes = themes.filter(x => x.id !== id); delete themeById[id]
   renderThemes(); toast('Theme deleted')
 }
@@ -1196,6 +1257,16 @@ async function loadReview() {
       if (!reviewWeeks.some(w => w.theme_id === t.id)) alerts.push('<div class="alert-row"><span class="pill draft">Missing</span> ' + esc(t.name) + ' (' + esc(anchorLabel(t)) + ') has no week in ' + y + '.</div>')
     })
   }
+  ;(placed.data || []).forEach(w => {
+    const t = w.theme_id && themeById[w.theme_id]
+    if (!t || !t.changes_yearly || w.locked_at) return
+    const missing = []
+    if (!w.theme_detail) missing.push('this year\'s detail')
+    if (!(slotCount[w.id] || eventCount[w.id] || miniCount[w.id])) missing.push('projects')
+    if (missing.length) alerts.push('<div class="alert-row"><span class="pill draft">Changes yearly</span> Week ' + isoWeek(pd(w.week_start)).week + ', ' + esc(t.name) + ' needs ' + missing.join(' and ') + '. <button class="btn btn-small" onclick="openWeekFromReview(\'' + w.week_start + '\')">Open</button></div>')
+  })
+  const endedUnlocked = (placed.data || []).filter(w => !w.locked_at && fd(addDays(pd(w.week_start), 6)) < todayStr()).length
+  if (endedUnlocked) alerts.push('<div class="alert-row"><span class="pill off">Not locked</span> ' + endedUnlocked + ' week' + (endedUnlocked === 1 ? ' has' : 's have') + ' ended but ' + (endedUnlocked === 1 ? 'isn\'t' : 'aren\'t') + ' locked yet. <button class="btn btn-small" onclick="lockEndedWeeks()">Lock ' + (endedUnlocked === 1 ? 'it' : 'them') + '</button></div>')
   const drafts = (placed.data || []).filter(w => w.status === 'draft').length
 
   let html = ''
@@ -1204,7 +1275,7 @@ async function loadReview() {
       (drafts ? '<div class="alert-row"><span class="pill draft">' + drafts + ' draft</span> week' + (drafts === 1 ? ' is' : 's are') + ' not marked reviewed yet.</div>' : '') + '</div>'
   }
   const curMonday = fd(mondayOf(new Date()))
-  html += '<div class="panel table-wrap"><table class="review-table"><thead><tr><th>Week</th><th>Dates</th><th>Theme</th><th>Line up</th><th>Friday event</th><th>Mini Make</th><th>Published</th><th>Status</th><th></th></tr></thead><tbody>'
+  html += '<div class="panel table-wrap"><table class="review-table"><thead><tr><th>Week</th><th>Dates</th><th>Theme</th><th>Line up</th><th>Friday event</th><th>Mini Make</th><th>Published</th><th>Status</th><th>Locked</th><th></th></tr></thead><tbody>'
   mondays.forEach((ms, i) => {
     const w = byStart[ms]
     const t = w && w.theme_id ? themeById[w.theme_id] : null
@@ -1212,7 +1283,7 @@ async function loadReview() {
     html += '<tr' + (ms === curMonday ? ' class="current"' : '') + '>' +
       '<td class="wk">' + (i + 1) + '</td>' +
       '<td style="white-space:nowrap">' + esc(shortDate(pd(ms)) + ' – ' + shortDate(addDays(pd(ms), 6))) + '</td>' +
-      '<td>' + (w ? '<div class="theme-name' + (t ? '' : ' none') + '">' + esc(t ? t.name : 'No theme') + (bad ? ' <span class="pill warn">not ' + esc(anchorLabel(t)) + '</span>' : '') + '</div>' +
+      '<td>' + (w ? '<div class="theme-name' + (t ? '' : ' none') + '">' + esc(t ? themeLabel(t.name, w.theme_detail) : 'No theme') + (bad ? ' <span class="pill warn">not ' + esc(anchorLabel(t)) + '</span>' : '') + '</div>' +
         (t && t.scheduling_note ? '<div class="muted small" style="max-width:320px;line-height:1.35">' + esc(t.scheduling_note) + '</div>' : '') +
         (w.notes ? '<div class="small" style="max-width:320px;line-height:1.35">' + esc(w.notes) + '</div>' : '') : '<span class="muted">Not planned</span>') + '</td>' +
       '<td>' + (w ? '<div style="display:flex;gap:8px;align-items:center"><div class="thumbs">' + (thumbs[w.id] || []).map(pid => { const p = libById[pid]; return p && p.image_url ? '<img src="' + esc(p.image_url) + '" alt="' + esc(p.name) + '" title="' + esc(p.name) + '" loading="lazy">' : '<span title="' + esc(p ? p.name : '') + '"></span>' }).join('') + '</div><span class="muted small">' + (slotCount[w.id] || 0) + '/18</span></div>' : '') + '</td>' +
@@ -1220,14 +1291,29 @@ async function loadReview() {
       '<td>' + (w ? (miniCount[w.id] || 0) + '/3' : '') + '</td>' +
       '<td>' + (w ? '<span class="pill ' + ((pubCount[w.id] || 0) === 7 ? 'pub' : pubCount[w.id] ? 'draft' : 'off') + '">' + (pubCount[w.id] || 0) + '/7</span>' : '') + '</td>' +
       '<td>' + (w ? '<button class="pill ' + (w.status === 'reviewed' ? 'pub' : 'draft') + '" onclick="reviewToggleStatus(\'' + w.id + '\')">' + (w.status === 'reviewed' ? 'Reviewed' : 'Draft') + '</button>' : '') + '</td>' +
+      '<td>' + (w ? (w.locked_at ? '<span class="pill off" title="Locked ' + esc(lockedDate(w.locked_at)) + '">Locked</span>' : '<button class="btn btn-small" onclick="reviewLock(\'' + w.id + '\')">Lock</button>') : '') + '</td>' +
       '<td style="white-space:nowrap"><button class="btn btn-small" onclick="openWeekFromReview(\'' + ms + '\')">' + (w ? 'Open' : 'Plan') + '</button>' +
-        (w ? ' <button class="btn btn-small" onclick="openPlace(\'' + w.id + '\')">Move…</button>' : '') + '</td>' +
+        (w && !w.locked_at ? ' <button class="btn btn-small" onclick="openPlace(\'' + w.id + '\')">Move…</button>' : '') + '</td>' +
     '</tr>'
   })
   html += '</tbody></table></div>'
   body.innerHTML = html
   const cur = body.querySelector('tr.current')
   if (cur) cur.scrollIntoView({ block: 'center' })
+}
+async function reviewLock(id) {
+  const { error } = await sb.from('project_weeks').update({ locked_at: new Date().toISOString(), locked_by: currentUserId }).eq('id', id)
+  if (error) { toast(friendlyError(error), true); return }
+  if (week && week.row && week.row.id === id) week = null
+  toast('Week locked'); loadReview()
+}
+async function lockEndedWeeks() {
+  const ids = reviewWeeks.filter(w => w.week_start && !w.locked_at && fd(addDays(pd(w.week_start), 6)) < todayStr()).map(w => w.id)
+  if (!ids.length) return
+  const { error } = await sb.from('project_weeks').update({ locked_at: new Date().toISOString(), locked_by: currentUserId }).in('id', ids)
+  if (error) { toast(friendlyError(error), true); return }
+  week = null
+  toast(ids.length + ' week' + (ids.length === 1 ? '' : 's') + ' locked'); loadReview()
 }
 function openWeekFromReview(ms) { switchTab('planner', true); goToWeek(ms) }
 async function reviewToggleStatus(id) {
@@ -1246,8 +1332,8 @@ function openPlace(id) {
   const opts = mondaysOf(y).map((ms, i) => {
     const o = byStart[ms], ot = o && o.theme_id ? themeById[o.theme_id] : null
     const fits = t && t.anchor_month ? (anchorInWeek(ms, t.anchor_month, t.anchor_day) ? ' (contains ' + anchorLabel(t) + ')' : '') : ''
-    const label = 'Week ' + (i + 1) + ', ' + shortDate(pd(ms)) + ' – ' + shortDate(addDays(pd(ms), 6)) + (o ? (o.id === placing.id ? ': current spot' : ': swap with ' + (ot ? ot.name : 'unthemed week')) : ': empty') + fits
-    return '<option value="' + ms + '"' + (placing.week_start === ms ? ' selected' : '') + '>' + esc(label) + '</option>'
+    const label = 'Week ' + (i + 1) + ', ' + shortDate(pd(ms)) + ' – ' + shortDate(addDays(pd(ms), 6)) + (o ? (o.id === placing.id ? ': current spot' : o.locked_at ? ': locked' : ': swap with ' + (ot ? themeLabel(ot.name, o.theme_detail) : 'unthemed week')) : ': empty') + fits
+    return '<option value="' + ms + '"' + (placing.week_start === ms ? ' selected' : '') + (o && o.locked_at && o.id !== placing.id ? ' disabled' : '') + '>' + esc(label) + '</option>'
   }).join('')
   document.getElementById('place-target').innerHTML = opts
   const note = document.getElementById('place-note')
