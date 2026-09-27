@@ -357,6 +357,31 @@ body.preview-mode .section-head.dev-only { display: flex !important; }
 .hero-session-row .count { font-family: 'IBM Plex Mono', monospace; font-weight: 700; }
 .hero-empty { font-size: 13px; color: rgba(255,255,255,0.75); font-style: italic; }
 
+/* today's projects (live for everyone, company-wide) */
+.projects-card { margin-bottom: 22px; }
+.projects-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.projects-head .title { font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.projects-theme { font-size: 12.5px; color: var(--ink-soft); font-weight: 600; }
+.projects-theme .wk { font-family: 'IBM Plex Mono', monospace; color: var(--accent-deep); margin-right: 6px; }
+.projects-event { font-size: 13px; font-weight: 700; color: var(--accent-deep); margin: -6px 0 12px; }
+.projects-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 190px)); gap: 12px; }
+.project-tile { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--card-bg); }
+.project-tile .ph { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: cover; background: var(--accent-soft); }
+.project-tile .ph-none { width: 100%; aspect-ratio: 1 / 1; background: var(--accent-soft); display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: var(--ink-soft); }
+.project-tile .nm { padding: 8px 10px 10px; font-size: 13px; font-weight: 600; line-height: 1.3; }
+.projects-mini { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+.projects-mini-label { font-size: 11.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 10px; }
+.projects-mini-row { display: grid; grid-template-columns: repeat(3, minmax(0, 230px)); gap: 10px; }
+.projects-mini-row .project-tile { display: flex; align-items: center; }
+.projects-mini-row .project-tile .ph, .projects-mini-row .project-tile .ph-none { width: 56px; min-width: 56px; }
+.projects-mini-row .project-tile .nm { font-size: 12.5px; padding: 8px 10px; }
+.projects-empty { font-size: 13px; color: var(--ink-soft); font-style: italic; }
+@media (max-width: 700px) {
+  .projects-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .project-tile .nm { font-size: 12px; padding: 6px 8px 8px; }
+  .projects-mini-row { grid-template-columns: 1fr; }
+}
+
 /* marketing suggestions */
 .suggestion-row { border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; }
 .suggestion-row:last-child { margin-bottom: 0; }
@@ -525,6 +550,13 @@ body.preview-mode .section-head.dev-only { display: flex !important; }
          whoever's actually looking at the screen, no server timezone
          guessing needed for this part). -->
     <div class="card hero-card" id="card-daily-hero"></div>
+
+    <!-- Today's Projects — live for everyone. Company-wide (same plan at every
+         studio), so it doesn't change with the admin studio switcher. Reads
+         get_projects_for_date(), which only returns published days and only
+         photo + name — safe for the anon key. Date = viewer's device date,
+         same as the greeting. -->
+    <div class="card projects-card" id="card-todays-projects" style="display:none"></div>
 
     <!-- Suggested marketing emails — live for everyone. Weather tag reused
          from the weather card fetch above, not a second API call. -->
@@ -762,6 +794,93 @@ async function loadDailyHero(pin, studioId) {
   } catch (e) {
     console.error('Daily hero load failed:', e);
     // Fail quietly — a broken greeting shouldn't disrupt the rest of the page.
+  }
+}
+
+// ---------- Today's Projects (live for everyone, company-wide) ----------
+
+let _projectsDate = null;          // date currently shown, so we can refresh after midnight
+let _projectsTimer = null;
+const PROJECTS_RECHECK_MS = 10 * 60 * 1000;
+
+function localDateStr(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function escAttr(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function fetchProjectsForDate(dateStr) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_projects_for_date`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+    },
+    body: JSON.stringify({ p_date: dateStr })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error((data && data.message) || 'Request failed');
+  return data;
+}
+
+function projectTileHtml(p) {
+  const photo = p.image_url
+    ? `<img class="ph" src="${escAttr(p.image_url)}" alt="" loading="lazy" onerror="this.outerHTML='<div class=&quot;ph-none&quot;>No photo</div>'">`
+    : `<div class="ph-none">No photo</div>`;
+  return `<div class="project-tile">${photo}<div class="nm">${esc(p.name)}</div></div>`;
+}
+
+function renderTodaysProjects(data) {
+  const card = document.getElementById('card-todays-projects');
+  if (!card) return;
+  if (!data) { card.style.display = 'none'; return; }
+  card.style.display = '';
+
+  const head = `<div class="projects-head">
+      <div class="title">🎨 Today's Projects</div>
+      <div class="projects-theme"><span class="wk">Week ${esc(data.week_number)}</span>${data.published && data.theme ? esc(data.theme) : ''}</div>
+    </div>`;
+
+  if (!data.published) {
+    card.innerHTML = head + `<div class="projects-empty">Today's projects haven't been published yet.</div>`;
+    return;
+  }
+
+  // Fridays: the event and its projects replace the line up
+  const isEvent = (data.event || []).length > 0;
+  const main = isEvent ? data.event : (data.projects || []);
+  const eventLine = isEvent && data.day_title ? `<div class="projects-event">${esc(data.day_title)}</div>` : '';
+  const mainHtml = main.length
+    ? `<div class="projects-grid">${main.map(projectTileHtml).join('')}</div>`
+    : `<div class="projects-empty">No projects listed for today.</div>`;
+
+  const minis = data.mini_make || [];
+  const miniHtml = minis.length
+    ? `<div class="projects-mini">
+        <div class="projects-mini-label">Mini Make this week</div>
+        <div class="projects-mini-row">${minis.map(projectTileHtml).join('')}</div>
+      </div>`
+    : '';
+
+  card.innerHTML = head + eventLine + mainHtml + miniHtml;
+}
+
+async function loadTodaysProjects() {
+  const today = localDateStr(new Date());
+  _projectsDate = today;
+  try {
+    renderTodaysProjects(await fetchProjectsForDate(today));
+  } catch (e) {
+    console.error("Today's Projects load failed:", e);
+    renderTodaysProjects(null); // fail quietly, like the greeting
+  }
+  // Re-check every 10 min so a dashboard left open overnight rolls to the new day
+  if (!_projectsTimer) {
+    _projectsTimer = setInterval(() => {
+      if (localDateStr(new Date()) !== _projectsDate) loadTodaysProjects();
+    }, PROJECTS_RECHECK_MS);
   }
 }
 
@@ -1583,6 +1702,8 @@ function unlockDashboard(data) {
   if (_sessionPin) {
     loadDailyHero(_sessionPin, data.studioId);
   }
+  // Today's Projects — company-wide, no PIN or studio needed.
+  loadTodaysProjects();
   // Studio Sales — separate PIN call, not on the Friday refresh timer
   // (sales data doesn't need 60s polling like a live Friday count). LIVE for
   // everyone now — community-sales-data scopes managers to their own studio
@@ -1885,9 +2006,6 @@ async function loadDashboardTheme() {
     document.documentElement.style.setProperty('--sidebar-bg-2', theme.sidebar_color_deep);
 
     if (theme.banner_image_url) {
-      // Re-applied whenever the hero re-renders (renderDailyHero overwrites
-      // innerHTML, not the card's own style, so this persists across those
-      // re-renders without needing to touch renderDailyHero itself).
       const applyBanner = () => {
         const hero = document.getElementById('card-daily-hero');
         if (hero) {
@@ -1896,10 +2014,6 @@ async function loadDashboardTheme() {
         }
       };
       applyBanner();
-      // Re-apply after each hero render (studio switch, initial load) since
-      // the element itself isn't recreated, just its content — but doing
-      // this defensively costs nothing and avoids a subtle future bug if
-      // that ever changes.
       const heroObserver = new MutationObserver(applyBanner);
       const heroEl = document.getElementById('card-daily-hero');
       if (heroEl) heroObserver.observe(heroEl, { childList: true });
