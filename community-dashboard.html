@@ -363,6 +363,21 @@ body.preview-mode .section-head.dev-only { display: flex !important; }
 .projects-head .title { font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
 .projects-theme { font-size: 12.5px; color: var(--ink-soft); font-weight: 600; }
 .projects-theme .wk { font-family: 'IBM Plex Mono', monospace; color: var(--accent-deep); margin-right: 6px; }
+
+/* new header block: big title + weather forecast pills + subtitle + stub button */
+.today-header { margin-bottom: 18px; }
+.today-header-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 10px; }
+.today-title { font-size: 22px; font-weight: 800; color: var(--accent-deep); display: flex; align-items: center; gap: 8px; }
+.today-see-all { flex-shrink: 0; height: 36px; padding: 0 16px; border-radius: 999px; border: 1.5px solid var(--accent); color: var(--accent-deep); background: white; font-size: 13px; font-weight: 600; cursor: default; white-space: nowrap; }
+.forecast-scroll { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 10px; }
+.forecast-pill {
+  flex-shrink: 0; display: flex; align-items: center; gap: 6px;
+  padding: 7px 14px; border-radius: 999px; border: 1.5px solid var(--border);
+  font-size: 12.5px; font-weight: 600; color: var(--ink-soft); background: white; white-space: nowrap;
+}
+.forecast-pill.today { background: var(--accent); border-color: var(--accent); color: white; }
+.forecast-scroll-hint { font-size: 11.5px; color: var(--ink-soft); flex-shrink: 0; align-self: center; padding-left: 4px; }
+.today-subtitle { font-size: 13.5px; font-weight: 600; color: var(--ink); }
 .projects-event { font-size: 13px; font-weight: 700; color: var(--accent-deep); margin: -6px 0 12px; }
 .projects-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .project-tile { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--card-bg); }
@@ -726,6 +741,48 @@ const WMO_LABELS = {
 };
 function weatherLabel(code) { return WMO_LABELS[code] || 'Unknown'; }
 
+const WMO_EMOJI = {
+  0: '☀️', 1: '🌤️', 2: '⛅', 3: '☁️',
+  45: '🌫️', 48: '🌫️',
+  51: '🌦️', 53: '🌦️', 55: '🌦️',
+  56: '🌧️', 57: '🌧️',
+  61: '🌧️', 63: '🌧️', 65: '🌧️',
+  66: '🌧️', 67: '🌧️',
+  71: '❄️', 73: '❄️', 75: '❄️', 77: '❄️',
+  80: '🌧️', 81: '🌧️', 82: '🌧️',
+  85: '🌨️', 86: '🌨️',
+  95: '⛈️', 96: '⛈️', 99: '⛈️'
+};
+function weatherEmoji(code) { return WMO_EMOJI[code] || '🌡️'; }
+
+// 7-day forecast for the "Today at 4Cats" header pills. Separate from the
+// existing current-conditions weather widget (top-strip) — this hits
+// Open-Meteo's daily forecast params instead of current-only, reusing the
+// same STUDIO_COORDS lookup.
+async function fetchWeatherForecast(studioId) {
+  const coords = STUDIO_COORDS[studioId];
+  if (!coords) return [];
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${coords.lat}&longitude=${coords.lon}&daily=weather_code,temperature_2m_max,temperature_2m_min&temperature_unit=celsius&timezone=auto&forecast_days=7`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('Forecast request failed');
+  const data = await res.json();
+  const daily = data.daily || {};
+  const days = (daily.time || []).map((dateStr, i) => ({
+    date: dateStr,
+    code: daily.weather_code[i],
+    tempMax: Math.round(daily.temperature_2m_max[i]),
+    tempMin: Math.round(daily.temperature_2m_min[i]),
+  }));
+  return days;
+}
+
+function forecastDayLabel(dateStr, index) {
+  if (index === 0) return 'Today';
+  if (index === 1) return 'Tomorrow';
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('en-US', { weekday: 'short' });
+}
+
 // ---------- Greeting hero (live for everyone) ----------
 
 async function fetchDailySnapshotWithPin(pin, studioId) {
@@ -824,14 +881,27 @@ function projectTileHtml(p) {
   return `<div class="project-tile">${photo}<div class="nm">${esc(p.name)}</div></div>`;
 }
 
-function renderTodaysProjects(data) {
+function forecastPillsHtml(forecastDays) {
+  if (!forecastDays || !forecastDays.length) return '';
+  return `<div class="forecast-scroll">${forecastDays.map((d, i) => `
+      <div class="forecast-pill ${i === 0 ? 'today' : ''}">
+        ${esc(forecastDayLabel(d.date, i))} · ${esc(weatherLabel(d.code))} ${weatherEmoji(d.code)}
+      </div>`).join('')}<span class="forecast-scroll-hint">Scroll days →</span></div>`;
+}
+
+function renderTodaysProjects(data, forecastDays) {
   const card = document.getElementById('card-todays-projects');
   if (!card) return;
   if (!data) { card.style.display = 'none'; return; }
   card.style.display = '';
 
-  const head = `<div class="projects-head">
-      <div class="title">🎨 Today's Projects</div>
+  const head = `<div class="today-header">
+      <div class="today-header-top">
+        <div class="today-title">🎨 Today at 4Cats</div>
+        <button class="today-see-all" title="Coming soon">See everything happening today at the studio →</button>
+      </div>
+      ${forecastPillsHtml(forecastDays)}
+      <div class="today-subtitle">Today's workshop lineup — guests choose 1 of 3 projects.</div>
       <div class="projects-theme"><span class="wk">Week ${esc(data.week_number)}</span>${data.published && data.theme ? esc(data.theme) : ''}</div>
     </div>`;
 
@@ -859,11 +929,18 @@ function renderTodaysProjects(data) {
   card.innerHTML = head + eventLine + mainHtml + miniHtml;
 }
 
-async function loadTodaysProjects() {
+async function loadTodaysProjects(studioId) {
   const today = localDateStr(new Date());
   _projectsDate = today;
+  let forecastDays = [];
   try {
-    renderTodaysProjects(await fetchProjectsForDate(today));
+    if (studioId) forecastDays = await fetchWeatherForecast(studioId);
+  } catch (e) {
+    console.error('Weather forecast load failed:', e);
+    // Fail quietly — the header still renders fine without the pills.
+  }
+  try {
+    renderTodaysProjects(await fetchProjectsForDate(today), forecastDays);
   } catch (e) {
     console.error("Today's Projects load failed:", e);
     renderTodaysProjects(null); // fail quietly, like the greeting
@@ -871,7 +948,7 @@ async function loadTodaysProjects() {
   // Re-check every 10 min so a dashboard left open overnight rolls to the new day
   if (!_projectsTimer) {
     _projectsTimer = setInterval(() => {
-      if (localDateStr(new Date()) !== _projectsDate) loadTodaysProjects();
+      if (localDateStr(new Date()) !== _projectsDate) loadTodaysProjects(studioId);
     }, PROJECTS_RECHECK_MS);
   }
 }
@@ -1694,8 +1771,9 @@ function unlockDashboard(data) {
   if (_sessionPin) {
     loadDailyHero(_sessionPin, data.studioId);
   }
-  // Today's Projects — company-wide, no PIN or studio needed.
-  loadTodaysProjects();
+  // Today's Projects — company-wide (same for every studio), but weather
+  // forecast pills in its header are per-studio.
+  loadTodaysProjects(data.studioId);
   // Studio Sales — separate PIN call, not on the Friday refresh timer
   // (sales data doesn't need 60s polling like a live Friday count). LIVE for
   // everyone now — community-sales-data scopes managers to their own studio
@@ -1751,6 +1829,7 @@ async function changeAdminStudio(studioId) {
     loadCheckinCount(_sessionPin, studioId);
     loadDailyHero(_sessionPin, studioId);
     loadMarketingSuggestions(_sessionPin, studioId);
+    loadTodaysProjects(studioId);
   } catch (e) {
     console.error('Failed to switch admin studio view:', e);
   }
