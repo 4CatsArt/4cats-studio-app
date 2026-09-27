@@ -356,6 +356,18 @@ body.preview-mode .section-head.dev-only { display: flex !important; }
 .hero-session-row .count { font-family: 'IBM Plex Mono', monospace; font-weight: 700; }
 .hero-empty { font-size: 13px; color: rgba(255,255,255,0.75); font-style: italic; }
 
+/* marketing suggestions */
+.suggestion-row { border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; }
+.suggestion-row:last-child { margin-bottom: 0; }
+.suggestion-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.suggestion-name { font-weight: 700; font-size: 14px; }
+.suggestion-subject { font-size: 13px; color: var(--ink-soft); margin-top: 2px; }
+.suggestion-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.suggestion-btn { height: 32px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--border); background: white; font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.suggestion-btn.primary { background: var(--accent); color: white; border: none; }
+.suggestion-preview { margin-top: 10px; padding: 12px; background: #faf9fd; border-radius: 8px; font-size: 13px; white-space: pre-wrap; display: none; }
+.suggestion-preview.open { display: block; }
+
 /* leaderboard */
 .lb-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .lb-row:last-of-type { border-bottom: none; }
@@ -512,6 +524,11 @@ body.preview-mode .section-head.dev-only { display: flex !important; }
          whoever's actually looking at the screen, no server timezone
          guessing needed for this part). -->
     <div class="card hero-card" id="card-daily-hero"></div>
+
+    <!-- Suggested marketing emails — live for everyone. Weather tag reused
+         from the weather card fetch above, not a second API call. -->
+    <div class="section-head ops">✉️ Suggested Emails</div>
+    <div class="card" id="card-marketing-suggestions"></div>
 
     <!-- Weather — real, per-studio, LIVE for everyone (not dev-only) -->
     <div class="top-strip-live">
@@ -747,6 +764,127 @@ async function loadDailyHero(pin, studioId) {
   }
 }
 
+// ---------- Suggested Marketing Emails ----------
+
+let _marketingSuggestions = []; // stashed so send/preview don't need a refetch
+let _marketingStudioId = null;
+let _marketingStudioName = '';
+
+async function fetchMarketingSuggestionsWithPin(pin, studioId, weatherTag) {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/community-marketing-suggestions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+    },
+    body: JSON.stringify({ pin, studioId, weatherTag })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+function renderMarketingSuggestions(data) {
+  const container = document.getElementById('card-marketing-suggestions');
+  if (!container) return;
+
+  if (!data || data.error || !data.studioId) {
+    container.innerHTML = '';
+    return;
+  }
+
+  _marketingSuggestions = data.suggestions || [];
+  _marketingStudioId = data.studioId;
+  _marketingStudioName = STUDIO_NAMES[data.studioId] || data.studioId;
+
+  if (!_marketingSuggestions.length) {
+    container.innerHTML = `<div class="no-cap">No suggested templates for right now — check back as the season or weather changes.</div>`;
+    return;
+  }
+
+  container.innerHTML = _marketingSuggestions.map(t => `
+    <div class="suggestion-row">
+      <div class="suggestion-head">
+        <div>
+          <div class="suggestion-name">${esc(t.name)}</div>
+          <div class="suggestion-subject">${esc(t.subject)}</div>
+        </div>
+        <div class="suggestion-actions">
+          <button class="suggestion-btn" onclick="togglePreview('${t.id}')">Preview</button>
+          <button class="suggestion-btn primary" onclick="sendMarketingTemplate('${t.id}')">Send</button>
+        </div>
+      </div>
+      <div class="suggestion-preview" id="preview-${t.id}">${esc(t.body)}</div>
+    </div>`).join('');
+}
+
+function togglePreview(templateId) {
+  const el = document.getElementById(`preview-${templateId}`);
+  if (el) el.classList.toggle('open');
+}
+
+async function sendMarketingTemplate(templateId) {
+  const template = _marketingSuggestions.find(t => t.id === templateId);
+  if (!template || !_marketingStudioId) return;
+
+  try {
+    // Dry run first — shows the real recipient count before committing to
+    // an irreversible send.
+    const dryRes = await fetch(`${SUPABASE_URL}/functions/v1/send-email-blast`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+      body: JSON.stringify({
+        studio_id: _marketingStudioId,
+        studio_name: _marketingStudioName,
+        recipient_type: 'marketing_all_customers',
+        subject: template.subject,
+        message: template.body,
+        dry_run: true
+      })
+    });
+    const dryData = await dryRes.json();
+    if (!dryRes.ok || !dryData.success) {
+      alert(`Couldn't check recipients: ${dryData.error || 'unknown error'}`);
+      return;
+    }
+
+    const confirmed = confirm(`Send "${template.name}" to ${dryData.count} opted-in customer(s) at ${_marketingStudioName}?\n\nThis cannot be undone.`);
+    if (!confirmed) return;
+
+    const sendRes = await fetch(`${SUPABASE_URL}/functions/v1/send-email-blast`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+      body: JSON.stringify({
+        studio_id: _marketingStudioId,
+        studio_name: _marketingStudioName,
+        recipient_type: 'marketing_all_customers',
+        subject: template.subject,
+        message: template.body
+      })
+    });
+    const sendData = await sendRes.json();
+    if (sendRes.ok && sendData.success) {
+      alert(`Sent! ${sendData.sent} delivered, ${sendData.failed} failed.`);
+    } else {
+      alert(`Send failed: ${sendData.error || 'unknown error'}`);
+    }
+  } catch (e) {
+    console.error('Marketing send failed:', e);
+    alert('Something went wrong sending this email — check the console for details.');
+  }
+}
+
+async function loadMarketingSuggestions(pin, studioId) {
+  try {
+    const weatherTag = deriveWeatherTag(_lastWeatherData);
+    const data = await fetchMarketingSuggestionsWithPin(pin, studioId, weatherTag);
+    renderMarketingSuggestions(data);
+  } catch (e) {
+    console.error('Marketing suggestions load failed:', e);
+  }
+}
+
 async function fetchFridayFillRateWithPin(pin, studioId) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/community-dashboard-data`, {
     method: 'POST',
@@ -961,11 +1099,26 @@ async function getWeatherData_api(studioId) {
 }
 const WEATHER_SOURCE = getWeatherData_api;
 
+let _lastWeatherData = null; // stashed so the marketing-suggestion fetch can derive a tag without a second weather call
+
+function deriveWeatherTag(w) {
+  if (!w || w.tempC === null) return null;
+  const cond = (w.condition || '').toLowerCase();
+  if (cond.includes('snow')) return 'snowy';
+  if (cond.includes('rain') || cond.includes('drizzle')) return 'rainy';
+  if (cond.includes('clear')) return w.tempC >= 20 ? 'sunny' : 'cold';
+  if (cond.includes('cloud') || cond.includes('overcast') || cond.includes('fog')) return 'cloudy';
+  if (w.tempC <= 5) return 'cold';
+  if (w.tempC >= 22) return 'warm';
+  return null;
+}
+
 async function renderWeatherCard(studioId) {
   const el = document.getElementById('mini-weather');
   if (!el) return;
   try {
     const w = await WEATHER_SOURCE(studioId);
+    _lastWeatherData = w;
     el.innerHTML = w.tempC === null ? `
       <div class="eyebrow">🌤️ Weather</div>
       <div class="sub">${esc(w.condition)}</div>` : `
@@ -1418,7 +1571,11 @@ function unlockDashboard(data) {
   document.getElementById('dashboard-gate').style.display = 'none';
   document.getElementById('dashboard-shell').style.display = 'flex';
   renderAdminStudioSwitcher(data);
-  initDashboard(data);
+  initDashboard(data).then(() => {
+    // Chained (not fired in parallel) — needs _lastWeatherData, which is
+    // only set once initDashboard's internal renderWeatherCard has resolved.
+    if (_sessionPin) loadMarketingSuggestions(_sessionPin, data.studioId);
+  });
   if (_fridayRefreshTimer) clearInterval(_fridayRefreshTimer);
   _fridayRefreshTimer = setInterval(refreshFridayFillRate, FRIDAY_REFRESH_MS);
   // Greeting hero — live for everyone, loads first since it's the top of the page.
@@ -1473,12 +1630,13 @@ async function changeAdminStudio(studioId) {
   try {
     const data = await fetchFridayFillRateWithPin(_sessionPin, studioId);
     renderFridayFillRateBody(data);
-    renderWeatherCard(studioId);
+    await renderWeatherCard(studioId);
     _salesMonth = null; // reset to current month when switching studios
     loadStudioSales(_sessionPin, studioId, null);
     loadAllBookingBuckets(_sessionPin, studioId);
     loadCheckinCount(_sessionPin, studioId);
     loadDailyHero(_sessionPin, studioId);
+    loadMarketingSuggestions(_sessionPin, studioId);
   } catch (e) {
     console.error('Failed to switch admin studio view:', e);
   }
