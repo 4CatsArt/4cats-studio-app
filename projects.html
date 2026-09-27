@@ -271,6 +271,7 @@ button.pill { cursor: pointer; }
   <!-- THEMES -->
   <div class="tab-content" id="tab-themes">
     <div class="toolbar">
+      <label class="inline">Sort <select id="theme-sort" onchange="renderThemes()"><option value="week">By week number</option><option value="name">A to Z</option></select></label>
       <div class="muted small grow">Themes are reused every year. The anchor date is a fixed date the theme's week should contain (for example Oct 31). The scheduling note shows during yearly review.</div>
       <button class="btn btn-primary" onclick="addTheme()">Add theme</button>
     </div>
@@ -486,7 +487,7 @@ function switchTab(tab, keepHash) {
     else history.replaceState(null, '', '#' + tab)
   }
   if (tab === 'library') renderLibrary()
-  if (tab === 'themes') renderThemes()
+  if (tab === 'themes') { themeWeeks = null; renderThemes() }
   if (tab === 'review') loadReview()
   if (tab === 'planner' && !week) goToWeek(fd(mondayOf(new Date())))
 }
@@ -1067,21 +1068,29 @@ async function runImport() {
 /* ============================================================
    THEMES
    ============================================================ */
-function renderThemes() {
+let themeWeeks = null   // { theme_id: ['2026-09-28', …] } for the current year
+async function renderThemes() {
   const body = document.getElementById('themes-body')
   if (!themes.length) { body.innerHTML = '<div class="empty">No themes yet. Add one to start planning weeks.</div>'; return }
+  if (!themeWeeks) await loadThemeWeeks()
+  const y = isoWeek(new Date()).year
+  const firstWeek = t => { const l = themeWeeks[t.id]; return l && l.length ? isoWeek(pd(l[0])).week : 999 }
+  const sorted = themes.slice().sort(document.getElementById('theme-sort').value === 'name'
+    ? (a, b) => a.name.localeCompare(b.name)
+    : (a, b) => firstWeek(a) - firstWeek(b) || a.name.localeCompare(b.name))
   const monthOpts = sel => '<option value="">No date</option>' + MONTHS.map((m, i) => '<option value="' + (i + 1) + '"' + (sel === i + 1 ? ' selected' : '') + '>' + m + '</option>').join('')
   body.innerHTML = '<table class="theme-table"><thead><tr><th style="width:24%">Theme</th><th style="width:140px">Weeks this year</th><th style="width:200px">Anchor date (optional)<br><span style="font-weight:400">month + day, e.g. Oct 31</span></th><th>Scheduling note (optional, shown every year)</th><th style="width:90px">Active</th><th style="width:70px"></th></tr></thead><tbody>' +
-    themes.map(t => '<tr>' +
+    sorted.map(t => '<tr>' +
       '<td><input type="text" value="' + esc(t.name) + '" onchange="saveTheme(\'' + t.id + '\',{name:this.value.trim()})" aria-label="Theme name"></td>' +
-      '<td class="theme-weeks small" data-theme="' + t.id + '"><span class="muted">…</span></td>' +
+      '<td class="small">' + ((themeWeeks[t.id] || []).length
+        ? themeWeeks[t.id].map(ws => '<a href="#planner/' + ws + '" onclick="switchTab(\'planner\',true);goToWeek(\'' + ws + '\');return false">Week ' + isoWeek(pd(ws)).week + '</a>').join(', ')
+        : '<span class="muted">Not used in ' + y + '</span>') + '</td>' +
       '<td><div class="anchor-cell"><select onchange="saveAnchor(\'' + t.id + '\',this)" data-part="m" aria-label="Anchor month">' + monthOpts(t.anchor_month) + '</select>' +
         '<input type="number" min="1" max="31" value="' + (t.anchor_day || '') + '" placeholder="Day" onchange="saveAnchor(\'' + t.id + '\',this)" data-part="d" aria-label="Anchor day"></div></td>' +
       '<td><textarea placeholder="Optional" onchange="saveTheme(\'' + t.id + '\',{scheduling_note:this.value.trim()||null})">' + esc(t.scheduling_note || '') + '</textarea></td>' +
       '<td><input type="checkbox"' + (t.is_active ? ' checked' : '') + ' onchange="saveTheme(\'' + t.id + '\',{is_active:this.checked})" aria-label="Active"></td>' +
       '<td><button class="link-btn" style="color:var(--warn)" onclick="deleteTheme(\'' + t.id + '\')">Delete</button></td>' +
     '</tr>').join('') + '</tbody></table>'
-  loadThemeWeeks()
 }
 async function loadThemeWeeks() {
   const y = isoWeek(new Date()).year
@@ -1089,12 +1098,8 @@ async function loadThemeWeeks() {
   const { data } = await sb.from('project_weeks').select('week_start, theme_id').gte('week_start', first).lte('week_start', last).not('theme_id', 'is', null)
   const byTheme = {}
   ;(data || []).forEach(w => { (byTheme[w.theme_id] = byTheme[w.theme_id] || []).push(w.week_start) })
-  document.querySelectorAll('.theme-weeks').forEach(td => {
-    const list = (byTheme[td.dataset.theme] || []).sort()
-    td.innerHTML = list.length
-      ? list.map(ws => '<a href="#planner/' + ws + '" onclick="switchTab(\'planner\',true);goToWeek(\'' + ws + '\');return false">Week ' + isoWeek(pd(ws)).week + '</a>').join(', ')
-      : '<span class="muted">Not used in ' + y + '</span>'
-  })
+  Object.values(byTheme).forEach(l => l.sort())
+  themeWeeks = byTheme
 }
 async function saveTheme(id, patch) {
   if (patch.name === '') { toast('A theme needs a name.', true); renderThemes(); return }
