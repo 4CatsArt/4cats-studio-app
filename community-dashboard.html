@@ -339,6 +339,23 @@ body.preview-mode .section-head.dev-only { display: flex !important; }
 .card-head .title { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 700; }
 .card-head .view-all { font-size: 12px; font-weight: 600; }
 
+/* greeting hero — distinct gradient treatment marks this as the "assistant" section */
+.hero-card {
+  background: linear-gradient(135deg, var(--accent) 0%, #8b6cf0 100%);
+  color: #ffffff; border: none; padding: 22px 24px; margin-bottom: 22px;
+}
+.hero-greeting { font-size: 21px; font-weight: 700; margin-bottom: 4px; }
+.hero-sub { font-size: 13px; color: rgba(255,255,255,0.8); margin-bottom: 16px; }
+.hero-sessions { display: flex; flex-direction: column; gap: 6px; }
+.hero-session-row {
+  display: flex; justify-content: space-between; align-items: center;
+  background: rgba(255,255,255,0.14); border-radius: 10px; padding: 9px 13px; font-size: 13px;
+}
+.hero-session-row .time { color: rgba(255,255,255,0.75); font-family: 'IBM Plex Mono', monospace; font-size: 12px; min-width: 68px; }
+.hero-session-row .title { flex: 1; margin: 0 10px; font-weight: 600; }
+.hero-session-row .count { font-family: 'IBM Plex Mono', monospace; font-weight: 700; }
+.hero-empty { font-size: 13px; color: rgba(255,255,255,0.75); font-style: italic; }
+
 /* leaderboard */
 .lb-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .lb-row:last-of-type { border-bottom: none; }
@@ -489,6 +506,12 @@ body.preview-mode .section-head.dev-only { display: flex !important; }
 
   <!-- ============================ MAIN ============================ -->
   <main class="main">
+
+    <!-- Greeting hero — live for everyone. Greeting text/time-of-day is
+         computed client-side from the viewer's own device clock (matches
+         whoever's actually looking at the screen, no server timezone
+         guessing needed for this part). -->
+    <div class="card hero-card" id="card-daily-hero"></div>
 
     <!-- Weather — real, per-studio, LIVE for everyone (not dev-only) -->
     <div class="top-strip-live">
@@ -652,6 +675,77 @@ const WMO_LABELS = {
   95: 'Thunderstorm', 96: 'Thunderstorm w/ hail', 99: 'Thunderstorm w/ hail'
 };
 function weatherLabel(code) { return WMO_LABELS[code] || 'Unknown'; }
+
+// ---------- Greeting hero (live for everyone) ----------
+
+async function fetchDailySnapshotWithPin(pin, studioId) {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/community-daily-snapshot`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+    },
+    body: JSON.stringify({ pin, studioId })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+function timeOfDayGreeting() {
+  const hour = new Date().getHours(); // viewer's own device clock, on purpose
+  if (hour < 12) return 'Good morning';
+  if (hour < 17) return 'Good afternoon';
+  return 'Good evening';
+}
+
+function formatSessionTime(t) {
+  // t is 'HH:MM:SS' from Postgres time type
+  const [hStr, mStr] = t.split(':');
+  let h = parseInt(hStr);
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12; if (h === 0) h = 12;
+  return `${h}:${mStr} ${ampm}`;
+}
+
+function renderDailyHero(data) {
+  const container = document.getElementById('card-daily-hero');
+  if (!container) return;
+
+  if (!data || data.error || !data.studioId) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const studioName = STUDIO_NAMES[data.studioId] || data.studioId;
+  const greeting = timeOfDayGreeting();
+  const sessions = data.sessions || [];
+
+  const sessionsHtml = sessions.length
+    ? `<div class="hero-sessions">${sessions.map(s => `
+        <div class="hero-session-row">
+          <span class="time">${esc(formatSessionTime(s.time))}</span>
+          <span class="title">${esc(s.title)}</span>
+          <span class="count">${s.bookingCount} booked</span>
+        </div>`).join('')}</div>`
+    : `<div class="hero-empty">Nothing booked at ${esc(studioName)} today.</div>`;
+
+  container.innerHTML = `
+    <div class="hero-greeting">${esc(greeting)}, ${esc(data.firstName)}! 👋</div>
+    <div class="hero-sub">Here's what's happening at ${esc(studioName)} today</div>
+    ${sessionsHtml}`;
+}
+
+async function loadDailyHero(pin, studioId) {
+  try {
+    const data = await fetchDailySnapshotWithPin(pin, studioId);
+    renderDailyHero(data);
+  } catch (e) {
+    console.error('Daily hero load failed:', e);
+    // Fail quietly — a broken greeting shouldn't disrupt the rest of the page.
+  }
+}
 
 async function fetchFridayFillRateWithPin(pin, studioId) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/community-dashboard-data`, {
@@ -1327,6 +1421,10 @@ function unlockDashboard(data) {
   initDashboard(data);
   if (_fridayRefreshTimer) clearInterval(_fridayRefreshTimer);
   _fridayRefreshTimer = setInterval(refreshFridayFillRate, FRIDAY_REFRESH_MS);
+  // Greeting hero — live for everyone, loads first since it's the top of the page.
+  if (_sessionPin) {
+    loadDailyHero(_sessionPin, data.studioId);
+  }
   // Studio Sales — separate PIN call, not on the Friday refresh timer
   // (sales data doesn't need 60s polling like a live Friday count). LIVE for
   // everyone now — community-sales-data scopes managers to their own studio
@@ -1380,6 +1478,7 @@ async function changeAdminStudio(studioId) {
     loadStudioSales(_sessionPin, studioId, null);
     loadAllBookingBuckets(_sessionPin, studioId);
     loadCheckinCount(_sessionPin, studioId);
+    loadDailyHero(_sessionPin, studioId);
   } catch (e) {
     console.error('Failed to switch admin studio view:', e);
   }
