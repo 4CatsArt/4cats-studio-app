@@ -540,10 +540,10 @@ async function copyFromLastMonth() {
 /* ---------- schedule (shift-based, planning tool) ---------- */
 // One shift per staff per day for now (start + end time) — doesn't yet
 // support split shifts (two separate blocks in one day for one person).
-let scheduleStudioId = STUDIO_IDS[0]
-let scheduleStaff = []
-let scheduleShifts = {}      // staff_id -> { 'YYYY-MM-DD': { start_time, end_time } }   (THIS studio only, editable)
-let scheduleOtherShifts = {} // staff_id -> { 'YYYY-MM-DD': studio_id }                  (any OTHER studio, for conflict greying)
+let scheduleStudioIds = [STUDIO_IDS[0]] // up to 4, shown stacked
+let scheduleStaffByStudio = {}        // studio_id -> [{staff_id, display_name, hourly_wage, province_code}]
+let scheduleShiftsByStudio = {}       // studio_id -> { staff_id -> { 'YYYY-MM-DD': { start_time, end_time } } }  (that studio's own shifts, editable)
+let scheduleOtherShiftsByStudio = {}  // studio_id -> { staff_id -> { 'YYYY-MM-DD': other_studio_id } }           (conflicts from studios NOT in scheduleStudioIds)
 let scheduleWeekStart = sundayOfWeek(new Date())
 
 function sundayOfWeek(d) {
@@ -585,29 +585,44 @@ function paidHoursForShift(startTime, endTime, provinceCode) {
 async function loadScheduleView() {
   const container = document.getElementById('schedule-body')
   container.innerHTML = `
-    <div class="toolbar" style="margin-bottom:14px">
-      <label class="muted small">Studio</label>
-      <select id="schedule-studio-select" onchange="changeScheduleStudio(this.value)" style="padding:6px 10px;border-radius:6px;border:0.5px solid var(--line-2)">
-        ${STUDIO_IDS.map(id => `<option value="${id}" ${id === scheduleStudioId ? 'selected' : ''}>${esc(STUDIO_NAMES[id])}</option>`).join('')}
-      </select>
+    <div class="toolbar" style="margin-bottom:14px;flex-wrap:wrap">
       <button class="btn" onclick="shiftScheduleWeek(-1)" aria-label="Previous week">‹</button>
       <div class="month-label" id="schedule-week-label" style="min-width:220px">…</div>
       <button class="btn" onclick="shiftScheduleWeek(1)" aria-label="Next week">›</button>
       <button class="btn" onclick="goToCurrentScheduleWeek()">This week</button>
-      <button class="btn" onclick="postScheduleToPayPeriod()">Post week to Pay Period →</button>
       <div class="muted small" style="flex:1">
-        Planning only, not yet wired to the pay-period wage estimate. Shifts over 5h lose 0.5h automatically (unpaid break).
-        Greyed-out days mean that person is already scheduled at another studio.
+        Pick up to 4 studios to compare side by side. Shifts over 5h lose 0.5h automatically (unpaid break).
+        Greyed-out days mean that person is already scheduled at a studio not currently shown.
       </div>
     </div>
-    <div class="panel" id="schedule-grid" style="overflow:auto"><div class="loading">Loading…</div></div>`
+    <div class="toolbar" style="margin-bottom:14px;flex-wrap:wrap;gap:4px 14px">
+      <span class="muted small" style="width:100%">Studios shown (max 4):</span>
+      ${STUDIO_IDS.map(id => `
+        <label class="inline small" style="display:flex;align-items:center;gap:4px;white-space:nowrap">
+          <input type="checkbox" value="${id}" ${scheduleStudioIds.includes(id) ? 'checked' : ''} onchange="toggleScheduleStudio('${id}', this.checked)">
+          ${esc(STUDIO_NAMES[id])}
+        </label>`).join('')}
+    </div>
+    <div id="schedule-sections"><div class="loading">Loading…</div></div>`
   await loadScheduleGrid()
 }
 
-function changeScheduleStudio(studioId) {
-  scheduleStudioId = studioId
+function toggleScheduleStudio(studioId, checked) {
+  if (checked) {
+    if (scheduleStudioIds.length >= 4) {
+      alert('Only 4 studios can be shown at once — uncheck one first.')
+      // revert the checkbox visually
+      const cb = document.querySelector(`input[type=checkbox][value="${studioId}"]`)
+      if (cb) cb.checked = false
+      return
+    }
+    scheduleStudioIds.push(studioId)
+  } else {
+    scheduleStudioIds = scheduleStudioIds.filter(id => id !== studioId)
+  }
   loadScheduleGrid()
 }
+
 function shiftScheduleWeek(n) {
   scheduleWeekStart = addDays(scheduleWeekStart, n * 7)
   loadScheduleGrid()
@@ -618,38 +633,57 @@ function goToCurrentScheduleWeek() {
 }
 
 async function loadScheduleGrid() {
-  const grid = document.getElementById('schedule-grid')
-  grid.innerHTML = '<div class="loading">Loading…</div>'
+  const container = document.getElementById('schedule-sections')
   document.getElementById('schedule-week-label').textContent = weekRangeLabel(scheduleWeekStart)
 
-  const { data: staff, error } = await sb.rpc('get_studio_staff_for_wages', { p_studio_id: scheduleStudioId })
-  if (error) { grid.innerHTML = `<div class="muted small" style="padding:16px">Couldn't load staff: ${esc(error.message)}</div>`; return }
-  scheduleStaff = staff || []
-
-  if (!scheduleStaff.length) {
-    grid.innerHTML = '<div class="muted small" style="padding:16px">No active staff assigned to this studio yet.</div>'
+  if (!scheduleStudioIds.length) {
+    container.innerHTML = '<div class="muted small" style="padding:16px">Check at least one studio above to see its schedule.</div>'
     return
   }
+  container.innerHTML = '<div class="loading">Loading…</div>'
 
   const weekDays = [0,1,2,3,4,5,6].map(i => addDays(scheduleWeekStart, i))
   const weekStartStr = dateStrOf(weekDays[0])
   const weekEndStr = dateStrOf(weekDays[6])
-  const staffIds = scheduleStaff.map(s => s.staff_id)
 
-  // ALL shifts for these staff this week, any studio — needed to detect
-  // "already scheduled elsewhere" conflicts, not just this studio's own shifts.
-  const { data: allShiftData } = await sb.from('staff_shifts').select('*')
-    .in('staff_id', staffIds).gte('shift_date', weekStartStr).lte('shift_date', weekEndStr)
+  // Fetch each selected studio's staff + shifts in parallel.
+  const studioData = {}
+  await Promise.all(scheduleStudioIds.map(async (studioId) => {
+    const { data: staff, error } = await sb.rpc('get_studio_staff_for_wages', { p_studio_id: studioId })
+    if (error) { studioData[studioId] = { error: error.message }; return }
 
-  scheduleShifts = {}
-  scheduleOtherShifts = {}
-  ;(allShiftData || []).forEach(s => {
-    if (s.studio_id === scheduleStudioId) {
-      if (!scheduleShifts[s.staff_id]) scheduleShifts[s.staff_id] = {}
-      scheduleShifts[s.staff_id][s.shift_date] = { start_time: s.start_time, end_time: s.end_time }
-    } else {
-      if (!scheduleOtherShifts[s.staff_id]) scheduleOtherShifts[s.staff_id] = {}
-      scheduleOtherShifts[s.staff_id][s.shift_date] = s.studio_id
+    const staffIds = (staff || []).map(s => s.staff_id)
+    let allShiftData = []
+    if (staffIds.length) {
+      const { data } = await sb.from('staff_shifts').select('*')
+        .in('staff_id', staffIds).gte('shift_date', weekStartStr).lte('shift_date', weekEndStr)
+      allShiftData = data || []
+    }
+
+    const ownShifts = {}
+    const otherShifts = {}
+    allShiftData.forEach(s => {
+      if (s.studio_id === studioId) {
+        if (!ownShifts[s.staff_id]) ownShifts[s.staff_id] = {}
+        ownShifts[s.staff_id][s.shift_date] = { start_time: s.start_time, end_time: s.end_time }
+      } else {
+        if (!otherShifts[s.staff_id]) otherShifts[s.staff_id] = {}
+        otherShifts[s.staff_id][s.shift_date] = s.studio_id
+      }
+    })
+
+    studioData[studioId] = { staff: staff || [], ownShifts, otherShifts }
+  }))
+
+  scheduleStaffByStudio = {}
+  scheduleShiftsByStudio = {}
+  scheduleOtherShiftsByStudio = {}
+  scheduleStudioIds.forEach(id => {
+    const d = studioData[id]
+    if (d && !d.error) {
+      scheduleStaffByStudio[id] = d.staff
+      scheduleShiftsByStudio[id] = d.ownShifts
+      scheduleOtherShiftsByStudio[id] = d.otherShifts
     }
   })
 
@@ -658,73 +692,96 @@ async function loadScheduleGrid() {
     return `<th style="min-width:110px">${dow} ${d.getDate()}</th>`
   }).join('')
 
-  const rows = scheduleStaff.map(s => {
-    let weekHours = 0
-    const cells = weekDays.map(d => {
-      const dateStr = dateStrOf(d)
-      const otherStudioId = (scheduleOtherShifts[s.staff_id] || {})[dateStr]
+  const sections = scheduleStudioIds.map(studioId => {
+    const d = studioData[studioId]
+    if (!d || d.error) {
+      return `<div class="panel" style="margin-bottom:18px;padding:16px">
+        <strong>${esc(STUDIO_NAMES[studioId])}</strong>
+        <div class="muted small">Couldn't load: ${esc(d ? d.error : 'unknown error')}</div>
+      </div>`
+    }
+    if (!d.staff.length) {
+      return `<div class="panel" style="margin-bottom:18px;padding:16px">
+        <strong>${esc(STUDIO_NAMES[studioId])}</strong>
+        <div class="muted small">No active staff assigned to this studio yet.</div>
+      </div>`
+    }
 
-      if (otherStudioId) {
-        return `<td style="background:var(--soft)"><div class="muted" style="font-size:10.5px;padding:4px">Scheduled at<br>${esc(STUDIO_NAMES[otherStudioId] || otherStudioId)}</div></td>`
-      }
+    const rows = d.staff.map(s => {
+      let weekHours = 0
+      const cells = weekDays.map(day => {
+        const dateStr = dateStrOf(day)
+        const otherStudioId = (d.otherShifts[s.staff_id] || {})[dateStr]
 
-      const shift = (scheduleShifts[s.staff_id] || {})[dateStr] || {}
-      const paid = paidHoursForShift(shift.start_time, shift.end_time, s.province_code)
-      weekHours += paid
-      return `<td>
-        <div style="display:flex;flex-direction:column;gap:2px">
-          <input type="time" step="900" value="${shift.start_time ? shift.start_time.slice(0,5) : ''}" style="width:90px;font-size:11px;padding:2px 4px"
-            onchange="saveShiftField('${s.staff_id}','${dateStr}','start_time',this)" aria-label="Start time">
-          <input type="time" step="900" value="${shift.end_time ? shift.end_time.slice(0,5) : ''}" style="width:90px;font-size:11px;padding:2px 4px"
-            onchange="saveShiftField('${s.staff_id}','${dateStr}','end_time',this)" aria-label="End time">
-          ${paid > 0 ? `<span class="muted" style="font-size:10px">${paid.toFixed(1)}h paid</span>` : ''}
-        </div>
-      </td>`
+        if (otherStudioId) {
+          return `<td style="background:var(--soft)"><div class="muted" style="font-size:10.5px;padding:4px">Scheduled at<br>${esc(STUDIO_NAMES[otherStudioId] || otherStudioId)}</div></td>`
+        }
+
+        const shift = (d.ownShifts[s.staff_id] || {})[dateStr] || {}
+        const paid = paidHoursForShift(shift.start_time, shift.end_time, s.province_code)
+        weekHours += paid
+        return `<td>
+          <div style="display:flex;flex-direction:column;gap:2px">
+            <input type="time" step="900" value="${shift.start_time ? shift.start_time.slice(0,5) : ''}" style="width:90px;font-size:11px;padding:2px 4px"
+              onchange="saveShiftField('${studioId}','${s.staff_id}','${dateStr}','start_time',this)" aria-label="Start time">
+            <input type="time" step="900" value="${shift.end_time ? shift.end_time.slice(0,5) : ''}" style="width:90px;font-size:11px;padding:2px 4px"
+              onchange="saveShiftField('${studioId}','${s.staff_id}','${dateStr}','end_time',this)" aria-label="End time">
+            ${paid > 0 ? `<span class="muted" style="font-size:10px">${paid.toFixed(1)}h paid</span>` : ''}
+          </div>
+        </td>`
+      }).join('')
+
+      const weekPay = s.hourly_wage != null ? weekHours * s.hourly_wage : null
+
+      return `<tr>
+        <td class="studio-name" style="position:sticky;left:0">${esc(s.display_name)}</td>
+        <td style="font-weight:700">${weekHours.toFixed(1)}h</td>
+        <td style="font-weight:700">${weekPay == null ? '<span class="muted">no wage set</span>' : money(weekPay)}</td>
+        ${cells}
+      </tr>`
     }).join('')
 
-    const weekPay = s.hourly_wage != null ? weekHours * s.hourly_wage : null
-
-    return `<tr>
-      <td class="studio-name" style="position:sticky;left:0">${esc(s.display_name)}</td>
-      <td style="font-weight:700">${weekHours.toFixed(1)}h</td>
-      <td style="font-weight:700">${weekPay == null ? '<span class="muted">no wage set</span>' : money(weekPay)}</td>
-      ${cells}
-    </tr>`
+    return `<div class="panel" style="margin-bottom:18px;overflow:auto">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:0.5px solid var(--line)">
+        <strong>${esc(STUDIO_NAMES[studioId])}</strong>
+        <button class="btn" onclick="postScheduleToPayPeriod('${studioId}')">Post week to Pay Period →</button>
+      </div>
+      <table class="fin-table" style="width:auto">
+        <thead><tr>
+          <th class="studio-name" style="position:sticky;left:0">Staff</th>
+          <th>Week Hours</th>
+          <th>Week Pay</th>
+          ${dayHeaders}
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`
   }).join('')
 
-  grid.innerHTML = `<table class="fin-table" style="width:auto">
-    <thead><tr>
-      <th class="studio-name" style="position:sticky;left:0">Staff</th>
-      <th>Week Hours</th>
-      <th>Week Pay</th>
-      ${dayHeaders}
-    </tr></thead>
-    <tbody>${rows}</tbody>
-  </table>`
+  container.innerHTML = sections
 }
 
-async function saveShiftField(staffId, dateStr, field, el) {
+async function saveShiftField(studioId, staffId, dateStr, field, el) {
   const value = el.value === '' ? null : el.value + ':00'
-  const existing = (scheduleShifts[staffId] || {})[dateStr] || {}
-  const patch = { staff_id: staffId, studio_id: scheduleStudioId, shift_date: dateStr, ...existing, [field]: value }
+  const existing = (scheduleShiftsByStudio[studioId]?.[staffId] || {})[dateStr] || {}
+  const patch = { staff_id: staffId, studio_id: studioId, shift_date: dateStr, ...existing, [field]: value }
 
   const { error } = await sb.from('staff_shifts')
     .upsert(patch, { onConflict: 'staff_id,studio_id,shift_date' })
   if (error) { toast(error.message, true); return }
 
-  if (!scheduleShifts[staffId]) scheduleShifts[staffId] = {}
-  scheduleShifts[staffId][dateStr] = { ...existing, [field]: value }
+  if (!scheduleShiftsByStudio[studioId]) scheduleShiftsByStudio[studioId] = {}
+  if (!scheduleShiftsByStudio[studioId][staffId]) scheduleShiftsByStudio[studioId][staffId] = {}
+  scheduleShiftsByStudio[studioId][staffId][dateStr] = { ...existing, [field]: value }
   loadScheduleGrid() // cheap re-render to update paid-hours display and totals
 }
 
-async function postScheduleToPayPeriod() {
+async function postScheduleToPayPeriod(studioId) {
   if (!payScheduleAnchor) {
     alert('Set up the Pay Schedule (⚙ button on the Monthly Summary tab) first — needed to auto-detect which pay period this week belongs to.')
     return
   }
 
-  // Detected from the week's own dates, via the known 6-day lag — no more
-  // manual "which period is this" guessing.
   const weekMidDate = dateStrOf(addDays(scheduleWeekStart, 3)) // middle of the week, safest single point to check
   const payDate = payDateForWorkDate(weekMidDate)
   if (!payDate) {
@@ -737,13 +794,16 @@ async function postScheduleToPayPeriod() {
     return
   }
 
+  const staff = scheduleStaffByStudio[studioId] || []
+  const shifts = scheduleShiftsByStudio[studioId] || {}
+
   let total = 0
-  scheduleStaff.forEach(s => {
+  staff.forEach(s => {
     if (s.hourly_wage == null) return // no wage on file — can't estimate this person, skip rather than guess
     let hours = 0
     for (let i = 0; i < 7; i++) {
       const dateStr = dateStrOf(addDays(scheduleWeekStart, i))
-      const shift = (scheduleShifts[s.staff_id] || {})[dateStr]
+      const shift = (shifts[s.staff_id] || {})[dateStr]
       if (shift) hours += paidHoursForShift(shift.start_time, shift.end_time, s.province_code)
     }
     total += hours * s.hourly_wage
@@ -751,32 +811,31 @@ async function postScheduleToPayPeriod() {
 
   const monthDate = monthToDate(target.monthDate)
   const { data: existing } = await sb.from('studio_pay_periods').select('is_manual_override, amount')
-    .eq('studio_id', scheduleStudioId).eq('month', monthDate).eq('period_number', target.periodNumber).maybeSingle()
+    .eq('studio_id', studioId).eq('month', monthDate).eq('period_number', target.periodNumber).maybeSingle()
 
   const targetLabel = `Pay ${target.periodNumber} (pay date ${payDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}), ${monthLabel(target.monthDate)}`
 
   if (existing && existing.is_manual_override) {
     const overwrite = confirm(
-      `${targetLabel} already has a manually-confirmed amount (${money(existing.amount)}).\n\n` +
+      `${STUDIO_NAMES[studioId]}: ${targetLabel} already has a manually-confirmed amount (${money(existing.amount)}).\n\n` +
       `Posting this schedule estimate (${money(total)}) will overwrite it. Continue?`
     )
     if (!overwrite) return
   } else {
-    const confirmed = confirm(`Post ${money(total)} to ${targetLabel}?`)
+    const confirmed = confirm(`Post ${money(total)} to ${STUDIO_NAMES[studioId]}'s ${targetLabel}?`)
     if (!confirmed) return
   }
 
   const { error } = await sb.from('studio_pay_periods')
-    .upsert({ studio_id: scheduleStudioId, month: monthDate, period_number: target.periodNumber, amount: total, is_manual_override: false },
+    .upsert({ studio_id: studioId, month: monthDate, period_number: target.periodNumber, amount: total, is_manual_override: false },
             { onConflict: 'studio_id,month,period_number' })
   if (error) { toast(error.message, true); return }
 
-  toast(`Posted ${money(total)} to Pay ${target.periodNumber}, ${monthLabel(target.monthDate)}.`)
-  // Refresh Monthly Summary data so it reflects the new amount next time that tab's viewed.
-  const { data: updatedFin } = await sb.from('studio_monthly_finance').select('*').eq('studio_id', scheduleStudioId).eq('month', monthDate).maybeSingle()
-  if (updatedFin) financeRows[scheduleStudioId] = updatedFin
-  const { data: prog } = await sb.rpc('get_studio_sales_goal_progress', { p_studio_id: scheduleStudioId, p_month: monthToText(target.monthDate) })
-  if (prog && prog[0]) progressRows[scheduleStudioId] = prog[0]
+  toast(`Posted ${money(total)} to ${STUDIO_NAMES[studioId]}'s Pay ${target.periodNumber}, ${monthLabel(target.monthDate)}.`)
+  const { data: updatedFin } = await sb.from('studio_monthly_finance').select('*').eq('studio_id', studioId).eq('month', monthDate).maybeSingle()
+  if (updatedFin) financeRows[studioId] = updatedFin
+  const { data: prog } = await sb.rpc('get_studio_sales_goal_progress', { p_studio_id: studioId, p_month: monthToText(target.monthDate) })
+  if (prog && prog[0]) progressRows[studioId] = prog[0]
 }
 
 /* ---------- staff hours / wage estimate panel ---------- */
