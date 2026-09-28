@@ -407,14 +407,22 @@ async function editPaySchedule() {
   const current = payScheduleAnchor ? payScheduleAnchor.anchor_pay_date : ''
   const input = prompt(
     'Enter any ONE known pay date (a date when payroll was or will be paid out), in YYYY-MM-DD format.\n\n' +
-    'Everything else (which pay dates fall in which month, Pay 1 vs Pay 2 vs Pay 3) gets computed automatically from this one date, assuming a 14-day cycle.',
+    'Everything else (which pay dates fall in which month, Pay 1 vs Pay 2 vs Pay 3, and auto-detecting pay periods from the Schedule tab) gets computed automatically from this one date, assuming a 14-day cycle.',
     current
   )
   if (!input) return
   if (!/^\d{4}-\d{2}-\d{2}$/.test(input)) { alert('Please enter a date as YYYY-MM-DD.'); return }
 
+  const currentLag = payScheduleAnchor && payScheduleAnchor.lag_days != null ? payScheduleAnchor.lag_days : 6
+  const lagInput = prompt(
+    'How many days after a work period ENDS does it actually get paid out?\n(e.g. period ends Friday, paid the following Thursday = 6 days)',
+    currentLag
+  )
+  const lagDays = parseInt(lagInput)
+  if (isNaN(lagDays) || lagDays < 0) { alert('Please enter a whole number of days.'); return }
+
   const { data, error } = await sb.from('pay_schedule_settings')
-    .upsert({ id: 1, anchor_pay_date: input, interval_days: 14 })
+    .upsert({ id: 1, anchor_pay_date: input, interval_days: 14, lag_days: lagDays })
     .select().single()
   if (error) { toast(error.message, true); return }
 
@@ -445,6 +453,40 @@ function payDatesInMonth(monthDate) {
     cursor.setDate(cursor.getDate() + interval)
   }
   return results
+}
+
+// Given a date someone actually worked, finds the pay date whose 14-day
+// (or whatever interval) period covers it — using the known lag between a
+// period ending and it actually being paid out. Brute-forces a small range
+// of nearby candidate pay dates rather than a closed-form formula, so it's
+// easy to verify correctness by eye rather than trusting off-by-one math.
+function payDateForWorkDate(dateStr) {
+  if (!payScheduleAnchor) return null
+  const lag = payScheduleAnchor.lag_days != null ? payScheduleAnchor.lag_days : 6
+  const interval = payScheduleAnchor.interval_days || 14
+  const anchor = new Date(payScheduleAnchor.anchor_pay_date + 'T00:00:00')
+  const target = new Date(dateStr + 'T00:00:00')
+  const msPerDay = 86400000
+
+  const roughK = Math.round((target - anchor) / msPerDay / interval)
+  for (let k = roughK - 2; k <= roughK + 2; k++) {
+    const payDate = addDays(anchor, k * interval)
+    const periodEnd = addDays(payDate, -lag)
+    const periodStart = addDays(periodEnd, -(interval - 1))
+    if (target >= periodStart && target <= periodEnd) return payDate
+  }
+  return null
+}
+
+// Given a pay date, finds which month it belongs to and its Pay 1/2/3
+// position within that month (same "pay date determines month" rule the
+// header labels already use).
+function monthAndPeriodForPayDate(payDate) {
+  const monthDate = new Date(payDate.getFullYear(), payDate.getMonth(), 1)
+  const dates = payDatesInMonth(monthDate)
+  const idx = dates.findIndex(d => dateStrOf(d) === dateStrOf(payDate))
+  if (idx === -1) return null
+  return { monthDate, periodNumber: idx + 1 }
 }
 
 function payPeriodHeaderLabel(periodNumber) {
@@ -676,15 +718,24 @@ async function saveShiftField(staffId, dateStr, field, el) {
 }
 
 async function postScheduleToPayPeriod() {
-  // Uses the same currentMonth as the Monthly Summary tab — make sure
-  // that's set to the month you actually want this week's labour posted
-  // into before running this.
-  const periodInput = prompt(
-    `Post this week's (${weekRangeLabel(scheduleWeekStart)}) labour estimate for ${STUDIO_NAMES[scheduleStudioId]} ` +
-    `into which pay period of ${monthLabel(currentMonth)}?\n\nEnter 1, 2, or 3.`
-  )
-  const periodNumber = parseInt(periodInput)
-  if (![1,2,3].includes(periodNumber)) return
+  if (!payScheduleAnchor) {
+    alert('Set up the Pay Schedule (⚙ button on the Monthly Summary tab) first — needed to auto-detect which pay period this week belongs to.')
+    return
+  }
+
+  // Detected from the week's own dates, via the known 6-day lag — no more
+  // manual "which period is this" guessing.
+  const weekMidDate = dateStrOf(addDays(scheduleWeekStart, 3)) // middle of the week, safest single point to check
+  const payDate = payDateForWorkDate(weekMidDate)
+  if (!payDate) {
+    alert("Couldn't determine a pay period for this week from the current pay schedule settings — check the anchor date and lag are right.")
+    return
+  }
+  const target = monthAndPeriodForPayDate(payDate)
+  if (!target) {
+    alert(`This week's pay date (${payDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}) doesn't line up with any Pay 1/2/3 slot for its month — this shouldn't normally happen, worth double-checking the pay schedule settings.`)
+    return
+  }
 
   let total = 0
   scheduleStaff.forEach(s => {
@@ -698,31 +749,33 @@ async function postScheduleToPayPeriod() {
     total += hours * s.hourly_wage
   })
 
-  const monthDate = monthToDate(currentMonth)
+  const monthDate = monthToDate(target.monthDate)
   const { data: existing } = await sb.from('studio_pay_periods').select('is_manual_override, amount')
-    .eq('studio_id', scheduleStudioId).eq('month', monthDate).eq('period_number', periodNumber).maybeSingle()
+    .eq('studio_id', scheduleStudioId).eq('month', monthDate).eq('period_number', target.periodNumber).maybeSingle()
+
+  const targetLabel = `Pay ${target.periodNumber} (pay date ${payDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}), ${monthLabel(target.monthDate)}`
 
   if (existing && existing.is_manual_override) {
     const overwrite = confirm(
-      `Pay ${periodNumber} for ${monthLabel(currentMonth)} already has a manually-confirmed amount (${money(existing.amount)}).\n\n` +
+      `${targetLabel} already has a manually-confirmed amount (${money(existing.amount)}).\n\n` +
       `Posting this schedule estimate (${money(total)}) will overwrite it. Continue?`
     )
     if (!overwrite) return
   } else {
-    const confirmed = confirm(`Post ${money(total)} to Pay ${periodNumber}, ${monthLabel(currentMonth)}?`)
+    const confirmed = confirm(`Post ${money(total)} to ${targetLabel}?`)
     if (!confirmed) return
   }
 
   const { error } = await sb.from('studio_pay_periods')
-    .upsert({ studio_id: scheduleStudioId, month: monthDate, period_number: periodNumber, amount: total, is_manual_override: false },
+    .upsert({ studio_id: scheduleStudioId, month: monthDate, period_number: target.periodNumber, amount: total, is_manual_override: false },
             { onConflict: 'studio_id,month,period_number' })
   if (error) { toast(error.message, true); return }
 
-  toast(`Posted ${money(total)} to Pay ${periodNumber}.`)
+  toast(`Posted ${money(total)} to Pay ${target.periodNumber}, ${monthLabel(target.monthDate)}.`)
   // Refresh Monthly Summary data so it reflects the new amount next time that tab's viewed.
   const { data: updatedFin } = await sb.from('studio_monthly_finance').select('*').eq('studio_id', scheduleStudioId).eq('month', monthDate).maybeSingle()
   if (updatedFin) financeRows[scheduleStudioId] = updatedFin
-  const { data: prog } = await sb.rpc('get_studio_sales_goal_progress', { p_studio_id: scheduleStudioId, p_month: monthToText(currentMonth) })
+  const { data: prog } = await sb.rpc('get_studio_sales_goal_progress', { p_studio_id: scheduleStudioId, p_month: monthToText(target.monthDate) })
   if (prog && prog[0]) progressRows[scheduleStudioId] = prog[0]
 }
 
