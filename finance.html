@@ -113,6 +113,7 @@ button, input, select { font: inherit; color: inherit; }
       </div>
       <button class="btn" onclick="goToCurrentMonth()">This month</button>
       <button class="btn" onclick="copyFromLastMonth()">Copy Rent/Supplies/Utilities from last month</button>
+      <button class="btn" onclick="editPaySchedule()">⚙ Pay Schedule</button>
       <div style="display:flex;gap:6px;margin-left:8px">
         <button class="btn" id="tab-summary-btn" onclick="switchView('summary')">Monthly Summary</button>
         <button class="btn" id="tab-daily-btn" onclick="switchView('daily')">Daily Grid</button>
@@ -197,6 +198,7 @@ async function initApp(user) {
   }
   document.getElementById('login-screen').style.display = 'none'
   document.getElementById('app-screen').style.display = 'block'
+  await loadPaySchedule()
   await loadMonth()
   switchView('summary')
 }
@@ -318,9 +320,9 @@ function renderTable() {
       <th class="group-editable">Rent</th>
       <th class="group-editable">Art Supplies</th>
       <th class="group-editable">Utilities</th>
-      <th class="group-editable">Pay 1</th>
-      <th class="group-editable">Pay 2</th>
-      <th class="group-editable">Pay 3</th>
+      <th class="group-editable" id="pay1-header">${esc(payPeriodHeaderLabel(1))}</th>
+      <th class="group-editable" id="pay2-header">${esc(payPeriodHeaderLabel(2))}</th>
+      <th class="group-editable" id="pay3-header">${esc(payPeriodHeaderLabel(3))}</th>
       <th class="group-computed">Wages Total</th>
       <th class="group-computed">Daily Goal</th>
       <th class="group-computed">MTD Sales</th>
@@ -392,7 +394,66 @@ async function savePayPeriod(studioId, periodNumber, el) {
   if (currentView === 'daily') renderDailyGrid()
 }
 
-/* ---------- copy from last month ---------- */
+/* ---------- pay schedule (auto-computed from one known pay date) ---------- */
+let payScheduleAnchor = null // { anchor_pay_date: 'YYYY-MM-DD', interval_days: 14 } or null if not set yet
+
+async function loadPaySchedule() {
+  const { data } = await sb.from('pay_schedule_settings').select('*').eq('id', 1).maybeSingle()
+  payScheduleAnchor = data || null
+}
+
+async function editPaySchedule() {
+  const current = payScheduleAnchor ? payScheduleAnchor.anchor_pay_date : ''
+  const input = prompt(
+    'Enter any ONE known pay date (a date when payroll was or will be paid out), in YYYY-MM-DD format.\n\n' +
+    'Everything else (which pay dates fall in which month, Pay 1 vs Pay 2 vs Pay 3) gets computed automatically from this one date, assuming a 14-day cycle.',
+    current
+  )
+  if (!input) return
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input)) { alert('Please enter a date as YYYY-MM-DD.'); return }
+
+  const { data, error } = await sb.from('pay_schedule_settings')
+    .upsert({ id: 1, anchor_pay_date: input, interval_days: 14 })
+    .select().single()
+  if (error) { toast(error.message, true); return }
+
+  payScheduleAnchor = data
+  toast('Pay schedule updated.')
+  renderTable()
+}
+
+// Every pay date that falls within the given month, ascending — computed
+// purely from the anchor date + a fixed interval, no stored calendar needed.
+function payDatesInMonth(monthDate) {
+  if (!payScheduleAnchor) return []
+  const interval = payScheduleAnchor.interval_days || 14
+  const anchor = new Date(payScheduleAnchor.anchor_pay_date + 'T00:00:00')
+  const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1)
+  const monthEnd = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0)
+
+  const msPerDay = 86400000
+  const diffDays = Math.round((monthStart - anchor) / msPerDay)
+  const k = Math.floor(diffDays / interval) - 2 // step back a bit to be safe, walk forward from there
+
+  const cursor = new Date(anchor)
+  cursor.setDate(cursor.getDate() + k * interval)
+
+  const results = []
+  while (cursor <= monthEnd) {
+    if (cursor >= monthStart && cursor <= monthEnd) results.push(new Date(cursor))
+    cursor.setDate(cursor.getDate() + interval)
+  }
+  return results
+}
+
+function payPeriodHeaderLabel(periodNumber) {
+  const dates = payDatesInMonth(currentMonth)
+  const d = dates[periodNumber - 1]
+  if (!d) return 'Pay ' + periodNumber
+  return 'Pay ' + periodNumber + ' (' + d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ')'
+}
+
+
 async function copyFromLastMonth() {
   const lastMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1)
   const lastMonthDate = monthToDate(lastMonth)
