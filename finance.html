@@ -199,6 +199,7 @@ async function initApp(user) {
   document.getElementById('login-screen').style.display = 'none'
   document.getElementById('app-screen').style.display = 'block'
   await loadPaySchedule()
+  await loadProvinceBreakRules()
   await loadMonth()
   switchView('summary')
 }
@@ -516,15 +517,27 @@ function weekRangeLabel(start) {
   return fmt(start) + ' – ' + fmt(end) + ', ' + end.getFullYear()
 }
 
-// The actual deduction rule: any shift over 5 hours loses 0.5h (unpaid
-// break). Exactly 5 hours or under gets no deduction.
-function paidHoursForShift(startTime, endTime) {
+// Province break rules — fetched once, editable any time in
+// province_break_rules (no code change needed if you correct a number
+// after verifying, or a rule changes later).
+let provinceBreakRules = {} // province_code -> { break_threshold_hours, break_duration_hours }
+
+async function loadProvinceBreakRules() {
+  const { data } = await sb.from('province_break_rules').select('*')
+  provinceBreakRules = {}
+  ;(data || []).forEach(r => { provinceBreakRules[r.province_code] = r })
+}
+
+function paidHoursForShift(startTime, endTime, provinceCode) {
   if (!startTime || !endTime) return 0
   const [sh, sm] = startTime.split(':').map(Number)
   const [eh, em] = endTime.split(':').map(Number)
   const rawHours = (eh + em / 60) - (sh + sm / 60)
   if (rawHours <= 0) return 0
-  return rawHours > 5 ? rawHours - 0.5 : rawHours
+
+  const rule = provinceBreakRules[provinceCode]
+  if (!rule) return rawHours // no rule on file for this province — no deduction applied, rather than guessing
+  return rawHours > rule.break_threshold_hours ? rawHours - rule.break_duration_hours : rawHours
 }
 
 async function loadScheduleView() {
@@ -613,7 +626,7 @@ async function loadScheduleGrid() {
       }
 
       const shift = (scheduleShifts[s.staff_id] || {})[dateStr] || {}
-      const paid = paidHoursForShift(shift.start_time, shift.end_time)
+      const paid = paidHoursForShift(shift.start_time, shift.end_time, s.province_code)
       weekHours += paid
       return `<td>
         <div style="display:flex;flex-direction:column;gap:2px">
