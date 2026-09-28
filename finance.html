@@ -66,6 +66,17 @@ button, input, select { font: inherit; color: inherit; }
 .save-dot.saved { background: var(--good); }
 .save-dot.saving { background: var(--warn); }
 
+.daily-table { border-collapse: collapse; font-size: 11px; white-space: nowrap; }
+.daily-table th, .daily-table td { padding: 5px 8px; border-bottom: 0.5px solid var(--line); text-align: right; }
+.daily-table th { font-size: 10px; color: var(--muted); font-weight: 600; text-transform: uppercase; position: sticky; top: 0; background: var(--soft); z-index: 1; }
+.daily-table td.day-label, .daily-table th.day-label { text-align: left; position: sticky; left: 0; background: var(--panel); z-index: 1; font-weight: 600; min-width: 90px; }
+.daily-table th.day-label { background: var(--soft); z-index: 2; }
+.daily-table tr.summary-row td, .daily-table tr.summary-row th { background: var(--soft); font-weight: 600; }
+.daily-table tr.summary-row.top td { border-bottom: 2px solid var(--line-2); }
+.daily-table tr.summary-row.bottom td { border-top: 2px solid var(--line-2); }
+.daily-cell { color: #1a1a1a; }
+.daily-cell.empty { color: var(--muted); background: transparent !important; }
+
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 9px 16px; border-radius: 8px; font-size: 12px; z-index: 900; display: none; }
 #toast.err { background: var(--bad); }
 </style>
@@ -101,12 +112,17 @@ button, input, select { font: inherit; color: inherit; }
         <button class="btn" onclick="shiftMonth(1)" aria-label="Next month">›</button>
       </div>
       <button class="btn" onclick="goToCurrentMonth()">This month</button>
+      <div style="display:flex;gap:6px;margin-left:8px">
+        <button class="btn" id="tab-summary-btn" onclick="switchView('summary')">Monthly Summary</button>
+        <button class="btn" id="tab-daily-btn" onclick="switchView('daily')">Daily Grid</button>
+      </div>
       <div class="muted small" style="flex:1">
         Goal/Rent/Supplies/Utilities/Wages are editable (amber columns) — saves automatically as you tab away from a field.
         Everything else is computed from real sales data and can't be edited directly.
       </div>
     </div>
     <div class="panel" id="fin-body"><div class="loading">Loading…</div></div>
+    <div class="panel" id="daily-body" style="display:none;margin-top:14px"></div>
   </div>
 </div>
 
@@ -178,6 +194,7 @@ async function initApp(user) {
   document.getElementById('login-screen').style.display = 'none'
   document.getElementById('app-screen').style.display = 'block'
   await loadMonth()
+  switchView('summary')
 }
 
 /* ---------- month navigation ---------- */
@@ -213,6 +230,7 @@ async function loadMonth() {
   }))
 
   renderTable()
+  if (currentView === 'daily') loadDailyGridIfNeeded()
 }
 
 /* ---------- rendering ---------- */
@@ -314,6 +332,126 @@ async function saveField(studioId, field, el) {
     if (prog && prog[0]) progressRows[studioId] = prog[0]
   }
   renderTable()
+  if (currentView === 'daily') renderDailyGrid() // recompute header rows if visible
+}
+
+/* ---------- daily grid view ---------- */
+let currentView = 'summary'
+let dailySales = {}     // studio_id -> { 'YYYY-MM-DD': total }
+let lastMonthTotals = {} // studio_id -> total
+let dailyLoadedForMonth = null
+
+function switchView(view) {
+  currentView = view
+  document.getElementById('tab-summary-btn').style.background = view === 'summary' ? 'var(--ink)' : '#fff'
+  document.getElementById('tab-summary-btn').style.color = view === 'summary' ? '#fff' : 'var(--ink)'
+  document.getElementById('tab-daily-btn').style.background = view === 'daily' ? 'var(--ink)' : '#fff'
+  document.getElementById('tab-daily-btn').style.color = view === 'daily' ? '#fff' : 'var(--ink)'
+  document.getElementById('fin-body').style.display = view === 'summary' ? '' : 'none'
+  document.getElementById('daily-body').style.display = view === 'daily' ? '' : 'none'
+  if (view === 'daily') loadDailyGridIfNeeded()
+}
+
+async function loadDailyGridIfNeeded() {
+  const monthText = monthToText(currentMonth)
+  if (dailyLoadedForMonth === monthText) { renderDailyGrid(); return }
+
+  document.getElementById('daily-body').innerHTML = '<div class="loading">Loading daily sales for all studios — this pulls a month of data per studio, may take a few seconds…</div>'
+
+  const lastMonthDate = new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1)
+  const lastMonthText = monthToText(lastMonthDate)
+
+  dailySales = {}
+  lastMonthTotals = {}
+
+  await Promise.all(STUDIO_IDS.map(async (studioId) => {
+    const { data, error } = await sb.rpc('get_studio_daily_sales', { p_studio_id: studioId, p_month: monthText })
+    const byDay = {}
+    if (!error) (data || []).forEach(r => { byDay[r.sale_day] = Number(r.total) })
+    dailySales[studioId] = byDay
+
+    const { data: lastSummary } = await sb.rpc('get_studio_sales_summary', { p_studio_id: studioId, p_month: lastMonthText })
+    lastMonthTotals[studioId] = lastSummary && lastSummary.monthTotal != null ? Number(lastSummary.monthTotal) : null
+  }))
+
+  dailyLoadedForMonth = monthText
+  renderDailyGrid()
+}
+
+function daysInMonth(d) { return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate() }
+
+// Continuous red -> amber -> green scale based on % of daily goal.
+// Approximate, not a pixel match to the old sheet's conditional formatting —
+// adjust the stops below if the feel isn't right once it's live.
+function dailyHeatColor(pct) {
+  if (pct == null) return ''
+  const p = Math.max(0, Math.min(pct, 150))
+  let r, g, b
+  if (p <= 100) {
+    // red (220,80,70) at 0% -> amber (255,193,7) at 100%
+    const t = p / 100
+    r = Math.round(220 + t * (255 - 220))
+    g = Math.round(80 + t * (193 - 80))
+    b = Math.max(0, Math.round(70 + t * (7 - 70)))
+  } else {
+    // amber (255,193,7) at 100% -> green (46,167,69) at 150%+
+    const t = (p - 100) / 50
+    r = Math.round(255 - t * (255 - 46))
+    g = Math.round(193 - t * (193 - 167))
+    b = Math.round(7 + t * (69 - 7))
+  }
+  return `rgb(${r},${g},${b})`
+}
+
+function renderDailyGrid() {
+  const monthText = monthToText(currentMonth)
+  const nDays = daysInMonth(currentMonth)
+  const container = document.getElementById('daily-body')
+
+  const headerCols = STUDIO_IDS.map(id => `<th>${esc(STUDIO_NAMES[id])}</th>`).join('')
+
+  function summaryRow(label, fn, cls) {
+    return `<tr class="summary-row ${cls || ''}"><td class="day-label">${esc(label)}</td>${
+      STUDIO_IDS.map(id => `<td>${fn(id)}</td>`).join('')
+    }</tr>`
+  }
+
+  const topRows = [
+    summaryRow('Monthly Goal', id => money((financeRows[id] || {}).monthly_sales_goal), 'top'),
+    summaryRow('Rent', id => money((financeRows[id] || {}).rent)),
+    summaryRow('Art Supplies', id => money((financeRows[id] || {}).art_supplies_budget)),
+    summaryRow('Utilities', id => money((financeRows[id] || {}).utilities_estimate)),
+    summaryRow('Wages', id => money((financeRows[id] || {}).wages)),
+    summaryRow('Daily Goal', id => money((progressRows[id] || {}).daily_sales_goal), 'top')
+  ].join('')
+
+  const dayRows = []
+  for (let day = 1; day <= nDays; day++) {
+    const dateStr = monthText + '-' + String(day).padStart(2, '0')
+    const dow = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), day).toLocaleDateString('en-US', { weekday: 'short' })
+    const cells = STUDIO_IDS.map(id => {
+      const total = (dailySales[id] || {})[dateStr]
+      const goal = (progressRows[id] || {}).daily_sales_goal
+      if (total == null) return `<td class="daily-cell empty">—</td>`
+      const pct = goal ? (total / goal) * 100 : null
+      const bg = dailyHeatColor(pct)
+      return `<td class="daily-cell" style="background:${bg}">${money(total)}</td>`
+    }).join('')
+    dayRows.push(`<tr><td class="day-label">${dow}, ${monthLabel(currentMonth).split(' ')[0].slice(0,3)} ${day}</td>${cells}</tr>`)
+  }
+
+  const bottomRows = [
+    summaryRow('This Month Total', id => money((progressRows[id] || {}).this_month_total), 'bottom'),
+    summaryRow('Last Month Total', id => money(lastMonthTotals[id])),
+    summaryRow('% Based on Daily (Pace)', id => { const p = (progressRows[id] || {}).pace_pct; return p == null ? '—' : p + '%' }),
+    summaryRow('Labour Cost %', id => { const l = computeLabourPct(id); return l == null ? '—' : l.toFixed(1) + '%' }),
+    summaryRow('Est. Profit', id => money(computeProfit(id)))
+  ].join('')
+
+  container.innerHTML = `<table class="daily-table">
+    <thead><tr><th class="day-label">Day</th>${headerCols}</tr></thead>
+    <tbody>${topRows}${dayRows.join('')}${bottomRows}</tbody>
+  </table>`
 }
 </script>
 </body>
