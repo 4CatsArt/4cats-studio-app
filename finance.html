@@ -112,9 +112,11 @@ button, input, select { font: inherit; color: inherit; }
         <button class="btn" onclick="shiftMonth(1)" aria-label="Next month">›</button>
       </div>
       <button class="btn" onclick="goToCurrentMonth()">This month</button>
+      <button class="btn" onclick="copyFromLastMonth()">Copy Rent/Supplies/Utilities from last month</button>
       <div style="display:flex;gap:6px;margin-left:8px">
         <button class="btn" id="tab-summary-btn" onclick="switchView('summary')">Monthly Summary</button>
         <button class="btn" id="tab-daily-btn" onclick="switchView('daily')">Daily Grid</button>
+        <button class="btn" id="tab-schedule-btn" onclick="switchView('schedule')">Schedule</button>
       </div>
       <div class="muted small" style="flex:1">
         Rent/Supplies/Utilities/Wages are editable (amber columns) — saves automatically as you tab away from a field.
@@ -123,6 +125,7 @@ button, input, select { font: inherit; color: inherit; }
     </div>
     <div class="panel" id="fin-body"><div class="loading">Loading…</div></div>
     <div class="panel" id="daily-body" style="display:none;margin-top:14px"></div>
+    <div id="schedule-body" style="display:none;margin-top:14px"></div>
   </div>
 </div>
 
@@ -389,6 +392,153 @@ async function savePayPeriod(studioId, periodNumber, el) {
   if (currentView === 'daily') renderDailyGrid()
 }
 
+/* ---------- copy from last month ---------- */
+async function copyFromLastMonth() {
+  const lastMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1)
+  const lastMonthDate = monthToDate(lastMonth)
+  const thisMonthDate = monthToDate(currentMonth)
+
+  const { data: lastData, error } = await sb.from('studio_monthly_finance').select('*').eq('month', lastMonthDate)
+  if (error) { toast(error.message, true); return }
+  if (!lastData || !lastData.length) { toast('No data found for last month to copy from.', true); return }
+
+  const confirmed = confirm(
+    `Copy Rent/Art Supplies/Utilities from ${monthLabel(lastMonth)} into ${monthLabel(currentMonth)}?\n\n` +
+    `Only fills in studios/fields that are currently blank this month — anything you've already entered stays untouched. Wages is never copied (resets each pay period).`
+  )
+  if (!confirmed) return
+
+  const FIELDS = ['rent', 'art_supplies_budget', 'utilities_estimate']
+  let filled = 0
+
+  for (const lastRow of lastData) {
+    const studioId = lastRow.studio_id
+    const current = financeRows[studioId] || {}
+    const patch = {}
+    FIELDS.forEach(f => {
+      if ((current[f] == null) && lastRow[f] != null) patch[f] = lastRow[f]
+    })
+    if (Object.keys(patch).length === 0) continue
+
+    const { data: updated, error: upErr } = await sb.from('studio_monthly_finance')
+      .upsert({ studio_id: studioId, month: thisMonthDate, ...patch }, { onConflict: 'studio_id,month' })
+      .select().single()
+    if (upErr) { console.error(upErr); continue }
+    financeRows[studioId] = updated
+    filled++
+  }
+
+  toast(`Filled in ${filled} studio${filled === 1 ? '' : 's'} from last month.`)
+  renderTable()
+  if (currentView === 'daily') renderDailyGrid()
+}
+
+/* ---------- weekly schedule (planning tool) ---------- */
+let scheduleStudioId = STUDIO_IDS[0]
+let scheduleStaff = []
+let scheduleHours = {} // staff_id -> { 'YYYY-MM-DD' (week_start): hours }
+
+function weeksOverlappingMonth(monthDate) {
+  const firstOfMonth = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1)
+  const lastOfMonth = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0)
+
+  // Find the Monday on/before the 1st (Sunday=0 ... Monday=1)
+  const dow = firstOfMonth.getDay()
+  const backToMonday = dow === 0 ? 6 : dow - 1
+  const cursor = new Date(firstOfMonth)
+  cursor.setDate(cursor.getDate() - backToMonday)
+
+  const weeks = []
+  while (cursor <= lastOfMonth) {
+    weeks.push(new Date(cursor))
+    cursor.setDate(cursor.getDate() + 7)
+  }
+  return weeks
+}
+
+function weekDateStr(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') }
+function weekRangeLabel(weekStart) {
+  const end = new Date(weekStart); end.setDate(end.getDate() + 6)
+  const fmt = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  return fmt(weekStart) + ' – ' + fmt(end)
+}
+
+async function loadScheduleView() {
+  const container = document.getElementById('schedule-body')
+  container.innerHTML = `
+    <div class="toolbar" style="margin-bottom:14px">
+      <label class="muted small">Studio</label>
+      <select id="schedule-studio-select" onchange="changeScheduleStudio(this.value)" style="padding:6px 10px;border-radius:6px;border:0.5px solid var(--line-2)">
+        ${STUDIO_IDS.map(id => `<option value="${id}" ${id === scheduleStudioId ? 'selected' : ''}>${esc(STUDIO_NAMES[id])}</option>`).join('')}
+      </select>
+      <div class="muted small" style="flex:1">
+        Planning only — estimated hours per staff per week for ${esc(monthLabel(currentMonth))}. Not yet connected to the pay-period wage estimate; that's still entered separately on the Monthly Summary tab.
+      </div>
+    </div>
+    <div class="panel" id="schedule-grid"><div class="loading">Loading…</div></div>`
+  await loadScheduleGrid()
+}
+
+function changeScheduleStudio(studioId) {
+  scheduleStudioId = studioId
+  loadScheduleGrid()
+}
+
+async function loadScheduleGrid() {
+  const grid = document.getElementById('schedule-grid')
+  grid.innerHTML = '<div class="loading">Loading…</div>'
+
+  const { data: staff, error } = await sb.rpc('get_studio_staff_for_wages', { p_studio_id: scheduleStudioId })
+  if (error) { grid.innerHTML = `<div class="muted small" style="padding:16px">Couldn't load staff: ${esc(error.message)}</div>`; return }
+  scheduleStaff = staff || []
+
+  if (!scheduleStaff.length) {
+    grid.innerHTML = '<div class="muted small" style="padding:16px">No active staff assigned to this studio yet.</div>'
+    return
+  }
+
+  const weeks = weeksOverlappingMonth(currentMonth)
+  const weekStrs = weeks.map(weekDateStr)
+  const staffIds = scheduleStaff.map(s => s.staff_id)
+
+  const { data: hoursData } = await sb.from('staff_weekly_hours_estimate').select('*')
+    .eq('studio_id', scheduleStudioId).in('staff_id', staffIds).in('week_start', weekStrs)
+
+  scheduleHours = {}
+  ;(hoursData || []).forEach(h => {
+    if (!scheduleHours[h.staff_id]) scheduleHours[h.staff_id] = {}
+    scheduleHours[h.staff_id][h.week_start] = h.estimated_hours
+  })
+
+  const headerCols = weeks.map(w => `<th>${esc(weekRangeLabel(w))}</th>`).join('')
+  const rows = scheduleStaff.map(s => {
+    const cells = weeks.map(w => {
+      const ws = weekDateStr(w)
+      const val = (scheduleHours[s.staff_id] || {})[ws]
+      return `<td><input type="number" step="0.5" value="${val == null ? '' : val}" style="width:70px"
+        onchange="saveScheduleHours('${s.staff_id}','${ws}',this)" aria-label="Hours"></td>`
+    }).join('')
+    const weekTotal = weeks.reduce((sum, w) => sum + (Number((scheduleHours[s.staff_id] || {})[weekDateStr(w)]) || 0), 0)
+    return `<tr><td style="text-align:left;font-weight:600">${esc(s.display_name)}</td>${cells}<td style="font-weight:600">${weekTotal.toFixed(1)}</td></tr>`
+  }).join('')
+
+  grid.innerHTML = `<table class="fin-table" style="width:auto">
+    <thead><tr><th class="studio-name">Staff</th>${headerCols}<th>Month Total</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`
+}
+
+async function saveScheduleHours(staffId, weekStart, el) {
+  const value = el.value === '' ? null : parseFloat(el.value)
+  const { error } = await sb.from('staff_weekly_hours_estimate')
+    .upsert({ staff_id: staffId, studio_id: scheduleStudioId, week_start: weekStart, estimated_hours: value },
+            { onConflict: 'staff_id,studio_id,week_start' })
+  if (error) { toast(error.message, true); return }
+  if (!scheduleHours[staffId]) scheduleHours[staffId] = {}
+  scheduleHours[staffId][weekStart] = value
+  loadScheduleGrid() // cheap re-render to update the row total
+}
+
 /* ---------- staff hours / wage estimate panel ---------- */
 let staffCache = {} // studio_id -> [{staff_id, display_name, hourly_wage}]
 let staffHoursCache = {} // studio_id -> { staff_id: { 1: hours, 2: hours, 3: hours } }
@@ -521,13 +671,16 @@ let dailyLoadedForMonth = null
 
 function switchView(view) {
   currentView = view
-  document.getElementById('tab-summary-btn').style.background = view === 'summary' ? 'var(--ink)' : '#fff'
-  document.getElementById('tab-summary-btn').style.color = view === 'summary' ? '#fff' : 'var(--ink)'
-  document.getElementById('tab-daily-btn').style.background = view === 'daily' ? 'var(--ink)' : '#fff'
-  document.getElementById('tab-daily-btn').style.color = view === 'daily' ? '#fff' : 'var(--ink)'
+  ;[['summary','tab-summary-btn'],['daily','tab-daily-btn'],['schedule','tab-schedule-btn']].forEach(([v, id]) => {
+    const btn = document.getElementById(id)
+    btn.style.background = view === v ? 'var(--ink)' : '#fff'
+    btn.style.color = view === v ? '#fff' : 'var(--ink)'
+  })
   document.getElementById('fin-body').style.display = view === 'summary' ? '' : 'none'
   document.getElementById('daily-body').style.display = view === 'daily' ? '' : 'none'
+  document.getElementById('schedule-body').style.display = view === 'schedule' ? '' : 'none'
   if (view === 'daily') loadDailyGridIfNeeded()
+  if (view === 'schedule') loadScheduleView()
 }
 
 async function loadDailyGridIfNeeded() {
