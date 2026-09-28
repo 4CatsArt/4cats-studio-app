@@ -582,6 +582,78 @@ function paidHoursForShift(startTime, endTime, provinceCode) {
   return rawHours > rule.break_threshold_hours ? rawHours - rule.break_duration_hours : rawHours
 }
 
+// Compact shift text entry, e.g. "8:30a-5p" or "830am-530pm" or "1p-9:30p".
+// AM/PM is REQUIRED on both sides — deliberately never guessed, since a
+// silently-wrong guess here would feed directly into a wage estimate.
+function parseShiftText(text) {
+  const parts = text.split('-')
+  if (parts.length !== 2) return null
+  const parseOne = (s) => {
+    const m = s.trim().match(/^(\d{1,2}):?(\d{2})?\s*([ap])m?$/i)
+    if (!m) return null
+    let hour = parseInt(m[1])
+    const minute = m[2] ? parseInt(m[2]) : 0
+    const ap = m[3].toLowerCase()
+    if (hour < 1 || hour > 12 || minute > 59) return null
+    if (ap === 'p' && hour !== 12) hour += 12
+    if (ap === 'a' && hour === 12) hour = 0
+    return String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0') + ':00'
+  }
+  const start_time = parseOne(parts[0])
+  const end_time = parseOne(parts[1])
+  if (!start_time || !end_time) return null
+  return { start_time, end_time }
+}
+
+function formatShiftText(startTime, endTime) {
+  if (!startTime || !endTime) return ''
+  const fmt = (t) => {
+    let [h, m] = t.split(':').map(Number)
+    const ap = h >= 12 ? 'p' : 'a'
+    h = h % 12; if (h === 0) h = 12
+    return h + (m ? ':' + String(m).padStart(2, '0') : '') + ap
+  }
+  return fmt(startTime) + '-' + fmt(endTime)
+}
+
+// "Copy this shift" — click a filled shift's 📋 to arm it, then click any
+// empty cell to paste instantly (no typing needed for a repeated pattern).
+let armedShiftValue = null // { start_time, end_time, label } or null
+
+function armShift(startTime, endTime) {
+  armedShiftValue = { start_time: startTime, end_time: endTime, label: formatShiftText(startTime, endTime) }
+  loadScheduleGrid()
+}
+function disarmShift() {
+  armedShiftValue = null
+  loadScheduleGrid()
+}
+function pasteArmedShift(studioId, staffId, dateStr) {
+  if (!armedShiftValue) return
+  saveShiftText(studioId, staffId, dateStr, armedShiftValue.label)
+}
+
+// Most common (start,end) pairs among the shifts currently visible for one
+// studio — becomes that studio's Quick Shift preset buttons. Auto-adapts to
+// whatever patterns are actually in use, rather than a fixed guessed list.
+function commonShiftPatterns(ownShifts, limit) {
+  const counts = {}
+  Object.values(ownShifts).forEach(byDate => {
+    Object.values(byDate).forEach(shift => {
+      if (!shift.start_time || !shift.end_time) return
+      const key = shift.start_time + '|' + shift.end_time
+      counts[key] = (counts[key] || 0) + 1
+    })
+  })
+  return Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([key, count]) => {
+      const [start_time, end_time] = key.split('|')
+      return { start_time, end_time, count, label: formatShiftText(start_time, end_time) }
+    })
+}
+
 async function loadScheduleView() {
   const container = document.getElementById('schedule-body')
   container.innerHTML = `
@@ -719,14 +791,22 @@ async function loadScheduleGrid() {
         }
 
         const shift = (d.ownShifts[s.staff_id] || {})[dateStr] || {}
+        const hasShift = !!(shift.start_time && shift.end_time)
         const paid = paidHoursForShift(shift.start_time, shift.end_time, s.province_code)
         weekHours += paid
+        const displayValue = hasShift ? formatShiftText(shift.start_time, shift.end_time) : ''
+        const pasteAttr = armedShiftValue && !hasShift
+          ? `onclick="pasteArmedShift('${studioId}','${s.staff_id}','${dateStr}')" style="cursor:copy;background:#eef7ee"`
+          : ''
+
         return `<td>
           <div style="display:flex;flex-direction:column;gap:2px">
-            <input type="time" step="900" value="${shift.start_time ? shift.start_time.slice(0,5) : ''}" style="width:90px;font-size:11px;padding:2px 4px"
-              onchange="saveShiftField('${studioId}','${s.staff_id}','${dateStr}','start_time',this)" aria-label="Start time">
-            <input type="time" step="900" value="${shift.end_time ? shift.end_time.slice(0,5) : ''}" style="width:90px;font-size:11px;padding:2px 4px"
-              onchange="saveShiftField('${studioId}','${s.staff_id}','${dateStr}','end_time',this)" aria-label="End time">
+            <div style="display:flex;align-items:center;gap:3px">
+              <input type="text" value="${esc(displayValue)}" placeholder="8:30a-5p" ${pasteAttr}
+                style="width:78px;font-size:11px;padding:2px 4px"
+                onchange="saveShiftText('${studioId}','${s.staff_id}','${dateStr}',this.value,this)" aria-label="Shift time">
+              ${hasShift ? `<button title="Copy this shift" onclick="armShift('${shift.start_time}','${shift.end_time}')" style="border:none;background:none;cursor:pointer;font-size:12px;padding:0">📋</button>` : ''}
+            </div>
             ${paid > 0 ? `<span class="muted" style="font-size:10px">${paid.toFixed(1)}h paid</span>` : ''}
           </div>
         </td>`
@@ -742,11 +822,20 @@ async function loadScheduleGrid() {
       </tr>`
     }).join('')
 
+    const presets = commonShiftPatterns(d.ownShifts, 4)
+    const presetBar = presets.length
+      ? `<div style="padding:8px 14px;border-bottom:0.5px solid var(--line);display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <span class="muted small">Quick shifts:</span>
+          ${presets.map(p => `<button class="btn" style="font-size:11px;padding:4px 10px;height:auto" onclick="armShift('${p.start_time}','${p.end_time}')">${esc(p.label)} (${p.count}×)</button>`).join('')}
+        </div>`
+      : ''
+
     return `<div class="panel" style="margin-bottom:18px;overflow:auto">
       <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:0.5px solid var(--line)">
         <strong>${esc(STUDIO_NAMES[studioId])}</strong>
         <button class="btn" onclick="postScheduleToPayPeriod('${studioId}')">Post week to Pay Period →</button>
       </div>
+      ${presetBar}
       <table class="fin-table" style="width:auto">
         <thead><tr>
           <th class="studio-name" style="position:sticky;left:0">Staff</th>
@@ -760,30 +849,42 @@ async function loadScheduleGrid() {
   }).join('')
 
   container.innerHTML = sections
+    + (armedShiftValue
+        ? `<div style="position:sticky;bottom:12px;margin-top:10px;background:var(--ink);color:#fff;padding:8px 16px;border-radius:8px;display:inline-flex;gap:10px;align-items:center;font-size:13px">
+             📋 Armed: <strong>${esc(armedShiftValue.label)}</strong> — click any empty cell to paste
+             <button class="btn" style="background:#fff" onclick="disarmShift()">Cancel</button>
+           </div>`
+        : '')
 }
 
-async function saveShiftField(studioId, staffId, dateStr, field, el) {
-  const value = el.value === '' ? null : el.value + ':00'
-  const existing = (scheduleShiftsByStudio[studioId]?.[staffId] || {})[dateStr] || {}
-  const updated = { ...existing, [field]: value }
+async function saveShiftText(studioId, staffId, dateStr, rawText, el) {
+  const text = (rawText || '').trim()
 
-  if (!updated.start_time && !updated.end_time) {
-    // Both fields now empty — delete the row entirely rather than leaving
-    // a null-filled ghost that would still (wrongly) show as a conflict
-    // for this person at other studios.
+  if (!text) {
+    // Cleared — delete the row entirely rather than leaving a ghost.
     const { error } = await sb.from('staff_shifts')
       .delete().eq('staff_id', staffId).eq('studio_id', studioId).eq('shift_date', dateStr)
     if (error) { toast(error.message, true); return }
-  } else {
-    const patch = { staff_id: staffId, studio_id: studioId, shift_date: dateStr, ...updated }
-    const { error } = await sb.from('staff_shifts')
-      .upsert(patch, { onConflict: 'staff_id,studio_id,shift_date' })
-    if (error) { toast(error.message, true); return }
+    if (scheduleShiftsByStudio[studioId]?.[staffId]) delete scheduleShiftsByStudio[studioId][staffId][dateStr]
+    loadScheduleGrid()
+    return
   }
 
+  const parsed = parseShiftText(text)
+  if (!parsed) {
+    toast('Couldn\'t read that — try a format like 8:30a-5p (am/pm required on both).', true)
+    if (el) el.style.borderColor = 'var(--bad)'
+    return
+  }
+
+  const patch = { staff_id: staffId, studio_id: studioId, shift_date: dateStr, ...parsed }
+  const { error } = await sb.from('staff_shifts')
+    .upsert(patch, { onConflict: 'staff_id,studio_id,shift_date' })
+  if (error) { toast(error.message, true); return }
+
   if (!scheduleShiftsByStudio[studioId]) scheduleShiftsByStudio[studioId] = {}
-  scheduleShiftsByStudio[studioId][staffId] = { ...(scheduleShiftsByStudio[studioId][staffId] || {}), [dateStr]: updated }
-  loadScheduleGrid() // cheap re-render to update paid-hours display and totals
+  scheduleShiftsByStudio[studioId][staffId] = { ...(scheduleShiftsByStudio[studioId][staffId] || {}), [dateStr]: parsed }
+  loadScheduleGrid()
 }
 
 async function postScheduleToPayPeriod(studioId) {
