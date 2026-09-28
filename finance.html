@@ -552,6 +552,7 @@ async function loadScheduleView() {
       <div class="month-label" id="schedule-week-label" style="min-width:220px">…</div>
       <button class="btn" onclick="shiftScheduleWeek(1)" aria-label="Next week">›</button>
       <button class="btn" onclick="goToCurrentScheduleWeek()">This week</button>
+      <button class="btn" onclick="postScheduleToPayPeriod()">Post week to Pay Period →</button>
       <div class="muted small" style="flex:1">
         Planning only, not yet wired to the pay-period wage estimate. Shifts over 5h lose 0.5h automatically (unpaid break).
         Greyed-out days mean that person is already scheduled at another studio.
@@ -672,6 +673,57 @@ async function saveShiftField(staffId, dateStr, field, el) {
   if (!scheduleShifts[staffId]) scheduleShifts[staffId] = {}
   scheduleShifts[staffId][dateStr] = { ...existing, [field]: value }
   loadScheduleGrid() // cheap re-render to update paid-hours display and totals
+}
+
+async function postScheduleToPayPeriod() {
+  // Uses the same currentMonth as the Monthly Summary tab — make sure
+  // that's set to the month you actually want this week's labour posted
+  // into before running this.
+  const periodInput = prompt(
+    `Post this week's (${weekRangeLabel(scheduleWeekStart)}) labour estimate for ${STUDIO_NAMES[scheduleStudioId]} ` +
+    `into which pay period of ${monthLabel(currentMonth)}?\n\nEnter 1, 2, or 3.`
+  )
+  const periodNumber = parseInt(periodInput)
+  if (![1,2,3].includes(periodNumber)) return
+
+  let total = 0
+  scheduleStaff.forEach(s => {
+    if (s.hourly_wage == null) return // no wage on file — can't estimate this person, skip rather than guess
+    let hours = 0
+    for (let i = 0; i < 7; i++) {
+      const dateStr = dateStrOf(addDays(scheduleWeekStart, i))
+      const shift = (scheduleShifts[s.staff_id] || {})[dateStr]
+      if (shift) hours += paidHoursForShift(shift.start_time, shift.end_time, s.province_code)
+    }
+    total += hours * s.hourly_wage
+  })
+
+  const monthDate = monthToDate(currentMonth)
+  const { data: existing } = await sb.from('studio_pay_periods').select('is_manual_override, amount')
+    .eq('studio_id', scheduleStudioId).eq('month', monthDate).eq('period_number', periodNumber).maybeSingle()
+
+  if (existing && existing.is_manual_override) {
+    const overwrite = confirm(
+      `Pay ${periodNumber} for ${monthLabel(currentMonth)} already has a manually-confirmed amount (${money(existing.amount)}).\n\n` +
+      `Posting this schedule estimate (${money(total)}) will overwrite it. Continue?`
+    )
+    if (!overwrite) return
+  } else {
+    const confirmed = confirm(`Post ${money(total)} to Pay ${periodNumber}, ${monthLabel(currentMonth)}?`)
+    if (!confirmed) return
+  }
+
+  const { error } = await sb.from('studio_pay_periods')
+    .upsert({ studio_id: scheduleStudioId, month: monthDate, period_number: periodNumber, amount: total, is_manual_override: false },
+            { onConflict: 'studio_id,month,period_number' })
+  if (error) { toast(error.message, true); return }
+
+  toast(`Posted ${money(total)} to Pay ${periodNumber}.`)
+  // Refresh Monthly Summary data so it reflects the new amount next time that tab's viewed.
+  const { data: updatedFin } = await sb.from('studio_monthly_finance').select('*').eq('studio_id', scheduleStudioId).eq('month', monthDate).maybeSingle()
+  if (updatedFin) financeRows[scheduleStudioId] = updatedFin
+  const { data: prog } = await sb.rpc('get_studio_sales_goal_progress', { p_studio_id: scheduleStudioId, p_month: monthToText(currentMonth) })
+  if (prog && prog[0]) progressRows[scheduleStudioId] = prog[0]
 }
 
 /* ---------- staff hours / wage estimate panel ---------- */
