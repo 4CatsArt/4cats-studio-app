@@ -290,7 +290,7 @@ function renderTable() {
     const profit = computeProfit(studioId)
     const labourPct = computeLabourPct(studioId)
     return `<tr data-studio="${studioId}">
-      <td class="studio-name">${esc(STUDIO_NAMES[studioId])}<span class="save-dot" id="dot-${studioId}"></span></td>
+      <td class="studio-name"><a href="#" onclick="toggleStaffPanel('${studioId}');return false" style="color:inherit;text-decoration:underline dotted">${esc(STUDIO_NAMES[studioId])}</a><span class="save-dot" id="dot-${studioId}"></span></td>
       <td>${money(p.monthly_sales_goal)}</td>
       ${editableCell(studioId, 'rent', f.rent)}
       ${editableCell(studioId, 'art_supplies_budget', f.art_supplies_budget)}
@@ -304,7 +304,8 @@ function renderTable() {
       <td class="${paceClass(p.pace_pct)}">${p.pace_pct == null ? '—' : p.pace_pct + '%'}</td>
       <td class="${labourPct != null && labourPct > 45 ? 'pct-bad' : ''}">${labourPct == null ? '—' : labourPct.toFixed(1) + '%'}</td>
       <td class="${profit != null && profit < 0 ? 'profit-neg' : ''}">${money(profit)}</td>
-    </tr>`
+    </tr>
+    <tr id="staff-panel-${studioId}" style="display:none"><td colspan="14" style="padding:0;background:var(--soft)"><div id="staff-panel-body-${studioId}" style="padding:12px 16px"></div></td></tr>`
   }).join('')
 
   body.innerHTML = `<table class="fin-table">
@@ -368,7 +369,7 @@ async function savePayPeriod(studioId, periodNumber, el) {
 
   const monthDate = monthToDate(currentMonth)
   const { error } = await sb.from('studio_pay_periods')
-    .upsert({ studio_id: studioId, month: monthDate, period_number: periodNumber, amount: value }, { onConflict: 'studio_id,month,period_number' })
+    .upsert({ studio_id: studioId, month: monthDate, period_number: periodNumber, amount: value, is_manual_override: true }, { onConflict: 'studio_id,month,period_number' })
 
   if (error) {
     toast(error.message, true)
@@ -388,7 +389,141 @@ async function savePayPeriod(studioId, periodNumber, el) {
   if (currentView === 'daily') renderDailyGrid()
 }
 
-/* ---------- daily grid view ---------- */
+/* ---------- staff hours / wage estimate panel ---------- */
+let staffCache = {} // studio_id -> [{staff_id, display_name, hourly_wage}]
+let staffHoursCache = {} // studio_id -> { staff_id: { 1: hours, 2: hours, 3: hours } }
+let expandedStudio = null
+
+async function toggleStaffPanel(studioId) {
+  const row = document.getElementById('staff-panel-' + studioId)
+  if (!row) return
+
+  if (expandedStudio === studioId) {
+    row.style.display = 'none'
+    expandedStudio = null
+    return
+  }
+  if (expandedStudio) {
+    const prev = document.getElementById('staff-panel-' + expandedStudio)
+    if (prev) prev.style.display = 'none'
+  }
+  expandedStudio = studioId
+  row.style.display = ''
+  await loadStaffPanel(studioId)
+}
+
+async function loadStaffPanel(studioId) {
+  const body = document.getElementById('staff-panel-body-' + studioId)
+  body.innerHTML = '<div class="muted small">Loading staff…</div>'
+
+  const { data: staff, error } = await sb.rpc('get_studio_staff_for_wages', { p_studio_id: studioId })
+  if (error) { body.innerHTML = `<div class="muted small">Couldn't load staff: ${esc(error.message)}</div>`; return }
+  staffCache[studioId] = staff || []
+
+  const monthDate = monthToDate(currentMonth)
+  const staffIds = (staff || []).map(s => s.staff_id)
+  let hoursData = []
+  if (staffIds.length) {
+    const { data } = await sb.from('staff_pay_period_hours').select('*')
+      .eq('studio_id', studioId).eq('month', monthDate).in('staff_id', staffIds)
+    hoursData = data || []
+  }
+  const byStaff = {}
+  hoursData.forEach(h => { (byStaff[h.staff_id] = byStaff[h.staff_id] || {})[h.period_number] = h.hours })
+  staffHoursCache[studioId] = byStaff
+
+  renderStaffPanel(studioId)
+}
+
+function renderStaffPanel(studioId) {
+  const body = document.getElementById('staff-panel-body-' + studioId)
+  const staff = staffCache[studioId] || []
+  if (!staff.length) { body.innerHTML = '<div class="muted small">No active staff assigned to this studio yet.</div>'; return }
+
+  const rows = staff.map(s => {
+    const hrs = (staffHoursCache[studioId] || {})[s.staff_id] || {}
+    return `<tr>
+      <td style="text-align:left">${esc(s.display_name)}</td>
+      <td><input type="number" step="0.01" value="${s.hourly_wage == null ? '' : s.hourly_wage}" placeholder="$/hr"
+        style="width:70px" onchange="saveHourlyWage('${studioId}','${s.staff_id}',this)"></td>
+      ${[1,2,3].map(pn => `<td><input type="number" step="0.25" value="${hrs[pn] == null ? '' : hrs[pn]}" placeholder="hrs"
+        style="width:60px" onchange="saveStaffHours('${studioId}','${s.staff_id}',${pn},this)"></td>`).join('')}
+    </tr>`
+  }).join('')
+
+  body.innerHTML = `
+    <div class="muted small" style="margin-bottom:8px">
+      Enter each person's hourly wage once, then hours per pay period as they're known.
+      This auto-fills the Pay Period box above (estimate) until you type a real number there directly — after that, it stops overwriting your entry.
+    </div>
+    <table style="border-collapse:collapse;font-size:12px">
+      <thead><tr>
+        <th style="text-align:left;padding:3px 8px">Staff</th>
+        <th style="padding:3px 8px">$/hr</th>
+        <th style="padding:3px 8px">Pay 1 hrs</th>
+        <th style="padding:3px 8px">Pay 2 hrs</th>
+        <th style="padding:3px 8px">Pay 3 hrs</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`
+}
+
+async function saveHourlyWage(studioId, staffId, el) {
+  const value = el.value === '' ? null : parseFloat(el.value)
+  const { error } = await sb.rpc('set_staff_hourly_wage', { p_staff_id: staffId, p_hourly_wage: value })
+  if (error) { toast(error.message, true); return }
+  const s = (staffCache[studioId] || []).find(x => x.staff_id === staffId)
+  if (s) s.hourly_wage = value
+  // Wage rate affects all 3 periods' estimates.
+  for (const pn of [1,2,3]) await refreshEstimate(studioId, pn)
+}
+
+async function saveStaffHours(studioId, staffId, periodNumber, el) {
+  const value = el.value === '' ? null : parseFloat(el.value)
+  const monthDate = monthToDate(currentMonth)
+  const { error } = await sb.from('staff_pay_period_hours')
+    .upsert({ staff_id: staffId, studio_id: studioId, month: monthDate, period_number: periodNumber, hours: value },
+            { onConflict: 'staff_id,studio_id,month,period_number' })
+  if (error) { toast(error.message, true); return }
+  if (!staffHoursCache[studioId]) staffHoursCache[studioId] = {}
+  if (!staffHoursCache[studioId][staffId]) staffHoursCache[studioId][staffId] = {}
+  staffHoursCache[studioId][staffId][periodNumber] = value
+  await refreshEstimate(studioId, periodNumber)
+}
+
+// Recomputes the hours×wage estimate for one period and, ONLY if that
+// period hasn't been manually overridden (typed directly into the Pay
+// Period box), writes it in as the auto-filled amount.
+async function refreshEstimate(studioId, periodNumber) {
+  const monthDate = monthToDate(currentMonth)
+  const { data: estimate, error: estErr } = await sb.rpc('get_estimated_wages', { p_studio_id: studioId, p_month: monthDate, p_period_number: periodNumber })
+  if (estErr) { toast(estErr.message, true); return }
+
+  const { data: existing } = await sb.from('studio_pay_periods').select('is_manual_override')
+    .eq('studio_id', studioId).eq('month', monthDate).eq('period_number', periodNumber).maybeSingle()
+
+  if (existing && existing.is_manual_override) return // don't clobber a real entered number
+
+  const { error } = await sb.from('studio_pay_periods')
+    .upsert({ studio_id: studioId, month: monthDate, period_number: periodNumber, amount: estimate, is_manual_override: false },
+            { onConflict: 'studio_id,month,period_number' })
+  if (error) { toast(error.message, true); return }
+
+  if (!payPeriodRows[studioId]) payPeriodRows[studioId] = {}
+  payPeriodRows[studioId][periodNumber] = estimate
+
+  const { data: prog } = await sb.rpc('get_studio_sales_goal_progress', { p_studio_id: studioId, p_month: monthToText(currentMonth) })
+  if (prog && prog[0]) progressRows[studioId] = prog[0]
+
+  renderTable()
+  if (currentView === 'daily') renderDailyGrid()
+  // Re-expand the panel in place if it's the one currently open (renderTable rebuilds the whole tbody).
+  if (expandedStudio === studioId) {
+    const row = document.getElementById('staff-panel-' + studioId)
+    if (row) row.style.display = ''
+    renderStaffPanel(studioId)
+  }
+}
 let currentView = 'summary'
 let dailySales = {}     // studio_id -> { 'YYYY-MM-DD': total }
 let lastMonthTotals = {} // studio_id -> total
