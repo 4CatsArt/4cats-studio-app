@@ -545,6 +545,9 @@ let scheduleStaffByStudio = {}        // studio_id -> [{staff_id, display_name, 
 let scheduleShiftsByStudio = {}       // studio_id -> { staff_id -> { 'YYYY-MM-DD': { start_time, end_time } } }  (that studio's own shifts, editable)
 let scheduleOtherShiftsByStudio = {}  // studio_id -> { staff_id -> { 'YYYY-MM-DD': other_studio_id } }           (conflicts from studios NOT in scheduleStudioIds)
 let scheduleWeekStart = sundayOfWeek(new Date())
+let sessionTypeCodes = [] // loaded once, used by the day carousel
+let carouselDayOffset = {} // studio_id -> 0-6, which day of the current week the carousel is showing
+let carouselCache = {} // 'studioId|dateStr' -> array of session code rows, avoids refetching on every arrow click
 
 function sundayOfWeek(d) {
   const result = new Date(d.getFullYear(), d.getMonth(), d.getDate())
@@ -654,6 +657,8 @@ const POPULAR_SHIFTS = [
 ]
 
 async function loadScheduleView() {
+  await loadSessionTypeCodes()
+  carouselDayOffset = {} // reset to day 1 of the week whenever the tab (re)opens
   const container = document.getElementById('schedule-body')
   container.innerHTML = `
     <div class="toolbar" style="margin-bottom:14px;flex-wrap:wrap">
@@ -661,11 +666,13 @@ async function loadScheduleView() {
       <div class="month-label" id="schedule-week-label" style="min-width:220px">…</div>
       <button class="btn" onclick="shiftScheduleWeek(1)" aria-label="Next week">›</button>
       <button class="btn" onclick="goToCurrentScheduleWeek()">This week</button>
+      <button class="btn" onclick="toggleManageCodes()">⚙ Manage Class Codes</button>
       <div class="muted small" style="flex:1">
         Pick up to 4 studios to compare side by side. Shifts over 5h lose 0.5h automatically (unpaid break).
         Greyed-out days mean that person is already scheduled at a studio not currently shown.
       </div>
     </div>
+    <div id="manage-codes-panel" class="panel" style="display:none;margin-bottom:14px;padding:14px"></div>
     <div class="toolbar" style="margin-bottom:14px;flex-wrap:wrap;gap:6px">
       <span class="muted small" style="width:100%">Quick shifts (available everywhere):</span>
       ${POPULAR_SHIFTS.map(p => `<button class="btn" style="font-size:11px;padding:4px 10px;height:auto" onclick="armShift('${p.start_time}','${p.end_time}')">${esc(formatShiftText(p.start_time, p.end_time))}</button>`).join('')}
@@ -680,6 +687,70 @@ async function loadScheduleView() {
     </div>
     <div id="schedule-sections"><div class="loading">Loading…</div></div>`
   await loadScheduleGrid()
+}
+
+async function loadSessionTypeCodes() {
+  const { data } = await sb.from('session_type_codes').select('*').order('sort_order')
+  sessionTypeCodes = data || []
+}
+
+function toggleManageCodes() {
+  const panel = document.getElementById('manage-codes-panel')
+  const show = panel.style.display === 'none'
+  panel.style.display = show ? '' : 'none'
+  if (show) renderManageCodes()
+}
+
+function renderManageCodes() {
+  const panel = document.getElementById('manage-codes-panel')
+  const rows = sessionTypeCodes.map(r => `
+    <tr>
+      <td><input type="text" value="${esc(r.keyword)}" style="width:160px" onchange="saveCodeRule('${r.id}','keyword',this.value)"></td>
+      <td><input type="text" value="${esc(r.code)}" style="width:70px" onchange="saveCodeRule('${r.id}','code',this.value)"></td>
+      <td><button class="btn" onclick="deleteCodeRule('${r.id}')">Delete</button></td>
+    </tr>`).join('')
+
+  panel.innerHTML = `
+    <div class="muted small" style="margin-bottom:10px">
+      Keyword is matched case-insensitively as a substring against the session title (e.g. "wheel" matches "Wheel Workshop").
+      First match by order wins if a title matches more than one keyword.
+    </div>
+    <table class="fin-table" style="width:auto;margin-bottom:10px">
+      <thead><tr><th>Keyword</th><th>Code</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <button class="btn" onclick="addCodeRule()">+ Add rule</button>`
+}
+
+async function saveCodeRule(id, field, value) {
+  const { error } = await sb.from('session_type_codes').update({ [field]: value }).eq('id', id)
+  if (error) { toast(error.message, true); return }
+  const rule = sessionTypeCodes.find(r => r.id === id)
+  if (rule) rule[field] = value
+  carouselCache = {} // codes changed — old cached results may be stale
+}
+
+async function deleteCodeRule(id) {
+  if (!confirm('Delete this code rule?')) return
+  const { error } = await sb.from('session_type_codes').delete().eq('id', id)
+  if (error) { toast(error.message, true); return }
+  sessionTypeCodes = sessionTypeCodes.filter(r => r.id !== id)
+  carouselCache = {}
+  renderManageCodes()
+}
+
+async function addCodeRule() {
+  const keyword = prompt('Keyword to match (part of a session title):')
+  if (!keyword) return
+  const code = prompt('Short code to show for it:')
+  if (!code) return
+  const { data, error } = await sb.from('session_type_codes')
+    .insert({ keyword, code, sort_order: sessionTypeCodes.length })
+    .select().single()
+  if (error) { toast(error.message, true); return }
+  sessionTypeCodes.push(data)
+  carouselCache = {}
+  renderManageCodes()
 }
 
 function toggleScheduleStudio(studioId, checked) {
@@ -700,10 +771,14 @@ function toggleScheduleStudio(studioId, checked) {
 
 function shiftScheduleWeek(n) {
   scheduleWeekStart = addDays(scheduleWeekStart, n * 7)
+  carouselDayOffset = {}
+  carouselCache = {}
   loadScheduleGrid()
 }
 function goToCurrentScheduleWeek() {
   scheduleWeekStart = sundayOfWeek(new Date())
+  carouselDayOffset = {}
+  carouselCache = {}
   loadScheduleGrid()
 }
 
@@ -839,6 +914,7 @@ async function loadScheduleGrid() {
         <strong>${esc(STUDIO_NAMES[studioId])}</strong>
         <button class="btn" onclick="postScheduleToPayPeriod('${studioId}')">Post week to Pay Period →</button>
       </div>
+      <div id="carousel-${studioId}" style="padding:8px 14px;border-bottom:0.5px solid var(--line);background:var(--soft)"></div>
       <table class="fin-table" style="width:auto">
         <thead><tr>
           <th class="studio-name" style="position:sticky;left:0">Staff</th>
@@ -858,6 +934,66 @@ async function loadScheduleGrid() {
              <button class="btn" style="background:#fff" onclick="disarmShift()">Cancel</button>
            </div>`
         : '')
+
+  scheduleStudioIds.forEach(id => renderCarousel(id))
+}
+
+function classCodeFor(title) {
+  const lower = title.toLowerCase()
+  const rule = sessionTypeCodes.find(r => lower.includes(r.keyword.toLowerCase()))
+  return rule ? rule.code : title.slice(0, 4).toUpperCase()
+}
+
+async function renderCarousel(studioId) {
+  const el = document.getElementById('carousel-' + studioId)
+  if (!el) return
+
+  const dayIndex = carouselDayOffset[studioId] || 0
+  const day = addDays(scheduleWeekStart, dayIndex)
+  const dateStr = dateStrOf(day)
+  const dayLabel = day.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })
+
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px">
+      <button class="btn" style="padding:2px 10px" onclick="shiftCarouselDay('${studioId}',-1)" ${dayIndex === 0 ? 'disabled' : ''} aria-label="Previous day">‹</button>
+      <strong style="min-width:170px">${esc(dayLabel)}</strong>
+      <button class="btn" style="padding:2px 10px" onclick="shiftCarouselDay('${studioId}',1)" ${dayIndex === 6 ? 'disabled' : ''} aria-label="Next day">›</button>
+      <span class="muted small" id="carousel-content-${studioId}">Loading…</span>
+    </div>`
+
+  const cacheKey = studioId + '|' + dateStr
+  let sessionRows = carouselCache[cacheKey]
+  if (!sessionRows) {
+    const { data, error } = await sb.rpc('get_day_session_codes', { p_studio_id: studioId, p_date: dateStr })
+    if (error) { document.getElementById('carousel-content-' + studioId).textContent = 'Couldn\'t load: ' + error.message; return }
+    sessionRows = data || []
+    carouselCache[cacheKey] = sessionRows
+  }
+
+  const contentEl = document.getElementById('carousel-content-' + studioId)
+  if (!contentEl) return // arrow may have been clicked again before this resolved
+
+  if (!sessionRows.length) {
+    contentEl.textContent = 'Nothing booked this day.'
+    return
+  }
+
+  contentEl.innerHTML = sessionRows.map(r => {
+    const t = r.session_time.slice(0, 5)
+    const [h, m] = t.split(':').map(Number)
+    const ap = h >= 12 ? 'p' : 'a'
+    const h12 = h % 12 === 0 ? 12 : h % 12
+    const timeLabel = h12 + (m ? ':' + String(m).padStart(2, '0') : '') + ap
+    return `<span title="${esc(r.title)} — ${r.booking_count} booked" style="margin-right:10px"><strong>${timeLabel}</strong> ${esc(r.code)}</span>`
+  }).join('')
+}
+
+function shiftCarouselDay(studioId, n) {
+  const current = carouselDayOffset[studioId] || 0
+  const next = current + n
+  if (next < 0 || next > 6) return
+  carouselDayOffset[studioId] = next
+  renderCarousel(studioId)
 }
 
 async function saveShiftText(studioId, staffId, dateStr, rawText, el) {
