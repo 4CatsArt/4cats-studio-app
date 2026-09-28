@@ -663,6 +663,7 @@ async function loadScheduleGrid() {
     const ownShifts = {}
     const otherShifts = {}
     allShiftData.forEach(s => {
+      if (!s.start_time && !s.end_time) return // ghost row (both times empty) — ignore, doesn't count as a real shift
       if (s.studio_id === studioId) {
         if (!ownShifts[s.staff_id]) ownShifts[s.staff_id] = {}
         ownShifts[s.staff_id][s.shift_date] = { start_time: s.start_time, end_time: s.end_time }
@@ -764,15 +765,24 @@ async function loadScheduleGrid() {
 async function saveShiftField(studioId, staffId, dateStr, field, el) {
   const value = el.value === '' ? null : el.value + ':00'
   const existing = (scheduleShiftsByStudio[studioId]?.[staffId] || {})[dateStr] || {}
-  const patch = { staff_id: staffId, studio_id: studioId, shift_date: dateStr, ...existing, [field]: value }
+  const updated = { ...existing, [field]: value }
 
-  const { error } = await sb.from('staff_shifts')
-    .upsert(patch, { onConflict: 'staff_id,studio_id,shift_date' })
-  if (error) { toast(error.message, true); return }
+  if (!updated.start_time && !updated.end_time) {
+    // Both fields now empty — delete the row entirely rather than leaving
+    // a null-filled ghost that would still (wrongly) show as a conflict
+    // for this person at other studios.
+    const { error } = await sb.from('staff_shifts')
+      .delete().eq('staff_id', staffId).eq('studio_id', studioId).eq('shift_date', dateStr)
+    if (error) { toast(error.message, true); return }
+  } else {
+    const patch = { staff_id: staffId, studio_id: studioId, shift_date: dateStr, ...updated }
+    const { error } = await sb.from('staff_shifts')
+      .upsert(patch, { onConflict: 'staff_id,studio_id,shift_date' })
+    if (error) { toast(error.message, true); return }
+  }
 
   if (!scheduleShiftsByStudio[studioId]) scheduleShiftsByStudio[studioId] = {}
-  if (!scheduleShiftsByStudio[studioId][staffId]) scheduleShiftsByStudio[studioId][staffId] = {}
-  scheduleShiftsByStudio[studioId][staffId][dateStr] = { ...existing, [field]: value }
+  scheduleShiftsByStudio[studioId][staffId] = { ...(scheduleShiftsByStudio[studioId][staffId] || {}), [dateStr]: updated }
   loadScheduleGrid() // cheap re-render to update paid-hours display and totals
 }
 
