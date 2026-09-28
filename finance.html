@@ -151,6 +151,7 @@ const STUDIO_IDS = Object.keys(STUDIO_NAMES)
 let currentMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1) // first of this month
 let financeRows = {} // studio_id -> row from studio_monthly_finance (or {} if none yet)
 let progressRows = {} // studio_id -> { monthly_sales_goal, daily_sales_goal, this_month_total, pace_pct } from the RPC
+let payPeriodRows = {} // studio_id -> { 1: amount, 2: amount, 3: amount }
 
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])) }
 function monthToText(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') }
@@ -220,6 +221,14 @@ async function loadMonth() {
   financeRows = {}
   ;(finData || []).forEach(r => { financeRows[r.studio_id] = r })
 
+  const { data: payData, error: payErr } = await sb.from('studio_pay_periods').select('*').eq('month', monthDate)
+  if (payErr) { toast(payErr.message, true); return }
+  payPeriodRows = {}
+  ;(payData || []).forEach(r => {
+    if (!payPeriodRows[r.studio_id]) payPeriodRows[r.studio_id] = {}
+    payPeriodRows[r.studio_id][r.period_number] = r.amount
+  })
+
   // One RPC call per studio for the computed columns. 31 calls, run in
   // parallel — fine for an admin tool loaded occasionally, not a
   // high-frequency page.
@@ -241,25 +250,36 @@ function paceClass(pct) {
   return 'pct-bad'
 }
 
+function wagesTotal(studioId) {
+  const periods = payPeriodRows[studioId] || {}
+  return (Number(periods[1]) || 0) + (Number(periods[2]) || 0) + (Number(periods[3]) || 0)
+}
+
 function computeProfit(studioId) {
   const f = financeRows[studioId] || {}
   const p = progressRows[studioId] || {}
   const total = p.this_month_total
   if (total == null) return null
-  const costs = (Number(f.rent) || 0) + (Number(f.art_supplies_budget) || 0) + (Number(f.utilities_estimate) || 0) + (Number(f.wages) || 0)
+  const costs = (Number(f.rent) || 0) + (Number(f.art_supplies_budget) || 0) + (Number(f.utilities_estimate) || 0) + wagesTotal(studioId)
   return total - costs
 }
 
 function computeLabourPct(studioId) {
-  const f = financeRows[studioId] || {}
   const p = progressRows[studioId] || {}
-  if (!f.wages || !p.this_month_total) return null
-  return (Number(f.wages) / p.this_month_total) * 100
+  const wages = wagesTotal(studioId)
+  if (!wages || !p.this_month_total) return null
+  return (wages / p.this_month_total) * 100
 }
 
 function editableCell(studioId, field, value) {
   return `<td><input type="number" step="0.01" value="${value == null ? '' : esc(value)}"
     onchange="saveField('${studioId}','${field}',this)" aria-label="${field}"></td>`
+}
+
+function payPeriodCell(studioId, periodNumber) {
+  const value = (payPeriodRows[studioId] || {})[periodNumber]
+  return `<td><input type="number" step="0.01" value="${value == null ? '' : esc(value)}"
+    onchange="savePayPeriod('${studioId}',${periodNumber},this)" aria-label="Pay period ${periodNumber}"></td>`
 }
 
 function renderTable() {
@@ -275,7 +295,10 @@ function renderTable() {
       ${editableCell(studioId, 'rent', f.rent)}
       ${editableCell(studioId, 'art_supplies_budget', f.art_supplies_budget)}
       ${editableCell(studioId, 'utilities_estimate', f.utilities_estimate)}
-      ${editableCell(studioId, 'wages', f.wages)}
+      ${payPeriodCell(studioId, 1)}
+      ${payPeriodCell(studioId, 2)}
+      ${payPeriodCell(studioId, 3)}
+      <td>${money(wagesTotal(studioId))}</td>
       <td>${money(p.daily_sales_goal)}</td>
       <td>${money(p.this_month_total)}</td>
       <td class="${paceClass(p.pace_pct)}">${p.pace_pct == null ? '—' : p.pace_pct + '%'}</td>
@@ -291,7 +314,10 @@ function renderTable() {
       <th class="group-editable">Rent</th>
       <th class="group-editable">Art Supplies</th>
       <th class="group-editable">Utilities</th>
-      <th class="group-editable">Wages</th>
+      <th class="group-editable">Pay 1</th>
+      <th class="group-editable">Pay 2</th>
+      <th class="group-editable">Pay 3</th>
+      <th class="group-computed">Wages Total</th>
       <th class="group-computed">Daily Goal</th>
       <th class="group-computed">MTD Sales</th>
       <th class="group-computed">Pace %</th>
@@ -324,15 +350,42 @@ async function saveField(studioId, field, el) {
   financeRows[studioId] = data
   if (dot) dot.className = 'save-dot saved'
 
-  // Goal is now computed from rent/supplies/utilities/wages (breakeven,
-  // rounded up to $500), so any of those four changing needs a fresh
-  // pace/goal recompute for this studio — not just the old single field.
-  if (['rent', 'art_supplies_budget', 'utilities_estimate', 'wages'].includes(field)) {
+  // Goal is computed from rent/supplies/utilities/wages (breakeven, rounded
+  // up to $500) — any of the first three changing needs a fresh recompute.
+  // Pay period changes are handled by savePayPeriod below, not here.
+  if (['rent', 'art_supplies_budget', 'utilities_estimate'].includes(field)) {
     const { data: prog } = await sb.rpc('get_studio_sales_goal_progress', { p_studio_id: studioId, p_month: monthToText(currentMonth) })
     if (prog && prog[0]) progressRows[studioId] = prog[0]
   }
   renderTable()
-  if (currentView === 'daily') renderDailyGrid() // recompute header rows if visible
+  if (currentView === 'daily') renderDailyGrid()
+}
+
+async function savePayPeriod(studioId, periodNumber, el) {
+  const value = el.value === '' ? null : parseFloat(el.value)
+  const dot = document.getElementById('dot-' + studioId)
+  if (dot) dot.className = 'save-dot saving'
+
+  const monthDate = monthToDate(currentMonth)
+  const { error } = await sb.from('studio_pay_periods')
+    .upsert({ studio_id: studioId, month: monthDate, period_number: periodNumber, amount: value }, { onConflict: 'studio_id,month,period_number' })
+
+  if (error) {
+    toast(error.message, true)
+    if (dot) dot.className = 'save-dot'
+    return
+  }
+
+  if (!payPeriodRows[studioId]) payPeriodRows[studioId] = {}
+  payPeriodRows[studioId][periodNumber] = value
+  if (dot) dot.className = 'save-dot saved'
+
+  // Wages changing affects the goal (breakeven costs), so recompute pace too.
+  const { data: prog } = await sb.rpc('get_studio_sales_goal_progress', { p_studio_id: studioId, p_month: monthToText(currentMonth) })
+  if (prog && prog[0]) progressRows[studioId] = prog[0]
+
+  renderTable()
+  if (currentView === 'daily') renderDailyGrid()
 }
 
 /* ---------- daily grid view ---------- */
@@ -421,7 +474,7 @@ function renderDailyGrid() {
     summaryRow('Rent', id => money((financeRows[id] || {}).rent)),
     summaryRow('Art Supplies', id => money((financeRows[id] || {}).art_supplies_budget)),
     summaryRow('Utilities', id => money((financeRows[id] || {}).utilities_estimate)),
-    summaryRow('Wages', id => money((financeRows[id] || {}).wages)),
+    summaryRow('Wages Total', id => money(wagesTotal(id))),
     summaryRow('Daily Goal', id => money((progressRows[id] || {}).daily_sales_goal), 'top')
   ].join('')
 
