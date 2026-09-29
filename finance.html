@@ -844,7 +844,7 @@ async function loadScheduleGrid() {
 
   const dayHeaders = weekDays.map(d => {
     const dow = d.toLocaleDateString('en-US', { weekday: 'short' })
-    return `<th style="min-width:110px">${dow} ${d.getDate()}</th>`
+    return `<th style="min-width:110px;text-align:center">${dow} ${d.getDate()}</th>`
   }).join('')
 
   const sections = scheduleStudioIds.map(studioId => {
@@ -1102,12 +1102,12 @@ async function renderCarousel(studioId) {
   const dayLabel = day.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })
 
   el.innerHTML = `
-    <div style="display:flex;align-items:center;gap:10px">
+    <div style="display:flex;align-items:center;justify-content:center;gap:10px">
       <button class="btn" style="padding:2px 10px" onclick="shiftCarouselDay('${studioId}',-1)" ${dayIndex === 0 ? 'disabled' : ''} aria-label="Previous day">‹</button>
-      <strong style="min-width:170px">${esc(dayLabel)}</strong>
+      <strong style="min-width:170px;text-align:center">${esc(dayLabel)}</strong>
       <button class="btn" style="padding:2px 10px" onclick="shiftCarouselDay('${studioId}',1)" ${dayIndex === 6 ? 'disabled' : ''} aria-label="Next day">›</button>
-      <span class="muted small" id="carousel-content-${studioId}">Loading…</span>
-    </div>`
+    </div>
+    <div id="carousel-content-${studioId}" class="muted small" style="margin-top:6px">Loading…</div>`
 
   const cacheKey = studioId + '|' + dateStr
   let sessionRows = carouselCache[cacheKey]
@@ -1123,32 +1123,67 @@ async function renderCarousel(studioId) {
   const contentEl = document.getElementById('carousel-content-' + studioId)
   if (!contentEl) return // arrow may have been clicked again before this resolved
 
-  if (!sessionRows.length) {
-    contentEl.textContent = 'Nothing scheduled this day.'
-    return
+  // Festivals/events get their own banner (matching how index.html shows
+  // them to studio staff) — pulled out of the regular session list below.
+  const festivalRows = sessionRows.filter(r => r.session_type === 'festival')
+  const regularRows = sessionRows.filter(r => r.session_type !== 'festival')
+
+  let festivalHtml = ''
+  if (festivalRows.length) {
+    const { data: details } = await sb.rpc('get_festival_details', { p_session_ids: festivalRows.map(r => r.session_id) })
+    const detailsMap = {}
+    ;(details || []).forEach(d => { detailsMap[d.session_id] = d })
+    festivalHtml = festivalRows.map(r => {
+      const det = detailsMap[r.session_id] || {}
+      const staffLine = (det.staff_names || []).length ? `<div class="muted small">👥 ${esc(det.staff_names.join(', '))}</div>` : ''
+      const projectLine = det.project ? `<div class="muted small">🎨 ${esc(det.project)}</div>` : ''
+      const dayPlanLine = det.day_plan ? `<div style="font-size:12px;margin-top:4px;white-space:pre-wrap">${esc(det.day_plan)}</div>` : ''
+      return `<div style="background:#e3edfb;border:1px solid #b8cff0;border-radius:8px;padding:10px 12px;margin-bottom:8px">
+        <strong style="color:#0d3a80">🎪 ${esc(r.title)}</strong>
+        ${staffLine}${projectLine}${dayPlanLine}
+      </div>`
+    }).join('')
   }
 
-  contentEl.innerHTML = `<div style="display:flex;flex-direction:column;margin-top:6px;border-top:1px solid var(--line-2)">${sessionRows.map((r, i) => {
-    const t = r.session_time.slice(0, 5)
-    const [h, m] = t.split(':').map(Number)
-    const ap = h >= 12 ? 'p' : 'a'
-    const h12 = h % 12 === 0 ? 12 : h % 12
-    const timeLabel = h12 + (m ? ':' + String(m).padStart(2, '0') : '') + ap
-    const bookedLabel = r.booking_count === 0 ? '0 booked' : r.booking_count + ' booked'
-    const isEmpty = r.booking_count === 0
-    const rowColor = isEmpty ? 'var(--muted)' : 'var(--ink)'
-    const adjustContainerId = `inv-adjust-${studioId}-${i}`
-    const rowKey = r.title + '|' + r.session_time
-    const hasMatch = !!(inventoryItemCache[cacheKey] || {})[rowKey]
-    return `<div style="display:flex;align-items:center;gap:10px;padding:6px 4px;border-bottom:1px solid var(--line-2);font-size:12.5px;color:${rowColor}" title="${esc(r.title)}">
-      <span style="font-weight:700;min-width:52px">${timeLabel}</span>
-      <span style="font-weight:700;background:var(--panel);border:1px solid var(--line-2);border-radius:5px;padding:1px 7px;min-width:38px;text-align:center;color:${rowColor}">${esc(r.code)}</span>
-      <span style="flex:1">${bookedLabel}${r.capacity != null ? ' / ' + r.capacity + ' cap' : ''}</span>
-      <span id="${adjustContainerId}">${hasMatch
-        ? `<button class="btn" style="font-size:11px;padding:2px 8px;height:auto" onclick="openInventoryAdjust('${studioId}','${dateStr}','${r.session_time}','${r.title.replace(/'/g, "\\'")}','${adjustContainerId}')">✏️ Adjust</button>`
-        : ''}</span>
-    </div>`
-  }).join('')}</div>`
+  let listHtml = ''
+  if (!regularRows.length) {
+    listHtml = '<div class="muted small" style="padding:6px 0">Nothing else scheduled this day.</div>'
+  } else {
+    listHtml = `<div style="display:flex;flex-direction:column;border-top:1px solid var(--line-2)">${regularRows.map((r, i) => {
+      const t = r.session_time.slice(0, 5)
+      const [h, m] = t.split(':').map(Number)
+      const ap = h >= 12 ? 'p' : 'a'
+      const h12 = h % 12 === 0 ? 12 : h % 12
+      const timeLabel = h12 + (m ? ':' + String(m).padStart(2, '0') : '') + ap
+      const bookedLabel = r.booking_count === 0 ? '0 booked' : r.booking_count + ' booked'
+      const isEmpty = r.booking_count === 0
+      const rowColor = isEmpty ? 'var(--muted)' : 'var(--ink)'
+      const adjustContainerId = `inv-adjust-${studioId}-${i}`
+      const rowKey = r.title + '|' + r.session_time
+      const hasMatch = !!(inventoryItemCache[cacheKey] || {})[rowKey]
+      return `<div style="display:flex;align-items:center;gap:10px;padding:6px 4px;border-bottom:1px solid var(--line-2);font-size:12.5px;color:${rowColor}" title="${esc(r.title)}">
+        <span style="font-weight:700;min-width:52px">${timeLabel}</span>
+        <span style="font-weight:700;background:var(--panel);border:1px solid var(--line-2);border-radius:5px;padding:1px 7px;min-width:38px;text-align:center;color:${rowColor}">${esc(r.code)}</span>
+        <span style="flex:1">${bookedLabel}${r.capacity != null ? ' / ' + r.capacity + ' cap' : ''}</span>
+        <span id="${adjustContainerId}">${hasMatch
+          ? `<button class="btn" style="font-size:11px;padding:2px 8px;height:auto" onclick="openInventoryAdjust('${studioId}','${dateStr}','${r.session_time}','${r.title.replace(/'/g, "\\'")}','${adjustContainerId}')">✏️ Adjust</button>`
+          : ''}</span>
+      </div>`
+    }).join('')}</div>`
+  }
+
+  const { data: noteRow } = await sb.from('schedule_day_notes').select('note').eq('studio_id', studioId).eq('note_date', dateStr).maybeSingle()
+  const noteHtml = `<textarea placeholder="Note for this day (staffing context, reminders, etc.)"
+    style="width:100%;box-sizing:border-box;margin-top:8px;border:1px solid var(--line-2);border-radius:6px;padding:6px 8px;font-size:12px;font-family:inherit;resize:vertical;min-height:44px"
+    onchange="saveDayNote('${studioId}','${dateStr}',this.value)">${esc(noteRow?.note || '')}</textarea>`
+
+  contentEl.innerHTML = festivalHtml + listHtml + noteHtml
+}
+
+async function saveDayNote(studioId, dateStr, note) {
+  const { error } = await sb.from('schedule_day_notes')
+    .upsert({ studio_id: studioId, note_date: dateStr, note: note || null })
+  if (error) toast(error.message, true)
 }
 
 function shiftCarouselDay(studioId, n) {
