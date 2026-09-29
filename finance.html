@@ -138,6 +138,7 @@ button, input, select { font: inherit; color: inherit; }
 <script>
 const SUPABASE_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co'
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA'
+const EDGE_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co/functions/v1/shopify-inventory'
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY)
 
 const STUDIO_NAMES = {
@@ -947,6 +948,150 @@ function classCodeFor(title) {
   return rule ? rule.code : title.slice(0, 4).toUpperCase()
 }
 
+// Copied verbatim from admin.html — this reconstructs the exact Shopify
+// product title from a session's date/time/title, matching many hand-tuned
+// special cases (e.g. "Kids Party" title variants, camp naming, etc).
+// Deliberately NOT reimplemented here — copy admin.html's actual version
+// over this one if it's ever updated there, rather than hand-editing a
+// second copy and risking the two drifting apart.
+function buildShopifyTitle(sessionDate, sessionTime, sessionTitle) {
+  const d = new Date(sessionDate + 'T12:00:00')
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  const day = days[d.getDay()], month = months[d.getMonth()], date = d.getDate()
+  const suffix = date===1||date===21||date===31?'st':date===2||date===22?'nd':date===3||date===23?'rd':'th'
+  const [h, m] = sessionTime.split(':').map(Number)
+  const hour = h===0?12:h>12?h-12:h
+  const ampm = h<12?'am':'pm'
+  const timeStr = m===0?`${hour}${ampm}`:`${hour}:${String(m).padStart(2,'0')}${ampm}`
+  const starPrefix = (h===9&&m===0)?'*':''
+  const titleLower = sessionTitle.toLowerCase().trim()
+  const TITLE_MAP = {
+    'kids party':'Kids Party','splatter party':'Splatter Party','field trip':'Field Trip',
+    'party time slot':null,'splatter party time slot':null,'field trip time slot':null,
+    'adult get-together time slot':'Adult Get Togethers, Parties & Group Booking',
+    'wheel workshop (adult & teen)':'Wheel Workshop','wheel workshop':'Wheel Workshop','friday night mixer':'Friday Night Mixer','friday night mixer (ages 16+)':'Friday Night Mixer',
+    'sunday early bird workshop':'Sunday Early Bird Workshop',
+    'sunday morning family time mixer':'Sunday Morning Family Time Mixer',
+    'mixed media class for kids ($10 for members)':'Mixed Media Class',
+    'thursday clay night':'Thursday Clay Night','thursdays: clay night':'Thursday Clay Night','natureware mugs':'Natureware Mug',
+    'summer camp half day morning':'Summer Camp Half Day','summer camp half day afternoon':'Summer Camp Half Day',
+    'no school day camp (ages 6-12)':'PA/PD Day','pd day':'PA/PD Day','pa day':'PA/PD Day','pa/pd day':'PA/PD Day',
+    'afternoon art meetup':'Afternoon Art Meetup','saturday early bird workshop':'Saturday Early Bird Workshop',
+    'dragons session (ages 5-12) class 1 of 5':'Dragons 5 Week Kids Session',
+    "mother's day celebration":"Mother's Day",'early drop off (mixed media class)':null,
+    'half day camp afternoon (ages 5-12)':'Summer Camp Half Day','half day camp morning (ages 5-12)':'Summer Camp Half Day',
+    'full day camp (ages 6-12)':'Summer Camp Full Day','natureware':'Natureware Mug','mini make drop in':'Mini Make Drop In',
+  }
+  if (/\b(class|week|session|part)\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(sessionTitle)) return null
+  if (titleLower in TITLE_MAP && TITLE_MAP[titleLower] === null) return null
+  if (titleLower === 'weekend workshop') return 'OVERRIDE'
+  if (/^weekend workshop:\s*/i.test(sessionTitle)) return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${sessionTitle.replace(/^weekend workshop:\s*/i,'').trim()}`
+  if (titleLower.includes('wednesday paint night')) return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | Wednesday Paint Night`
+  if (TITLE_MAP[titleLower]) return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${TITLE_MAP[titleLower]}`
+  const seriesMatch = sessionTitle.match(/(\|\s*\d+\s+Week\s+Session.*)/i)
+  const seriesSuffix = seriesMatch ? ` ${seriesMatch[1].trim()}` : ''
+  let cleanTitle = sessionTitle.replace(/\s*\|.*$/, '').trim()
+  return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${cleanTitle}${seriesSuffix}`
+}
+
+// studioId+dateStr -> { title -> inventory_item_id }, populated from the
+// cached shopify_variants table (one batch query per carousel day/studio),
+// same pre-population approach admin.html uses.
+let inventoryItemCache = {}
+
+async function loadInventoryItemIds(studioId, dateStr, sessionRows) {
+  const key = studioId + '|' + dateStr
+  if (inventoryItemCache[key]) return inventoryItemCache[key]
+
+  const titleToShopifyTitle = {}
+  sessionRows.forEach(r => {
+    const st = buildShopifyTitle(dateStr, r.session_time, r.title)
+    if (st && st !== 'OVERRIDE') titleToShopifyTitle[r.title + '|' + r.session_time] = st
+  })
+  const shopifyTitles = [...new Set(Object.values(titleToShopifyTitle))]
+  if (!shopifyTitles.length) { inventoryItemCache[key] = {}; return {} }
+
+  const { data } = await sb.from('shopify_variants')
+    .select('shopify_title, inventory_item_id')
+    .in('shopify_title', shopifyTitles)
+    .eq('studio_id', studioId)
+    .not('inventory_item_id', 'is', null)
+
+  const shopifyTitleToItemId = {}
+  ;(data || []).forEach(v => { shopifyTitleToItemId[v.shopify_title] = v.inventory_item_id })
+
+  const result = {}
+  Object.entries(titleToShopifyTitle).forEach(([rowKey, st]) => {
+    if (shopifyTitleToItemId[st]) result[rowKey] = shopifyTitleToItemId[st]
+  })
+  inventoryItemCache[key] = result
+  return result
+}
+
+async function openInventoryAdjust(studioId, dateStr, sessionTime, title, containerId) {
+  const el = document.getElementById(containerId)
+  if (!el) return
+  el.innerHTML = '<span class="muted" style="font-size:11px">Loading live Shopify quantity…</span>'
+
+  const shopifyTitle = buildShopifyTitle(dateStr, sessionTime, title)
+  if (!shopifyTitle || shopifyTitle === 'OVERRIDE') {
+    el.innerHTML = '<span class="muted" style="font-size:11px">No matching Shopify product for this session.</span>'
+    return
+  }
+
+  try {
+    const res = await fetch(EDGE_URL, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'get_all', product_title: shopifyTitle })
+    })
+    const data = await res.json()
+    if (data.error) { el.innerHTML = `<span class="muted" style="font-size:11px">Not found in Shopify: ${esc(shopifyTitle)}</span>`; return }
+
+    const cacheKey = studioId + '|' + dateStr
+    const itemIds = inventoryItemCache[cacheKey] || {}
+    const rowKey = title + '|' + sessionTime
+    const inventoryItemId = itemIds[rowKey]
+    const variant = (data.variants || []).find(v => v.inventory_item_id === inventoryItemId)
+
+    if (!variant) {
+      el.innerHTML = '<span class="muted" style="font-size:11px">Couldn\'t match this studio\'s variant.</span>'
+      return
+    }
+
+    const inputId = 'inv-adj-' + inventoryItemId
+    el.innerHTML = `
+      <input type="number" id="${inputId}" value="${variant.inventory_quantity}" min="0" style="width:55px;font-size:11px;padding:2px 4px;text-align:center">
+      <button class="btn" style="font-size:11px;padding:2px 8px;height:auto" onclick="setSessionInventory(${inventoryItemId},'${inputId}','${containerId}')">Set</button>`
+  } catch (e) {
+    el.innerHTML = `<span class="muted" style="font-size:11px">Error: ${esc(e.message)}</span>`
+  }
+}
+
+async function setSessionInventory(inventoryItemId, inputId, containerId) {
+  const input = document.getElementById(inputId)
+  const qty = parseInt(input.value)
+  if (isNaN(qty) || qty < 0) { toast('Enter a valid quantity (0 or more).', true); return }
+
+  const el = document.getElementById(containerId)
+  el.innerHTML = '<span class="muted" style="font-size:11px">Setting…</span>'
+  try {
+    const res = await fetch(EDGE_URL, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'set', inventory_item_id: inventoryItemId, quantity: qty })
+    })
+    const data = await res.json()
+    if (!data.inventory_level) { toast('Shopify update failed.', true); el.innerHTML = `<span style="color:var(--bad);font-size:11px">Failed — try again</span>`; return }
+    toast(`Set to ${qty} in Shopify.`)
+    el.innerHTML = `<span style="color:var(--good);font-size:11px">✓ Set to ${qty}</span>`
+  } catch (e) {
+    toast(e.message, true)
+    el.innerHTML = `<span style="color:var(--bad);font-size:11px">Error</span>`
+  }
+}
+
 async function renderCarousel(studioId) {
   const el = document.getElementById('carousel-' + studioId)
   if (!el) return
@@ -973,6 +1118,8 @@ async function renderCarousel(studioId) {
     carouselCache[cacheKey] = sessionRows
   }
 
+  await loadInventoryItemIds(studioId, dateStr, sessionRows) // populates inventoryItemCache, used on-demand when Adjust is clicked
+
   const contentEl = document.getElementById('carousel-content-' + studioId)
   if (!contentEl) return // arrow may have been clicked again before this resolved
 
@@ -981,18 +1128,25 @@ async function renderCarousel(studioId) {
     return
   }
 
-  contentEl.innerHTML = `<div style="display:flex;flex-direction:column;margin-top:6px;border-top:1px solid var(--line-2)">${sessionRows.map(r => {
+  contentEl.innerHTML = `<div style="display:flex;flex-direction:column;margin-top:6px;border-top:1px solid var(--line-2)">${sessionRows.map((r, i) => {
     const t = r.session_time.slice(0, 5)
     const [h, m] = t.split(':').map(Number)
     const ap = h >= 12 ? 'p' : 'a'
     const h12 = h % 12 === 0 ? 12 : h % 12
     const timeLabel = h12 + (m ? ':' + String(m).padStart(2, '0') : '') + ap
     const bookedLabel = r.booking_count === 0 ? '0 booked' : r.booking_count + ' booked'
-    const bookedClass = r.booking_count === 0 ? 'muted' : ''
-    return `<div style="display:flex;align-items:center;gap:10px;padding:6px 4px;border-bottom:1px solid var(--line-2);font-size:12.5px" title="${esc(r.title)}">
+    const isEmpty = r.booking_count === 0
+    const rowColor = isEmpty ? 'var(--muted)' : 'var(--ink)'
+    const adjustContainerId = `inv-adjust-${studioId}-${i}`
+    const rowKey = r.title + '|' + r.session_time
+    const hasMatch = !!(inventoryItemCache[cacheKey] || {})[rowKey]
+    return `<div style="display:flex;align-items:center;gap:10px;padding:6px 4px;border-bottom:1px solid var(--line-2);font-size:12.5px;color:${rowColor}" title="${esc(r.title)}">
       <span style="font-weight:700;min-width:52px">${timeLabel}</span>
-      <span style="font-weight:700;background:var(--panel);border:1px solid var(--line-2);border-radius:5px;padding:1px 7px;min-width:38px;text-align:center">${esc(r.code)}</span>
-      <span class="${bookedClass}" style="flex:1">${bookedLabel}${r.capacity != null ? ' / ' + r.capacity + ' cap' : ''}</span>
+      <span style="font-weight:700;background:var(--panel);border:1px solid var(--line-2);border-radius:5px;padding:1px 7px;min-width:38px;text-align:center;color:${rowColor}">${esc(r.code)}</span>
+      <span style="flex:1">${bookedLabel}${r.capacity != null ? ' / ' + r.capacity + ' cap' : ''}</span>
+      <span id="${adjustContainerId}">${hasMatch
+        ? `<button class="btn" style="font-size:11px;padding:2px 8px;height:auto" onclick="openInventoryAdjust('${studioId}','${dateStr}','${r.session_time}','${r.title.replace(/'/g, "\\'")}','${adjustContainerId}')">✏️ Adjust</button>`
+        : ''}</span>
     </div>`
   }).join('')}</div>`
 }
