@@ -257,8 +257,9 @@ async function loadMonth() {
     bucketTotals[bucket] = data != null ? Number(data) : 0
   }))
 
-  const { data: hoRow } = await sb.from('home_office_costs').select('labour_cost').eq('month', monthDate).maybeSingle()
-  homeOfficeLabour = hoRow && hoRow.labour_cost != null ? Number(hoRow.labour_cost) : null
+  const { data: hoRows } = await sb.from('home_office_costs').select('*').eq('month', monthDate)
+  homeOfficeLabourPeriods = {}
+  ;(hoRows || []).forEach(r => { homeOfficeLabourPeriods[r.period_number] = r.amount })
 
   renderTable()
   if (currentView === 'daily') loadDailyGridIfNeeded()
@@ -304,23 +305,30 @@ function payPeriodCell(studioId, periodNumber) {
     onchange="savePayPeriod('${studioId}',${periodNumber},this)" aria-label="Pay period ${periodNumber}"></td>`
 }
 
+function homeOfficeLabourTotal() {
+  const vals = [1, 2, 3].map(n => homeOfficeLabourPeriods[n])
+  if (vals.every(v => v == null)) return null // nothing entered yet at all
+  return vals.reduce((sum, v) => sum + (Number(v) || 0), 0)
+}
+
 function computeSystemProfit() {
-  if (homeOfficeLabour == null) return null
+  const homeOfficeTotal = homeOfficeLabourTotal()
+  if (homeOfficeTotal == null) return null
   const systemTotal = STUDIO_IDS.reduce((sum, id) => sum + (Number((progressRows[id] || {}).this_month_total) || 0), 0)
     + (Number(bucketTotals.membership) || 0) + (Number(bucketTotals.warehouse) || 0)
   const systemCosts = STUDIO_IDS.reduce((sum, id) => {
     const f = financeRows[id] || {}
     return sum + (Number(f.rent) || 0) + (Number(f.art_supplies_budget) || 0) + (Number(f.utilities_estimate) || 0) + wagesTotal(id)
   }, 0)
-  return systemTotal - systemCosts - homeOfficeLabour
+  return systemTotal - systemCosts - homeOfficeTotal
 }
 
-async function saveHomeOfficeLabour(value) {
+async function saveHomeOfficeLabour(periodNumber, value) {
   const monthDate = monthToDate(currentMonth)
   const num = value === '' ? null : Number(value)
-  const { error } = await sb.from('home_office_costs').upsert({ month: monthDate, labour_cost: num })
+  const { error } = await sb.from('home_office_costs').upsert({ month: monthDate, period_number: periodNumber, amount: num }, { onConflict: 'month,period_number' })
   if (error) { toast(error.message, true); return }
-  homeOfficeLabour = num
+  homeOfficeLabourPeriods[periodNumber] = num
   renderTable()
 }
 
@@ -359,12 +367,15 @@ function renderTable() {
   const bucketRows = bucketRow('Membership', 'membership') + bucketRow('Warehouse', 'warehouse')
 
   const systemProfit = computeSystemProfit()
-  const hoPanel = `<div class="panel" style="display:flex;align-items:center;gap:24px;padding:14px 18px;margin-bottom:14px;flex-wrap:wrap">
-    <label style="display:flex;align-items:center;gap:8px">
-      <span class="muted small">Home Office Labour (this month)</span>
-      <input type="number" step="0.01" value="${homeOfficeLabour == null ? '' : homeOfficeLabour}" style="width:110px"
-        onchange="saveHomeOfficeLabour(this.value)" aria-label="Home office labour">
-    </label>
+  const hoPeriodInput = n => `<label style="display:flex;flex-direction:column;gap:2px;font-size:11px">
+    <span class="muted small">${esc(payPeriodHeaderLabel(n))}</span>
+    <input type="number" step="0.01" value="${homeOfficeLabourPeriods[n] == null ? '' : homeOfficeLabourPeriods[n]}" style="width:100px"
+      onchange="saveHomeOfficeLabour(${n},this.value)" aria-label="Home office labour pay period ${n}">
+  </label>`
+  const hoPanel = `<div class="panel" style="display:flex;align-items:flex-end;gap:24px;padding:14px 18px;margin-bottom:14px;flex-wrap:wrap">
+    <div><div class="muted small" style="margin-bottom:6px">Home Office Labour</div>
+      <div style="display:flex;gap:10px">${hoPeriodInput(1)}${hoPeriodInput(2)}${hoPeriodInput(3)}</div>
+    </div>
     <div><div class="muted small">System-Wide Profit</div><div class="${systemProfit != null && systemProfit < 0 ? 'profit-neg' : ''}" style="font-size:20px;font-weight:700">${systemProfit == null ? '<span class="muted">Enter home office labour to compute</span>' : money(systemProfit)}</div></div>
   </div>`
 
@@ -1465,7 +1476,7 @@ let currentView = 'summary'
 let dailySales = {}     // studio_id -> { 'YYYY-MM-DD': total }
 let lastMonthTotals = {} // studio_id -> total
 let systemTotalSameMonthLastYear = null // number or null if not on file
-let homeOfficeLabour = null // this month's value, or null if not set yet
+let homeOfficeLabourPeriods = {} // period_number -> amount (or null if not set yet)
 let dailyLoadedForMonth = null
 
 function switchView(view) {
