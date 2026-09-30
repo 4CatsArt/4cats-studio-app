@@ -161,6 +161,7 @@ const STUDIO_IDS = Object.keys(STUDIO_NAMES)
 let currentMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1) // first of this month
 let financeRows = {} // studio_id -> row from studio_monthly_finance (or {} if none yet)
 let progressRows = {} // studio_id -> { monthly_sales_goal, daily_sales_goal, this_month_total, pace_pct } from the RPC
+let bucketTotals = {} // 'membership' | 'warehouse' -> this month's total for unattributed sales in that bucket
 let payPeriodRows = {} // studio_id -> { 1: amount, 2: amount, 3: amount }
 
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])) }
@@ -250,6 +251,12 @@ async function loadMonth() {
     if (!error && data && data[0]) progressRows[studioId] = data[0]
   }))
 
+  bucketTotals = {}
+  await Promise.all(['membership', 'warehouse'].map(async (bucket) => {
+    const { data } = await sb.rpc('get_bucket_month_total', { p_bucket: bucket, p_month: monthText })
+    bucketTotals[bucket] = data != null ? Number(data) : 0
+  }))
+
   renderTable()
   if (currentView === 'daily') loadDailyGridIfNeeded()
 }
@@ -320,6 +327,14 @@ function renderTable() {
     <tr id="staff-panel-${studioId}" style="display:none"><td colspan="14" style="padding:0;background:var(--soft)"><div id="staff-panel-body-${studioId}" style="padding:12px 16px"></div></td></tr>`
   }).join('')
 
+  const bucketRow = (label, bucket) => `<tr style="background:var(--soft)">
+    <td class="studio-name"><em>${esc(label)}</em> <span class="muted small">(unattributed sales)</span></td>
+    <td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>
+    <td>${money(bucketTotals[bucket])}</td>
+    <td>—</td><td>—</td><td>—</td>
+  </tr>`
+  const bucketRows = bucketRow('Membership', 'membership') + bucketRow('Warehouse', 'warehouse')
+
   body.innerHTML = `<table class="fin-table">
     <thead><tr>
       <th class="studio-name">Studio</th>
@@ -337,7 +352,7 @@ function renderTable() {
       <th class="group-computed">Labour %</th>
       <th class="group-computed">Est. Profit</th>
     </tr></thead>
-    <tbody>${rows}</tbody>
+    <tbody>${rows}${bucketRows}</tbody>
   </table>`
 }
 
@@ -1454,6 +1469,13 @@ async function loadDailyGridIfNeeded() {
     lastMonthTotals[studioId] = lastSummary && lastSummary.monthTotal != null ? Number(lastSummary.monthTotal) : null
   }))
 
+  await Promise.all(['membership', 'warehouse'].map(async (bucket) => {
+    const { data, error } = await sb.rpc('get_bucket_daily_sales', { p_bucket: bucket, p_month: monthText })
+    const byDay = {}
+    if (!error) (data || []).forEach(r => { byDay[r.sale_day] = Number(r.total) })
+    dailySales['__' + bucket + '__'] = byDay
+  }))
+
   dailyLoadedForMonth = monthText
   renderDailyGrid()
 }
@@ -1506,7 +1528,8 @@ function renderDailyGrid() {
   const monthText = monthToText(currentMonth)
   const nDays = daysInMonth(currentMonth)
   const container = document.getElementById('daily-body')
-  const ids = sortedStudioIdsForDailyGrid()
+  const ids = sortedStudioIdsForDailyGrid().concat(['__membership__', '__warehouse__'])
+  const labelFor = id => id === '__membership__' ? 'Membership' : id === '__warehouse__' ? 'Warehouse' : STUDIO_NAMES[id]
 
   const sortBar = `<div class="toolbar" style="margin-bottom:10px">
     <label class="small muted" style="display:flex;align-items:center;gap:6px">
@@ -1517,9 +1540,10 @@ function renderDailyGrid() {
         <option value="sales_desc" ${dailyGridSortMode === 'sales_desc' ? 'selected' : ''}>Sales: high to low</option>
       </select>
     </label>
+    <span class="muted small">Membership/Warehouse = unattributed sales with no studio signal (memberships bought standalone, gift cards, standalone kit sales, etc.)</span>
   </div>`
 
-  const headerCols = ids.map(id => `<th>${esc(STUDIO_NAMES[id])}</th>`).join('')
+  const headerCols = ids.map(id => `<th>${esc(labelFor(id))}</th>`).join('')
 
   function summaryRow(label, fn, cls) {
     return `<tr class="summary-row ${cls || ''}"><td class="day-label">${esc(label)}</td>${
@@ -1551,8 +1575,10 @@ function renderDailyGrid() {
     dayRows.push(`<tr><td class="day-label">${dow}, ${monthLabel(currentMonth).split(' ')[0].slice(0,3)} ${day}</td>${cells}</tr>`)
   }
 
+  const monthTotalFor = id => id.startsWith('__') ? bucketTotals[id.replace(/__/g, '')] : (progressRows[id] || {}).this_month_total
+
   const bottomRows = [
-    summaryRow('This Month Total', id => money((progressRows[id] || {}).this_month_total), 'bottom'),
+    summaryRow('This Month Total', id => money(monthTotalFor(id)), 'bottom'),
     summaryRow('Last Month Total', id => money(lastMonthTotals[id])),
     summaryRow('% Based on Daily (Pace)', id => { const p = (progressRows[id] || {}).pace_pct; return p == null ? '—' : p + '%' }),
     summaryRow('Labour Cost %', id => { const l = computeLabourPct(id); return l == null ? '—' : l.toFixed(1) + '%' }),
