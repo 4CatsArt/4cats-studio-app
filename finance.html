@@ -229,6 +229,145 @@ function goToCurrentMonth() {
 }
 
 /* ---------- data loading ---------- */
+let pendingPayrollUpload = null // { matched, unmapped, target: {monthDate, periodNumber}, payDate } or null
+
+async function handlePayrollCSVUpload(file) {
+  if (!file) return
+  if (!payScheduleAnchor) { alert('Set up the Pay Schedule (⚙ button below) first — needed to auto-detect which pay period this belongs to.'); return }
+
+  const text = await file.text()
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l)
+  if (!lines.length) { alert('That file looks empty.'); return }
+
+  const raw = lines[0]
+  if (!/^\d{8}$/.test(raw)) { alert('Could not read a date (expected YYYYMMDD) from the first line of this file — is this a Payworks GL export?'); return }
+  const periodEndStr = raw.slice(0, 4) + '-' + raw.slice(4, 6) + '-' + raw.slice(6, 8)
+
+  const payDate = payDateForWorkDate(periodEndStr)
+  if (!payDate) { alert("Couldn't match this period-end date to a pay date using the current pay schedule settings — check the anchor date and lag."); return }
+  const target = monthAndPeriodForPayDate(payDate)
+  if (!target) { alert(`This file's pay date (${payDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}) doesn't line up with any Pay 1/2/3 slot for its month.`); return }
+
+  const wagesByDept = {}
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(',')
+    if (cols.length >= 5 && cols[3] === 'Wages' && cols[1]) {
+      wagesByDept[cols[1]] = Math.abs(parseFloat(cols[4])) || 0
+    }
+  }
+  if (!Object.keys(wagesByDept).length) { alert('No "Wages" rows found in this file — is this the right export?'); return }
+
+  const { data: mapRows, error } = await sb.from('payroll_department_map').select('*')
+  if (error) { toast(error.message, true); return }
+  const deptMap = {}
+  ;(mapRows || []).forEach(r => { deptMap[r.department_number] = r.studio_id })
+
+  const matched = []
+  const unmapped = []
+  Object.entries(wagesByDept).forEach(([dept, amount]) => {
+    const studioId = deptMap[dept]
+    if (!studioId) { unmapped.push({ dept, amount }); return }
+    matched.push({ dept, studioId, amount })
+  })
+
+  pendingPayrollUpload = { matched, unmapped, target, payDate }
+  renderPayrollPreview()
+}
+
+function renderPayrollPreview() {
+  const el = document.getElementById('payroll-upload-preview')
+  if (!el) return
+  if (!pendingPayrollUpload) { el.innerHTML = ''; return }
+  const { matched, unmapped, target, payDate } = pendingPayrollUpload
+
+  const payLabel = `Pay ${target.periodNumber}, ${monthLabel(target.monthDate)} (pay date ${payDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })})`
+
+  const matchedRows = matched.map(m => {
+    const label = m.studioId === '__HOME_OFFICE__' ? 'Home Office' : esc(STUDIO_NAMES[m.studioId] || m.studioId)
+    return `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:13px"><span>${label}</span><span>${money(m.amount)}</span></div>`
+  }).join('')
+
+  const unmappedRows = unmapped.map((u, i) => `
+    <div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px">
+      <span style="min-width:80px">Dept ${esc(u.dept)}</span>
+      <span class="muted">${money(u.amount)}</span>
+      <select id="unmapped-select-${i}" style="font-size:12px">
+        <option value="">— assign a studio —</option>
+        <option value="__HOME_OFFICE__">Home Office</option>
+        ${STUDIO_IDS.map(id => `<option value="${id}">${esc(STUDIO_NAMES[id])}</option>`).join('')}
+      </select>
+    </div>`).join('')
+
+  el.innerHTML = `
+    <div style="margin-top:12px;border-top:1px solid var(--line-2);padding-top:12px">
+      <strong>${esc(payLabel)}</strong>
+      <div style="margin-top:8px;max-height:220px;overflow-y:auto">${matchedRows}</div>
+      ${unmapped.length ? `<div style="margin-top:10px;padding:8px;background:#fff3e0;border-radius:6px">
+        <strong class="muted small">Unrecognized department numbers — assign a studio to include them (saved for next time):</strong>
+        ${unmappedRows}
+      </div>` : ''}
+      <div style="margin-top:12px">
+        <button onclick="confirmPayrollUpload()" style="padding:6px 14px;border:none;border-radius:6px;background:var(--ink);color:#fff;cursor:pointer">Confirm & Save</button>
+        <button onclick="cancelPayrollUpload()" style="margin-left:8px;padding:6px 14px;border:0.5px solid var(--line-2);border-radius:6px;background:var(--panel);cursor:pointer">Cancel</button>
+      </div>
+    </div>`
+}
+
+function cancelPayrollUpload() {
+  pendingPayrollUpload = null
+  renderPayrollPreview()
+}
+
+async function confirmPayrollUpload() {
+  if (!pendingPayrollUpload) return
+  const { matched, unmapped, target } = pendingPayrollUpload
+  const monthDate = monthToDate(target.monthDate)
+
+  const newlyAssigned = []
+  unmapped.forEach((u, i) => {
+    const sel = document.getElementById('unmapped-select-' + i)
+    const studioId = sel ? sel.value : ''
+    if (studioId) newlyAssigned.push({ dept: u.dept, studioId, amount: u.amount })
+  })
+
+  if (newlyAssigned.length) {
+    const { error: mapErr } = await sb.from('payroll_department_map')
+      .upsert(newlyAssigned.map(n => ({ department_number: n.dept, studio_id: n.studioId })))
+    if (mapErr) { toast(mapErr.message, true); return }
+  }
+
+  const allRows = matched.concat(newlyAssigned)
+  const studioRows = allRows.filter(r => r.studioId !== '__HOME_OFFICE__')
+  const hoRow = allRows.find(r => r.studioId === '__HOME_OFFICE__')
+
+  for (const row of studioRows) {
+    const { error } = await sb.from('studio_pay_periods')
+      .upsert({ studio_id: row.studioId, month: monthDate, period_number: target.periodNumber, amount: row.amount, is_manual_override: true },
+        { onConflict: 'studio_id,month,period_number' })
+    if (error) { toast(error.message, true); return }
+    if (!payPeriodRows[row.studioId]) payPeriodRows[row.studioId] = {}
+    payPeriodRows[row.studioId][target.periodNumber] = row.amount
+  }
+
+  if (hoRow) {
+    const { error } = await sb.from('home_office_costs')
+      .upsert({ month: monthDate, period_number: target.periodNumber, amount: hoRow.amount }, { onConflict: 'month,period_number' })
+    if (error) { toast(error.message, true); return }
+    homeOfficeLabourPeriods[target.periodNumber] = hoRow.amount
+  }
+
+  toast(`Updated Pay ${target.periodNumber} (${monthLabel(target.monthDate)}) for ${studioRows.length} studio${studioRows.length === 1 ? '' : 's'}${hoRow ? ' + Home Office' : ''}.`)
+  pendingPayrollUpload = null
+
+  if (monthToText(currentMonth) === monthToText(target.monthDate)) {
+    await Promise.all(STUDIO_IDS.map(async (id) => {
+      const { data: prog } = await sb.rpc('get_studio_sales_goal_progress', { p_studio_id: id, p_month: monthToText(currentMonth) })
+      if (prog && prog[0]) progressRows[id] = prog[0]
+    }))
+  }
+  renderTable()
+}
+
 async function loadMonth() {
   document.getElementById('month-label').textContent = monthLabel(currentMonth)
   document.getElementById('fin-body').innerHTML = '<div class="loading">Loading…</div>'
@@ -539,6 +678,15 @@ function renderTable() {
     <input type="number" step="0.01" value="${homeOfficeLabourPeriods[n] == null ? '' : homeOfficeLabourPeriods[n]}" style="width:100px"
       onchange="saveHomeOfficeLabour(${n},this.value)" aria-label="Home office labour pay period ${n}">
   </label>`
+  const uploadPanel = `<div class="panel" style="padding:14px 18px;margin-bottom:14px">
+    <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+      <span style="padding:6px 12px;border:0.5px solid var(--line-2);border-radius:6px;background:var(--panel);font-size:12px">📤 Upload Payroll CSV</span>
+      <input type="file" accept=".csv" style="display:none" onchange="handlePayrollCSVUpload(this.files[0]); this.value=''">
+      <span class="muted small">Parses a Payworks GL export and fills in the matching Pay 1/2/3 slot automatically, for whichever studios it covers</span>
+    </label>
+    <div id="payroll-upload-preview"></div>
+  </div>`
+
   const hoPanel = `<div class="panel" style="display:flex;align-items:flex-end;gap:24px;padding:14px 18px;margin-bottom:14px;flex-wrap:wrap">
     <div><div class="muted small" style="margin-bottom:6px">Home Office Labour</div>
       <div style="display:flex;gap:10px">${hoPeriodInput(1)}${hoPeriodInput(2)}${hoPeriodInput(3)}</div>
@@ -549,7 +697,7 @@ function renderTable() {
     <div style="margin-left:auto"><button onclick="togglePayPeriods()" style="padding:6px 12px;border:0.5px solid var(--line-2);border-radius:6px;background:var(--panel);cursor:pointer;font-size:12px">${showPayPeriods ? '◂ Hide pay periods' : '▸ Show pay periods'}</button></div>
   </div>`
 
-  body.innerHTML = hoPanel + `<table class="fin-table">
+  body.innerHTML = uploadPanel + hoPanel + `<table class="fin-table">
     <thead><tr>${summaryHeaderHtml()}
     </tr></thead>
     <tbody>${rows}${bucketRows}</tbody>
