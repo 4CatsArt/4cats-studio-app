@@ -257,6 +257,9 @@ async function loadMonth() {
     bucketTotals[bucket] = data != null ? Number(data) : 0
   }))
 
+  const { data: hoRow } = await sb.from('home_office_costs').select('labour_cost').eq('month', monthDate).maybeSingle()
+  homeOfficeLabour = hoRow && hoRow.labour_cost != null ? Number(hoRow.labour_cost) : null
+
   renderTable()
   if (currentView === 'daily') loadDailyGridIfNeeded()
 }
@@ -301,6 +304,26 @@ function payPeriodCell(studioId, periodNumber) {
     onchange="savePayPeriod('${studioId}',${periodNumber},this)" aria-label="Pay period ${periodNumber}"></td>`
 }
 
+function computeSystemProfit() {
+  if (homeOfficeLabour == null) return null
+  const systemTotal = STUDIO_IDS.reduce((sum, id) => sum + (Number((progressRows[id] || {}).this_month_total) || 0), 0)
+    + (Number(bucketTotals.membership) || 0) + (Number(bucketTotals.warehouse) || 0)
+  const systemCosts = STUDIO_IDS.reduce((sum, id) => {
+    const f = financeRows[id] || {}
+    return sum + (Number(f.rent) || 0) + (Number(f.art_supplies_budget) || 0) + (Number(f.utilities_estimate) || 0) + wagesTotal(id)
+  }, 0)
+  return systemTotal - systemCosts - homeOfficeLabour
+}
+
+async function saveHomeOfficeLabour(value) {
+  const monthDate = monthToDate(currentMonth)
+  const num = value === '' ? null : Number(value)
+  const { error } = await sb.from('home_office_costs').upsert({ month: monthDate, labour_cost: num })
+  if (error) { toast(error.message, true); return }
+  homeOfficeLabour = num
+  renderTable()
+}
+
 function renderTable() {
   const body = document.getElementById('fin-body')
   const rows = STUDIO_IDS.map(studioId => {
@@ -335,7 +358,17 @@ function renderTable() {
   </tr>`
   const bucketRows = bucketRow('Membership', 'membership') + bucketRow('Warehouse', 'warehouse')
 
-  body.innerHTML = `<table class="fin-table">
+  const systemProfit = computeSystemProfit()
+  const hoPanel = `<div class="panel" style="display:flex;align-items:center;gap:24px;padding:14px 18px;margin-bottom:14px;flex-wrap:wrap">
+    <label style="display:flex;align-items:center;gap:8px">
+      <span class="muted small">Home Office Labour (this month)</span>
+      <input type="number" step="0.01" value="${homeOfficeLabour == null ? '' : homeOfficeLabour}" style="width:110px"
+        onchange="saveHomeOfficeLabour(this.value)" aria-label="Home office labour">
+    </label>
+    <div><div class="muted small">System-Wide Profit</div><div class="${systemProfit != null && systemProfit < 0 ? 'profit-neg' : ''}" style="font-size:20px;font-weight:700">${systemProfit == null ? '<span class="muted">Enter home office labour to compute</span>' : money(systemProfit)}</div></div>
+  </div>`
+
+  body.innerHTML = hoPanel + `<table class="fin-table">
     <thead><tr>
       <th class="studio-name">Studio</th>
       <th class="group-computed">Monthly Goal</th>
@@ -1431,6 +1464,8 @@ async function refreshEstimate(studioId, periodNumber) {
 let currentView = 'summary'
 let dailySales = {}     // studio_id -> { 'YYYY-MM-DD': total }
 let lastMonthTotals = {} // studio_id -> total
+let systemTotalSameMonthLastYear = null // number or null if not on file
+let homeOfficeLabour = null // this month's value, or null if not set yet
 let dailyLoadedForMonth = null
 
 function switchView(view) {
@@ -1475,6 +1510,9 @@ async function loadDailyGridIfNeeded() {
     if (!error) (data || []).forEach(r => { byDay[r.sale_day] = Number(r.total) })
     dailySales['__' + bucket + '__'] = byDay
   }))
+
+  const { data: lastYearTotal } = await sb.rpc('get_system_total_same_month_last_year', { p_month: monthText })
+  systemTotalSameMonthLastYear = lastYearTotal != null ? Number(lastYearTotal) : null
 
   dailyLoadedForMonth = monthText
   renderDailyGrid()
@@ -1524,12 +1562,43 @@ function setDailyGridSort(mode) {
   renderDailyGrid()
 }
 
+function daysElapsedInMonth(monthDate) {
+  const today = new Date()
+  if (monthDate.getFullYear() === today.getFullYear() && monthDate.getMonth() === today.getMonth()) {
+    return today.getDate()
+  }
+  return daysInMonth(monthDate) // a fully past (or future) month — treat as fully elapsed either way
+}
+
+function computeSystemTotals() {
+  const systemTotalThisMonth = STUDIO_IDS.reduce((sum, id) => sum + (Number((progressRows[id] || {}).this_month_total) || 0), 0)
+    + (Number(bucketTotals.membership) || 0) + (Number(bucketTotals.warehouse) || 0)
+  const systemDailyGoal = STUDIO_IDS.reduce((sum, id) => sum + (Number((progressRows[id] || {}).daily_sales_goal) || 0), 0)
+  const elapsed = daysElapsedInMonth(currentMonth)
+  const pacedGoal = systemDailyGoal * elapsed
+  const systemPacePct = pacedGoal > 0 ? (systemTotalThisMonth / pacedGoal) * 100 : null
+  return { systemTotalThisMonth, systemDailyGoal, systemPacePct }
+}
+
 function renderDailyGrid() {
   const monthText = monthToText(currentMonth)
   const nDays = daysInMonth(currentMonth)
   const container = document.getElementById('daily-body')
   const ids = sortedStudioIdsForDailyGrid().concat(['__membership__', '__warehouse__'])
   const labelFor = id => id === '__membership__' ? 'Membership' : id === '__warehouse__' ? 'Warehouse' : STUDIO_NAMES[id]
+
+  const sys = computeSystemTotals()
+  const lastYearLabel = systemTotalSameMonthLastYear == null
+    ? '<span class="muted">No data on file</span>'
+    : money(systemTotalSameMonthLastYear)
+  const paceLabel = sys.systemPacePct == null ? '—' : sys.systemPacePct.toFixed(1) + '%'
+
+  const systemPanel = `<div class="panel" style="display:flex;gap:28px;padding:14px 18px;margin-bottom:14px;flex-wrap:wrap">
+    <div><div class="muted small">Total Sales This Month (System-Wide)</div><div style="font-size:20px;font-weight:700">${money(sys.systemTotalThisMonth)}</div></div>
+    <div><div class="muted small">Same Month Last Year</div><div style="font-size:20px;font-weight:700">${lastYearLabel}</div></div>
+    <div><div class="muted small">Daily Avg Sales Goal (System-Wide)</div><div style="font-size:20px;font-weight:700">${money(sys.systemDailyGoal)}</div></div>
+    <div><div class="muted small">% Based on Daily Pace (System-Wide)</div><div class="${paceClass(sys.systemPacePct)}" style="font-size:20px;font-weight:700">${paceLabel}</div></div>
+  </div>`
 
   const sortBar = `<div class="toolbar" style="margin-bottom:10px">
     <label class="small muted" style="display:flex;align-items:center;gap:6px">
@@ -1585,8 +1654,7 @@ function renderDailyGrid() {
     summaryRow('Est. Profit', id => money(computeProfit(id)))
   ].join('')
 
-  container.innerHTML = sortBar + `<table class="daily-table">
-    <thead><tr><th class="day-label">Day</th>${headerCols}</tr></thead>
+  container.innerHTML = systemPanel + sortBar + `<table class="daily-table">    <thead><tr><th class="day-label">Day</th>${headerCols}</tr></thead>
     <tbody>${topRows}${dayRows.join('')}${bottomRows}</tbody>
   </table>`
 }
