@@ -287,6 +287,13 @@ function computeProfit(studioId) {
   return total - costs
 }
 
+function computeProfitPct(studioId) {
+  const p = progressRows[studioId] || {}
+  const profit = computeProfit(studioId)
+  if (profit == null || !Number(p.this_month_total)) return null
+  return (profit / Number(p.this_month_total)) * 100
+}
+
 function computeLabourPct(studioId) {
   const p = progressRows[studioId] || {}
   const wages = wagesTotal(studioId)
@@ -311,11 +318,23 @@ function homeOfficeLabourTotal() {
   return vals.reduce((sum, v) => sum + (Number(v) || 0), 0)
 }
 
+// All sales this month: every studio's MTD plus the Membership and Warehouse (unattributed) buckets
+function computeSystemSalesTotal() {
+  return STUDIO_IDS.reduce((sum, id) => sum + (Number((progressRows[id] || {}).this_month_total) || 0), 0)
+    + (Number(bucketTotals.membership) || 0) + (Number(bucketTotals.warehouse) || 0)
+}
+
+function computeSystemProfitPct() {
+  const profit = computeSystemProfit()
+  const sales = computeSystemSalesTotal()
+  if (profit == null || !sales) return null
+  return (profit / sales) * 100
+}
+
 function computeSystemProfit() {
   const homeOfficeTotal = homeOfficeLabourTotal()
   if (homeOfficeTotal == null) return null
-  const systemTotal = STUDIO_IDS.reduce((sum, id) => sum + (Number((progressRows[id] || {}).this_month_total) || 0), 0)
-    + (Number(bucketTotals.membership) || 0) + (Number(bucketTotals.warehouse) || 0)
+  const systemTotal = computeSystemSalesTotal()
   const systemCosts = STUDIO_IDS.reduce((sum, id) => {
     const f = financeRows[id] || {}
     return sum + (Number(f.rent) || 0) + (Number(f.art_supplies_budget) || 0) + (Number(f.utilities_estimate) || 0) + wagesTotal(id)
@@ -350,6 +369,7 @@ const SUMMARY_COLUMNS = [
   { key: 'pace',     label: 'Pace %',       cls: 'group-computed', get: id => (progressRows[id] || {}).pace_pct },
   { key: 'labour',   label: 'Labour %',     cls: 'group-computed', get: id => computeLabourPct(id) },
   { key: 'profit',   label: 'Est. Profit',  cls: 'group-computed', get: id => computeProfit(id) },
+  { key: 'profitpct', label: 'Profit %',    cls: 'group-computed', get: id => computeProfitPct(id) },
 ]
 
 function setSummarySort(key) {
@@ -394,6 +414,7 @@ function renderTable() {
     const p = progressRows[studioId] || {}
     const profit = computeProfit(studioId)
     const labourPct = computeLabourPct(studioId)
+    const profitPct = computeProfitPct(studioId)
     return `<tr data-studio="${studioId}">
       <td class="studio-name"><a href="#" onclick="toggleStaffPanel('${studioId}');return false" style="color:inherit;text-decoration:underline dotted">${esc(STUDIO_NAMES[studioId])}</a><span class="save-dot" id="dot-${studioId}"></span></td>
       <td>${money(p.monthly_sales_goal)}</td>
@@ -409,19 +430,21 @@ function renderTable() {
       <td class="${paceClass(p.pace_pct)}">${p.pace_pct == null ? '—' : p.pace_pct + '%'}</td>
       <td class="${labourPct != null && labourPct > 45 ? 'pct-bad' : ''}">${labourPct == null ? '—' : labourPct.toFixed(1) + '%'}</td>
       <td class="${profit != null && profit < 0 ? 'profit-neg' : ''}">${money(profit)}</td>
+      <td class="${profitPct != null && profitPct < 0 ? 'profit-neg' : ''}">${profitPct == null ? '—' : profitPct.toFixed(1) + '%'}</td>
     </tr>
-    <tr id="staff-panel-${studioId}" style="display:none"><td colspan="14" style="padding:0;background:var(--soft)"><div id="staff-panel-body-${studioId}" style="padding:12px 16px"></div></td></tr>`
+    <tr id="staff-panel-${studioId}" style="display:none"><td colspan="15" style="padding:0;background:var(--soft)"><div id="staff-panel-body-${studioId}" style="padding:12px 16px"></div></td></tr>`
   }).join('')
 
   const bucketRow = (label, bucket) => `<tr style="background:var(--soft)">
     <td class="studio-name"><em>${esc(label)}</em> <span class="muted small">(unattributed sales)</span></td>
     <td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>
     <td>${money(bucketTotals[bucket])}</td>
-    <td>—</td><td>—</td><td>—</td>
+    <td>—</td><td>—</td><td>—</td><td>—</td>
   </tr>`
   const bucketRows = bucketRow('Membership', 'membership') + bucketRow('Warehouse', 'warehouse')
 
   const systemProfit = computeSystemProfit()
+  const systemProfitPct = computeSystemProfitPct()
   const hoPeriodInput = n => `<label style="display:flex;flex-direction:column;gap:2px;font-size:11px">
     <span class="muted small">${esc(payPeriodHeaderLabel(n))}</span>
     <input type="number" step="0.01" value="${homeOfficeLabourPeriods[n] == null ? '' : homeOfficeLabourPeriods[n]}" style="width:100px"
@@ -432,6 +455,7 @@ function renderTable() {
       <div style="display:flex;gap:10px">${hoPeriodInput(1)}${hoPeriodInput(2)}${hoPeriodInput(3)}</div>
     </div>
     <div><div class="muted small">System-Wide Profit</div><div class="${systemProfit != null && systemProfit < 0 ? 'profit-neg' : ''}" style="font-size:20px;font-weight:700">${systemProfit == null ? '<span class="muted">Enter home office labour to compute</span>' : money(systemProfit)}</div></div>
+    <div><div class="muted small">System-Wide Profit %</div><div class="${systemProfitPct != null && systemProfitPct < 0 ? 'profit-neg' : ''}" style="font-size:20px;font-weight:700">${systemProfitPct == null ? '<span class="muted">—</span>' : systemProfitPct.toFixed(1) + '%'}</div></div>
   </div>`
 
   body.innerHTML = hoPanel + `<table class="fin-table">
