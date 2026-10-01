@@ -59,13 +59,13 @@ h1 { font-size: 20px; margin: 0; }
   <div class="toolbar" style="margin-bottom:6px">
     <h1>Studio Pace</h1>
     <div class="seg">
-      <button id="view-day" class="on" onclick="setView('day')">Today</button>
-      <button id="view-month" onclick="setView('month')">This month</button>
+      <button id="view-today" class="on" onclick="setView('today')">Today</button>
+      <button id="view-day" onclick="setView('day')">Day</button>
+      <button id="view-month" onclick="setView('month')">Month</button>
     </div>
-    <button class="btn" onclick="shiftDay(-1)" aria-label="Previous day">‹</button>
-    <div id="day-label" style="font-weight:700;min-width:150px;text-align:center"></div>
-    <button class="btn" id="next-day-btn" onclick="shiftDay(1)" aria-label="Next day">›</button>
-    <button class="btn" id="today-btn" onclick="goToday()">Today</button>
+    <input type="date" id="day-picker" class="btn" style="display:none" onchange="pickDay(this.value)" aria-label="Pick a day">
+    <input type="month" id="month-picker" class="btn" style="display:none" onchange="pickMonth(this.value)" aria-label="Pick a month">
+    <div id="day-label" style="font-weight:700;min-width:150px"></div>
     <button class="btn" id="refresh-btn" onclick="loadPace()" style="font-weight:600">⟳ Refresh</button>
     <span class="muted small" id="updated-label"></span>
     <span style="margin-left:auto"></span>
@@ -125,8 +125,10 @@ function pacificToday() {
   const p = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Vancouver' }).split('-').map(Number)
   return new Date(p[0], p[1] - 1, p[2])
 }
-let currentDay = pacificToday()
-let viewMode = 'day'     // 'day' | 'month'
+let viewMode = 'today'          // 'today' | 'day' | 'month'
+let pickedDay = pacificToday()   // used by Day view
+let pickedMonth = new Date(pacificToday().getFullYear(), pacificToday().getMonth(), 1) // used by Month view
+let currentDay = pacificToday()  // the "as of" day sent to the database
 let orderMode = 'best'   // 'best' | 'worst'
 let rows = []            // [{ studio_id, day_pct, month_pace_pct, month_goal_pct }]
 
@@ -164,27 +166,47 @@ async function initApp(user) {
 }
 
 /* ---------- navigation ---------- */
+// Today = today's sales vs daily goal. Day = any past day, same measure.
+// Month = month pace as of the end of the picked month (or as of today for this month).
 function setView(v) {
   viewMode = v
-  document.getElementById('view-day').className = v === 'day' ? 'on' : ''
-  document.getElementById('view-month').className = v === 'month' ? 'on' : ''
-  render()
-}
-function shiftDay(n) {
-  const d = new Date(currentDay.getFullYear(), currentDay.getMonth(), currentDay.getDate() + n)
-  if (d > pacificToday()) return
-  currentDay = d
+  ;['today', 'day', 'month'].forEach(m => { document.getElementById('view-' + m).className = m === v ? 'on' : '' })
+  const today = pacificToday()
+  const dp = document.getElementById('day-picker'), mp = document.getElementById('month-picker')
+  dp.max = dayToText(today)
+  mp.max = dayToText(today).slice(0, 7)
+  dp.style.display = v === 'day' ? '' : 'none'
+  mp.style.display = v === 'month' ? '' : 'none'
+  if (v === 'today') currentDay = today
+  if (v === 'day') { dp.value = dayToText(pickedDay); currentDay = pickedDay }
+  if (v === 'month') {
+    mp.value = dayToText(pickedMonth).slice(0, 7)
+    const monthEnd = new Date(pickedMonth.getFullYear(), pickedMonth.getMonth() + 1, 0)
+    currentDay = monthEnd > today ? today : monthEnd
+  }
   loadPace()
 }
-function goToday() { currentDay = pacificToday(); loadPace() }
+function pickDay(value) {
+  if (!value) return
+  const p = value.split('-').map(Number)
+  const d = new Date(p[0], p[1] - 1, p[2])
+  pickedDay = d > pacificToday() ? pacificToday() : d
+  setView('day')
+}
+function pickMonth(value) {
+  if (!value) return
+  const p = value.split('-').map(Number)
+  pickedMonth = new Date(p[0], p[1] - 1, 1)
+  setView('month')
+}
 
 /* ---------- data ---------- */
 async function loadPace() {
   const btn = document.getElementById('refresh-btn')
   btn.disabled = true; btn.textContent = '⟳ Refreshing…'
-  document.getElementById('day-label').textContent = currentDay.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
-  document.getElementById('next-day-btn').disabled = isToday(currentDay)
-  document.getElementById('today-btn').disabled = isToday(currentDay)
+  document.getElementById('day-label').textContent = viewMode === 'month'
+    ? currentDay.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) + (isToday(currentDay) ? ' (so far)' : '')
+    : currentDay.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
   const dayText = dayToText(currentDay)
   const { data, error } = await sb.rpc('get_pace_leaderboard', { p_day: dayText })
   btn.disabled = false; btn.textContent = '⟳ Refresh'
@@ -205,7 +227,7 @@ async function loadPace() {
 
 /* ---------- render ---------- */
 function render() {
-  const metric = viewMode === 'day' ? 'day_pct' : 'month_pace_pct'
+  const metric = viewMode === 'month' ? 'month_pace_pct' : 'day_pct'
   const byId = {}
   rows.forEach(r => { byId[r.studio_id] = r })
   const list = STUDIO_IDS.map(id => byId[id] || { studio_id: id, day_pct: null, month_pace_pct: null, month_goal_pct: null })
@@ -230,7 +252,7 @@ function render() {
     const rank = rankOf[r.studio_id]
     const medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : (rank ? rank : '—')
     const barW = v == null ? 0 : Math.max(2, Math.min(100, v / 1.5))  // bar full at 150%
-    const sub = viewMode === 'day'
+    const sub = viewMode !== 'month'
       ? (r.month_pace_pct == null ? '' : `Month pace ${r.month_pace_pct}%`)
       : (r.month_goal_pct == null ? '' : `${r.month_goal_pct}% of the full month's goal reached`)
     return `<div class="row">
@@ -242,9 +264,9 @@ function render() {
   }).join('')
   document.getElementById('pace-body').innerHTML = `<div class="board">${html}</div>`
 
-  document.getElementById('explain').innerHTML = viewMode === 'day'
-    ? `<b>Today</b> = ${esc(dayWord)}'s sales compared with the studio's daily goal (monthly goal ÷ days in the month). 100% = hit the daily goal.${isToday(currentDay) ? ' Today is still in progress, so this climbs through the day.' : ''}`
-    : `<b>This month</b> = month-to-date sales compared with where the studio needs to be by ${esc(dayWord)} to hit its monthly goal. 100% = exactly on track. The smaller number shows how much of the full month's goal is already reached.`
+  document.getElementById('explain').innerHTML = viewMode !== 'month'
+    ? `<b>${viewMode === 'today' ? 'Today' : 'Day'}</b> = ${esc(dayWord)}'s sales compared with the studio's daily goal (monthly goal ÷ days in the month). 100% = hit the daily goal.${isToday(currentDay) ? ' Today is still in progress, so this climbs through the day.' : ''}`
+    : `<b>Month</b> = month-to-date sales compared with where the studio needs to be by ${esc(dayWord)} to hit its monthly goal. 100% = exactly on track. The smaller number shows how much of the full month's goal is already reached.`
 }
 </script>
 </body>
