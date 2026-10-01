@@ -321,6 +321,17 @@ body.preview-mode .card.admin-only { display: block !important; }
 .goal-note { font-size: 11.5px; color: var(--ink-soft); margin-top: 2px; }
 .goal-msg { font-size: 13px; color: var(--amber); font-weight: 600; padding: 4px 0; }
 
+/* Instagram card */
+.ig-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 900px) { .ig-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.ig-change { font-size: 11.5px; font-weight: 700; margin-top: 3px; }
+.ig-change.up { color: var(--green); }
+.ig-change.down { color: var(--red); }
+.ig-change.flat { color: var(--ink-soft); }
+.ig-handle { font-size: 12.5px; font-weight: 600; color: var(--ink-soft); }
+.ig-warn { font-size: 12px; color: var(--amber); font-weight: 600; margin-bottom: 10px; }
+.ig-foot { font-size: 11.5px; color: var(--ink-soft); margin-top: 10px; }
+
 /* Sales goal leaderboard */
 .sglb { margin-top: 4px; border-top: 1px solid var(--border); padding-top: 14px; }
 .sglb-title { font-size: 11px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 8px; }
@@ -707,6 +718,11 @@ body.preview-mode .card.admin-only { display: block !important; }
          real staff schedule/time-punch data exists. -->
     <div class="section-head ops">📋 Daily Check-Ins</div>
     <div class="card sales-card" id="card-checkins"></div>
+
+    <!-- Instagram — moved here from the old Community Hub in index.html.
+         Served by community-instagram-data (PIN-checked, own studio only). -->
+    <div class="section-head ops">📷 Instagram</div>
+    <div class="card sales-card" id="card-instagram"></div>
 
     <!-- leaderboard / points&rewards / points earned -->
     <div class="trio dev-only">
@@ -1892,6 +1908,80 @@ function startGoalRefresh() {
   }, GOAL_REFRESH_MS);
 }
 
+// ---------- Instagram (moved from index.html's Community Hub) ----------
+
+async function fetchInstagramWithPin(pin, studioId) {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/community-instagram-data`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+    },
+    body: JSON.stringify(studioId ? { pin, studioId } : { pin })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+function igNum(n) {
+  return n == null ? '—' : Number(n).toLocaleString('en-US');
+}
+
+function renderInstagramCard(data) {
+  const container = document.getElementById('card-instagram');
+  if (!container) return;
+  if (!data || data.error || !data.studioId) { container.innerHTML = ''; return; }
+
+  const studioName = STUDIO_NAMES[data.studioId] || data.studioId;
+  const head = `<div class="card-head"><div class="title">📷 Instagram — ${esc(studioName)}</div>${data.username ? `<div class="ig-handle">@${esc(String(data.username).replace(/^@/, ''))}</div>` : ''}</div>`;
+
+  if (data.state === 'not_connected') {
+    container.innerHTML = head + `<div class="goal-note">Instagram isn't connected for this studio yet.</div>`;
+    return;
+  }
+  if (data.state === 'no_snapshot_yet') {
+    container.innerHTML = head + `<div class="goal-note">Connected — waiting for the first sync.</div>`;
+    return;
+  }
+
+  let changeHtml = '';
+  if (data.followerChange != null) {
+    const c = data.followerChange;
+    const cls = c > 0 ? 'up' : c < 0 ? 'down' : 'flat';
+    const arrow = c > 0 ? '↑' : c < 0 ? '↓' : '→';
+    changeHtml = `<div class="ig-change ${cls}">${arrow} ${igNum(Math.abs(c))} in ${data.changeSinceDays} day${data.changeSinceDays === 1 ? '' : 's'}</div>`;
+  }
+
+  const tile = (label, value, extra) => `
+    <div class="friday-tile">
+      <div class="eyebrow">${esc(label)}</div>
+      <div class="pct">${igNum(value)}</div>
+      ${extra || ''}
+    </div>`;
+
+  container.innerHTML = head
+    + (data.state === 'stale' ? `<div class="ig-warn">⚠ The last update failed — showing the most recent good numbers.</div>` : '')
+    + `<div class="ig-grid">
+        ${tile('Followers', data.followers, changeHtml)}
+        ${tile('Reach', data.reach)}
+        ${tile('Profile Views', data.profileViews)}
+        ${tile('Engagements', data.engagements)}
+      </div>`
+    + `<div class="ig-foot">${data.asOf ? 'As of ' + esc(data.asOf) : 'As of — (studio timezone unavailable)'}</div>`;
+}
+
+async function loadInstagram(pin, studioId) {
+  try {
+    renderInstagramCard(await fetchInstagramWithPin(pin, studioId));
+  } catch (e) {
+    console.error('Instagram load failed:', e);
+    const c = document.getElementById('card-instagram');
+    if (c) c.innerHTML = `<div class="card-head"><div class="title">📷 Instagram</div></div><div class="goal-note">Couldn't load Instagram right now. Try refreshing the page.</div>`;
+  }
+}
+
 // ---------- Daily Check-Ins (admin-only for now, simple count) ----------
 
 async function fetchCheckinCountWithPin(pin, studioId) {
@@ -2045,6 +2135,10 @@ function unlockDashboard(data) {
   if (_sessionPin) {
     loadCheckinCount(_sessionPin, data.studioId);
   }
+  // Instagram — moved from index.html's Community Hub.
+  if (_sessionPin) {
+    loadInstagram(_sessionPin, data.studioId);
+  }
   // Sales Goals — percentages only; refreshes every 5 minutes.
   if (_sessionPin) {
     loadGoalProgress(_sessionPin, data.studioId);
@@ -2086,6 +2180,7 @@ async function changeAdminStudio(studioId) {
     loadAllBookingBuckets(_sessionPin, studioId);
     loadCheckinCount(_sessionPin, studioId);
     loadGoalProgress(_sessionPin, studioId);
+    loadInstagram(_sessionPin, studioId);
     loadDailyHero(_sessionPin, studioId);
     loadMarketingSuggestions(_sessionPin, studioId);
     loadTodaysProjects(studioId);
