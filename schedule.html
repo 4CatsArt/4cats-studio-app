@@ -548,7 +548,7 @@ sb.auth.getSession().then(({ data: { session } }) => {
 
 let currentStudioId = null
 let dayViewSessionsCache = {}
-let eligibleAdjustStaffCache = null // populated on demand: [{id, display_name, manager_pin, role, can_adjust_spaces}]
+let eligibleAdjustStaffCache = null // populated on demand: [{id, display_name, role, can_adjust_spaces}]
 let pinVerifiedStaff = null // the staff row whose PIN was last accepted, for the active adjust flow
 let isAdminUser = false
 let allStudiosListCache = null
@@ -6092,14 +6092,28 @@ async function submitAdjustSpacesPin(sessionId) {
   submitBtn.disabled = true
   errEl.textContent = ''
 
-  const { data: staffRows } = await sb.from('staff_profiles')
-    .select('id, display_name, manager_pin, role, can_adjust_spaces, studio_ids, is_active')
-    .eq('manager_pin', pin).eq('is_active', true)
-
-  const match = (staffRows || []).find(s =>
-    (!s.studio_ids?.length || s.studio_ids.includes(currentStudioId)) &&
-    (s.role === 'admin' || (s.role === 'manager' && s.can_adjust_spaces))
-  )
+  // PIN is checked on the server (staff-pin Edge Function) — the browser never sees PINs
+  let match = null
+  try {
+    const res = await fetch(SUPABASE_URL + '/functions/v1/staff-pin', {
+      method: 'POST',
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'adjust_spaces', pin, studio_id: currentStudioId || '' })
+    })
+    const body = await res.json().catch(() => ({}))
+    if (!res.ok || body.error) {
+      errEl.textContent = body.error || 'Could not check PIN — try again.'
+      submitBtn.disabled = false
+      input.value = ''
+      input.focus()
+      return
+    }
+    match = body.match || null
+  } catch (e) {
+    errEl.textContent = 'Connection error — try again.'
+    submitBtn.disabled = false
+    return
+  }
 
   if (!match) {
     errEl.textContent = 'PIN not recognized or not authorized for this action.'
