@@ -4494,6 +4494,26 @@ async function adminDeleteTask(id) {
 
 
 // ── Staff ────────────────────────────────────────────────────
+// staff_profiles PINs are not readable directly (not even by home office) —
+// so select('*') would fail. staffCols() returns every column this login may
+// read; PINs go through admin_get_staff_pin / admin_set_staff_pin.
+let _staffColsPromise = null
+function staffCols() {
+  if (!_staffColsPromise) {
+    _staffColsPromise = sb.rpc('staff_profile_columns').then(({ data, error }) => {
+      if (error || !data) {
+        _staffColsPromise = null
+        const msg = 'Could not load staff columns: ' + (error?.message || 'no columns returned')
+        alert(msg)
+        throw new Error(msg)
+      }
+      return data
+    })
+  }
+  return _staffColsPromise
+}
+let staffPinLoaded = false   // true once the edit form holds the real current PIN
+
 let editingStaffId = null   // staff_profiles.id
 let editingUserId = null    // auth user id
 let editingIsActive = true
@@ -4536,7 +4556,7 @@ async function loadStaffTab() {
   const statusFilter = document.getElementById('staff-filter-status').value
   const roleFilter = document.getElementById('staff-filter-role').value
 
-  let query = sb.from('staff_profiles').select('*').order('display_name')
+  let query = sb.from('staff_profiles').select(await staffCols()).order('display_name')
   if (statusFilter === 'active') query = query.eq('is_active', true)
   if (statusFilter === 'inactive') query = query.eq('is_active', false)
   if (roleFilter) query = query.eq('role', roleFilter)
@@ -4659,7 +4679,7 @@ async function openStaffModal(id = null) {
     document.getElementById('staff-password-row').style.display = 'none'
     document.getElementById('staff-deactivate-btn-wrap').style.display = 'block'
 
-    const { data } = await sb.from('staff_profiles').select('*').eq('id', id).single()
+    const { data } = await sb.from('staff_profiles').select(await staffCols()).eq('id', id).single()
     if (data) {
       editingUserId = data.user_id
       editingIsActive = data.is_active
@@ -4676,7 +4696,17 @@ async function openStaffModal(id = null) {
       document.getElementById('staff-role').value = data.role || 'staff'
       document.getElementById('staff-employment').value = data.employment_type || 'regular'
       document.getElementById('staff-province').value = data.province_code || ''
-      document.getElementById('staff-pin').value = data.manager_pin || ''
+      staffPinLoaded = false
+      document.getElementById('staff-pin').value = ''
+      const { data: pinVal, error: pinErr } = await sb.rpc('admin_get_staff_pin', { p_profile_id: id })
+      if (pinErr) {
+        console.error('Could not load PIN', pinErr)
+        document.getElementById('staff-pin').placeholder = "Couldn't load — type to replace"
+      } else {
+        document.getElementById('staff-pin').value = pinVal || ''
+        document.getElementById('staff-pin').placeholder = 'e.g. 1234'
+        staffPinLoaded = true
+      }
       document.getElementById('staff-can-adjust-spaces').checked = !!data.can_adjust_spaces
       document.getElementById('staff-can-view-community-dashboard').checked = !!data.can_view_community_dashboard
       document.getElementById('staff-hire-date').value = data.hire_date || ''
@@ -4714,6 +4744,8 @@ async function openStaffModal(id = null) {
     document.getElementById('staff-employment').value = 'regular'
     document.getElementById('staff-province').value = ''
     document.getElementById('staff-pin').value = ''
+    document.getElementById('staff-pin').placeholder = 'e.g. 1234'
+    staffPinLoaded = true
     document.getElementById('staff-can-adjust-spaces').checked = false
     document.getElementById('staff-can-view-community-dashboard').checked = false
     document.getElementById('staff-hire-date').value = ''
@@ -4746,6 +4778,10 @@ async function saveStaff() {
   const studioIds = getSelectedStaffStudios()
   const trainingUnitIds = Array.from(document.querySelectorAll('.staff-unit-cb:checked')).map(cb => cb.value)
   const pinVal = document.getElementById('staff-pin').value.trim()
+  if (pinVal && !/^\d{4}$/.test(pinVal)) { alert('PIN must be exactly 4 digits.'); return }
+  // Only touch the PIN if we know its current value, or someone typed a new one —
+  // never wipe a PIN just because it failed to load.
+  const shouldSetPin = staffPinLoaded || !!pinVal
   const profilePayload = {
     display_name: name,
     nickname: document.getElementById('staff-nickname').value.trim() || null,
@@ -4755,7 +4791,6 @@ async function saveStaff() {
     employment_type: document.getElementById('staff-employment').value,
     province_code: document.getElementById('staff-province').value || null,
     training_unit_ids: trainingUnitIds,
-    manager_pin: pinVal || null,
     can_adjust_spaces: document.getElementById('staff-role').value === 'manager' ? document.getElementById('staff-can-adjust-spaces').checked : false,
     can_view_community_dashboard: document.getElementById('staff-can-view-community-dashboard').checked,
     hire_date: document.getElementById('staff-hire-date').value || null,
@@ -4773,8 +4808,12 @@ async function saveStaff() {
   if (editingStaffId) {
     // Update existing profile
     const { error } = await sb.from('staff_profiles').update(profilePayload).eq('id', editingStaffId)
+    if (error) { btn.textContent = 'Save'; btn.disabled = false; alert('Error: ' + error.message); return }
+    if (shouldSetPin) {
+      const { error: pinErr } = await sb.rpc('admin_set_staff_pin', { p_profile_id: editingStaffId, p_pin: pinVal || null })
+      if (pinErr) { btn.textContent = 'Save'; btn.disabled = false; alert('Profile saved, but the PIN was not: ' + pinErr.message); return }
+    }
     btn.textContent = 'Save'; btn.disabled = false
-    if (error) { alert('Error: ' + error.message); return }
     // Save due dates if user_id exists
     if (editingUserId && unitDueDates.length) {
       await sb.from('staff_training_due_dates').delete().eq('user_id', editingUserId)
@@ -4802,6 +4841,13 @@ async function saveStaff() {
     const result = await res.json()
     btn.textContent = 'Save'; btn.disabled = false
     if (result.error) { alert('Error: ' + result.error); return }
+    if (pinVal) {
+      const { data: newRow } = await sb.from('staff_profiles').select('id').eq('email', email).maybeSingle()
+      const { error: pinErr } = newRow
+        ? await sb.rpc('admin_set_staff_pin', { p_profile_id: newRow.id, p_pin: pinVal })
+        : { error: { message: 'new profile not found' } }
+      if (pinErr) alert('Staff member created, but the PIN was not saved (' + pinErr.message + '). Open them and set it again.')
+    }
   }
 
   closeStaffModal()
@@ -5819,7 +5865,7 @@ async function loadTrainingOverview() {
       trainingUnitsCache.filter(u => !u.is_draft).map(u => `<option value="${u.id}">${u.name}</option>`).join('')
   }
 
-  let staffQuery = sb.from('staff_profiles').select('*').eq('is_active', true).order('display_name')
+  let staffQuery = sb.from('staff_profiles').select(await staffCols()).eq('is_active', true).order('display_name')
   if (typeFilter) staffQuery = staffQuery.eq('employment_type', typeFilter)
   const { data: allStaff } = await staffQuery
   let staff = allStaff || []
@@ -6272,10 +6318,10 @@ async function applyMassDueDates() {
   if (massTarget === 'individual') {
     const userId = document.getElementById('mass-individual-staff').value
     if (!userId) { alert('Please select a staff member.'); btn.textContent = 'Apply'; btn.disabled = false; return }
-    const { data: s } = await sb.from('staff_profiles').select('*').eq('user_id', userId).single()
+    const { data: s } = await sb.from('staff_profiles').select(await staffCols()).eq('user_id', userId).single()
     if (s) staffWithLogin = [s]
   } else {
-    let { data: allStaff } = await sb.from('staff_profiles').select('*').eq('is_active', true)
+    let { data: allStaff } = await sb.from('staff_profiles').select(await staffCols()).eq('is_active', true)
     let staff = allStaff || []
     if (massTarget === 'studio') {
       const studioIds = getStudioPickerSelection('mass-studio-picker')
