@@ -80,8 +80,6 @@ button, input, select { font: inherit; color: inherit; }
 .daily-table td:not(.day-label) { width: 72px; max-width: 72px; }
 .daily-table td.day-label, .daily-table th.day-label { text-align: left; position: sticky; left: 0; background: var(--panel); z-index: 1; font-weight: 600; min-width: 90px; }
 .daily-table th.day-label { background: var(--soft); z-index: 2; }
-.daily-table td.total-col, .daily-table th.total-col { position: sticky; left: 90px; background: var(--panel); z-index: 1; font-weight: 700; border-right: 2px solid var(--line-2); min-width: 80px; }
-.daily-table th.total-col { background: var(--soft); z-index: 2; }
 .daily-table tr.summary-row td, .daily-table tr.summary-row th { background: var(--soft); font-weight: 600; }
 .daily-table tr.summary-row.top td { border-bottom: 2px solid var(--line-2); }
 .daily-table tr.summary-row.bottom td { border-top: 2px solid var(--line-2); }
@@ -129,6 +127,7 @@ button, input, select { font: inherit; color: inherit; }
         <button class="btn" id="tab-summary-btn" onclick="switchView('summary')">Monthly Summary</button>
         <button class="btn" id="tab-daily-btn" onclick="switchView('daily')">Daily Grid</button>
         <button class="btn" id="tab-schedule-btn" onclick="switchView('schedule')">Schedule</button>
+        <button class="btn" id="tab-unattr-btn" onclick="switchView('unattr')">Unattributed <span id="unattr-badge" style="display:none;background:#c0392b;color:#fff;border-radius:9px;padding:1px 7px;font-size:11px;margin-left:4px"></span></button>
       </div>
       <div class="muted small" style="flex:1">
         Rent/Supplies/Utilities/Wages are editable (amber columns) — saves automatically as you tab away from a field.
@@ -138,6 +137,7 @@ button, input, select { font: inherit; color: inherit; }
     <div class="panel" id="fin-body"><div class="loading">Loading…</div></div>
     <div class="panel" id="daily-body" style="display:none;margin-top:14px"></div>
     <div id="schedule-body" style="display:none;margin-top:14px"></div>
+    <div class="panel" id="unattr-body" style="display:none;margin-top:14px"></div>
   </div>
 </div>
 
@@ -229,145 +229,6 @@ function goToCurrentMonth() {
 }
 
 /* ---------- data loading ---------- */
-let pendingPayrollUpload = null // { matched, unmapped, target: {monthDate, periodNumber}, payDate } or null
-
-async function handlePayrollCSVUpload(file) {
-  if (!file) return
-  if (!payScheduleAnchor) { alert('Set up the Pay Schedule (⚙ button below) first — needed to auto-detect which pay period this belongs to.'); return }
-
-  const text = await file.text()
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l)
-  if (!lines.length) { alert('That file looks empty.'); return }
-
-  const raw = lines[0]
-  if (!/^\d{8}$/.test(raw)) { alert('Could not read a date (expected YYYYMMDD) from the first line of this file — is this a Payworks GL export?'); return }
-  const periodEndStr = raw.slice(0, 4) + '-' + raw.slice(4, 6) + '-' + raw.slice(6, 8)
-
-  const payDate = payDateForWorkDate(periodEndStr)
-  if (!payDate) { alert("Couldn't match this period-end date to a pay date using the current pay schedule settings — check the anchor date and lag."); return }
-  const target = monthAndPeriodForPayDate(payDate)
-  if (!target) { alert(`This file's pay date (${payDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}) doesn't line up with any Pay 1/2/3 slot for its month.`); return }
-
-  const wagesByDept = {}
-  for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(',')
-    if (cols.length >= 5 && cols[3] === 'Wages' && cols[1]) {
-      wagesByDept[cols[1]] = Math.abs(parseFloat(cols[4])) || 0
-    }
-  }
-  if (!Object.keys(wagesByDept).length) { alert('No "Wages" rows found in this file — is this the right export?'); return }
-
-  const { data: mapRows, error } = await sb.from('payroll_department_map').select('*')
-  if (error) { toast(error.message, true); return }
-  const deptMap = {}
-  ;(mapRows || []).forEach(r => { deptMap[r.department_number] = r.studio_id })
-
-  const matched = []
-  const unmapped = []
-  Object.entries(wagesByDept).forEach(([dept, amount]) => {
-    const studioId = deptMap[dept]
-    if (!studioId) { unmapped.push({ dept, amount }); return }
-    matched.push({ dept, studioId, amount })
-  })
-
-  pendingPayrollUpload = { matched, unmapped, target, payDate }
-  renderPayrollPreview()
-}
-
-function renderPayrollPreview() {
-  const el = document.getElementById('payroll-upload-preview')
-  if (!el) return
-  if (!pendingPayrollUpload) { el.innerHTML = ''; return }
-  const { matched, unmapped, target, payDate } = pendingPayrollUpload
-
-  const payLabel = `Pay ${target.periodNumber}, ${monthLabel(target.monthDate)} (pay date ${payDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })})`
-
-  const matchedRows = matched.map(m => {
-    const label = m.studioId === '__HOME_OFFICE__' ? 'Home Office' : esc(STUDIO_NAMES[m.studioId] || m.studioId)
-    return `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:13px"><span>${label}</span><span>${money(m.amount)}</span></div>`
-  }).join('')
-
-  const unmappedRows = unmapped.map((u, i) => `
-    <div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px">
-      <span style="min-width:80px">Dept ${esc(u.dept)}</span>
-      <span class="muted">${money(u.amount)}</span>
-      <select id="unmapped-select-${i}" style="font-size:12px">
-        <option value="">— assign a studio —</option>
-        <option value="__HOME_OFFICE__">Home Office</option>
-        ${STUDIO_IDS.map(id => `<option value="${id}">${esc(STUDIO_NAMES[id])}</option>`).join('')}
-      </select>
-    </div>`).join('')
-
-  el.innerHTML = `
-    <div style="margin-top:12px;border-top:1px solid var(--line-2);padding-top:12px">
-      <strong>${esc(payLabel)}</strong>
-      <div style="margin-top:8px;max-height:220px;overflow-y:auto">${matchedRows}</div>
-      ${unmapped.length ? `<div style="margin-top:10px;padding:8px;background:#fff3e0;border-radius:6px">
-        <strong class="muted small">Unrecognized department numbers — assign a studio to include them (saved for next time):</strong>
-        ${unmappedRows}
-      </div>` : ''}
-      <div style="margin-top:12px">
-        <button onclick="confirmPayrollUpload()" style="padding:6px 14px;border:none;border-radius:6px;background:var(--ink);color:#fff;cursor:pointer">Confirm & Save</button>
-        <button onclick="cancelPayrollUpload()" style="margin-left:8px;padding:6px 14px;border:0.5px solid var(--line-2);border-radius:6px;background:var(--panel);cursor:pointer">Cancel</button>
-      </div>
-    </div>`
-}
-
-function cancelPayrollUpload() {
-  pendingPayrollUpload = null
-  renderPayrollPreview()
-}
-
-async function confirmPayrollUpload() {
-  if (!pendingPayrollUpload) return
-  const { matched, unmapped, target } = pendingPayrollUpload
-  const monthDate = monthToDate(target.monthDate)
-
-  const newlyAssigned = []
-  unmapped.forEach((u, i) => {
-    const sel = document.getElementById('unmapped-select-' + i)
-    const studioId = sel ? sel.value : ''
-    if (studioId) newlyAssigned.push({ dept: u.dept, studioId, amount: u.amount })
-  })
-
-  if (newlyAssigned.length) {
-    const { error: mapErr } = await sb.from('payroll_department_map')
-      .upsert(newlyAssigned.map(n => ({ department_number: n.dept, studio_id: n.studioId })))
-    if (mapErr) { toast(mapErr.message, true); return }
-  }
-
-  const allRows = matched.concat(newlyAssigned)
-  const studioRows = allRows.filter(r => r.studioId !== '__HOME_OFFICE__')
-  const hoRow = allRows.find(r => r.studioId === '__HOME_OFFICE__')
-
-  for (const row of studioRows) {
-    const { error } = await sb.from('studio_pay_periods')
-      .upsert({ studio_id: row.studioId, month: monthDate, period_number: target.periodNumber, amount: row.amount, is_manual_override: true },
-        { onConflict: 'studio_id,month,period_number' })
-    if (error) { toast(error.message, true); return }
-    if (!payPeriodRows[row.studioId]) payPeriodRows[row.studioId] = {}
-    payPeriodRows[row.studioId][target.periodNumber] = row.amount
-  }
-
-  if (hoRow) {
-    const { error } = await sb.from('home_office_costs')
-      .upsert({ month: monthDate, period_number: target.periodNumber, amount: hoRow.amount }, { onConflict: 'month,period_number' })
-    if (error) { toast(error.message, true); return }
-    homeOfficeLabourPeriods[target.periodNumber] = hoRow.amount
-  }
-
-  toast(`Updated Pay ${target.periodNumber} (${monthLabel(target.monthDate)}) for ${studioRows.length} studio${studioRows.length === 1 ? '' : 's'}${hoRow ? ' + Home Office' : ''}.`)
-  pendingPayrollUpload = null
-
-  if (monthToText(currentMonth) === monthToText(target.monthDate)) {
-    await Promise.all(STUDIO_IDS.map(async (id) => {
-      const { data: prog } = await sb.rpc('get_studio_sales_goal_progress', { p_studio_id: id, p_month: monthToText(currentMonth) })
-      if (prog && prog[0]) progressRows[id] = prog[0]
-    }))
-  }
-  renderTable()
-}
-
 async function loadMonth() {
   document.getElementById('month-label').textContent = monthLabel(currentMonth)
   document.getElementById('fin-body').innerHTML = '<div class="loading">Loading…</div>'
@@ -417,6 +278,96 @@ async function loadMonth() {
 
   renderTable()
   if (currentView === 'daily') loadDailyGridIfNeeded()
+  loadUnattributed() // not awaited — fills the Unattributed tab + its badge in the background
+}
+
+/* ---------- Unattributed sales (line items with no studio) ---------- */
+let unattrRows = []
+let unattrLoadedFor = null
+let unattrShowAll = false
+
+async function loadUnattributed() {
+  const monthText = monthToText(currentMonth)
+  const { data, error } = await sb.rpc('get_unattributed_sales', { p_month: monthText })
+  if (monthToText(currentMonth) !== monthText) return // month changed while loading
+  if (error) { unattrRows = []; unattrLoadedFor = 'error:' + error.message }
+  else { unattrRows = data || []; unattrLoadedFor = monthText }
+  const needs = unattrRows.filter(r => r.item_type === 'NEEDS A STUDIO').length
+  const badge = document.getElementById('unattr-badge')
+  badge.textContent = needs
+  badge.style.display = needs > 0 ? 'inline-block' : 'none'
+  if (currentView === 'unattr') renderUnattributed()
+}
+
+function toggleUnattrShowAll() { unattrShowAll = !unattrShowAll; renderUnattributed() }
+
+function unattrTypeStyle(t) {
+  if (t === 'NEEDS A STUDIO') return 'background:#fdecea;color:#c0392b;font-weight:600'
+  if (t === 'membership') return 'background:#eef3fb;color:#2c5aa0'
+  if (t === 'gift card') return 'background:#f3eefb;color:#6b3fa0'
+  return 'background:#f1f1ec;color:#666'
+}
+
+function renderUnattributed() {
+  const body = document.getElementById('unattr-body')
+  if (!unattrLoadedFor) { body.innerHTML = '<div class="loading">Loading…</div>'; return }
+  if (String(unattrLoadedFor).startsWith('error:')) {
+    body.innerHTML = `<div style="padding:16px" class="profit-neg">Couldn't load unattributed sales: ${esc(unattrLoadedFor.slice(6))}<br><span class="muted small">Has the get_unattributed_sales SQL function been created?</span></div>`
+    return
+  }
+  const needsRows = unattrRows.filter(r => r.item_type === 'NEEDS A STUDIO')
+  const sum = rows => rows.reduce((t, r) => t + (Number(r.net_amount) || 0), 0)
+  const shown = unattrShowAll ? unattrRows : needsRows
+
+  const byDay = {}
+  shown.forEach(r => { (byDay[r.sale_day] = byDay[r.sale_day] || []).push(r) })
+  const days = Object.keys(byDay).sort().reverse()
+
+  const studioOptions = '<option value="">Assign studio…</option>' +
+    STUDIO_IDS.slice().sort((a, b) => STUDIO_NAMES[a].localeCompare(STUDIO_NAMES[b]))
+      .map(id => `<option value="${id}">${esc(STUDIO_NAMES[id])}</option>`).join('')
+
+  const rowHtml = r => `<tr>
+    <td style="text-align:left"><a href="https://admin.shopify.com/store/4cats-arts-studio-main-street/orders?query=${encodeURIComponent(String(r.shopify_order_name || '').replace('#', ''))}" target="_blank" rel="noopener">${esc(r.shopify_order_name)}</a></td>
+    <td style="text-align:left"><span style="padding:2px 8px;border-radius:9px;font-size:11px;${unattrTypeStyle(r.item_type)}">${esc(r.item_type)}</span></td>
+    <td style="text-align:left;white-space:normal;max-width:380px">${esc(r.product_title)}</td>
+    <td style="text-align:left;white-space:normal;max-width:260px" class="muted">${esc(r.variant_title || '')}</td>
+    <td>${esc(r.quantity)}</td>
+    <td>${money(r.net_amount)}</td>
+    <td><select onchange="assignUnattributedStudio('${esc(r.shopify_order_name)}','${esc(r.shopify_line_item_id || '')}',this)" style="font-size:12px;padding:3px">${studioOptions}</select></td>
+  </tr>`
+
+  const tableRows = days.map(d => {
+    const label = new Date(d + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+    return `<tr style="background:var(--soft)"><td colspan="5" style="text-align:left;font-weight:600">${label} <span class="muted small">· ${byDay[d].length} item${byDay[d].length === 1 ? '' : 's'}</span></td><td style="font-weight:600">${money(sum(byDay[d]))}</td><td></td></tr>` +
+      byDay[d].map(rowHtml).join('')
+  }).join('')
+
+  body.innerHTML = `<div style="display:flex;gap:28px;align-items:flex-end;padding:14px 18px;flex-wrap:wrap;border-bottom:0.5px solid var(--line)">
+      <div><div class="muted small">Needs a studio</div><div style="font-size:20px;font-weight:700" class="${needsRows.length ? 'profit-neg' : ''}">${needsRows.length} · ${money(sum(needsRows))}</div></div>
+      <div><div class="muted small">All unattributed this month</div><div style="font-size:20px;font-weight:700">${unattrRows.length} · ${money(sum(unattrRows))}</div></div>
+      <div class="muted small" style="max-width:420px;line-height:1.4"><b>Needs a studio</b> = classes, parties, add-ons or anything dated that came in without a studio — these should be assigned. Memberships, gift cards and online/warehouse items are expected and already counted in the Membership and Warehouse buckets.</div>
+      <div style="margin-left:auto"><button class="btn" onclick="toggleUnattrShowAll()">${unattrShowAll ? 'Show only “Needs a studio”' : 'Show all unattributed'}</button></div>
+    </div>
+    ${shown.length ? `<table class="fin-table"><thead><tr>
+        <th style="text-align:left">Order</th><th style="text-align:left">Type</th><th style="text-align:left">Product</th><th style="text-align:left">Variant</th><th>Qty</th><th>Net</th><th>Studio</th>
+      </tr></thead><tbody>${tableRows}</tbody></table>`
+      : `<div style="padding:24px" class="muted">${unattrShowAll ? 'No unattributed sales this month.' : 'Nothing needs a studio this month. ✓'}</div>`}`
+}
+
+async function assignUnattributedStudio(orderName, lineItemId, sel) {
+  const studioId = sel.value
+  if (!studioId) return
+  if (!confirm(`Assign ${orderName} to ${STUDIO_NAMES[studioId]}? It will count toward that studio's sales.`)) { sel.value = ''; return }
+  sel.disabled = true
+  const { data, error } = await sb.rpc('set_sales_line_studio', { p_order_name: orderName, p_line_item_id: lineItemId || null, p_studio_id: studioId })
+  if (error || !data) {
+    toast(error ? error.message : 'Nothing was updated (already assigned?)', true)
+    sel.disabled = false; sel.value = ''
+    return
+  }
+  toast(`${orderName} assigned to ${STUDIO_NAMES[studioId]}`)
+  loadMonth() // refresh studio totals, buckets and this tab
 }
 
 /* ---------- rendering ---------- */
@@ -678,15 +629,6 @@ function renderTable() {
     <input type="number" step="0.01" value="${homeOfficeLabourPeriods[n] == null ? '' : homeOfficeLabourPeriods[n]}" style="width:100px"
       onchange="saveHomeOfficeLabour(${n},this.value)" aria-label="Home office labour pay period ${n}">
   </label>`
-  const uploadPanel = `<div class="panel" style="padding:14px 18px;margin-bottom:14px">
-    <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
-      <span style="padding:6px 12px;border:0.5px solid var(--line-2);border-radius:6px;background:var(--panel);font-size:12px">📤 Upload Payroll CSV</span>
-      <input type="file" accept=".csv" style="display:none" onchange="handlePayrollCSVUpload(this.files[0]); this.value=''">
-      <span class="muted small">Parses a Payworks GL export and fills in the matching Pay 1/2/3 slot automatically, for whichever studios it covers</span>
-    </label>
-    <div id="payroll-upload-preview"></div>
-  </div>`
-
   const hoPanel = `<div class="panel" style="display:flex;align-items:flex-end;gap:24px;padding:14px 18px;margin-bottom:14px;flex-wrap:wrap">
     <div><div class="muted small" style="margin-bottom:6px">Home Office Labour</div>
       <div style="display:flex;gap:10px">${hoPeriodInput(1)}${hoPeriodInput(2)}${hoPeriodInput(3)}</div>
@@ -697,7 +639,7 @@ function renderTable() {
     <div style="margin-left:auto"><button onclick="togglePayPeriods()" style="padding:6px 12px;border:0.5px solid var(--line-2);border-radius:6px;background:var(--panel);cursor:pointer;font-size:12px">${showPayPeriods ? '◂ Hide pay periods' : '▸ Show pay periods'}</button></div>
   </div>`
 
-  body.innerHTML = uploadPanel + hoPanel + `<table class="fin-table">
+  body.innerHTML = hoPanel + `<table class="fin-table">
     <thead><tr>${summaryHeaderHtml()}
     </tr></thead>
     <tbody>${rows}${bucketRows}</tbody>
@@ -1785,7 +1727,7 @@ let dailyLoadedForMonth = null
 
 function switchView(view) {
   currentView = view
-  ;[['summary','tab-summary-btn'],['daily','tab-daily-btn'],['schedule','tab-schedule-btn']].forEach(([v, id]) => {
+  ;[['summary','tab-summary-btn'],['daily','tab-daily-btn'],['schedule','tab-schedule-btn'],['unattr','tab-unattr-btn']].forEach(([v, id]) => {
     const btn = document.getElementById(id)
     btn.style.background = view === v ? 'var(--ink)' : '#fff'
     btn.style.color = view === v ? '#fff' : 'var(--ink)'
@@ -1793,6 +1735,8 @@ function switchView(view) {
   document.getElementById('fin-body').style.display = view === 'summary' ? '' : 'none'
   document.getElementById('daily-body').style.display = view === 'daily' ? '' : 'none'
   document.getElementById('schedule-body').style.display = view === 'schedule' ? '' : 'none'
+  document.getElementById('unattr-body').style.display = view === 'unattr' ? '' : 'none'
+  if (view === 'unattr') renderUnattributed()
   if (view === 'daily') loadDailyGridIfNeeded()
   if (view === 'schedule') loadScheduleView()
 }
@@ -1928,10 +1872,10 @@ function renderDailyGrid() {
     <span class="muted small">Membership/Warehouse = unattributed sales with no studio signal (memberships bought standalone, gift cards, standalone kit sales, etc.)</span>
   </div>`
 
-  const headerCols = `<th class="total-col">Total</th>` + ids.map(id => `<th>${esc(labelFor(id))}</th>`).join('')
+  const headerCols = ids.map(id => `<th>${esc(labelFor(id))}</th>`).join('')
 
   function summaryRow(label, fn, cls) {
-    return `<tr class="summary-row ${cls || ''}"><td class="day-label">${esc(label)}</td><td class="total-col">—</td>${
+    return `<tr class="summary-row ${cls || ''}"><td class="day-label">${esc(label)}</td>${
       ids.map(id => `<td>${fn(id)}</td>`).join('')
     }</tr>`
   }
@@ -1945,43 +1889,19 @@ function renderDailyGrid() {
     summaryRow('Daily Goal', id => money((progressRows[id] || {}).daily_sales_goal), 'top')
   ].join('')
 
-  // Which day (if any) each studio's running total first reaches its
-  // monthly goal — only that specific day gets the magenta milestone
-  // highlight; every other day (before or after) keeps the normal heat scale.
-  const goalReachedDay = {}
-  STUDIO_IDS.forEach(id => {
-    const goal = (progressRows[id] || {}).monthly_sales_goal
-    if (!goal) return
-    let running = 0
-    for (let day = 1; day <= nDays; day++) {
-      const dateStr = monthText + '-' + String(day).padStart(2, '0')
-      const total = (dailySales[id] || {})[dateStr]
-      if (total == null) continue
-      const before = running
-      running += total
-      if (before < goal && running >= goal) { goalReachedDay[id] = day; break }
-    }
-  })
-
   const dayRows = []
   for (let day = 1; day <= nDays; day++) {
     const dateStr = monthText + '-' + String(day).padStart(2, '0')
     const dow = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), day).toLocaleDateString('en-US', { weekday: 'short' })
-    let dayTotal = null
     const cells = ids.map(id => {
       const total = (dailySales[id] || {})[dateStr]
-      if (total != null) dayTotal = (dayTotal || 0) + total
       const goal = (progressRows[id] || {}).daily_sales_goal
       if (total == null) return `<td class="daily-cell empty">—</td>`
-      if (goalReachedDay[id] === day) {
-        return `<td class="daily-cell" style="background:#c2185b;color:#fff" title="Monthly goal reached today">${money(total)}</td>`
-      }
       const pct = goal ? (total / goal) * 100 : null
       const bg = dailyHeatColor(pct)
       return `<td class="daily-cell" style="background:${bg}">${money(total)}</td>`
     }).join('')
-    const totalCell = `<td class="total-col">${money(dayTotal)}</td>`
-    dayRows.push(`<tr><td class="day-label">${dow}, ${monthLabel(currentMonth).split(' ')[0].slice(0,3)} ${day}</td>${totalCell}${cells}</tr>`)
+    dayRows.push(`<tr><td class="day-label">${dow}, ${monthLabel(currentMonth).split(' ')[0].slice(0,3)} ${day}</td>${cells}</tr>`)
   }
 
   const monthTotalFor = id => id.startsWith('__') ? bucketTotals[id.replace(/__/g, '')] : (progressRows[id] || {}).this_month_total
