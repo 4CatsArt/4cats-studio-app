@@ -1802,10 +1802,25 @@ function dailyHeatColor(pct) {
   return `rgb(${r},${g},${b})`
 }
 
-let dailyGridSortMode = 'province' // 'province' | 'sales_asc' | 'sales_desc'
+let dailyGridSortMode = 'province' // 'province' | 'sales_asc' | 'sales_desc' | 'pace_asc' | 'pace_desc'
 
 function sortedStudioIdsForDailyGrid() {
   if (dailyGridSortMode === 'province') return STUDIO_IDS // natural order, already grouped by province
+
+  // Colour sort = pace sort: sorting by pace % groups the colour tiers together
+  // (red, orange, turquoise, green, magenta) and orders studios within each tier.
+  // Studios with no pace yet (no colour) always go last.
+  if (dailyGridSortMode === 'pace_asc' || dailyGridSortMode === 'pace_desc') {
+    const dir = dailyGridSortMode === 'pace_asc' ? 1 : -1
+    return STUDIO_IDS.slice().sort((a, b) => {
+      const pa = (progressRows[a] || {}).pace_pct, pb = (progressRows[b] || {}).pace_pct
+      const na = pa == null || isNaN(Number(pa)), nb = pb == null || isNaN(Number(pb))
+      if (na && nb) return 0
+      if (na) return 1
+      if (nb) return -1
+      return (Number(pa) - Number(pb)) * dir
+    })
+  }
 
   const withTotals = STUDIO_IDS.map(id => ({
     id,
@@ -1839,6 +1854,24 @@ function computeSystemTotals() {
   return { systemTotalThisMonth, systemDailyGoal, systemPacePct }
 }
 
+// Pace tiers for the Daily Grid studio headers (based on % Based on Daily Pace)
+const PACE_TIERS = [
+  { min: -Infinity, max: 10,  label: 'Closed',          note: 'less than 10%',             bg: '#d32f2f', fg: '#fff' },
+  { min: 10,        max: 50,  label: 'SOS',             note: 'needs immediate attention · 10–50%', bg: '#f57c00', fg: '#fff' },
+  { min: 50,        max: 80,  label: 'Action plan',     note: '50–80% of goal',            bg: '#75fcfd', fg: '#000' },
+  { min: 80,        max: 100, label: 'Planned growth',  note: '80–100% of goal',           bg: '#75fc4c', fg: '#000' },
+  { min: 100,       max: Infinity, label: 'All good',   note: 'over goal',                 bg: '#e0218a', fg: '#fff' },
+]
+function paceTier(pct) {
+  if (pct == null || isNaN(Number(pct))) return null
+  const v = Number(pct)
+  if (v > 100) return PACE_TIERS[4]
+  if (v >= 80) return PACE_TIERS[3]
+  if (v >= 50) return PACE_TIERS[2]
+  if (v >= 10) return PACE_TIERS[1]
+  return PACE_TIERS[0]
+}
+
 function renderDailyGrid() {
   applyWageEstimates()
   const monthText = monthToText(currentMonth)
@@ -1867,12 +1900,23 @@ function renderDailyGrid() {
         <option value="province" ${dailyGridSortMode === 'province' ? 'selected' : ''}>Province</option>
         <option value="sales_asc" ${dailyGridSortMode === 'sales_asc' ? 'selected' : ''}>Sales: low to high</option>
         <option value="sales_desc" ${dailyGridSortMode === 'sales_desc' ? 'selected' : ''}>Sales: high to low</option>
+        <option value="pace_asc" ${dailyGridSortMode === 'pace_asc' ? 'selected' : ''}>Colour: red → magenta (needs attention first)</option>
+        <option value="pace_desc" ${dailyGridSortMode === 'pace_desc' ? 'selected' : ''}>Colour: magenta → red (best first)</option>
       </select>
     </label>
     <span class="muted small">Membership/Warehouse = unattributed sales with no studio signal (memberships bought standalone, gift cards, standalone kit sales, etc.)</span>
   </div>`
 
-  const headerCols = ids.map(id => `<th>${esc(labelFor(id))}</th>`).join('')
+  const headerCols = ids.map(id => {
+    const pace = id.startsWith('__') ? null : (progressRows[id] || {}).pace_pct
+    const t = paceTier(pace)
+    if (!t) return `<th>${esc(labelFor(id))}</th>`
+    return `<th style="background:${t.bg};color:${t.fg}" title="${esc(t.label)} — ${esc(t.note)} (pace ${pace}%)">${esc(labelFor(id))}<div style="font-size:10px;font-weight:600;margin-top:3px;opacity:0.95">${esc(t.label)} · ${pace}%</div></th>`
+  }).join('')
+
+  const paceLegend = `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;font-size:11px">${
+    PACE_TIERS.map(t => `<span style="background:${t.bg};color:${t.fg};padding:3px 9px;border-radius:9px"><b>${esc(t.label)}</b> · ${esc(t.note)}</span>`).join('')
+  }<span class="muted" style="align-self:center">— based on each studio's % Based on Daily Pace</span></div>`
 
   function summaryRow(label, fn, cls) {
     return `<tr class="summary-row ${cls || ''}"><td class="day-label">${esc(label)}</td>${
@@ -1914,7 +1958,7 @@ function renderDailyGrid() {
     summaryRow('Est. Profit', id => money(computeProfit(id)))
   ].join('')
 
-  container.innerHTML = systemPanel + sortBar + `<table class="daily-table">    <thead><tr><th class="day-label">Day</th>${headerCols}</tr></thead>
+  container.innerHTML = systemPanel + sortBar + paceLegend + `<table class="daily-table">    <thead><tr><th class="day-label">Day</th>${headerCols}</tr></thead>
     <tbody>${topRows}${dayRows.join('')}${bottomRows}</tbody>
   </table>`
 }
