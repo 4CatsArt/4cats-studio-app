@@ -25,11 +25,20 @@ h1 { font-size: 20px; margin: 0; }
 #error-msg { display: none; color: #c0392b; font-size: 13px; margin-top: 10px; }
 .legend { display: flex; gap: 8px; flex-wrap: wrap; font-size: 12px; margin: 14px 0; }
 .legend span { padding: 3px 10px; border-radius: 9px; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
-.tile { border-radius: 10px; padding: 14px 12px; min-height: 92px; display: flex; flex-direction: column; justify-content: space-between; border: 0.5px solid rgba(0,0,0,0.08); }
-.tile .name { font-size: 12px; font-weight: 700; text-transform: uppercase; line-height: 1.25; }
-.tile .pct { font-size: 26px; font-weight: 800; margin-top: 8px; }
-.tile.none { background: #fff; color: var(--muted); }
+.board { background: var(--panel); border: 0.5px solid var(--line); border-radius: 12px; overflow: hidden; max-width: 900px; }
+.row { display: grid; grid-template-columns: 52px 1fr 220px 90px; align-items: center; gap: 12px; padding: 9px 16px; border-bottom: 0.5px solid var(--line); }
+.row:last-child { border-bottom: 0; }
+.rank { font-size: 18px; font-weight: 800; color: var(--muted); text-align: center; }
+.rank.top { color: var(--ink); }
+.studio { font-weight: 700; text-transform: uppercase; font-size: 13px; }
+.sub { font-size: 11px; color: var(--muted); margin-top: 2px; font-weight: 400; text-transform: none; }
+.bar { height: 12px; border-radius: 6px; background: #efefea; overflow: hidden; }
+.bar > div { height: 100%; border-radius: 6px; }
+.pct { font-size: 18px; font-weight: 800; text-align: right; padding: 3px 8px; border-radius: 8px; }
+.seg { display: inline-flex; border: 0.5px solid var(--line-2); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; background: #fff; padding: 7px 16px; font-size: 13px; cursor: pointer; }
+.seg button.on { background: var(--ink); color: #fff; font-weight: 600; }
+@media (max-width: 640px) { .row { grid-template-columns: 36px 1fr 74px; } .bar { display: none; } }
 .loading { padding: 30px; text-align: center; color: var(--muted); }
 </style>
 </head>
@@ -49,22 +58,26 @@ h1 { font-size: 20px; margin: 0; }
 <div id="app-screen" style="display:none" class="wrap">
   <div class="toolbar" style="margin-bottom:6px">
     <h1>Studio Pace</h1>
-    <button class="btn" onclick="shiftMonth(-1)" aria-label="Previous month">‹</button>
-    <div id="month-label" style="font-weight:700;min-width:130px;text-align:center"></div>
-    <button class="btn" onclick="shiftMonth(1)" aria-label="Next month">›</button>
+    <div class="seg">
+      <button id="view-day" class="on" onclick="setView('day')">Today</button>
+      <button id="view-month" onclick="setView('month')">This month</button>
+    </div>
+    <button class="btn" onclick="shiftDay(-1)" aria-label="Previous day">‹</button>
+    <div id="day-label" style="font-weight:700;min-width:150px;text-align:center"></div>
+    <button class="btn" id="next-day-btn" onclick="shiftDay(1)" aria-label="Next day">›</button>
+    <button class="btn" id="today-btn" onclick="goToday()">Today</button>
     <button class="btn" id="refresh-btn" onclick="loadPace()" style="font-weight:600">⟳ Refresh</button>
     <span class="muted small" id="updated-label"></span>
-    <span style="margin-left:auto" class="small muted">View in order of</span>
-    <select id="sort-select" class="btn" onchange="sortMode = this.value; render()">
-      <option value="province">Province</option>
-      <option value="pace_asc">Daily pace %: low to high (red → magenta)</option>
-      <option value="pace_desc">Daily pace %: high to low (magenta → red)</option>
+    <span style="margin-left:auto"></span>
+    <select id="order-select" class="btn" onchange="orderMode = this.value; render()">
+      <option value="best">Best first</option>
+      <option value="worst">Needs attention first</option>
     </select>
     <button class="btn" onclick="signOut()">Sign out</button>
   </div>
   <div id="legend" class="legend"></div>
   <div id="pace-body"><div class="loading">Loading…</div></div>
-  <p class="muted small" style="margin-top:14px">Daily pace % = how a studio's sales this month compare with where they need to be by today to hit the monthly goal. 100% = exactly on track.</p>
+  <p class="muted small" style="margin-top:14px;max-width:900px;line-height:1.5" id="explain"></p>
 </div>
 
 <script>
@@ -107,13 +120,18 @@ function paceTier(pct) {
 
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])) }
 
-// Current month in Pacific time (finance days end at midnight Pacific)
-const ptNow = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Vancouver' }).split('-').map(Number)
-let currentMonth = new Date(ptNow[0], ptNow[1] - 1, 1)
-let paceRows = {}
-let sortMode = 'province'
+// "Today" in Pacific time (finance days end at midnight Pacific)
+function pacificToday() {
+  const p = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Vancouver' }).split('-').map(Number)
+  return new Date(p[0], p[1] - 1, p[2])
+}
+let currentDay = pacificToday()
+let viewMode = 'day'     // 'day' | 'month'
+let orderMode = 'best'   // 'best' | 'worst'
+let rows = []            // [{ studio_id, day_pct, month_pace_pct, month_goal_pct }]
 
-function monthToText(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') }
+function dayToText(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') }
+function isToday(d) { return dayToText(d) === dayToText(pacificToday()) }
 
 /* ---------- auth ---------- */
 sb.auth.getSession().then(({ data: { session } }) => { if (session) initApp(session.user) })
@@ -145,53 +163,88 @@ async function initApp(user) {
   loadPace()
 }
 
-/* ---------- data ---------- */
-function shiftMonth(n) {
-  currentMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + n, 1)
+/* ---------- navigation ---------- */
+function setView(v) {
+  viewMode = v
+  document.getElementById('view-day').className = v === 'day' ? 'on' : ''
+  document.getElementById('view-month').className = v === 'month' ? 'on' : ''
+  render()
+}
+function shiftDay(n) {
+  const d = new Date(currentDay.getFullYear(), currentDay.getMonth(), currentDay.getDate() + n)
+  if (d > pacificToday()) return
+  currentDay = d
   loadPace()
 }
+function goToday() { currentDay = pacificToday(); loadPace() }
 
+/* ---------- data ---------- */
 async function loadPace() {
   const btn = document.getElementById('refresh-btn')
   btn.disabled = true; btn.textContent = '⟳ Refreshing…'
-  document.getElementById('month-label').textContent = currentMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
-  const monthText = monthToText(currentMonth)
-  const { data, error } = await sb.rpc('get_network_pace', { p_month: monthText })
+  document.getElementById('day-label').textContent = currentDay.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+  document.getElementById('next-day-btn').disabled = isToday(currentDay)
+  document.getElementById('today-btn').disabled = isToday(currentDay)
+  const dayText = dayToText(currentDay)
+  const { data, error } = await sb.rpc('get_pace_leaderboard', { p_day: dayText })
   btn.disabled = false; btn.textContent = '⟳ Refresh'
-  if (monthToText(currentMonth) !== monthText) return // month changed while loading
+  if (dayToText(currentDay) !== dayText) return // day changed while loading
   if (error) {
     document.getElementById('pace-body').innerHTML = `<div class="panel" style="color:#c0392b">Couldn't load pace: ${esc(error.message)}</div>`
     return
   }
-  paceRows = {}
-  ;(data || []).forEach(r => { paceRows[r.studio_id] = r.pace_pct == null ? null : Number(r.pace_pct) })
+  rows = (data || []).map(r => ({
+    studio_id: r.studio_id,
+    day_pct: r.day_pct == null ? null : Number(r.day_pct),
+    month_pace_pct: r.month_pace_pct == null ? null : Number(r.month_pace_pct),
+    month_goal_pct: r.month_goal_pct == null ? null : Number(r.month_goal_pct),
+  }))
   document.getElementById('updated-label').textContent = 'Updated ' + new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
   render()
 }
 
 /* ---------- render ---------- */
-function sortedIds() {
-  if (sortMode === 'province') return STUDIO_IDS
-  const dir = sortMode === 'pace_asc' ? 1 : -1
-  return STUDIO_IDS.slice().sort((a, b) => {
-    const pa = paceRows[a], pb = paceRows[b]
-    const na = pa == null, nb = pb == null
-    if (na && nb) return 0
-    if (na) return 1
-    if (nb) return -1
-    return (pa - pb) * dir
-  })
-}
-
 function render() {
-  const tiles = sortedIds().map(id => {
-    const pace = paceRows[id]
-    const t = paceTier(pace)
-    if (!t) return `<div class="tile none"><div class="name">${esc(STUDIO_NAMES[id])}</div><div class="pct">—</div></div>`
-    return `<div class="tile" style="background:${t.bg};color:${t.fg}" title="${esc(t.label)} — ${esc(t.note)}">
-      <div class="name">${esc(STUDIO_NAMES[id])}</div><div class="pct">${pace}%</div></div>`
+  const metric = viewMode === 'day' ? 'day_pct' : 'month_pace_pct'
+  const byId = {}
+  rows.forEach(r => { byId[r.studio_id] = r })
+  const list = STUDIO_IDS.map(id => byId[id] || { studio_id: id, day_pct: null, month_pace_pct: null, month_goal_pct: null })
+  const dir = orderMode === 'best' ? -1 : 1
+  list.sort((a, b) => {
+    const va = a[metric], vb = b[metric]
+    if (va == null && vb == null) return STUDIO_NAMES[a.studio_id].localeCompare(STUDIO_NAMES[b.studio_id])
+    if (va == null) return 1
+    if (vb == null) return -1
+    return (va - vb) * dir
+  })
+
+  // Rank 1 = best, always; ties share a rank
+  const ranked = list.filter(r => r[metric] != null).slice().sort((a, b) => b[metric] - a[metric])
+  const rankOf = {}
+  ranked.forEach((r, i) => { rankOf[r.studio_id] = (i > 0 && ranked[i - 1][metric] === r[metric]) ? rankOf[ranked[i - 1].studio_id] : i + 1 })
+
+  const dayWord = isToday(currentDay) ? 'today' : currentDay.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  const html = list.map(r => {
+    const v = r[metric]
+    const t = paceTier(v)
+    const rank = rankOf[r.studio_id]
+    const medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : (rank ? rank : '—')
+    const barW = v == null ? 0 : Math.max(2, Math.min(100, v / 1.5))  // bar full at 150%
+    const sub = viewMode === 'day'
+      ? (r.month_pace_pct == null ? '' : `Month pace ${r.month_pace_pct}%`)
+      : (r.month_goal_pct == null ? '' : `${r.month_goal_pct}% of the full month's goal reached`)
+    return `<div class="row">
+      <div class="rank ${rank && rank <= 3 ? 'top' : ''}">${medal}</div>
+      <div class="studio">${esc(STUDIO_NAMES[r.studio_id])}<div class="sub">${esc(sub)}</div></div>
+      <div class="bar"><div style="width:${barW}%;background:${t ? t.bg : 'transparent'}"></div></div>
+      <div class="pct" style="${t ? `background:${t.bg};color:${t.fg}` : 'color:var(--muted)'}">${v == null ? '—' : v + '%'}</div>
+    </div>`
   }).join('')
-  document.getElementById('pace-body').innerHTML = `<div class="grid">${tiles}</div>`
+  document.getElementById('pace-body').innerHTML = `<div class="board">${html}</div>`
+
+  document.getElementById('explain').innerHTML = viewMode === 'day'
+    ? `<b>Today</b> = ${esc(dayWord)}'s sales compared with the studio's daily goal (monthly goal ÷ days in the month). 100% = hit the daily goal.${isToday(currentDay) ? ' Today is still in progress, so this climbs through the day.' : ''}`
+    : `<b>This month</b> = month-to-date sales compared with where the studio needs to be by ${esc(dayWord)} to hit its monthly goal. 100% = exactly on track. The smaller number shows how much of the full month's goal is already reached.`
 }
 </script>
 </body>
