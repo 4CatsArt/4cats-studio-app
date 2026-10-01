@@ -1035,7 +1035,7 @@ var STUDIO_NAMES = {
 
 // ── STATE ────────────────────────────────────────────────────
 var pinBuffer = '';
-var currentManager = null;   // { id, display_name, nickname, studio_ids, manager_pin }
+var currentManager = null;   // { id, display_name, nickname, studio_ids, role } — PIN is never sent to the browser
 var currentStudio = '';
 var currentStaff = null;     // { id, user_id, display_name, nickname, role }
 var trainingUnits = [];
@@ -1129,22 +1129,32 @@ function showError(msg) {
 // PIN-first: look up who this PIN belongs to, then only ask which
 // studio if that's actually ambiguous (a floater with multiple
 // studios, or — rarely — two different people sharing a PIN).
-function attemptLogin() {
-  var url = SUPABASE_URL + '/rest/v1/staff_profiles'
-    + '?select=id,display_name,nickname,studio_ids,role,manager_pin'
-    + '&is_active=eq.true'
-    + '&manager_pin=eq.' + encodeURIComponent(pinBuffer)
-    + '&role=in.(manager,admin)';
-
-  fetch(url, {
+// PINs are checked on the server (staff-pin Edge Function); the browser
+// never sees anyone's PIN.
+function callStaffPin(payload) {
+  return fetch(SUPABASE_URL + '/functions/v1/staff-pin', {
+    method: 'POST',
     headers: {
       'apikey': SUPABASE_ANON,
-      'Authorization': 'Bearer ' + SUPABASE_ANON
-    }
+      'Authorization': 'Bearer ' + SUPABASE_ANON,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
   })
-  .then(function(res) { return res.json(); })
-  .then(function(data) {
-    if (!data || !data.length) {
+  .then(function(res) {
+    return res.json().then(function(body) { return { status: res.status, body: body || {} }; });
+  });
+}
+
+function attemptLogin() {
+  callStaffPin({ action: 'training_login', pin: pinBuffer })
+  .then(function(r) {
+    if (r.status !== 200 || r.body.error) {
+      showError(r.body.error || 'Could not check PIN — try again');
+      return;
+    }
+    var data = r.body.matches || [];
+    if (!data.length) {
       showError('Incorrect PIN');
       return;
     }
@@ -1748,8 +1758,7 @@ function goBackToPicker() {
 var switchPinBuffer = '';
 
 function openSwitchPinScreen() {
-  // If no PIN on record just go straight through
-  if (!currentManager || !currentManager.manager_pin) {
+  if (!currentManager) {
     goBackToPicker();
     return;
   }
@@ -1793,21 +1802,39 @@ function updateSwitchPinDots(isError) {
   }
 }
 
+var switchPinChecking = false;
+
 function verifySwitchPin() {
-  if (!currentManager || switchPinBuffer !== currentManager.manager_pin) {
-    updateSwitchPinDots(true);
-    document.getElementById('switch-pin-error').textContent = 'Incorrect PIN';
-    var display = document.getElementById('switch-pin-display');
-    display.className = 'pin-display shake';
-    setTimeout(function() {
-      display.className = 'pin-display';
-      switchPinBuffer = '';
-      updateSwitchPinDots(false);
-    }, 500);
-    return;
-  }
-  closeSwitchPinScreen();
-  goBackToPicker();
+  if (!currentManager || switchPinChecking) return;
+  switchPinChecking = true;
+  document.getElementById('switch-pin-error').textContent = 'Checking…';
+  callStaffPin({ action: 'confirm', profile_id: currentManager.id, pin: switchPinBuffer })
+  .then(function(r) {
+    switchPinChecking = false;
+    if (r.status === 200 && r.body.ok === true) {
+      document.getElementById('switch-pin-error').textContent = '';
+      closeSwitchPinScreen();
+      goBackToPicker();
+      return;
+    }
+    switchPinFailed(r.status === 200 ? 'Incorrect PIN' : (r.body.error || 'Could not check PIN — try again'));
+  })
+  .catch(function() {
+    switchPinChecking = false;
+    switchPinFailed('Connection error — try again');
+  });
+}
+
+function switchPinFailed(msg) {
+  updateSwitchPinDots(true);
+  document.getElementById('switch-pin-error').textContent = msg;
+  var display = document.getElementById('switch-pin-display');
+  display.className = 'pin-display shake';
+  setTimeout(function() {
+    display.className = 'pin-display';
+    switchPinBuffer = '';
+    updateSwitchPinDots(false);
+  }, 500);
 }
 
 function doLock() {
