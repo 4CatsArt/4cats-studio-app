@@ -304,6 +304,15 @@ body.preview-mode .section-head.dev-only { display: flex !important; }
 .friday-tile .detail { font-size: 11.5px; color: var(--ink-soft); margin-top: 2px; }
 .friday-tile .no-cap { font-size: 12.5px; color: var(--amber); font-weight: 600; margin-top: 8px; }
 
+.goal-tile .progress-track { height: 8px; margin-top: 10px; }
+.goal-tile .progress-fill.hit { background: var(--green); }
+.goal-pace { display: inline-block; margin-top: 8px; font-size: 11.5px; font-weight: 700; padding: 3px 9px; border-radius: 999px; }
+.goal-pace.ahead { background: var(--green-bg); color: var(--green); }
+.goal-pace.close { background: var(--amber-bg); color: var(--amber); }
+.goal-pace.behind { background: var(--red-bg); color: var(--red); }
+.goal-note { font-size: 11.5px; color: var(--ink-soft); margin-top: 2px; }
+.goal-msg { font-size: 13px; color: var(--amber); font-weight: 600; padding: 4px 0; }
+
 .friday-chart-scroll { overflow-x: auto; padding-bottom: 4px; }
 .friday-chart-scroll svg { display: block; }
 
@@ -638,6 +647,12 @@ body.preview-mode .section-head.dev-only { display: flex !important; }
     <!-- Friday event fill rate — the one LIVE feature; visible in both modes -->
     <div class="section-head ops">Friday Night Events — Fill Rate</div>
     <div class="card friday-card" id="card-friday-fillrate"></div>
+
+    <!-- Sales goals — percentages only, never dollars (enforced server-side
+         in community-goal-progress). Built to be safe for studio-mode /
+         staff logins later. -->
+    <div class="section-head ops">🎯 Sales Goals</div>
+    <div class="card sales-card" id="card-sales-goals"></div>
 
     <!-- Studio sales — LIVE for everyone now. Each manager sees only their
          own studio's numbers (enforced server-side in community-sales-data,
@@ -1697,6 +1712,95 @@ function loadAllBookingBuckets(pin, studioId) {
   loadBookingBucketStats(pin, studioId, 'team_building');
 }
 
+// ---------- Sales Goals (percentages only) ----------
+// community-goal-progress never returns dollar amounts — only % of today's
+// goal, % of the monthly goal, and a pace status. Same goal formula as
+// finance.html, including estimated wages for pay periods not yet entered.
+
+const GOAL_REFRESH_MS = 5 * 60 * 1000; // 5 min — sales don't need 60s polling
+let _goalRefreshTimer = null;
+
+async function fetchGoalProgressWithPin(pin, studioId) {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/community-goal-progress`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+    },
+    body: JSON.stringify(studioId ? { pin, studioId } : { pin })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+function goalTileHtml(eyebrow, pct, extraHtml, live) {
+  const hit = pct >= 100;
+  const width = Math.max(0, Math.min(pct, 100));
+  return `
+    <div class="friday-tile goal-tile${live ? ' live' : ''}">
+      <div class="eyebrow">${live ? '<span class="live-dot"></span> ' : ''}${esc(eyebrow)}</div>
+      <div class="pct${hit ? ' hit' : ''}">${pct}%</div>
+      <div class="progress-track"><div class="progress-fill${hit ? ' hit' : ''}" style="width:${width}%"></div></div>
+      ${extraHtml || ''}
+    </div>`;
+}
+
+function renderGoalCard(data) {
+  const container = document.getElementById('card-sales-goals');
+  if (!container) return;
+
+  if (!data || data.error || !data.studioId) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const studioName = STUDIO_NAMES[data.studioId] || data.studioId;
+  const head = `<div class="card-head"><div class="title">🎯 Sales Goals — ${esc(studioName)}</div></div>`;
+
+  // Fail clearly: no goal set, or no timezone — say so instead of showing 0%.
+  if (data.status !== 'ok') {
+    container.innerHTML = head + `<div class="goal-msg">${esc(data.message || 'Goal tracking isn\'t available yet.')}</div>`;
+    return;
+  }
+
+  const paceLabel = {
+    ahead: '✓ On pace for the month',
+    close: 'Slightly behind pace',
+    behind: 'Behind pace'
+  }[data.paceStatus] || '';
+
+  const todayTile = goalTileHtml('Today', data.todayPct,
+    `<div class="goal-note">of today's goal · as of ${esc(data.asOf)}</div>`, true);
+
+  const monthTile = goalTileHtml(monthLabel(data.month), data.monthPct,
+    `<div class="goal-note">of the monthly goal · ${data.daysLeftInMonth} day${data.daysLeftInMonth === 1 ? '' : 's'} left</div>
+     ${paceLabel ? `<span class="goal-pace ${esc(data.paceStatus)}">${paceLabel}</span>` : ''}`, false);
+
+  const estNote = data.isAdmin && data.goalUsesEstimatedWages
+    ? `<div class="goal-note" style="margin-top:-6px">Goal includes estimated wages for pay periods not entered yet (same as finance tool).</div>`
+    : '';
+
+  container.innerHTML = head + `<div class="friday-summary">${todayTile}${monthTile}</div>` + estNote;
+}
+
+async function loadGoalProgress(pin, studioId) {
+  try {
+    const data = await fetchGoalProgressWithPin(pin, studioId);
+    renderGoalCard(data);
+  } catch (e) {
+    console.error('Sales goal load failed:', e);
+  }
+}
+
+function startGoalRefresh() {
+  if (_goalRefreshTimer) clearInterval(_goalRefreshTimer);
+  _goalRefreshTimer = setInterval(() => {
+    if (_sessionPin) loadGoalProgress(_sessionPin, _sessionStudioId);
+  }, GOAL_REFRESH_MS);
+}
+
 // ---------- Daily Check-Ins (admin-only for now, simple count) ----------
 
 async function fetchCheckinCountWithPin(pin, studioId) {
@@ -1849,6 +1953,11 @@ function unlockDashboard(data) {
   if (_sessionPin) {
     loadCheckinCount(_sessionPin, data.studioId);
   }
+  // Sales Goals — percentages only; refreshes every 5 minutes.
+  if (_sessionPin) {
+    loadGoalProgress(_sessionPin, data.studioId);
+    startGoalRefresh();
+  }
 }
 
 // Admin-only: a studio dropdown pinned above the Friday card. Changing it
@@ -1884,6 +1993,7 @@ async function changeAdminStudio(studioId) {
     loadStudioSales(_sessionPin, studioId, null);
     loadAllBookingBuckets(_sessionPin, studioId);
     loadCheckinCount(_sessionPin, studioId);
+    loadGoalProgress(_sessionPin, studioId);
     loadDailyHero(_sessionPin, studioId);
     loadMarketingSuggestions(_sessionPin, studioId);
     loadTodaysProjects(studioId);
@@ -2190,6 +2300,7 @@ function lockDashboard() {
   document.getElementById('dashboard-gate').style.display = 'flex';
   renderDashboardPinGate();
   if (_fridayRefreshTimer) { clearInterval(_fridayRefreshTimer); _fridayRefreshTimer = null; }
+  if (_goalRefreshTimer) { clearInterval(_goalRefreshTimer); _goalRefreshTimer = null; }
   if (_inactivityTimer) { clearTimeout(_inactivityTimer); _inactivityTimer = null; }
 }
 
