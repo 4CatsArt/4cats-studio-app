@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="https://cdn.shopify.com/s/files/1/1451/3756/files/favicon_black_512x512_9c6dd2c0-fdcd-4575-887e-bf65538803af.png?v=1631720337">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>4Cats Studio Pace</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+:root { --bg: #f5f5f0; --panel: #ffffff; --ink: #1a1a1a; --muted: #888; --line: #e0e0d8; --line-2: #d0d0c8; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--ink); font-size: 14px; }
+.wrap { padding: 1.25rem; }
+.panel { background: var(--panel); border: 0.5px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+.btn { padding: 6px 14px; border-radius: 6px; font-size: 13px; cursor: pointer; border: 0.5px solid var(--line-2); background: #fff; height: 32px; }
+.btn:hover { background: var(--bg); }
+.btn:disabled { opacity: 0.6; cursor: default; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+.toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+h1 { font-size: 20px; margin: 0; }
+#login-screen { max-width: 340px; margin: 12vh auto; }
+#login-screen input { width: 100%; padding: 9px 10px; margin: 6px 0 10px; border: 0.5px solid var(--line-2); border-radius: 6px; font-size: 14px; }
+#login-screen button { width: 100%; height: 38px; }
+#error-msg { display: none; color: #c0392b; font-size: 13px; margin-top: 10px; }
+.legend { display: flex; gap: 8px; flex-wrap: wrap; font-size: 12px; margin: 14px 0; }
+.legend span { padding: 3px 10px; border-radius: 9px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+.tile { border-radius: 10px; padding: 14px 12px; min-height: 92px; display: flex; flex-direction: column; justify-content: space-between; border: 0.5px solid rgba(0,0,0,0.08); }
+.tile .name { font-size: 12px; font-weight: 700; text-transform: uppercase; line-height: 1.25; }
+.tile .pct { font-size: 26px; font-weight: 800; margin-top: 8px; }
+.tile.none { background: #fff; color: var(--muted); }
+.loading { padding: 30px; text-align: center; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<div id="login-screen" class="panel">
+  <h1>4Cats Studio Pace</h1>
+  <p class="muted small">Home office sign in</p>
+  <label class="small">Email</label>
+  <input id="email-input" type="email" autocomplete="username">
+  <label class="small">Password</label>
+  <input id="password-input" type="password" autocomplete="current-password">
+  <button class="btn" onclick="signIn()">Sign in</button>
+  <div id="error-msg"></div>
+</div>
+
+<div id="app-screen" style="display:none" class="wrap">
+  <div class="toolbar" style="margin-bottom:6px">
+    <h1>Studio Pace</h1>
+    <button class="btn" onclick="shiftMonth(-1)" aria-label="Previous month">‹</button>
+    <div id="month-label" style="font-weight:700;min-width:130px;text-align:center"></div>
+    <button class="btn" onclick="shiftMonth(1)" aria-label="Next month">›</button>
+    <button class="btn" id="refresh-btn" onclick="loadPace()" style="font-weight:600">⟳ Refresh</button>
+    <span class="muted small" id="updated-label"></span>
+    <span style="margin-left:auto" class="small muted">View in order of</span>
+    <select id="sort-select" class="btn" onchange="sortMode = this.value; render()">
+      <option value="province">Province</option>
+      <option value="pace_asc">Daily pace %: low to high (red → magenta)</option>
+      <option value="pace_desc">Daily pace %: high to low (magenta → red)</option>
+    </select>
+    <button class="btn" onclick="signOut()">Sign out</button>
+  </div>
+  <div id="legend" class="legend"></div>
+  <div id="pace-body"><div class="loading">Loading…</div></div>
+  <p class="muted small" style="margin-top:14px">Daily pace % = how a studio's sales this month compare with where they need to be by today to hit the monthly goal. 100% = exactly on track.</p>
+</div>
+
+<script>
+const SUPABASE_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co'
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA'
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY)
+
+const STUDIO_NAMES = {
+  'BC-RICH-GC':'Richmond - Garden City','BC-RICH-STV':'Richmond - Steveston','BC-SUR-SSR':'Surrey - South',
+  'BC-YVR-KIT':'Vancouver - Kitsilano','BC-YVR-MS':'Vancouver - Main Street','BC-YVR-UBC':'Vancouver - UBC',
+  'BC-YYJ-CSV':'Victoria - Cook Street Village','BC-YYJ-ESQ':'Victoria - Esquimalt','BC-YYJ-OB':'Victoria - Oak Bay',
+  'BC-YYJ-VIC':'Victoria - Uptown','AB-YYC-ING':'Calgary - Inglewood','AB-STA-STA':'St Albert',
+  'ON-BRL-BRL':'Burlington - South','ON-CMB-GLT':'Cambridge - Galt','ON-ERN-ERN':'Erin',
+  'ON-HAM-OS':'Hamilton - Ottawa Street','ON-HAM-WD':'Hamilton - Waterdown','ON-HAM-WH':'Hamilton - West Harbour',
+  'ON-KGN-AP':'Kingston - Arlington Park','ON-LDN-BYR':'London - Byron','ON-LDN-WVG':'London - Wortley Village',
+  'ON-MIS-PC':'Mississauga - Port Credit','ON-OAK-OAK':'Oakville - North','ON-OAK-WST':'Oakville - West',
+  'ON-YOW-GLB':'Ottawa - The Glebe','ON-STC-STC':'St Catharines','ON-YYZ-AVE':'Toronto - Avenue Road',
+  'ON-YYZ-BP':'Toronto - Baby Point','ON-YYZ-LEA':'Toronto - Leaside','ON-YYZ-BEA':'Toronto - The Beaches',
+  'ON-WTR-WTR':'Waterloo - Uptown'
+}
+const STUDIO_IDS = Object.keys(STUDIO_NAMES)
+
+const PACE_TIERS = [
+  { min: -Infinity, max: 10,  label: 'Closed',          note: 'less than 10%',             bg: '#d32f2f', fg: '#fff' },
+  { min: 10,        max: 50,  label: 'SOS',             note: 'needs immediate attention · 10–50%', bg: '#f57c00', fg: '#fff' },
+  { min: 50,        max: 80,  label: 'Action plan',     note: '50–80% of goal',            bg: '#75fcfd', fg: '#000' },
+  { min: 80,        max: 100, label: 'Planned growth',  note: '80–100% of goal',           bg: '#75fc4c', fg: '#000' },
+  { min: 100,       max: Infinity, label: 'All good',   note: 'over goal',                 bg: '#e0218a', fg: '#fff' },
+]
+function paceTier(pct) {
+  if (pct == null || isNaN(Number(pct))) return null
+  const v = Number(pct)
+  if (v > 100) return PACE_TIERS[4]
+  if (v >= 80) return PACE_TIERS[3]
+  if (v >= 50) return PACE_TIERS[2]
+  if (v >= 10) return PACE_TIERS[1]
+  return PACE_TIERS[0]
+}
+
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])) }
+
+// Current month in Pacific time (finance days end at midnight Pacific)
+const ptNow = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Vancouver' }).split('-').map(Number)
+let currentMonth = new Date(ptNow[0], ptNow[1] - 1, 1)
+let paceRows = {}
+let sortMode = 'province'
+
+function monthToText(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') }
+
+/* ---------- auth ---------- */
+sb.auth.getSession().then(({ data: { session } }) => { if (session) initApp(session.user) })
+document.getElementById('password-input').addEventListener('keydown', e => { if (e.key === 'Enter') signIn() })
+
+async function signIn() {
+  const email = document.getElementById('email-input').value.trim()
+  const password = document.getElementById('password-input').value
+  const errEl = document.getElementById('error-msg')
+  errEl.style.display = 'none'
+  const { data, error } = await sb.auth.signInWithPassword({ email, password })
+  if (error) { errEl.textContent = error.message; errEl.style.display = 'block'; return }
+  initApp(data.user)
+}
+
+async function signOut() { await sb.auth.signOut(); location.reload() }
+
+async function initApp(user) {
+  const { data: mapping } = await sb.from('studio_users').select('role').eq('user_id', user.id).maybeSingle()
+  if (!mapping || (mapping.role !== 'admin' && mapping.role !== 'pace_viewer')) {
+    const errEl = document.getElementById('error-msg')
+    errEl.textContent = 'This account does not have access to Studio Pace.'; errEl.style.display = 'block'
+    await sb.auth.signOut(); return
+  }
+  document.getElementById('login-screen').style.display = 'none'
+  document.getElementById('app-screen').style.display = 'block'
+  document.getElementById('legend').innerHTML = PACE_TIERS.map(t =>
+    `<span style="background:${t.bg};color:${t.fg}"><b>${esc(t.label)}</b> · ${esc(t.note)}</span>`).join('')
+  loadPace()
+}
+
+/* ---------- data ---------- */
+function shiftMonth(n) {
+  currentMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + n, 1)
+  loadPace()
+}
+
+async function loadPace() {
+  const btn = document.getElementById('refresh-btn')
+  btn.disabled = true; btn.textContent = '⟳ Refreshing…'
+  document.getElementById('month-label').textContent = currentMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+  const monthText = monthToText(currentMonth)
+  const { data, error } = await sb.rpc('get_network_pace', { p_month: monthText })
+  btn.disabled = false; btn.textContent = '⟳ Refresh'
+  if (monthToText(currentMonth) !== monthText) return // month changed while loading
+  if (error) {
+    document.getElementById('pace-body').innerHTML = `<div class="panel" style="color:#c0392b">Couldn't load pace: ${esc(error.message)}</div>`
+    return
+  }
+  paceRows = {}
+  ;(data || []).forEach(r => { paceRows[r.studio_id] = r.pace_pct == null ? null : Number(r.pace_pct) })
+  document.getElementById('updated-label').textContent = 'Updated ' + new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+  render()
+}
+
+/* ---------- render ---------- */
+function sortedIds() {
+  if (sortMode === 'province') return STUDIO_IDS
+  const dir = sortMode === 'pace_asc' ? 1 : -1
+  return STUDIO_IDS.slice().sort((a, b) => {
+    const pa = paceRows[a], pb = paceRows[b]
+    const na = pa == null, nb = pb == null
+    if (na && nb) return 0
+    if (na) return 1
+    if (nb) return -1
+    return (pa - pb) * dir
+  })
+}
+
+function render() {
+  const tiles = sortedIds().map(id => {
+    const pace = paceRows[id]
+    const t = paceTier(pace)
+    if (!t) return `<div class="tile none"><div class="name">${esc(STUDIO_NAMES[id])}</div><div class="pct">—</div></div>`
+    return `<div class="tile" style="background:${t.bg};color:${t.fg}" title="${esc(t.label)} — ${esc(t.note)}">
+      <div class="name">${esc(STUDIO_NAMES[id])}</div><div class="pct">${pace}%</div></div>`
+  }).join('')
+  document.getElementById('pace-body').innerHTML = `<div class="grid">${tiles}</div>`
+}
+</script>
+</body>
+</html>
