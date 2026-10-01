@@ -11388,6 +11388,7 @@ async function removeAgeException(id, name) {
   </p>
 
   <div style="display:flex;gap:0;border-bottom:0.5px solid #e0e0d8;margin-bottom:1.25rem;flex-wrap:wrap">
+    <button id="cp-subbtn-coordinators" onclick="cpSwitchSub('coordinators')" class="cp-subbtn">Coordinators</button>
     <button id="cp-subbtn-rules" onclick="cpSwitchSub('rules')" class="cp-subbtn">Earning Rules</button>
     <button id="cp-subbtn-prizes" onclick="cpSwitchSub('prizes')" class="cp-subbtn">Prizes</button>
     <button id="cp-subbtn-levels" onclick="cpSwitchSub('levels')" class="cp-subbtn">Levels</button>
@@ -11418,6 +11419,16 @@ async function removeAgeException(id, name) {
 .cp-pill-fulfilled { background:#e8f5e9; color:#2e7d32; }
 .cp-pill-cancelled { background:#f0f0ea; color:#999; }
 .cp-note { font-size:12px; color:#888; margin:0.5rem 0 1rem; }
+.sc-table { width:100%; border-collapse:collapse; font-size:13px; }
+.sc-table th { text-align:left; font-size:11px; color:#888; text-transform:uppercase; letter-spacing:0.4px; font-weight:500; padding:6px 8px; border-bottom:0.5px solid #e0e0d8; }
+.sc-table td { padding:9px 8px; border-bottom:0.5px solid #f0f0ea; vertical-align:top; }
+.sc-actions { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
+.sc-none { color:#e65100; font-weight:500; }
+.sc-flag { display:inline-block; margin-left:6px; padding:1px 7px; border-radius:10px; font-size:11px; font-weight:500; background:#fdecea; color:#c0392b; }
+.sc-upcoming { font-size:12px; color:#1565c0; margin-top:3px; }
+.sc-sub { font-size:12px; color:#888; margin-top:2px; }
+.sc-history td { background:#fafaf7; font-size:12px; color:#555; }
+.sc-history-row { padding:3px 0; }
 .cp-muted { color:#aaa; font-size:11px; }
 .cp-row-off td { opacity:0.5; }
 .cp-check { display:flex; align-items:center; gap:8px; font-size:13px; }
@@ -11432,7 +11443,8 @@ async function removeAgeException(id, name) {
 // ═══════════════════════════════════════════════
 const CP_URL = SUPABASE_URL + '/functions/v1/community-points-admin'
 let cpData = null
-let cpSub = 'rules'
+let cpSub = 'coordinators'
+let cpLoadError = null
 let cpRedemptionFilter = 'open'
 let cpModalSaveFn = null
 
@@ -11465,11 +11477,15 @@ async function loadPointsTab() {
   document.getElementById('cp-body').innerHTML = '<div class="empty">Loading…</div>'
   try {
     cpData = await cpRequest('get_all')
+    cpLoadError = null
     cpUpdateBadges()
-    cpSwitchSub(cpSub)
   } catch (e) {
-    document.getElementById('cp-body').innerHTML = `<div class="empty" style="color:#c0392b">Failed to load: ${cpEsc(e.message)}</div>`
+    // Points tables/function may not be live yet — the Coordinators sub-tab
+    // doesn't depend on them, so keep it usable either way.
+    cpData = null
+    cpLoadError = 'Failed to load: ' + e.message
   }
+  cpSwitchSub(cpSub)
 }
 
 async function cpRefresh() {
@@ -11498,8 +11514,9 @@ function cpSwitchSub(sub) {
 }
 
 function cpRender() {
-  if (!cpData) return
   const body = document.getElementById('cp-body')
+  if (cpSub === 'coordinators') { scLoad(); return }
+  if (!cpData) { body.innerHTML = `<div class="empty" style="color:#c0392b">${cpEsc(cpLoadError || 'Points data isn\'t loaded yet.')}</div>`; return }
   if (cpSub === 'rules') body.innerHTML = cpRenderRules()
   if (cpSub === 'prizes') body.innerHTML = cpRenderPrizes()
   if (cpSub === 'levels') body.innerHTML = cpRenderLevels()
@@ -11933,6 +11950,189 @@ async function cpModalSave() {
   btn.disabled = true; btn.textContent = 'Saving…'; err.textContent = ''
   try { await cpModalSaveFn(); cpCloseModal(); await cpRefresh() }
   catch (e) { err.textContent = e.message; btn.disabled = false; btn.textContent = 'Save' }
+}
+
+// ═══ COORDINATORS ═════════════════════════════════
+// Who each studio's SC (studio coordinator) is, and since when. Uses the
+// studio_coordinators SQL functions directly (admin-checked in the database),
+// so it works even before the points tables/Edge Function are live.
+let scRows = null
+let scHistoryOpen = {}
+let scModalSaveFn = null
+
+function scErrMsg(error) {
+  const m = (error && error.message) || String(error)
+  if (/Could not find the function|does not exist/i.test(m)) return 'The studio_coordinators SQL hasn\'t been run yet.'
+  return m
+}
+function scToday() {
+  const d = new Date()
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
+}
+function scDate(d) { return d ? new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' }) : '' }
+function scName(r) { return r.display_name || r.nickname || 'Unnamed' }
+function scDayBefore(ymd) {
+  const [y, m, d] = ymd.split('-').map(Number)
+  const dt = new Date(Date.UTC(y, m - 1, d - 1))
+  return dt.toISOString().slice(0, 10)
+}
+
+async function scLoad() {
+  const body = document.getElementById('cp-body')
+  if (!scRows) body.innerHTML = '<div class="empty">Loading…</div>'
+  const { data, error } = await sb.rpc('list_studio_coordinators')
+  if (cpSub !== 'coordinators') return
+  if (error) { body.innerHTML = `<div class="empty" style="color:#c0392b">Couldn't load coordinators: ${cpEsc(scErrMsg(error))}</div>`; return }
+  scRows = data || []
+  body.innerHTML = scRender()
+}
+
+function scRender() {
+  const today = scToday()
+  const byStudio = {}
+  scRows.forEach(r => { (byStudio[r.studio_id] = byStudio[r.studio_id] || []).push(r) }) // newest first
+  let withSc = 0
+
+  const rows = allStudios.map(s => {
+    const hist = byStudio[s.id] || []
+    const current = hist.find(r => r.start_date <= today && (!r.end_date || r.end_date >= today))
+    const upcoming = hist.filter(r => r.start_date > today).pop()
+    const open = hist.find(r => !r.end_date)
+    const lastEnded = !current ? hist.find(r => r.end_date && r.end_date < today) : null
+    if (current) withSc++
+
+    let who
+    if (current) {
+      who = `<strong>${cpEsc(scName(current))}</strong>${current.staff_is_active ? '' : '<span class="sc-flag">inactive staff profile</span>'}
+             <div class="sc-sub">Since ${scDate(current.start_date)}${current.end_date ? ' · ends ' + scDate(current.end_date) : ''}</div>`
+    } else {
+      who = `<span class="sc-none">No SC</span>${lastEnded ? `<div class="sc-sub">${cpEsc(scName(lastEnded))} ended ${scDate(lastEnded.end_date)}</div>` : ''}`
+    }
+    if (upcoming) who += `<div class="sc-upcoming">Starting ${scDate(upcoming.start_date)}: ${cpEsc(scName(upcoming))}</div>`
+
+    const actions = [
+      `<button class="btn btn-primary" onclick="scOpenAssignModal('${cpEsc(s.id)}')">${hist.length ? 'Change SC' : 'Assign SC'}</button>`,
+      open ? `<button class="btn" onclick="scOpenEndModal('${cpEsc(s.id)}')">End</button>` : '',
+      hist.length ? `<button class="btn" onclick="scUndo('${cpEsc(s.id)}')" title="Undo the most recent change for this studio">Undo last change</button>` : '',
+      hist.length ? `<button class="btn" onclick="scToggleHistory('${cpEsc(s.id)}')">History (${hist.length})</button>` : ''
+    ].join('')
+
+    const historyRow = scHistoryOpen[s.id] && hist.length ? `
+      <tr class="sc-history"><td colspan="3">${hist.map(r => `
+        <div class="sc-history-row"><strong>${cpEsc(scName(r))}</strong> · ${scDate(r.start_date)} → ${r.end_date ? scDate(r.end_date) : 'current'}${r.note ? ' · ' + cpEsc(r.note) : ''}</div>`).join('')}
+      </td></tr>` : ''
+
+    return `<tr><td>${cpEsc(getStudioName(s.id))}</td><td>${who}</td><td><div class="sc-actions">${actions}</div></td></tr>${historyRow}`
+  }).join('')
+
+  const missing = allStudios.length - withSc
+  return `
+    <div class="cp-summary">
+      <div class="cp-stat"><div class="cp-stat-label">Studios with an SC</div><div class="cp-stat-value">${withSc} / ${allStudios.length}</div>
+        <div class="cp-stat-sub">${missing ? missing + ' still need one' : 'Every studio is covered'}</div></div>
+    </div>
+    <p class="cp-note">Each studio has one SC at a time. Changing the SC ends the current one the day before the new start date, so points and check-ins are always credited to whoever held the role that day. Use <strong>Undo last change</strong> to fix a mistake.</p>
+    <div class="cp-card" style="padding:0.5rem 0.75rem">
+      <table class="sc-table">
+        <thead><tr><th style="width:28%">Studio</th><th>Studio Coordinator</th><th style="text-align:right">Actions</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`
+}
+
+function scToggleHistory(studioId) {
+  scHistoryOpen[studioId] = !scHistoryOpen[studioId]
+  document.getElementById('cp-body').innerHTML = scRender()
+}
+
+function scOpenModal(title, sub, innerHtml, saveFn, saveLabel) {
+  scModalSaveFn = saveFn
+  document.getElementById('cp-modal-root').innerHTML = `
+    <div class="modal-overlay"><div class="modal-box">
+      <div class="modal-header"><div><div class="modal-title">${cpEsc(title)}</div><div class="modal-sub">${cpEsc(sub)}</div></div>
+        <button class="modal-close" onclick="scCloseModal()">×</button></div>
+      ${innerHtml}
+      <div id="sc-modal-error" style="color:#c0392b;font-size:13px;margin-top:0.75rem"></div>
+      <div class="modal-actions"><button class="btn" onclick="scCloseModal()">Cancel</button>
+        <button class="btn btn-primary" id="sc-modal-save" onclick="scModalSave()" ${saveFn ? '' : 'disabled'}>${cpEsc(saveLabel || 'Save')}</button></div>
+    </div></div>`
+}
+function scCloseModal() { document.getElementById('cp-modal-root').innerHTML = ''; scModalSaveFn = null }
+async function scModalSave() {
+  if (!scModalSaveFn) return
+  const btn = document.getElementById('sc-modal-save'), err = document.getElementById('sc-modal-error')
+  const label = btn.textContent
+  btn.disabled = true; btn.textContent = 'Saving…'; err.textContent = ''
+  try { await scModalSaveFn(); scCloseModal(); await scLoad() }
+  catch (e) { err.textContent = scErrMsg(e); btn.disabled = false; btn.textContent = label }
+}
+
+async function scOpenAssignModal(studioId) {
+  const studioName = getStudioName(studioId)
+  scOpenModal('Studio Coordinator', studioName, '<div class="empty">Loading staff…</div>', null)
+  const { data, error } = await sb.rpc('list_coordinator_candidates', { p_studio_id: studioId })
+  if (error) { scOpenModal('Studio Coordinator', studioName, `<div style="color:#c0392b">${cpEsc(scErrMsg(error))}</div>`, null); return }
+
+  const people = data || []
+  if (!people.length) {
+    scOpenModal('Studio Coordinator', studioName,
+      `<p style="font-size:13px">No active staff are linked to ${cpEsc(studioName)}. Add the studio to the person's profile in the <strong>Staff</strong> tab first.</p>`, null)
+    return
+  }
+
+  const open = (scRows || []).find(r => r.studio_id === studioId && !r.end_date)
+  const html = `
+    ${open ? `<p style="font-size:13px;margin-bottom:0.75rem">Current SC: <strong>${cpEsc(scName(open))}</strong> (since ${scDate(open.start_date)}). Their role will end the day before the new start date.</p>` : ''}
+    <div class="modal-field"><label>New SC</label>
+      <select id="sc-person"><option value="">Choose a staff member…</option>
+        ${people.map(p => `<option value="${cpEsc(p.id)}">${cpEsc(p.display_name || p.nickname || 'Unnamed')}${p.role ? ' (' + cpEsc(p.role) + ')' : ''}</option>`).join('')}
+      </select></div>
+    <div class="modal-field"><label>Start date (first day in the role)</label><input id="sc-start" type="date" value="${scToday()}"></div>
+    <div class="modal-field"><label>Note (optional)</label><input id="sc-note" placeholder="e.g. Ana moved to Uptown"></div>`
+
+  scOpenModal(open ? 'Change Studio Coordinator' : 'Assign Studio Coordinator', studioName, html, async () => {
+    const person = document.getElementById('sc-person').value
+    const start = document.getElementById('sc-start').value
+    if (!person) throw new Error('Choose a staff member.')
+    if (!start) throw new Error('Choose a start date.')
+    const { error } = await sb.rpc('assign_studio_coordinator', {
+      p_studio_id: studioId, p_staff_profile_id: person, p_start_date: start,
+      p_note: document.getElementById('sc-note').value
+    })
+    if (error) throw error
+  }, open ? 'Change SC' : 'Assign SC')
+}
+
+function scOpenEndModal(studioId) {
+  const studioName = getStudioName(studioId)
+  const open = (scRows || []).find(r => r.studio_id === studioId && !r.end_date)
+  if (!open) return
+  const html = `
+    <p style="font-size:13px;margin-bottom:0.75rem">Ends <strong>${cpEsc(scName(open))}</strong>'s role with no replacement. Use this when an SC leaves before a new one is chosen. To hand over to someone new, use <strong>Change SC</strong> instead.</p>
+    <div class="modal-field"><label>Last day in the role</label><input id="sc-end" type="date" value="${scToday()}"></div>
+    <div class="modal-field"><label>Note (optional)</label><input id="sc-end-note" placeholder="e.g. Left 4Cats"></div>`
+  scOpenModal('End Studio Coordinator', studioName, html, async () => {
+    const end = document.getElementById('sc-end').value
+    if (!end) throw new Error('Choose an end date.')
+    const { error } = await sb.rpc('end_studio_coordinator', {
+      p_studio_id: studioId, p_end_date: end, p_note: document.getElementById('sc-end-note').value
+    })
+    if (error) throw error
+  }, 'End role')
+}
+
+async function scUndo(studioId) {
+  const hist = (scRows || []).filter(r => r.studio_id === studioId) // newest first
+  if (!hist.length) return
+  const latest = hist[0]
+  const msg = latest.end_date
+    ? `Undo ending ${scName(latest)}'s role? They'll be the current SC again.`
+    : `Undo ${scName(latest)}'s assignment (starting ${scDate(latest.start_date)})?` +
+      (hist[1] && hist[1].end_date && scDayBefore(latest.start_date) === hist[1].end_date ? ` ${scName(hist[1])} will be reopened as the current SC.` : '')
+  if (!confirm(msg + '\n\nOnly use this to fix a mistake. Real handovers should stay in the history.')) return
+  const { error } = await sb.rpc('undo_last_coordinator_change', { p_studio_id: studioId })
+  if (error) { alert(scErrMsg(error)); return }
+  await scLoad()
 }
 </script>
 
