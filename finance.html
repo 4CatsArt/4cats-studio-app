@@ -64,6 +64,8 @@ button, input, select { font: inherit; color: inherit; }
 .fin-table th.studio-name { min-width: 150px; }
 .fin-table input[type="number"]::placeholder { color: #a8a8a8; font-style: italic; }
 .est { color: #9a9a9a; font-style: italic; }
+.fin-table tr.totals-row td { font-weight: 700; background: var(--soft); border-bottom: 2px solid var(--line); }
+.fin-table tr.totals-row td.studio-name { background: var(--soft); }
 .fin-table input[type="number"]:focus { border-color: #888; outline: none; }
 .pct-good { color: var(--good); font-weight: 600; }
 .pct-bad { color: var(--bad); font-weight: 600; }
@@ -603,6 +605,57 @@ function summaryCell(key, studioId) {
   return '<td>—</td>'
 }
 
+// Totals row shown at the top of the Monthly Summary. Money columns are plain
+// sums of the studio rows (pay periods include the grey estimates, same as
+// Wages Total). MTD Sales also adds Membership + Warehouse, so it matches the
+// system-wide total. The % columns are recomputed from the totals (not
+// averaged), so bigger studios count for more.
+function summaryTotalsRowHtml(cols) {
+  const ids = STUDIO_IDS
+  const num = v => Number(v) || 0
+  const sumBy = fn => ids.reduce((a, id) => a + num(fn(id)), 0)
+  const anyGoalEst = ids.some(id => (progressRows[id] || {})._estimated)
+
+  const payTotal = n => {
+    let total = 0, est = false
+    ids.forEach(id => {
+      const v = (payPeriodRows[id] || {})[n]
+      if (hasAmount(v)) total += Number(v)
+      else { const e = estimatedPeriodAmount(id, n); if (e != null) { total += e; est = true } }
+    })
+    return { total, est }
+  }
+
+  const wages = sumBy(id => wagesTotal(id))
+  const wagesEst = ids.some(id => wagesEstimateExtra(id) > 0)
+  const otherCosts = sumBy(id => { const f = financeRows[id] || {}; return num(f.rent) + num(f.art_supplies_budget) + num(f.utilities_estimate) })
+  const sales = computeSystemSalesTotal() // studios + Membership + Warehouse
+  const sys = computeSystemTotals()
+  const profit = sales - otherCosts - wages
+  const labourPct = sales ? (wages / sales) * 100 : null
+  const profitPct = sales ? (profit / sales) * 100 : null
+
+  const cell = key => {
+    switch (key) {
+      case 'studio': return `<td class="studio-name">Total <span class="muted small">(all studios)</span></td>`
+      case 'goal': return `<td>${estWrap(anyGoalEst, moneyShort(sumBy(id => (progressRows[id] || {}).monthly_sales_goal)))}</td>`
+      case 'rent': return `<td>${moneyShort(sumBy(id => (financeRows[id] || {}).rent))}</td>`
+      case 'supplies': return `<td>${moneyShort(sumBy(id => (financeRows[id] || {}).art_supplies_budget))}</td>`
+      case 'util': return `<td>${moneyShort(sumBy(id => (financeRows[id] || {}).utilities_estimate))}</td>`
+      case 'pay1': case 'pay2': case 'pay3': { const t = payTotal(Number(key.slice(3))); return `<td>${estWrap(t.est, moneyShort(t.total))}</td>` }
+      case 'wages': return `<td>${estWrap(wagesEst, moneyShort(wages))}</td>`
+      case 'daily': return `<td>${estWrap(anyGoalEst, moneyShort(sys.systemDailyGoal))}</td>`
+      case 'mtd': return `<td title="Studios + Membership + Warehouse">${moneyShort(sales)}</td>`
+      case 'pace': return `<td class="${paceClass(sys.systemPacePct == null ? null : Math.round(sys.systemPacePct))}">${sys.systemPacePct == null ? '—' : Math.round(sys.systemPacePct) + '%'}</td>`
+      case 'labour': return `<td class="${labourPct != null && labourPct > 45 ? 'pct-bad' : ''}">${labourPct == null ? '—' : labourPct.toFixed(1) + '%'}</td>`
+      case 'profit': return `<td class="${profit < 0 ? 'profit-neg' : ''}" title="All sales minus all studio costs (before home office labour)">${moneyShort(profit)}</td>`
+      case 'profitpct': return `<td class="${profitPct != null && profitPct < 0 ? 'profit-neg' : ''}" title="Before home office labour">${profitPct == null ? '—' : profitPct.toFixed(1) + '%'}</td>`
+    }
+    return '<td>—</td>'
+  }
+  return `<tr class="totals-row">${cols.map(c => cell(c.key)).join('')}</tr>`
+}
+
 function summaryHeaderHtml() {
   return visibleSummaryColumns().map(c => {
     const label = typeof c.label === 'function' ? c.label() : c.label
@@ -645,7 +698,7 @@ function renderTable() {
   body.innerHTML = hoPanel + `<table class="fin-table">
     <thead><tr>${summaryHeaderHtml()}
     </tr></thead>
-    <tbody>${rows}${bucketRows}</tbody>
+    <tbody>${summaryTotalsRowHtml(cols)}${rows}${bucketRows}</tbody>
   </table>`
 }
 
