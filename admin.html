@@ -4518,6 +4518,16 @@ function staffCols() {
 let staffPinLoaded = false   // true once the edit form holds the real current PIN
 
 let editingStaffId = null   // staff_profiles.id
+// Hourly wages are finance-only: stored in staff_wages, read and written only
+// through finance-gated RPCs. Everyone else never sees the field, and the
+// database refuses their reads/writes even if the field were un-hidden.
+let canSeeWages = null
+async function checkCanSeeWages() {
+  if (canSeeWages !== null) return canSeeWages
+  const { data, error } = await sb.rpc('has_finance_access')
+  canSeeWages = !error && data === true
+  return canSeeWages
+}
 let editingUserId = null    // auth user id
 let editingIsActive = true
 
@@ -4668,6 +4678,8 @@ async function populateStaffUnitList(selectedIds = [], dueDates = {}) {
 
 async function openStaffModal(id = null) {
   editingStaffId = id
+  const showWage = await checkCanSeeWages()
+  document.getElementById('staff-wage-wrap').style.display = showWage ? '' : 'none'
   editingUserId = null
   const modal = document.getElementById('staff-modal')
 
@@ -4713,7 +4725,12 @@ async function openStaffModal(id = null) {
       document.getElementById('staff-can-adjust-spaces').checked = !!data.can_adjust_spaces
       document.getElementById('staff-can-view-community-dashboard').checked = !!data.can_view_community_dashboard
       document.getElementById('staff-hire-date').value = data.hire_date || ''
-      document.getElementById('staff-hourly-wage').value = data.hourly_wage != null ? data.hourly_wage : ''
+      document.getElementById('staff-hourly-wage').value = ''
+      if (showWage) {
+        const { data: wageVal, error: wageErr } = await sb.rpc('get_staff_wage', { p_staff_id: id })
+        if (wageErr) console.error('Could not load wage', wageErr)
+        else document.getElementById('staff-hourly-wage').value = wageVal != null ? wageVal : ''
+      }
       togglePinRow()
       buildStaffStudioList(data.studio_ids || [])
       const deactivateBtn = document.getElementById('staff-deactivate-btn')
@@ -4797,8 +4814,9 @@ async function saveStaff() {
     can_adjust_spaces: document.getElementById('staff-role').value === 'manager' ? document.getElementById('staff-can-adjust-spaces').checked : false,
     can_view_community_dashboard: document.getElementById('staff-can-view-community-dashboard').checked,
     hire_date: document.getElementById('staff-hire-date').value || null,
-    hourly_wage: document.getElementById('staff-hourly-wage').value ? parseFloat(document.getElementById('staff-hourly-wage').value) : null,
   }
+  const wageInput = document.getElementById('staff-hourly-wage').value
+  const wageVal = wageInput ? parseFloat(wageInput) : null
 
   btn.textContent = 'Saving...'; btn.disabled = true
 
@@ -4815,6 +4833,10 @@ async function saveStaff() {
     if (shouldSetPin) {
       const { error: pinErr } = await sb.rpc('admin_set_staff_pin', { p_profile_id: editingStaffId, p_pin: pinVal || null })
       if (pinErr) { btn.textContent = 'Save'; btn.disabled = false; alert('Profile saved, but the PIN was not: ' + pinErr.message); return }
+    }
+    if (canSeeWages) {
+      const { error: wErr } = await sb.rpc('set_staff_wage', { p_staff_id: editingStaffId, p_wage: wageVal })
+      if (wErr) { btn.textContent = 'Save'; btn.disabled = false; alert('Profile saved, but the hourly wage was not: ' + wErr.message); return }
     }
     btn.textContent = 'Save'; btn.disabled = false
     // Save due dates if user_id exists
@@ -4850,6 +4872,13 @@ async function saveStaff() {
         ? await sb.rpc('admin_set_staff_pin', { p_profile_id: newRow.id, p_pin: pinVal })
         : { error: { message: 'new profile not found' } }
       if (pinErr) alert('Staff member created, but the PIN was not saved (' + pinErr.message + '). Open them and set it again.')
+    }
+    if (canSeeWages && wageVal != null) {
+      const { data: newRow2 } = await sb.from('staff_profiles').select('id').eq('email', email).maybeSingle()
+      const { error: wErr } = newRow2
+        ? await sb.rpc('set_staff_wage', { p_staff_id: newRow2.id, p_wage: wageVal })
+        : { error: { message: 'new profile not found' } }
+      if (wErr) alert('Staff member created, but the hourly wage was not saved (' + wErr.message + '). Open them and set it again.')
     }
   }
 
@@ -8480,8 +8509,8 @@ function showAdminToast(msg, duration = 2500) {
         <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Hire Date</label>
         <input id="staff-hire-date" type="date" style="width:180px;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;background:white">
       </div>
-      <div>
-        <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Hourly Wage <span style="font-weight:400;text-transform:none;color:#aaa">(for finance.html payroll estimates)</span></label>
+      <div id="staff-wage-wrap" style="display:none">
+        <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Hourly Wage <span style="font-weight:400;text-transform:none;color:#aaa">(finance only — hidden from everyone else)</span></label>
         <input id="staff-hourly-wage" type="number" step="0.01" min="0" placeholder="$/hr" style="width:100px;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;background:white">
       </div>
     </div>
