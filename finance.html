@@ -86,6 +86,9 @@ button, input, select { font: inherit; color: inherit; }
 .daily-table tr.summary-row.top td { border-bottom: 2px solid var(--line-2); }
 .daily-table tr.summary-row.bottom td { border-top: 2px solid var(--line-2); }
 .daily-table tr.yesterday-row td { border-bottom: 2px solid var(--line-2); }
+.daily-table td.day-label, .daily-table th.day-label { box-sizing: border-box; width: 160px; min-width: 160px; max-width: 160px; }
+.daily-table .total-col { position: sticky; left: 160px; z-index: 1; background: var(--soft); font-weight: 700; border-right: 2px solid var(--line-2); width: 84px; min-width: 84px; }
+.daily-table th.total-col { z-index: 3; }
 .daily-cell { color: #1a1a1a; }
 .daily-cell.empty { color: var(--muted); background: transparent !important; }
 
@@ -2173,11 +2176,26 @@ function renderDailyGrid() {
     : money(systemTotalSameMonthLastYear)
   const paceLabel = sys.systemPacePct == null ? '—' : sys.systemPacePct.toFixed(1) + '%'
 
+  // How far the whole network is from breakeven this month: the same figure as
+  // System-Wide Profit (all sales − all studio costs − home office labour),
+  // shown as "left to go" while negative. If home office labour hasn't been
+  // entered yet, it's left out and labelled.
+  const breakeven = (() => {
+    const withHO = computeSystemProfit()
+    if (withHO != null) return { profit: withHO, note: 'after home office labour' }
+    const costs = STUDIO_IDS.reduce((a, id) => { const f = financeRows[id] || {}; return a + (Number(f.rent) || 0) + (Number(f.art_supplies_budget) || 0) + (Number(f.utilities_estimate) || 0) + wagesTotal(id) }, 0)
+    return { profit: computeSystemSalesTotal() - costs, note: 'home office labour not entered yet' }
+  })()
+  const breakevenHtml = breakeven.profit < 0
+    ? `<div><div class="muted small">Left to Breakeven (System-Wide)</div><div class="profit-neg" style="font-size:20px;font-weight:700">${money(-breakeven.profit)}</div><div class="muted small">${esc(breakeven.note)}</div></div>`
+    : `<div><div class="muted small">Left to Breakeven (System-Wide)</div><div style="font-size:20px;font-weight:700;color:#1b8a3a">✓ Reached · +${money(breakeven.profit)}</div><div class="muted small">${esc(breakeven.note)}</div></div>`
+
   const systemPanel = `<div class="panel" style="display:flex;gap:28px;padding:14px 18px;margin-bottom:14px;flex-wrap:wrap">
     <div><div class="muted small">Total Sales This Month (System-Wide)</div><div style="font-size:20px;font-weight:700">${money(sys.systemTotalThisMonth)}</div></div>
     <div><div class="muted small">Same Month Last Year</div><div style="font-size:20px;font-weight:700">${lastYearLabel}</div></div>
     <div><div class="muted small">Daily Avg Sales Goal (System-Wide)</div><div style="font-size:20px;font-weight:700">${money(sys.systemDailyGoal)}</div></div>
     <div><div class="muted small">% Based on Daily Pace (System-Wide)</div><div class="${paceClass(sys.systemPacePct)}" style="font-size:20px;font-weight:700">${paceLabel}</div></div>
+    ${breakevenHtml}
   </div>`
 
   const refreshedLabel = dailyLastRefreshed
@@ -2206,15 +2224,21 @@ function renderDailyGrid() {
     return `<th style="background:${t.bg};color:${t.fg}" title="${esc(t.label)} — ${esc(t.note)} (pace ${pace}%)">${esc(labelFor(id))}<div style="font-size:11px;font-weight:700;margin-top:3px">${pace}%</div></th>`
   }).join('')
 
+  const sysTier = paceTier(sys.systemPacePct == null ? null : Math.round(sys.systemPacePct * 10) / 10)
+  const totalHeader = sysTier
+    ? `<th class="total-col" style="background:${sysTier.bg};color:${sysTier.fg}" title="System-wide — ${esc(sysTier.label)}">Total<div style="font-size:11px;font-weight:700;margin-top:3px">${sys.systemPacePct.toFixed(1)}%</div></th>`
+    : `<th class="total-col">Total</th>`
+
   const paceLegend = `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;font-size:11px">${
     PACE_TIERS.map(t => `<span style="background:${t.bg};color:${t.fg};padding:3px 9px;border-radius:9px"><b>${esc(t.label)}</b> · ${esc(t.note)}</span>`).join('')
   }<span class="muted" style="align-self:center">— based on each studio's % Based on Daily Pace</span></div>`
 
-  function summaryRow(label, fn, cls) {
-    return `<tr class="summary-row ${cls || ''}"><td class="day-label">${esc(label)}</td>${
+  function summaryRow(label, fn, cls, totalHtml) {
+    return `<tr class="summary-row ${cls || ''}"><td class="day-label">${esc(label)}</td><td class="total-col">${totalHtml == null ? '' : totalHtml}</td>${
       ids.map(id => `<td>${fn(id)}</td>`).join('')
     }</tr>`
   }
+  const sumIds = fn => STUDIO_IDS.reduce((a, id) => a + (Number(fn(id)) || 0), 0)
 
   // "Yesterday's colour": each studio's pace as it stood at the end of
   // yesterday (sales from the 1st through yesterday vs. daily goal × days),
@@ -2232,7 +2256,16 @@ function renderDailyGrid() {
     for (let d = 1; d <= yDays; d++) total += Number((dailySales[id] || {})[monthText + '-' + String(d).padStart(2, '0')]) || 0
     return Math.round(1000 * total / (goal * yDays)) / 10
   }
-  const yesterdayRow = viewingCurrent ? `<tr class="summary-row yesterday-row"><td class="day-label" title="Pace through the end of yesterday">Yesterday's colour</td>${
+  const yesterdaySystemCell = (() => {
+    if (yDays < 1) return '<td class="total-col muted">—</td>'
+    if (!sys.systemDailyGoal) return '<td class="total-col">—</td>'
+    let total = 0
+    ids.forEach(id => { for (let d = 1; d <= yDays; d++) total += Number((dailySales[id] || {})[monthText + '-' + String(d).padStart(2, '0')]) || 0 })
+    const yp = Math.round(1000 * total / (sys.systemDailyGoal * yDays)) / 10
+    const t = paceTier(yp)
+    return `<td class="total-col" style="background:${t.bg};color:${t.fg};text-align:center" title="System-wide — ${esc(t.label)} — pace through yesterday ${yp}%">${yp}%</td>`
+  })()
+  const yesterdayRow = viewingCurrent ? `<tr class="summary-row yesterday-row"><td class="day-label" title="Pace through the end of yesterday">Yesterday's colour</td>${yesterdaySystemCell}${
     ids.map(id => {
       if (id.startsWith('__')) return '<td></td>'
       if (yDays < 1) return '<td class="muted" title="Yesterday was last month">—</td>'
@@ -2244,12 +2277,12 @@ function renderDailyGrid() {
   }</tr>` : ''
 
   const topRows = yesterdayRow + [
-    summaryRow('Monthly Goal', id => money((progressRows[id] || {}).monthly_sales_goal), 'top'),
-    summaryRow('Rent', id => money((financeRows[id] || {}).rent)),
-    summaryRow('Art Supplies', id => money((financeRows[id] || {}).art_supplies_budget)),
-    summaryRow('Utilities', id => money((financeRows[id] || {}).utilities_estimate)),
-    summaryRow('Wages Total', id => money(wagesTotal(id))),
-    summaryRow('Daily Goal', id => money((progressRows[id] || {}).daily_sales_goal), 'top')
+    summaryRow('Monthly Goal', id => money((progressRows[id] || {}).monthly_sales_goal), 'top', money(sumIds(id => (progressRows[id] || {}).monthly_sales_goal))),
+    summaryRow('Rent', id => money((financeRows[id] || {}).rent), '', money(sumIds(id => (financeRows[id] || {}).rent))),
+    summaryRow('Art Supplies', id => money((financeRows[id] || {}).art_supplies_budget), '', money(sumIds(id => (financeRows[id] || {}).art_supplies_budget))),
+    summaryRow('Utilities', id => money((financeRows[id] || {}).utilities_estimate), '', money(sumIds(id => (financeRows[id] || {}).utilities_estimate))),
+    summaryRow('Wages Total', id => money(wagesTotal(id)), '', money(sumIds(id => wagesTotal(id)))),
+    summaryRow('Daily Goal', id => money((progressRows[id] || {}).daily_sales_goal), 'top', money(sys.systemDailyGoal))
   ].join('')
 
   const dayRows = []
@@ -2264,20 +2297,25 @@ function renderDailyGrid() {
       const bg = dailyHeatColor(pct)
       return `<td class="daily-cell" style="background:${bg}">${money(total)}</td>`
     }).join('')
-    dayRows.push(`<tr><td class="day-label">${dow}, ${monthLabel(currentMonth).split(' ')[0].slice(0,3)} ${day}</td>${cells}</tr>`)
+    let dayTotal = 0, anyDay = false
+    ids.forEach(id => { const v = (dailySales[id] || {})[dateStr]; if (v != null) { dayTotal += Number(v) || 0; anyDay = true } })
+    const totalCell = anyDay
+      ? `<td class="total-col daily-cell" style="background:${dailyHeatColor(sys.systemDailyGoal ? (dayTotal / sys.systemDailyGoal) * 100 : null)}" title="All studios + Membership + Gift Cards + Warehouse">${money(dayTotal)}</td>`
+      : `<td class="total-col daily-cell empty">—</td>`
+    dayRows.push(`<tr><td class="day-label">${dow}, ${monthLabel(currentMonth).split(' ')[0].slice(0,3)} ${day}</td>${totalCell}${cells}</tr>`)
   }
 
   const monthTotalFor = id => id.startsWith('__') ? bucketTotals[id.replace(/__/g, '')] : (progressRows[id] || {}).this_month_total
 
   const bottomRows = [
-    summaryRow('This Month Total', id => money(monthTotalFor(id)), 'bottom'),
-    summaryRow('Last Month Total', id => money(lastMonthTotals[id])),
-    summaryRow('% Based on Daily (Pace)', id => { const p = (progressRows[id] || {}).pace_pct; return p == null ? '—' : p + '%' }),
-    summaryRow('Labour Cost %', id => { const l = computeLabourPct(id); return l == null ? '—' : l.toFixed(1) + '%' }),
-    summaryRow('Est. Profit', id => money(computeProfit(id)))
+    summaryRow('This Month Total', id => money(monthTotalFor(id)), 'bottom', money(sys.systemTotalThisMonth)),
+    summaryRow('Last Month Total', id => money(lastMonthTotals[id]), '', STUDIO_IDS.some(id => lastMonthTotals[id] != null) ? money(sumIds(id => lastMonthTotals[id])) : '—'),
+    summaryRow('% Based on Daily (Pace)', id => { const p = (progressRows[id] || {}).pace_pct; return p == null ? '—' : p + '%' }, '', sys.systemPacePct == null ? '—' : sys.systemPacePct.toFixed(1) + '%'),
+    summaryRow('Labour Cost %', id => { const l = computeLabourPct(id); return l == null ? '—' : l.toFixed(1) + '%' }, '', sys.systemTotalThisMonth ? (sumIds(id => wagesTotal(id)) / sys.systemTotalThisMonth * 100).toFixed(1) + '%' : '—'),
+    summaryRow('Est. Profit', id => money(computeProfit(id)), '', money(breakeven.profit))
   ].join('')
 
-  container.innerHTML = systemPanel + sortBar + paceLegend + `<table class="daily-table">    <thead><tr><th class="day-label">Day</th>${headerCols}</tr></thead>
+  container.innerHTML = systemPanel + sortBar + paceLegend + `<table class="daily-table">    <thead><tr><th class="day-label">Day</th>${totalHeader}${headerCols}</tr></thead>
     <tbody>${topRows}${dayRows.join('')}${bottomRows}</tbody>
   </table>`
 }
