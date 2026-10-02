@@ -184,10 +184,14 @@ button.pill { cursor: pointer; }
 .modal-bg.open { display: flex; }
 .modal { background: var(--panel); border-radius: 14px; width: 100%; max-width: 640px; padding: 1.25rem 1.4rem; }
 .modal.wide { max-width: 980px; }
-.base-row { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(220px, 2fr) auto auto auto; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid #ecebe4; }
+.base-row { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(280px, 2.6fr) auto auto auto; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid #ecebe4; }
 .base-row.archived { opacity: 0.55; }
 .base-row input { width: 100%; }
 .base-row .used { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.sheet-src { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.sheet-src input { flex: 1; min-width: 0; }
+.file-chip { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; padding: 6px 10px; border-radius: 8px; background: #f3f2ec; }
+.sheet-source-choice { display: flex; gap: 14px; }
 .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; gap: 12px; }
 .modal-head h2 { font-size: 16px; }
 .modal-close { background: none; border: none; font-size: 22px; color: var(--muted); cursor: pointer; line-height: 1; }
@@ -365,8 +369,16 @@ button.pill { cursor: pointer; }
     <div id="sheets-body"></div>
     <div class="form-grid" style="margin-top:14px">
       <div><label class="field-label" for="sh-name" id="sh-name-label">New name</label><input type="text" id="sh-name"></div>
-      <div><label class="field-label" for="sh-url">Link</label><input type="url" id="sh-url" placeholder="https://drive.google.com/…" onkeydown="if(event.key==='Enter') addSheet()"></div>
+      <div>
+        <div class="field-label sheet-source-choice">
+          <label class="inline"><input type="radio" name="sh-source" value="upload" checked onchange="setNewSheetSource(this.value)"> Upload a file</label>
+          <label class="inline"><input type="radio" name="sh-source" value="link" onchange="setNewSheetSource(this.value)"> Paste a link</label>
+        </div>
+        <input type="file" id="sh-file" accept=".pdf,application/pdf,image/png,image/jpeg,image/webp">
+        <input type="url" id="sh-url" placeholder="https://drive.google.com/…" style="display:none" onkeydown="if(event.key==='Enter') addSheet()">
+      </div>
     </div>
+    <input type="file" id="sh-replace-file" accept=".pdf,application/pdf,image/png,image/jpeg,image/webp" style="display:none" onchange="sheetReplaceChosen(this)">
     <div class="modal-foot">
       <button class="btn" onclick="closeModal('sheets-modal')">Done</button>
       <button class="btn btn-primary" id="sh-add" onclick="addSheet()">Add</button>
@@ -1090,7 +1102,7 @@ function sheetOptionsHtml(kind, selectedId) {
   const opts = sheetData[kind].rows.filter(r => r.is_active || r.id === selectedId)
   return '<option value="">None</option>' + opts.map(r =>
     '<option value="' + esc(r.id) + '"' + (r.id === selectedId ? ' selected' : '') + '>' +
-    esc(r.name) + (r.is_active ? '' : ' (archived)') + (r.url ? '' : ' (no link yet)') + '</option>').join('')
+    esc(r.name) + (r.is_active ? '' : ' (archived)') + (r.url || r.file_path ? '' : ' (no file or link yet)') + '</option>').join('')
 }
 function refreshEditorSheetSelect(kind) {
   const sel = document.getElementById(SHEET_LIBS[kind].select)
@@ -1112,6 +1124,9 @@ function openSheets(kind) {
   document.getElementById('sh-name').placeholder = cfg.placeholder
   document.getElementById('sh-add').textContent = 'Add ' + cfg.one
   document.getElementById('sh-name').value = ''; document.getElementById('sh-url').value = ''
+  document.getElementById('sh-file').value = ''
+  document.querySelector('input[name="sh-source"][value="upload"]').checked = true
+  setNewSheetSource('upload')
   renderSheets(); openModal('sheets-modal')
   setTimeout(() => document.getElementById('sh-name').focus(), 30)
 }
@@ -1124,28 +1139,109 @@ function renderSheets() {
     const n = sheetUsageCount(kind, r.id)
     return '<div class="base-row' + (r.is_active ? '' : ' archived') + '">' +
       '<input type="text" value="' + esc(r.name) + '" onchange="updateSheet(\'' + r.id + '\', \'name\', this.value)" aria-label="Name">' +
-      '<input type="url" value="' + esc(r.url || '') + '" placeholder="Link" onchange="updateSheet(\'' + r.id + '\', \'url\', this.value)" aria-label="Link">' +
+      (r.file_path
+        ? '<div class="sheet-src"><span class="file-chip" title="' + esc(sheetFileLabel(r.file_path)) + '">📎 ' + esc(sheetFileLabel(r.file_path)) + '</span>' +
+          '<button class="btn" onclick="pickReplaceFile(\'' + r.id + '\')">Replace file</button>' +
+          '<button class="btn" onclick="switchSheetToLink(\'' + r.id + '\')">Use a link</button></div>'
+        : '<div class="sheet-src"><input type="url" value="' + esc(r.url || '') + '" placeholder="Link" onchange="updateSheet(\'' + r.id + '\', \'url\', this.value)" aria-label="Link">' +
+          '<button class="btn" onclick="pickReplaceFile(\'' + r.id + '\')">Upload file</button></div>') +
       '<span class="used">' + n + ' project' + (n === 1 ? '' : 's') + '</span>' +
-      (r.url && /^https?:\/\//i.test(r.url) ? '<a class="btn" href="' + esc(r.url) + '" target="_blank" rel="noopener">Open</a>' : '<span></span>') +
+      (r.file_path
+        ? '<button class="btn" onclick="openSheetFile(\'' + esc(r.file_path) + '\')">Open</button>'
+        : r.url && /^https?:\/\//i.test(r.url) ? '<a class="btn" href="' + esc(r.url) + '" target="_blank" rel="noopener">Open</a>' : '<span></span>') +
       '<button class="btn" onclick="toggleSheetActive(\'' + r.id + '\')">' + (r.is_active ? 'Archive' : 'Restore') + '</button>' +
       '</div>'
   }).join('')
 }
+function setNewSheetSource(src) {
+  document.getElementById('sh-file').style.display = src === 'upload' ? '' : 'none'
+  document.getElementById('sh-url').style.display = src === 'link' ? '' : 'none'
+}
 async function addSheet() {
   const kind = sheetsKind, cfg = SHEET_LIBS[kind]
-  const nameEl = document.getElementById('sh-name'), urlEl = document.getElementById('sh-url')
+  const nameEl = document.getElementById('sh-name'), urlEl = document.getElementById('sh-url'), fileEl = document.getElementById('sh-file')
+  const source = document.querySelector('input[name="sh-source"]:checked').value
   const name = nameEl.value.trim()
   if (!name) { toast('Give the ' + cfg.one + ' a name first.', true); nameEl.focus(); return }
   if (sheetData[kind].rows.some(r => r.name.toLowerCase() === name.toLowerCase())) { toast('There is already a ' + cfg.one + ' called ' + name + '.', true); return }
+  const file = source === 'upload' ? fileEl.files[0] : null
+  if (source === 'upload' && file && !sheetFileOk(file)) return
   const btn = document.getElementById('sh-add'); btn.disabled = true
-  const { error } = await sb.from(cfg.table).insert({ name, url: nz(urlEl.value) })
+  const { data: row, error } = await sb.from(cfg.table).insert({ name, url: source === 'link' ? nz(urlEl.value) : null }).select().single()
+  if (error) { btn.disabled = false; toast(friendlyError(error), true); return }
+  if (file) await uploadSheetFile(kind, row.id, file, null)
   btn.disabled = false
-  if (error) { toast(friendlyError(error), true); return }
-  nameEl.value = ''; urlEl.value = ''
+  nameEl.value = ''; urlEl.value = ''; fileEl.value = ''
   await reloadSheets(kind)
   toast(cfg.title.replace(/s$/, '') + ' added')
   nameEl.focus()
 }
+
+/* ---------- uploads (private 'project-sheets' bucket) ----------
+   A sheet is EITHER an uploaded file (file_path) OR a link (url); setting one
+   clears the other. Admins upload/replace here; studio logins only ever get
+   temporary signed links on the dashboard. */
+const SHEETS_BUCKET = 'project-sheets'
+const SHEET_MAX_BYTES = 20 * 1024 * 1024
+const SHEET_TYPES = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp']
+
+function sheetFileOk(file) {
+  if (!SHEET_TYPES.includes(file.type)) { toast('Upload a PDF, or a PNG / JPG / WebP image.', true); return false }
+  if (file.size > SHEET_MAX_BYTES) { toast('That file is over 20 MB.', true); return false }
+  return true
+}
+function sheetFileLabel(path) {
+  return String(path || '').split('/').pop().replace(/^\d+-/, '')
+}
+async function uploadSheetFile(kind, id, file, oldPath) {
+  const cfg = SHEET_LIBS[kind]
+  const safeName = file.name.toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-+|-+$/g, '') || 'sheet.pdf'
+  const path = kind + '/' + id + '/' + Date.now() + '-' + safeName
+  toast('Uploading ' + file.name + '…')
+  const { error: upErr } = await sb.storage.from(SHEETS_BUCKET).upload(path, file, { contentType: file.type, upsert: false })
+  if (upErr) { toast('Upload failed: ' + friendlyError(upErr), true); return false }
+  const { error } = await sb.from(cfg.table).update({ file_path: path, url: null, updated_at: new Date().toISOString() }).eq('id', id)
+  if (error) {
+    await sb.storage.from(SHEETS_BUCKET).remove([path]) // don't leave an orphan file behind
+    toast(friendlyError(error), true); return false
+  }
+  if (oldPath && oldPath !== path) await sb.storage.from(SHEETS_BUCKET).remove([oldPath])
+  toast('Uploaded — every project using it now has the new file')
+  return true
+}
+let _replaceSheetId = null
+function pickReplaceFile(id) {
+  _replaceSheetId = id
+  const input = document.getElementById('sh-replace-file')
+  input.value = ''
+  input.click()
+}
+async function sheetReplaceChosen(input) {
+  const file = input.files[0], id = _replaceSheetId
+  _replaceSheetId = null
+  if (!file || !id || !sheetFileOk(file)) return
+  const r = sheetData[sheetsKind].byId[id]
+  if (await uploadSheetFile(sheetsKind, id, file, r && r.file_path)) await reloadSheets(sheetsKind)
+}
+async function switchSheetToLink(id) {
+  const kind = sheetsKind, cfg = SHEET_LIBS[kind], r = sheetData[kind].byId[id]
+  if (!r) return
+  const link = (prompt('Paste the link to use instead of the uploaded file for ' + r.name + ':') || '').trim()
+  if (!link) return
+  if (!/^https?:\/\//i.test(link)) { toast('That does not look like a web link (it should start with https://).', true); return }
+  const { error } = await sb.from(cfg.table).update({ url: link, file_path: null, updated_at: new Date().toISOString() }).eq('id', id)
+  if (error) { toast(friendlyError(error), true); return }
+  if (r.file_path) await sb.storage.from(SHEETS_BUCKET).remove([r.file_path])
+  await reloadSheets(kind)
+  toast('Now using the link')
+}
+async function openSheetFile(path) {
+  const w = window.open('', '_blank') // open first, so the browser doesn't block it as a popup
+  const { data, error } = await sb.storage.from(SHEETS_BUCKET).createSignedUrl(path, 300)
+  if (error || !data) { if (w) w.close(); toast('Could not open the file: ' + friendlyError(error || {}), true); return }
+  if (w) w.location.href = data.signedUrl; else window.location.href = data.signedUrl
+}
+
 async function updateSheet(id, field, raw) {
   const kind = sheetsKind, cfg = SHEET_LIBS[kind]
   const value = field === 'name' ? String(raw || '').trim() : nz(raw)
