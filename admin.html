@@ -4518,15 +4518,26 @@ function staffCols() {
 let staffPinLoaded = false   // true once the edit form holds the real current PIN
 
 let editingStaffId = null   // staff_profiles.id
-// Hourly wages are finance-only: stored in staff_wages, read and written only
-// through finance-gated RPCs. Everyone else never sees the field, and the
-// database refuses their reads/writes even if the field were un-hidden.
+// Hourly wages live in staff_wages, read and written only through gated RPCs.
+//   'full'  (finance: Renée + Joey) — see and edit every wage
+//   'entry' (onboarding, e.g. Alona) — enter a wage for someone with none yet,
+//           and see/correct only wages she entered; all others hidden + locked
+//   'none'  — field hidden. The database enforces all of this, not just the page.
 let canSeeWages = null
+let wageLevel = 'none'
 async function checkCanSeeWages() {
   if (canSeeWages !== null) return canSeeWages
-  const { data, error } = await sb.rpc('has_finance_access')
-  canSeeWages = !error && data === true
+  const { data, error } = await sb.rpc('wage_access_level')
+  wageLevel = !error && (data === 'full' || data === 'entry') ? data : 'none'
+  canSeeWages = wageLevel !== 'none'
   return canSeeWages
+}
+function setWageInputState(locked, placeholder) {
+  const el = document.getElementById('staff-hourly-wage')
+  el.disabled = locked
+  el.placeholder = placeholder
+  el.style.background = locked ? '#f0f0ea' : 'white'
+  el.title = locked ? 'A wage is already on file. Only finance can view or change it.' : ''
 }
 let editingUserId = null    // auth user id
 let editingIsActive = true
@@ -4726,10 +4737,13 @@ async function openStaffModal(id = null) {
       document.getElementById('staff-can-view-community-dashboard').checked = !!data.can_view_community_dashboard
       document.getElementById('staff-hire-date').value = data.hire_date || ''
       document.getElementById('staff-hourly-wage').value = ''
+      setWageInputState(false, '$/hr')
       if (showWage) {
-        const { data: wageVal, error: wageErr } = await sb.rpc('get_staff_wage', { p_staff_id: id })
-        if (wageErr) console.error('Could not load wage', wageErr)
-        else document.getElementById('staff-hourly-wage').value = wageVal != null ? wageVal : ''
+        const { data: wRows, error: wageErr } = await sb.rpc('get_staff_wage_for_entry', { p_staff_id: id })
+        const w = wRows && wRows[0]
+        if (wageErr || !w) { console.error('Could not load wage', wageErr); setWageInputState(true, "Couldn't load") }
+        else if (!w.can_edit) setWageInputState(true, 'On file (hidden)')
+        else document.getElementById('staff-hourly-wage').value = w.wage != null ? w.wage : ''
       }
       togglePinRow()
       buildStaffStudioList(data.studio_ids || [])
@@ -4770,6 +4784,7 @@ async function openStaffModal(id = null) {
     document.getElementById('staff-can-view-community-dashboard').checked = false
     document.getElementById('staff-hire-date').value = ''
     document.getElementById('staff-hourly-wage').value = ''
+    setWageInputState(false, '$/hr')
     togglePinRow()
   }
 
@@ -4834,7 +4849,10 @@ async function saveStaff() {
       const { error: pinErr } = await sb.rpc('admin_set_staff_pin', { p_profile_id: editingStaffId, p_pin: pinVal || null })
       if (pinErr) { btn.textContent = 'Save'; btn.disabled = false; alert('Profile saved, but the PIN was not: ' + pinErr.message); return }
     }
-    if (canSeeWages) {
+    const wageLocked = document.getElementById('staff-hourly-wage').disabled
+    // Finance saves whatever is in the box (blank clears it). Entry-only users
+    // only save when they typed a wage into an unlocked box — never a clear.
+    if (canSeeWages && !wageLocked && (wageLevel === 'full' || wageVal != null)) {
       const { error: wErr } = await sb.rpc('set_staff_wage', { p_staff_id: editingStaffId, p_wage: wageVal })
       if (wErr) { btn.textContent = 'Save'; btn.disabled = false; alert('Profile saved, but the hourly wage was not: ' + wErr.message); return }
     }
@@ -8510,7 +8528,7 @@ function showAdminToast(msg, duration = 2500) {
         <input id="staff-hire-date" type="date" style="width:180px;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;background:white">
       </div>
       <div id="staff-wage-wrap" style="display:none">
-        <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Hourly Wage <span style="font-weight:400;text-transform:none;color:#aaa">(finance only — hidden from everyone else)</span></label>
+        <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Hourly Wage <span style="font-weight:400;text-transform:none;color:#aaa">(finance + onboarding only — hidden from everyone else)</span></label>
         <input id="staff-hourly-wage" type="number" step="0.01" min="0" placeholder="$/hr" style="width:100px;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;background:white">
       </div>
     </div>
