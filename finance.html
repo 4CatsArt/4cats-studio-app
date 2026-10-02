@@ -1113,7 +1113,7 @@ async function loadScheduleGrid() {
   // Fetch each selected studio's staff + shifts in parallel.
   const studioData = {}
   await Promise.all(scheduleStudioIds.map(async (studioId) => {
-    const { data: staff, error } = await sb.rpc('get_studio_staff_for_wages', { p_studio_id: studioId })
+    const { data: staff, error } = await sb.rpc('get_studio_staff_for_wages_range', { p_studio_id: studioId, p_from: weekStartStr, p_to: weekEndStr })
     if (error) { studioData[studioId] = { error: error.message }; return }
 
     const staffIds = (staff || []).map(s => s.staff_id)
@@ -1226,7 +1226,7 @@ async function loadScheduleGrid() {
     return `<div class="panel" style="margin-bottom:18px;overflow:auto">
       <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:0.5px solid var(--line)">
         <strong>${esc(STUDIO_NAMES[studioId])}</strong>
-        <button class="btn" onclick="postScheduleToPayPeriod('${studioId}')">Post week to Pay Period →</button>
+        <button class="btn" onclick="postScheduleToPayPeriod('${studioId}')">Post pay period →</button>
       </div>
       <div id="carousel-${studioId}" style="padding:8px 14px;border-bottom:0.5px solid var(--line);background:var(--soft)"></div>
       <table class="fin-table" style="width:auto">
@@ -1552,20 +1552,52 @@ async function postScheduleToPayPeriod(studioId) {
     return
   }
 
-  const staff = scheduleStaffByStudio[studioId] || []
-  const shifts = scheduleShiftsByStudio[studioId] || {}
+  // The full pay period this pay date covers (same lag/interval math as
+  // payDateForWorkDate). Everything in it is totalled straight from the
+  // database — both weeks — so posting after either week always gives the
+  // correct period total, and re-posting never doubles anything.
+  const lag = payScheduleAnchor.lag_days != null ? payScheduleAnchor.lag_days : 6
+  const interval = payScheduleAnchor.interval_days || 14
+  const periodEnd = addDays(payDate, -lag)
+  const periodStart = addDays(periodEnd, -(interval - 1))
+  const periodStartStr = dateStrOf(periodStart)
+  const periodEndStr = dateStrOf(periodEnd)
+
+  const { data: staff, error: staffErr } = await sb.rpc('get_studio_staff_for_wages_range', { p_studio_id: studioId, p_from: periodStartStr, p_to: periodEndStr })
+  if (staffErr) { toast(staffErr.message, true); return }
+  const { data: periodShifts, error: shiftErr } = await sb.from('staff_shifts').select('staff_id, shift_date, start_time, end_time')
+    .eq('studio_id', studioId).gte('shift_date', periodStartStr).lte('shift_date', periodEndStr)
+  if (shiftErr) { toast(shiftErr.message, true); return }
+
+  const staffById = {}
+  ;(staff || []).forEach(s => { staffById[s.staff_id] = s })
 
   let total = 0
-  staff.forEach(s => {
-    if (s.hourly_wage == null) return // no wage on file — can't estimate this person, skip rather than guess
-    let hours = 0
-    for (let i = 0; i < 7; i++) {
-      const dateStr = dateStrOf(addDays(scheduleWeekStart, i))
-      const shift = (shifts[s.staff_id] || {})[dateStr]
-      if (shift) hours += paidHoursForShift(shift.start_time, shift.end_time, s.province_code)
-    }
-    total += hours * s.hourly_wage
+  const noWage = new Set()
+  const daysWithShifts = new Set()
+  ;(periodShifts || []).forEach(sh => {
+    if (!sh.start_time || !sh.end_time) return // ghost row
+    daysWithShifts.add(sh.shift_date)
+    const person = staffById[sh.staff_id]
+    if (!person) return
+    if (person.hourly_wage == null) { noWage.add(person.display_name); return } // no wage on file — skip rather than guess
+    total += paidHoursForShift(sh.start_time, sh.end_time, person.province_code) * person.hourly_wage
   })
+
+  // Flag a week of the period with nothing entered yet, so a half-period
+  // total is never mistaken for the full thing.
+  const fmtShort = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  const emptyWeeks = []
+  for (let w = 0; w < interval; w += 7) {
+    const wStart = addDays(periodStart, w)
+    const wEnd = addDays(periodStart, Math.min(w + 6, interval - 1))
+    let any = false
+    for (let d = new Date(wStart); d <= wEnd; d = addDays(d, 1)) if (daysWithShifts.has(dateStrOf(d))) { any = true; break }
+    if (!any) emptyWeeks.push(fmtShort(wStart) + '–' + fmtShort(wEnd))
+  }
+  let notes = `\n\nCovers work dates ${fmtShort(periodStart)} – ${fmtShort(periodEnd)}.`
+  if (emptyWeeks.length) notes += `\n⚠ No shifts entered yet for ${emptyWeeks.join(', ')} — this total is partial.`
+  if (noWage.size) notes += `\n⚠ No hourly wage on file (counted as $0): ${[...noWage].join(', ')}.`
 
   const monthDate = monthToDate(target.monthDate)
   const { data: existing } = await sb.from('studio_pay_periods').select('is_manual_override, amount')
@@ -1576,11 +1608,11 @@ async function postScheduleToPayPeriod(studioId) {
   if (existing && existing.is_manual_override) {
     const overwrite = confirm(
       `${STUDIO_NAMES[studioId]}: ${targetLabel} already has a manually-confirmed amount (${money(existing.amount)}).\n\n` +
-      `Posting this schedule estimate (${money(total)}) will overwrite it. Continue?`
+      `Posting this schedule estimate (${money(total)}) will overwrite it. Continue?` + notes
     )
     if (!overwrite) return
   } else {
-    const confirmed = confirm(`Post ${money(total)} to ${STUDIO_NAMES[studioId]}'s ${targetLabel}?`)
+    const confirmed = confirm(`Post ${money(total)} to ${STUDIO_NAMES[studioId]}'s ${targetLabel}?` + notes)
     if (!confirmed) return
   }
 
@@ -1623,7 +1655,9 @@ async function loadStaffPanel(studioId) {
   const body = document.getElementById('staff-panel-body-' + studioId)
   body.innerHTML = '<div class="muted small">Loading staff…</div>'
 
-  const { data: staff, error } = await sb.rpc('get_studio_staff_for_wages', { p_studio_id: studioId })
+  const panelMonthStart = monthToDate(currentMonth)
+  const panelMonthEnd = dateStrOf(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0))
+  const { data: staff, error } = await sb.rpc('get_studio_staff_for_wages_range', { p_studio_id: studioId, p_from: panelMonthStart, p_to: panelMonthEnd })
   if (error) { body.innerHTML = `<div class="muted small">Couldn't load staff: ${esc(error.message)}</div>`; return }
   staffCache[studioId] = staff || []
 
