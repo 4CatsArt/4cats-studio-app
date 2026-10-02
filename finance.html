@@ -981,12 +981,14 @@ async function loadScheduleView() {
       <button class="btn" onclick="shiftScheduleWeek(1)" aria-label="Next week">›</button>
       <button class="btn" onclick="goToCurrentScheduleWeek()">This week</button>
       <button class="btn" onclick="toggleManageCodes()">⚙ Manage Class Codes</button>
+      <button class="btn" onclick="openPostAllPanel()" title="Preview and post every studio's wages for this week's pay period">Post all studios to pay period →</button>
       <div class="muted small" style="flex:1">
         Pick up to 4 studios to compare side by side. Shifts over 5h lose 0.5h automatically (unpaid break).
         Greyed-out days mean that person is already scheduled at a studio not currently shown.
       </div>
     </div>
     <div id="manage-codes-panel" class="panel" style="display:none;margin-bottom:14px;padding:14px"></div>
+    <div id="post-all-panel" class="panel" style="display:none;margin-bottom:14px"></div>
     <div class="toolbar" style="margin-bottom:14px;flex-wrap:wrap;gap:6px">
       <span class="muted small" style="width:100%">Quick shifts (available everywhere):</span>
       ${POPULAR_SHIFTS.map(p => `<button class="btn" style="font-size:11px;padding:4px 10px;height:auto" onclick="armShift('${p.start_time}','${p.end_time}')">${esc(formatShiftText(p.start_time, p.end_time))}</button>`).join('')}
@@ -1534,49 +1536,70 @@ async function saveShiftText(studioId, staffId, dateStr, rawText, el) {
   loadScheduleGrid()
 }
 
-async function postScheduleToPayPeriod(studioId) {
+// ---------- Pay-period posting (single studio + all studios) ----------
+// Both buttons share the same helpers, so a studio's total is identical
+// whichever way it gets posted.
+
+// Works out the pay period the currently-shown Schedule week belongs to.
+// Returns null (after alerting) if the pay schedule can't place it.
+function getSchedulePayPeriodContext() {
   if (!payScheduleAnchor) {
     alert('Set up the Pay Schedule (⚙ button on the Monthly Summary tab) first — needed to auto-detect which pay period this week belongs to.')
-    return
+    return null
   }
-
   const weekMidDate = dateStrOf(addDays(scheduleWeekStart, 3)) // middle of the week, safest single point to check
   const payDate = payDateForWorkDate(weekMidDate)
   if (!payDate) {
     alert("Couldn't determine a pay period for this week from the current pay schedule settings — check the anchor date and lag are right.")
-    return
+    return null
   }
   const target = monthAndPeriodForPayDate(payDate)
   if (!target) {
     alert(`This week's pay date (${payDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}) doesn't line up with any Pay 1/2/3 slot for its month — this shouldn't normally happen, worth double-checking the pay schedule settings.`)
-    return
+    return null
   }
-
-  // The full pay period this pay date covers (same lag/interval math as
-  // payDateForWorkDate). Everything in it is totalled straight from the
-  // database — both weeks — so posting after either week always gives the
-  // correct period total, and re-posting never doubles anything.
+  // The full pay period this pay date covers (same lag/interval math as payDateForWorkDate).
   const lag = payScheduleAnchor.lag_days != null ? payScheduleAnchor.lag_days : 6
   const interval = payScheduleAnchor.interval_days || 14
   const periodEnd = addDays(payDate, -lag)
   const periodStart = addDays(periodEnd, -(interval - 1))
-  const periodStartStr = dateStrOf(periodStart)
-  const periodEndStr = dateStrOf(periodEnd)
+  const fmtShort = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  return {
+    payDate, target, interval, periodStart, periodEnd,
+    periodStartStr: dateStrOf(periodStart),
+    periodEndStr: dateStrOf(periodEnd),
+    monthDate: monthToDate(target.monthDate),
+    fmtShort,
+    targetLabel: `Pay ${target.periodNumber} (pay date ${fmtShort(payDate)}), ${monthLabel(target.monthDate)}`,
+    periodLabel: `${fmtShort(periodStart)} – ${fmtShort(periodEnd)}`,
+  }
+}
 
-  const { data: staff, error: staffErr } = await sb.rpc('get_studio_staff_for_wages_range', { p_studio_id: studioId, p_from: periodStartStr, p_to: periodEndStr })
-  if (staffErr) { toast(staffErr.message, true); return }
-  const { data: periodShifts, error: shiftErr } = await sb.from('staff_shifts').select('staff_id, shift_date, start_time, end_time')
-    .eq('studio_id', studioId).gte('shift_date', periodStartStr).lte('shift_date', periodEndStr)
-  if (shiftErr) { toast(shiftErr.message, true); return }
+// Totals one studio's wages for the whole pay period straight from the
+// database (both weeks), so posting after either week gives the right
+// period total and re-posting never doubles anything.
+// Pass preloadedShifts (this studio's rows) to skip the shift query.
+async function computeStudioPayPeriod(studioId, ctx, preloadedShifts) {
+  const { data: staff, error: staffErr } = await sb.rpc('get_studio_staff_for_wages_range', { p_studio_id: studioId, p_from: ctx.periodStartStr, p_to: ctx.periodEndStr })
+  if (staffErr) return { error: staffErr.message }
+
+  let periodShifts = preloadedShifts
+  if (!periodShifts) {
+    const { data, error: shiftErr } = await sb.from('staff_shifts').select('staff_id, studio_id, shift_date, start_time, end_time')
+      .eq('studio_id', studioId).gte('shift_date', ctx.periodStartStr).lte('shift_date', ctx.periodEndStr)
+    if (shiftErr) return { error: shiftErr.message }
+    periodShifts = data || []
+  }
 
   const staffById = {}
   ;(staff || []).forEach(s => { staffById[s.staff_id] = s })
 
-  let total = 0
+  let total = 0, shiftCount = 0
   const noWage = new Set()
   const daysWithShifts = new Set()
-  ;(periodShifts || []).forEach(sh => {
+  periodShifts.forEach(sh => {
     if (!sh.start_time || !sh.end_time) return // ghost row
+    shiftCount++
     daysWithShifts.add(sh.shift_date)
     const person = staffById[sh.staff_id]
     if (!person) return
@@ -1586,46 +1609,207 @@ async function postScheduleToPayPeriod(studioId) {
 
   // Flag a week of the period with nothing entered yet, so a half-period
   // total is never mistaken for the full thing.
-  const fmtShort = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
   const emptyWeeks = []
-  for (let w = 0; w < interval; w += 7) {
-    const wStart = addDays(periodStart, w)
-    const wEnd = addDays(periodStart, Math.min(w + 6, interval - 1))
+  for (let w = 0; w < ctx.interval; w += 7) {
+    const wStart = addDays(ctx.periodStart, w)
+    const wEnd = addDays(ctx.periodStart, Math.min(w + 6, ctx.interval - 1))
     let any = false
     for (let d = new Date(wStart); d <= wEnd; d = addDays(d, 1)) if (daysWithShifts.has(dateStrOf(d))) { any = true; break }
-    if (!any) emptyWeeks.push(fmtShort(wStart) + '–' + fmtShort(wEnd))
+    if (!any) emptyWeeks.push(ctx.fmtShort(wStart) + '–' + ctx.fmtShort(wEnd))
   }
-  let notes = `\n\nCovers work dates ${fmtShort(periodStart)} – ${fmtShort(periodEnd)}.`
-  if (emptyWeeks.length) notes += `\n⚠ No shifts entered yet for ${emptyWeeks.join(', ')} — this total is partial.`
-  if (noWage.size) notes += `\n⚠ No hourly wage on file (counted as $0): ${[...noWage].join(', ')}.`
 
-  const monthDate = monthToDate(target.monthDate)
   const { data: existing } = await sb.from('studio_pay_periods').select('is_manual_override, amount')
-    .eq('studio_id', studioId).eq('month', monthDate).eq('period_number', target.periodNumber).maybeSingle()
+    .eq('studio_id', studioId).eq('month', ctx.monthDate).eq('period_number', ctx.target.periodNumber).maybeSingle()
 
-  const targetLabel = `Pay ${target.periodNumber} (pay date ${payDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}), ${monthLabel(target.monthDate)}`
+  return { total, shiftCount, noWage: [...noWage], emptyWeeks, existing: existing || null }
+}
 
-  if (existing && existing.is_manual_override) {
+async function writeStudioPayPeriod(studioId, ctx, total) {
+  const { error } = await sb.from('studio_pay_periods')
+    .upsert({ studio_id: studioId, month: ctx.monthDate, period_number: ctx.target.periodNumber, amount: total, is_manual_override: false },
+            { onConflict: 'studio_id,month,period_number' })
+  if (error) return error.message
+  const { data: updatedFin } = await sb.from('studio_monthly_finance').select('*').eq('studio_id', studioId).eq('month', ctx.monthDate).maybeSingle()
+  if (updatedFin) financeRows[studioId] = updatedFin
+  const { data: prog } = await sb.rpc('get_studio_sales_goal_progress', { p_studio_id: studioId, p_month: monthToText(ctx.target.monthDate) })
+  if (prog && prog[0]) progressRows[studioId] = prog[0]
+  return null
+}
+
+async function postScheduleToPayPeriod(studioId) {
+  const ctx = getSchedulePayPeriodContext()
+  if (!ctx) return
+  const r = await computeStudioPayPeriod(studioId, ctx)
+  if (r.error) { toast(r.error, true); return }
+
+  let notes = `\n\nCovers work dates ${ctx.periodLabel}.`
+  if (r.emptyWeeks.length) notes += `\n⚠ No shifts entered yet for ${r.emptyWeeks.join(', ')} — this total is partial.`
+  if (r.noWage.length) notes += `\n⚠ No hourly wage on file (counted as $0): ${r.noWage.join(', ')}.`
+
+  if (r.existing && r.existing.is_manual_override) {
     const overwrite = confirm(
-      `${STUDIO_NAMES[studioId]}: ${targetLabel} already has a manually-confirmed amount (${money(existing.amount)}).\n\n` +
-      `Posting this schedule estimate (${money(total)}) will overwrite it. Continue?` + notes
+      `${STUDIO_NAMES[studioId]}: ${ctx.targetLabel} already has a manually-confirmed amount (${money(r.existing.amount)}).\n\n` +
+      `Posting this schedule estimate (${money(r.total)}) will overwrite it. Continue?` + notes
     )
     if (!overwrite) return
   } else {
-    const confirmed = confirm(`Post ${money(total)} to ${STUDIO_NAMES[studioId]}'s ${targetLabel}?` + notes)
+    const confirmed = confirm(`Post ${money(r.total)} to ${STUDIO_NAMES[studioId]}'s ${ctx.targetLabel}?` + notes)
     if (!confirmed) return
   }
 
-  const { error } = await sb.from('studio_pay_periods')
-    .upsert({ studio_id: studioId, month: monthDate, period_number: target.periodNumber, amount: total, is_manual_override: false },
-            { onConflict: 'studio_id,month,period_number' })
-  if (error) { toast(error.message, true); return }
+  const err = await writeStudioPayPeriod(studioId, ctx, r.total)
+  if (err) { toast(err, true); return }
+  toast(`Posted ${money(r.total)} to ${STUDIO_NAMES[studioId]}'s Pay ${ctx.target.periodNumber}, ${monthLabel(ctx.target.monthDate)}.`)
+}
 
-  toast(`Posted ${money(total)} to ${STUDIO_NAMES[studioId]}'s Pay ${target.periodNumber}, ${monthLabel(target.monthDate)}.`)
-  const { data: updatedFin } = await sb.from('studio_monthly_finance').select('*').eq('studio_id', studioId).eq('month', monthDate).maybeSingle()
-  if (updatedFin) financeRows[studioId] = updatedFin
-  const { data: prog } = await sb.rpc('get_studio_sales_goal_progress', { p_studio_id: studioId, p_month: monthToText(target.monthDate) })
-  if (prog && prog[0]) progressRows[studioId] = prog[0]
+// ----- Post ALL studios -----
+// Builds a preview of every studio that has shifts in the pay period, lets
+// you review/untick, then posts the ticked ones. Studios with no shifts in
+// the period are left completely untouched (never overwritten with $0).
+// Manually-entered amounts start UNticked so they're never replaced by accident.
+let postAllPreview = null // { ctx, rows: [{ studioId, total, shiftCount, noWage, emptyWeeks, existing, error }] }
+
+async function openPostAllPanel() {
+  const panel = document.getElementById('post-all-panel')
+  const ctx = getSchedulePayPeriodContext()
+  if (!ctx) return
+  panel.style.display = ''
+  panel.innerHTML = '<div class="loading">Calculating every studio for ' + esc(ctx.periodLabel) + '…</div>'
+
+  // All shifts in the period, fetched in pages (Supabase caps a single
+  // response at 1000 rows), then grouped by studio.
+  const allShifts = []
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await sb.from('staff_shifts').select('staff_id, studio_id, shift_date, start_time, end_time')
+      .gte('shift_date', ctx.periodStartStr).lte('shift_date', ctx.periodEndStr)
+      .order('shift_date').order('studio_id').order('staff_id') // = the table's unique key, so paging is stable
+      .range(from, from + 999)
+    if (error) { panel.innerHTML = `<div class="muted small" style="padding:14px">Couldn't load shifts: ${esc(error.message)}</div>`; return }
+    allShifts.push(...(data || []))
+    if (!data || data.length < 1000) break
+  }
+
+  const byStudio = {}
+  ;allShifts.forEach(sh => {
+    if (!sh.start_time || !sh.end_time) return
+    ;(byStudio[sh.studio_id] = byStudio[sh.studio_id] || []).push(sh)
+  })
+  const studiosWithShifts = STUDIO_IDS.filter(id => byStudio[id] && byStudio[id].length)
+  const unknownStudios = Object.keys(byStudio).filter(id => !STUDIO_NAMES[id])
+
+  const rows = await Promise.all(studiosWithShifts.map(async (studioId) => {
+    const r = await computeStudioPayPeriod(studioId, ctx, byStudio[studioId])
+    return { studioId, ...r }
+  }))
+  postAllPreview = { ctx, rows, skippedCount: STUDIO_IDS.length - studiosWithShifts.length, unknownStudios }
+  renderPostAllPanel()
+}
+
+function renderPostAllPanel() {
+  const panel = document.getElementById('post-all-panel')
+  const { ctx, rows, skippedCount, unknownStudios } = postAllPreview
+
+  const body = rows.map((r, i) => {
+    if (r.error) {
+      return `<tr><td style="text-align:center">—</td><td class="studio-name" style="text-align:left">${esc(STUDIO_NAMES[r.studioId])}</td>
+        <td colspan="4" style="text-align:left;color:var(--bad)">Couldn't calculate: ${esc(r.error)}</td></tr>`
+    }
+    const isManual = r.existing && r.existing.is_manual_override
+    const warnings = []
+    if (isManual) warnings.push(`Manually entered ${money(r.existing.amount)} — tick to replace`)
+    if (r.emptyWeeks.length) warnings.push(`Partial: no shifts ${r.emptyWeeks.join(', ')}`)
+    if (r.noWage.length) warnings.push(`No wage ($0): ${r.noWage.join(', ')}`)
+    const current = r.existing ? money(r.existing.amount) + (isManual ? ' (manual)' : '') : '—'
+    return `<tr>
+      <td style="text-align:center"><input type="checkbox" id="post-all-cb-${i}" ${isManual ? '' : 'checked'} onchange="updatePostAllSummary()"></td>
+      <td class="studio-name" style="text-align:left">${esc(STUDIO_NAMES[r.studioId])}</td>
+      <td>${r.shiftCount}</td>
+      <td>${current}</td>
+      <td><strong>${money(r.total)}</strong></td>
+      <td style="text-align:left;color:${warnings.length ? 'var(--bad)' : 'var(--muted)'}">${warnings.length ? esc(warnings.join(' · ')) : 'OK'}</td>
+    </tr>`
+  }).join('')
+
+  panel.innerHTML = `
+    <div style="padding:12px 14px;border-bottom:0.5px solid var(--line)">
+      <strong>Post all studios → ${esc(ctx.targetLabel)}</strong>
+      <div class="muted small" style="margin-top:4px">
+        Work dates ${esc(ctx.periodLabel)}. Each total covers the full pay period, using the same math as the per-studio button.
+        ${skippedCount ? `${skippedCount} studio${skippedCount === 1 ? '' : 's'} with no shifts in this period ${skippedCount === 1 ? 'is' : 'are'} not shown and won't be touched.` : ''}
+        ${unknownStudios.length ? `<br><span style="color:var(--bad)">⚠ Shifts found for unrecognized studio IDs (not posted): ${esc(unknownStudios.join(', '))}</span>` : ''}
+      </div>
+    </div>
+    <table class="fin-table" style="width:auto">
+      <thead><tr>
+        <th style="text-align:center"><input type="checkbox" onchange="toggleAllPostAll(this.checked)" title="Tick / untick all"></th>
+        <th class="studio-name" style="text-align:left">Studio</th>
+        <th>Shifts</th><th>Current amount</th><th>Will post</th><th style="text-align:left">Notes</th>
+      </tr></thead>
+      <tbody>${body || '<tr><td colspan="6" class="muted" style="text-align:left">No shifts found in this pay period.</td></tr>'}</tbody>
+    </table>
+    <div style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-top:0.5px solid var(--line)">
+      <button class="btn" id="post-all-go" onclick="confirmPostAll()">Post selected</button>
+      <button class="btn" onclick="closePostAllPanel()">Cancel</button>
+      <span class="muted small" id="post-all-summary"></span>
+    </div>`
+  updatePostAllSummary()
+}
+
+function selectedPostAllRows() {
+  if (!postAllPreview) return []
+  return postAllPreview.rows.filter((r, i) => {
+    const cb = document.getElementById('post-all-cb-' + i)
+    return !r.error && cb && cb.checked
+  })
+}
+
+function updatePostAllSummary() {
+  const sel = selectedPostAllRows()
+  const sum = sel.reduce((a, r) => a + r.total, 0)
+  const el = document.getElementById('post-all-summary')
+  if (el) el.textContent = `${sel.length} studio${sel.length === 1 ? '' : 's'} selected · ${money(sum)} total`
+}
+
+function toggleAllPostAll(checked) {
+  postAllPreview.rows.forEach((r, i) => {
+    const cb = document.getElementById('post-all-cb-' + i)
+    if (cb) cb.checked = checked
+  })
+  updatePostAllSummary()
+}
+
+function closePostAllPanel() {
+  postAllPreview = null
+  const panel = document.getElementById('post-all-panel')
+  panel.style.display = 'none'
+  panel.innerHTML = ''
+}
+
+async function confirmPostAll() {
+  const sel = selectedPostAllRows()
+  if (!sel.length) { toast('Nothing selected to post.', true); return }
+  const { ctx } = postAllPreview
+  const manualCount = sel.filter(r => r.existing && r.existing.is_manual_override).length
+  const sum = sel.reduce((a, r) => a + r.total, 0)
+  let msg = `Post ${money(sum)} across ${sel.length} studio${sel.length === 1 ? '' : 's'} to ${ctx.targetLabel}?\n\nWork dates ${ctx.periodLabel}.`
+  if (manualCount) msg += `\n\n⚠ ${manualCount} of these will REPLACE a manually-entered amount.`
+  if (!confirm(msg)) return
+
+  const btn = document.getElementById('post-all-go')
+  if (btn) { btn.disabled = true; btn.textContent = 'Posting…' }
+
+  const failures = []
+  for (const r of sel) { // one at a time — simple, and keeps the failure list exact
+    const err = await writeStudioPayPeriod(r.studioId, ctx, r.total)
+    if (err) failures.push(`${STUDIO_NAMES[r.studioId]}: ${err}`)
+  }
+
+  if (failures.length) {
+    alert(`Posted ${sel.length - failures.length} of ${sel.length}. These failed:\n\n${failures.join('\n')}`)
+  } else {
+    toast(`Posted ${money(sum)} across ${sel.length} studios to Pay ${ctx.target.periodNumber}, ${monthLabel(ctx.target.monthDate)}.`)
+  }
+  closePostAllPanel()
 }
 
 /* ---------- staff hours / wage estimate panel ---------- */
