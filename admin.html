@@ -4748,7 +4748,6 @@ async function openStaffModal(id = null) {
         staffPinLoaded = true
       }
       document.getElementById('staff-can-adjust-spaces').checked = !!data.can_adjust_spaces
-      document.getElementById('staff-can-view-community-dashboard').checked = !!data.can_view_community_dashboard
       document.getElementById('staff-hire-date').value = data.hire_date || ''
       document.getElementById('staff-hourly-wage').value = ''
       setWageInputState(false, '$/hr')
@@ -4795,7 +4794,6 @@ async function openStaffModal(id = null) {
     document.getElementById('staff-pin').placeholder = 'e.g. 1234'
     staffPinLoaded = true
     document.getElementById('staff-can-adjust-spaces').checked = false
-    document.getElementById('staff-can-view-community-dashboard').checked = false
     document.getElementById('staff-hire-date').value = ''
     document.getElementById('staff-hourly-wage').value = ''
     setWageInputState(false, '$/hr')
@@ -4841,7 +4839,6 @@ async function saveStaff() {
     province_code: document.getElementById('staff-province').value || null,
     training_unit_ids: trainingUnitIds,
     can_adjust_spaces: document.getElementById('staff-role').value === 'manager' ? document.getElementById('staff-can-adjust-spaces').checked : false,
-    can_view_community_dashboard: document.getElementById('staff-can-view-community-dashboard').checked,
     hire_date: document.getElementById('staff-hire-date').value || null,
   }
   const wageInput = document.getElementById('staff-hourly-wage').value
@@ -8561,12 +8558,11 @@ function showAdminToast(msg, duration = 2500) {
       <div style="font-size:11px;color:#aaa;margin-top:3px;margin-left:22px">Admins can always do this — this checkbox is for managers only.</div>
     </div>
 
-    <!-- Community Dashboard access -->
-    <div id="staff-community-dashboard-row" style="margin-bottom:10px">
-      <label style="font-size:12px;display:flex;align-items:center;gap:7px;cursor:pointer">
-        <input type="checkbox" id="staff-can-view-community-dashboard"> Can access Community Dashboard (via PIN)
-      </label>
-      <div style="font-size:11px;color:#aaa;margin-top:3px;margin-left:22px">Not tied to role — grant to whoever is acting as this studio's community coordinator.</div>
+    <!-- Community Dashboard access: no checkbox any more — the dashboard's
+         coordinator view is unlocked by being this studio's ACTIVE SC
+         (Community Points → Coordinators) or an admin. -->
+    <div id="staff-community-dashboard-row" style="margin-bottom:10px;font-size:11px;color:#aaa">
+      Community Dashboard coordinator view: unlocked automatically for this studio's current SC (Community Points → Coordinators) and for admins.
     </div>
 
     <!-- Studios -->
@@ -11493,7 +11489,8 @@ async function removeAgeException(id, name) {
   <h3 style="margin-bottom:0.5rem">🏆 Community Points</h3>
   <p style="color:#888;font-size:13px;margin-bottom:1rem">
     Set what coordinators earn, manage prizes and levels, and handle redemptions.
-    Points are awarded automatically at month end — nothing here changes a month that's already closed.
+    Friday fill points are awarded every Saturday morning; party fill and team building on the 2nd of each month.
+    Editing a rule never changes points already awarded.
   </p>
 
   <div style="display:flex;gap:0;border-bottom:0.5px solid #e0e0d8;margin-bottom:1.25rem;flex-wrap:wrap">
@@ -11638,164 +11635,197 @@ function cpStaff(id) { return (cpData.staff || []).find(s => s.id === id) }
 function cpStaffName(id) { const s = cpStaff(id); return s ? (s.display_name || s.nickname || 'Unnamed') : 'Unknown person' }
 function cpPrize(id) { return (cpData.prizes || []).find(p => p.id === id) }
 function cpTier(id) { return (cpData.tiers || []).find(t => t.id === id) }
-function cpBalance(id) { return (cpData.balances || []).find(b => b.staff_profile_id === id) || { wallet: 0, lifetime: 0, level_name: null, badge_emoji: null } }
+function cpRole(id) { return (cpData.roles || []).find(r => r.id === id) }
+// "Main Street · Camilla" — wallets belong to a coordinator role, labelled by studio
+function cpRoleLabel(id) {
+  const r = cpRole(id)
+  if (!r) return 'Unknown coordinator'
+  return getStudioName(r.studio_id) + ' · ' + cpStaffName(r.staff_profile_id)
+}
+function cpBalanceForRole(id) { return (cpData.balances || []).find(b => b.coordinator_role_id === id) || { wallet: 0, balance: 0, lifetime_earned: 0, this_month: 0, forfeited: 0 } }
+function cpRoleActive(r) { const t = cpData.today; return r.start_date <= t && (!r.end_date || r.end_date >= t) }
+function cpCurrentRoles() {
+  return (cpData.roles || []).filter(cpRoleActive)
+    .sort((a, b) => getStudioName(a.studio_id).localeCompare(getStudioName(b.studio_id)))
+}
+function cpCurrentRoleOptions(placeholder) {
+  return `<option value="">${cpEsc(placeholder || 'Choose a studio…')}</option>` + cpCurrentRoles().map(r =>
+    `<option value="${r.id}">${cpEsc(getStudioName(r.studio_id))} — ${cpEsc(cpStaffName(r.staff_profile_id))}</option>`).join('')
+}
 
 // ── Rule helpers ────────────────────────────────
-function cpRuleMax(r) {
-  if (r.calc_method === 'scaled') { const full = Math.round(100 * Number(r.multiplier || 0)); return r.monthly_cap != null ? Math.min(full, r.monthly_cap) : full }
-  if (r.calc_method === 'per_unit') return r.monthly_cap != null ? r.monthly_cap : null
-  return r.flat_points
+const CP_METHODS = { threshold: 'Tiers (stacking)', per_unit: 'Points per item', flat: 'Fixed points', milestone: 'Milestones (repeating)' }
+const CP_PERIODS = { weekly: 'Weekly', monthly: 'Monthly', cumulative: 'Running total' }
+// Rules the database scores automatically. Any other code can only be entered by hand.
+const CP_AUTO_CODES = ['friday_fill', 'party_fill', 'team_building', 'sales_yoy', 'instagram_followers']
+
+function cpUnitSuffix(r) {
+  const u = (r.unit_label || '').trim()
+  return !u || u.startsWith('%') ? '%' : ' ' + u
 }
-function cpRuleWorth(r) {
-  if (r.calc_method === 'scaled') return `Score × ${Number(r.multiplier)} <span class="cp-muted">(0–100% score → up to ${cpFmt(Math.round(100 * Number(r.multiplier)))})</span>`
-  if (r.calc_method === 'per_unit') return `${cpFmt(r.points_per_unit)} each`
-  return `${cpFmt(r.flat_points)} pts`
+function cpDescribeRule(r) {
+  if (r.calc_method === 'threshold') {
+    const tiers = (r.tiers || []).slice().sort((a, b) => a.at - b.at)
+    return tiers.map((t, i) => `${i ? '+' : ''}${cpFmt(t.points)} at ${t.at}${cpUnitSuffix(r)}`).join(', ') || '—'
+  }
+  if (r.calc_method === 'per_unit') return `${cpFmt(r.points_per_unit)} each${r.monthly_cap ? ` (max ${cpFmt(r.monthly_cap)}/month)` : ''}`
+  if (r.calc_method === 'flat') return `${cpFmt(r.flat_points)} pts`
+  if (r.calc_method === 'milestone') return (r.milestones || []).map((m, i) => `${i ? '+' : ''}${cpFmt(m.points)} every ${cpFmt(m.every)}`).join(', ') || '—'
+  return '—'
+}
+function cpRuleMaxMonth(r) {
+  if (!r.is_active) return 0
+  if (r.calc_method === 'threshold') {
+    const per = (r.tiers || []).reduce((s, t) => s + (Number(t.points) || 0), 0)
+    return r.period === 'weekly' ? per * 4.33 : per
+  }
+  if (r.calc_method === 'per_unit') return r.monthly_cap || null
+  if (r.calc_method === 'flat') return r.flat_points || 0
+  return null
 }
 
 // ═══ EARNING RULES ═══════════════════════════════
 function cpRenderRules() {
-  const rules = cpData.rules || []
-  const earning = rules.filter(r => r.is_active && r.kind !== 'bonus')
-  let resultMax = 0, effortMax = 0, uncapped = false
-  earning.forEach(r => {
-    const m = cpRuleMax(r)
-    if (m == null) { uncapped = true; return }
-    if (r.kind === 'result') resultMax += m; else effortMax += m
+  const rules = (cpData.rules || []).slice().sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
+  let maxMonth = 0, uncapped = []
+  rules.filter(r => r.is_active).forEach(r => {
+    const m = cpRuleMaxMonth(r)
+    if (m === null) uncapped.push(r.name); else maxMonth += m
   })
-  const total = resultMax + effortMax
-  const resultPct = total ? Math.round(resultMax / total * 100) : 0
-  const tier1 = (cpData.tiers || []).filter(t => t.is_active).sort((a, b) => a.points_cost - b.points_cost)[0]
-
-  let html = `<div class="cp-summary">
-    <div class="cp-stat"><div class="cp-stat-label">Max per month</div>
-      <div class="cp-stat-value">${cpFmt(total)}${uncapped ? '+' : ''}</div>
-      <div class="cp-stat-sub">results + effort, before bonuses${uncapped ? ' · some categories uncapped' : ''}</div></div>
-    <div class="cp-stat"><div class="cp-stat-label">Results vs effort</div>
-      <div class="cp-stat-value">${resultPct}% / ${total ? 100 - resultPct : 0}%</div>
-      <div class="cp-stat-sub">${cpFmt(resultMax)} results · ${cpFmt(effortMax)} effort</div></div>
-    ${tier1 ? `<div class="cp-stat"><div class="cp-stat-label">Cheapest prize tier</div>
-      <div class="cp-stat-value">${cpFmt(tier1.points_cost)}</div>
-      <div class="cp-stat-sub">${cpEsc(tier1.name)} · ${total ? Math.round(tier1.points_cost / total * 100) : '–'}% of a max month</div></div>` : ''}
-  </div>
-  <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
-    <div class="cp-note" style="margin:0">Changes apply from <strong>${cpMonthLabel(cpData.current_month)}</strong>. Closed months keep the values they were earned under.</div>
-    <button class="btn btn-primary" onclick="cpOpenRuleModal(null)">+ Add Category</button>
-  </div>
-  <div class="users-table-wrap" style="margin-top:0.75rem"><table class="users-table"><thead><tr>
-    <th>Category</th><th>Type</th><th>Worth</th><th>Monthly cap</th><th>Leaderboard</th><th>Since</th><th></th>
-  </tr></thead><tbody>`
-  if (!rules.length) html += `<tr><td colspan="7"><div class="empty">No categories yet.</div></td></tr>`
+  let html = `
+    <div class="cp-summary">
+      <div class="cp-stat"><div class="cp-stat-label">Active rules</div><div class="cp-stat-value">${rules.filter(r => r.is_active).length} / ${rules.length}</div>
+        <div class="cp-stat-sub">Inactive rules earn nothing and don't show on the dashboard</div></div>
+      <div class="cp-stat"><div class="cp-stat-label">Max per month (one studio)</div><div class="cp-stat-value">~${cpFmt(Math.round(maxMonth))}</div>
+        <div class="cp-stat-sub">${uncapped.length ? 'Plus uncapped: ' + cpEsc(uncapped.join(', ')) : 'Every active rule is capped'}</div></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;gap:1rem;flex-wrap:wrap">
+      <div class="cp-note" style="margin:0">Tiers <strong>stack</strong>: reaching a higher tier adds its points on top. Edits apply from this month — points already awarded keep their original rule.</div>
+      <button class="btn btn-primary" onclick="cpOpenRuleModal(null)">+ Add rule</button>
+    </div>
+    <div class="users-table-wrap"><table class="users-table"><thead><tr><th>Rule</th><th>How it earns</th><th>When</th><th>Waiting</th><th>Status</th><th></th></tr></thead><tbody>`
+  if (!rules.length) html += '<tr><td colspan="6"><div class="empty">No rules yet.</div></td></tr>'
   rules.forEach(r => {
     html += `<tr class="${r.is_active ? '' : 'cp-row-off'}">
-      <td><div style="font-weight:500;font-size:13px">${cpEsc(r.name)}${r.is_active ? '' : ' <span class="cp-pill cp-pill-off">Off</span>'}</div>
-        <div class="cp-muted">${cpEsc(r.code)}${r.source_notes ? ' · ' + cpEsc(r.source_notes) : ''}</div></td>
-      <td><span class="cp-pill cp-pill-${r.kind}">${r.kind}</span></td>
-      <td>${cpRuleWorth(r)}</td>
-      <td>${r.monthly_cap != null ? cpFmt(r.monthly_cap) : '<span class="cp-muted">—</span>'}</td>
-      <td>${r.has_leaderboard ? '✓' : ''}</td>
-      <td>${cpMonthLabel(r.effective_from)}</td>
-      <td><button class="btn" style="font-size:11px" onclick="cpOpenRuleModal('${r.code}')">Edit</button></td>
-    </tr>`
+      <td><div style="font-size:13px;font-weight:500">${cpEsc(r.name)}</div><div class="cp-muted">${cpEsc(r.code)}${r.source_notes ? ' · ' + cpEsc(r.source_notes) : ''}</div></td>
+      <td style="font-size:13px">${cpEsc(cpDescribeRule(r))}</td>
+      <td style="font-size:12px">${cpEsc(CP_PERIODS[r.period] || r.period)}<div class="cp-muted">${r.source === 'manual' ? 'Entered by home office' : 'Automatic'}</div></td>
+      <td style="font-size:12px">${r.waiting_months ? r.waiting_months + ' month' + (r.waiting_months === 1 ? '' : 's') : '—'}</td>
+      <td>${r.is_active ? '<span class="cp-pill cp-pill-result">On</span>' : '<span class="cp-pill cp-pill-off">Off</span>'}</td>
+      <td><button class="btn" style="font-size:11px" onclick="cpOpenRuleModal('${cpEsc(r.code)}')">Edit</button></td></tr>`
   })
   return html + '</tbody></table></div>'
+}
+
+function cpTierRowHtml(kind, a, b) {
+  const [la, lb] = kind === 'tier' ? ['Target', 'Points'] : ['Every', 'Points']
+  return `<div class="cpr-${kind}-row" style="display:flex;gap:0.5rem;align-items:center;margin-bottom:6px">
+    <input type="number" step="any" min="0" class="cpr-a" value="${cpEsc(a == null ? '' : a)}" placeholder="${la}" style="width:120px" oninput="cpRulePreview()">
+    <input type="number" step="1" min="1" class="cpr-b" value="${cpEsc(b == null ? '' : b)}" placeholder="${lb}" style="width:110px" oninput="cpRulePreview()">
+    <button class="btn" style="font-size:11px" onclick="this.parentNode.remove();cpRulePreview()">Remove</button></div>`
+}
+function cpAddTierRow(kind) {
+  document.getElementById(`cpr-${kind}s`).insertAdjacentHTML('beforeend', cpTierRowHtml(kind, '', ''))
+  cpRulePreview()
 }
 
 function cpOpenRuleModal(code) {
   const r = code ? (cpData.rules || []).find(x => x.code === code) : null
   const isNew = !r
-  const v = r || { name: '', code: '', kind: 'result', calc_method: 'scaled', multiplier: 3, points_per_unit: 5, flat_points: 50, monthly_cap: '', has_leaderboard: true, is_active: true, source_notes: '', sort_order: ((cpData.rules || []).length + 1) * 10 }
+  const v = r || { code: '', name: '', calc_method: 'per_unit', period: 'monthly', source: 'manual', tiers: [], milestones: [],
+                   points_per_unit: '', flat_points: '', monthly_cap: '', waiting_months: 0, unit_label: '', sort_order: ((cpData.rules || []).length + 1) * 10, is_active: true, source_notes: '' }
+  const opt = (map, sel) => Object.keys(map).map(k => `<option value="${k}" ${k === sel ? 'selected' : ''}>${cpEsc(map[k])}</option>`).join('')
   const html = `
-    <div class="modal-field"><label>Name (shown to coordinators)</label>
-      <input id="cpr-name" value="${cpEsc(v.name)}" oninput="cpRuleNameInput(${isNew})"></div>
-    <div class="modal-field"><label>Code</label>
-      <input id="cpr-code" value="${cpEsc(v.code)}" ${isNew ? '' : 'disabled'} placeholder="e.g. camp_registrations">
-      <div class="modal-hint">${isNew ? 'Used by the monthly points job to find the data. Lowercase and underscores.' : 'Codes can\'t change once created.'}</div></div>
     <div style="display:flex;gap:1rem">
-      <div class="modal-field" style="flex:1"><label>Type</label>
-        <select id="cpr-kind" onchange="cpRulePreview()">
-          <option value="result" ${v.kind === 'result' ? 'selected' : ''}>Result</option>
-          <option value="effort" ${v.kind === 'effort' ? 'selected' : ''}>Effort</option>
-          <option value="bonus" ${v.kind === 'bonus' ? 'selected' : ''}>Bonus</option>
-        </select></div>
-      <div class="modal-field" style="flex:1.4"><label>How points are calculated</label>
-        <select id="cpr-method" onchange="cpRuleMethodChanged()">
-          <option value="scaled" ${v.calc_method === 'scaled' ? 'selected' : ''}>Scaled from a 0–100% score</option>
-          <option value="per_unit" ${v.calc_method === 'per_unit' ? 'selected' : ''}>Points for each one</option>
-          <option value="flat" ${v.calc_method === 'flat' ? 'selected' : ''}>Flat bonus</option>
-        </select></div>
+      <div class="modal-field" style="flex:1"><label>Name</label><input id="cpr-name" value="${cpEsc(v.name)}" placeholder="e.g. Influencer visit with content published" oninput="cpRuleNameInput(${isNew})"></div>
+      <div class="modal-field" style="width:200px"><label>Code</label><input id="cpr-code" value="${cpEsc(v.code)}" ${isNew ? '' : 'disabled'} placeholder="influencer_visit"></div>
     </div>
-    <div style="display:flex;gap:1rem">
-      <div class="modal-field" style="flex:1" id="cpr-mult-wrap"><label>Multiplier</label>
-        <input id="cpr-mult" type="number" step="0.1" min="0" value="${cpEsc(v.multiplier == null ? 3 : v.multiplier)}" oninput="cpRulePreview()"></div>
-      <div class="modal-field" style="flex:1" id="cpr-ppu-wrap"><label>Points each</label>
-        <input id="cpr-ppu" type="number" step="1" min="1" value="${cpEsc(v.points_per_unit == null ? 5 : v.points_per_unit)}" oninput="cpRulePreview()"></div>
-      <div class="modal-field" style="flex:1" id="cpr-flat-wrap"><label>Bonus points</label>
-        <input id="cpr-flat" type="number" step="1" min="1" value="${cpEsc(v.flat_points == null ? 50 : v.flat_points)}" oninput="cpRulePreview()"></div>
-      <div class="modal-field" style="flex:1"><label>Monthly cap</label>
-        <input id="cpr-cap" type="number" step="1" min="0" value="${cpEsc(v.monthly_cap == null ? '' : v.monthly_cap)}" placeholder="No cap" oninput="cpRulePreview()"></div>
+    ${isNew ? `<div class="cp-note" style="margin-top:-0.25rem">New rules are <strong>entered by home office</strong> (Wallets &amp; Adjustments). Rules that score themselves need database work — ask Claude.</div>` : ''}
+    <div style="display:flex;gap:1rem;flex-wrap:wrap">
+      <div class="modal-field" style="flex:1;min-width:170px"><label>Type</label><select id="cpr-method" onchange="cpRuleMethodChanged()">${opt(CP_METHODS, v.calc_method)}</select></div>
+      <div class="modal-field" style="flex:1;min-width:150px"><label>Period</label><select id="cpr-period" onchange="cpRulePreview()">${opt(CP_PERIODS, v.period)}</select></div>
+      <div class="modal-field" style="flex:1;min-width:190px"><label>Scored</label><select id="cpr-source" ${isNew ? 'disabled' : ''}>
+        <option value="auto" ${v.source !== 'manual' ? 'selected' : ''}>Automatically</option>
+        <option value="manual" ${v.source === 'manual' ? 'selected' : ''}>Entered by home office</option></select></div>
     </div>
-    <div id="cpr-preview" style="background:#fafaf8;border-radius:8px;padding:10px 12px;font-size:13px;margin-bottom:1rem"></div>
-    <div class="modal-field"><label>Where the number comes from (admin note)</label>
-      <input id="cpr-notes" value="${cpEsc(v.source_notes || '')}" placeholder="e.g. camp registrations vs. camp capacity"></div>
-    <div style="display:flex;gap:1.5rem;align-items:center;margin-bottom:1rem">
-      <label class="cp-check"><input type="checkbox" id="cpr-lb" ${v.has_leaderboard ? 'checked' : ''}> Monthly category leader</label>
-      <label class="cp-check"><input type="checkbox" id="cpr-active" ${v.is_active ? 'checked' : ''}> Active</label>
-      <div class="modal-field" style="margin:0 0 0 auto;width:110px"><label>Sort order</label>
-        <input id="cpr-sort" type="number" step="1" value="${cpEsc(v.sort_order)}"></div>
+    <div id="cpr-sec-threshold" class="modal-field"><label>Tiers — each one reached adds its points</label>
+      <div id="cpr-tiers">${(v.tiers || []).map(t => cpTierRowHtml('tier', t.at, t.points)).join('')}</div>
+      <button class="btn" style="font-size:11px" onclick="cpAddTierRow('tier')">+ Add tier</button></div>
+    <div id="cpr-sec-milestone" class="modal-field"><label>Milestones — repeat every time the total passes another step</label>
+      <div id="cpr-milestones">${(v.milestones || []).map(m => cpTierRowHtml('milestone', m.every, m.points)).join('')}</div>
+      <button class="btn" style="font-size:11px" onclick="cpAddTierRow('milestone')">+ Add milestone</button></div>
+    <div style="display:flex;gap:1rem;flex-wrap:wrap">
+      <div id="cpr-sec-per_unit" class="modal-field" style="width:150px"><label>Points each</label><input id="cpr-ppu" type="number" min="1" value="${cpEsc(v.points_per_unit == null ? '' : v.points_per_unit)}" oninput="cpRulePreview()"></div>
+      <div id="cpr-sec-flat" class="modal-field" style="width:150px"><label>Points</label><input id="cpr-flat" type="number" min="1" value="${cpEsc(v.flat_points == null ? '' : v.flat_points)}" oninput="cpRulePreview()"></div>
+      <div class="modal-field" style="width:150px"><label>Max per month</label><input id="cpr-cap" type="number" min="1" value="${cpEsc(v.monthly_cap == null ? '' : v.monthly_cap)}" placeholder="No cap" oninput="cpRulePreview()"></div>
+      <div class="modal-field" style="width:150px"><label>Unit label</label><input id="cpr-unit" value="${cpEsc(v.unit_label || '')}" placeholder="% fill" oninput="cpRulePreview()"></div>
     </div>
-    <div class="modal-hint">Saving applies from ${cpMonthLabel(cpData.current_month)} onward.</div>`
-  cpOpenModal(isNew ? 'Add Category' : 'Edit ' + v.name, isNew ? 'A new way for coordinators to earn' : 'Earning rule', html, () => cpSaveRule(isNew, v.code))
+    <div style="display:flex;gap:1rem;flex-wrap:wrap">
+      <div class="modal-field" style="width:210px"><label>Waiting period for new SCs (months)</label><input id="cpr-wait" type="number" min="0" value="${cpEsc(v.waiting_months || 0)}"></div>
+      <div class="modal-field" style="width:120px"><label>Sort order</label><input id="cpr-sort" type="number" value="${cpEsc(v.sort_order || 0)}"></div>
+      <div class="modal-field" style="flex:1;min-width:200px"><label>Notes (optional)</label><input id="cpr-notes" value="${cpEsc(v.source_notes || '')}"></div>
+    </div>
+    <label class="cp-check"><input type="checkbox" id="cpr-active" ${v.is_active ? 'checked' : ''}> Active (earns points and shows on the dashboard)</label>
+    <div id="cpr-preview" class="cp-note" style="margin-top:0.75rem"></div>`
+  cpOpenModal(isNew ? 'Add earning rule' : 'Edit earning rule', isNew ? 'New rule' : 'Changes apply from this month', html, () => cpSaveRule(isNew))
   cpRuleMethodChanged()
 }
-
 function cpRuleNameInput(isNew) {
-  if (isNew) {
-    document.getElementById('cpr-code').value = document.getElementById('cpr-name').value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40)
-  }
+  if (!isNew) return
+  const code = document.getElementById('cpr-name').value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40)
+  document.getElementById('cpr-code').value = code
 }
 function cpRuleMethodChanged() {
   const m = document.getElementById('cpr-method').value
-  document.getElementById('cpr-mult-wrap').style.display = m === 'scaled' ? '' : 'none'
-  document.getElementById('cpr-ppu-wrap').style.display = m === 'per_unit' ? '' : 'none'
-  document.getElementById('cpr-flat-wrap').style.display = m === 'flat' ? '' : 'none'
+  ;['threshold', 'milestone', 'per_unit', 'flat'].forEach(k => {
+    const el = document.getElementById('cpr-sec-' + k)
+    if (el) el.style.display = k === m ? '' : 'none'
+  })
+  if (m === 'threshold' && !document.querySelector('#cpr-tiers .cpr-tier-row')) cpAddTierRow('tier')
+  if (m === 'milestone' && !document.querySelector('#cpr-milestones .cpr-milestone-row')) cpAddTierRow('milestone')
   cpRulePreview()
 }
-function cpRulePreview() {
-  const m = document.getElementById('cpr-method').value
-  const capRaw = document.getElementById('cpr-cap').value
-  const cap = capRaw === '' ? null : Number(capRaw)
-  let text = ''
-  if (m === 'scaled') {
-    const mult = Number(document.getElementById('cpr-mult').value) || 0
-    const at = pct => { const p = Math.round(pct * mult); return cap != null ? Math.min(p, cap) : p }
-    text = `A 50% score earns <strong>${cpFmt(at(50))}</strong>, 75% earns <strong>${cpFmt(at(75))}</strong>, 100% earns <strong>${cpFmt(at(100))}</strong>.`
-  } else if (m === 'per_unit') {
-    const ppu = Number(document.getElementById('cpr-ppu').value) || 0
-    text = `Each one earns <strong>${cpFmt(ppu)}</strong>.` + (cap != null ? ` Stops counting at <strong>${cpFmt(cap)}</strong> for the month (${Math.floor(cap / (ppu || 1))} of them).` : ' <span style="color:#e65100">No cap — consider one for self-reported activity.</span>')
-  } else {
-    const flat = Number(document.getElementById('cpr-flat').value) || 0
-    text = `Earns <strong>${cpFmt(flat)}</strong> each time it's achieved in a month.`
-  }
-  document.getElementById('cpr-preview').innerHTML = text
+function cpReadRows(kind) {
+  return [...document.querySelectorAll(`#cpr-${kind}s .cpr-${kind}-row`)].map(row => {
+    const a = row.querySelector('.cpr-a').value, b = row.querySelector('.cpr-b').value
+    return kind === 'tier' ? { at: a === '' ? null : Number(a), points: b === '' ? null : Number(b) }
+                           : { every: a === '' ? null : Number(a), points: b === '' ? null : Number(b) }
+  }).filter(x => Object.values(x).some(v => v !== null))
 }
-
-async function cpSaveRule(isNew, originalCode) {
-  const rule = {
-    is_new: isNew,
-    code: isNew ? document.getElementById('cpr-code').value.trim() : originalCode,
-    name: document.getElementById('cpr-name').value.trim(),
-    kind: document.getElementById('cpr-kind').value,
+function cpRuleFromForm() {
+  return {
     calc_method: document.getElementById('cpr-method').value,
-    multiplier: document.getElementById('cpr-mult').value,
+    period: document.getElementById('cpr-period').value,
+    tiers: cpReadRows('tier'), milestones: cpReadRows('milestone'),
     points_per_unit: document.getElementById('cpr-ppu').value,
     flat_points: document.getElementById('cpr-flat').value,
     monthly_cap: document.getElementById('cpr-cap').value,
-    has_leaderboard: document.getElementById('cpr-lb').checked,
-    is_active: document.getElementById('cpr-active').checked,
-    source_notes: document.getElementById('cpr-notes').value.trim(),
-    sort_order: document.getElementById('cpr-sort').value
+    unit_label: document.getElementById('cpr-unit').value
   }
-  await cpRequest('save_rule', { rule })
+}
+function cpRulePreview() {
+  const el = document.getElementById('cpr-preview')
+  if (!el) return
+  const r = cpRuleFromForm()
+  const per = r.period === 'weekly' ? ' each week' : r.period === 'monthly' ? ' each month' : ''
+  el.innerHTML = `Shows on the dashboard as: <strong>${cpEsc(cpDescribeRule(Object.assign({}, r, {
+    points_per_unit: Number(r.points_per_unit) || 0, flat_points: Number(r.flat_points) || 0, monthly_cap: Number(r.monthly_cap) || null
+  })))}${r.calc_method === 'threshold' || r.calc_method === 'flat' ? cpEsc(per) : ''}</strong>`
+}
+async function cpSaveRule(isNew) {
+  const code = document.getElementById('cpr-code').value.trim()
+  const name = document.getElementById('cpr-name').value.trim()
+  if (!name) throw new Error('Give the rule a name.')
+  if (isNew && CP_AUTO_CODES.includes(code)) throw new Error('That code is reserved for an automatic rule.')
+  const f = cpRuleFromForm()
+  await cpRequest('save_rule', { rule: Object.assign(f, {
+    code, name, is_new: isNew,
+    source: isNew ? 'manual' : document.getElementById('cpr-source').value,
+    waiting_months: document.getElementById('cpr-wait').value,
+    sort_order: document.getElementById('cpr-sort').value,
+    source_notes: document.getElementById('cpr-notes').value,
+    is_active: document.getElementById('cpr-active').checked
+  }) })
 }
 
 // ═══ PRIZES ═══════════════════════════════════════
@@ -11882,10 +11912,10 @@ function cpRenderLevels() {
   let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;gap:1rem;flex-wrap:wrap">
     <div class="cp-note" style="margin:0">Levels are based on lifetime points, which never go down when someone redeems.</div>
     <button class="btn btn-primary" onclick="cpOpenLevelModal(null)">+ Add Level</button></div>
-  <div class="users-table-wrap"><table class="users-table"><thead><tr><th>Level</th><th>Lifetime points needed</th><th>People at this level</th><th></th></tr></thead><tbody>`
+  <div class="users-table-wrap"><table class="users-table"><thead><tr><th>Level</th><th>Lifetime points needed</th><th>Current coordinators at this level</th><th></th></tr></thead><tbody>`
   if (!levels.length) html += '<tr><td colspan="4"><div class="empty">No levels yet.</div></td></tr>'
   levels.forEach(l => {
-    const count = (cpData.balances || []).filter(b => b.level_name === l.name).length
+    const count = (cpData.balances || []).filter(b => b.role_active && b.level_name === l.name).length
     html += `<tr><td style="font-size:13px;font-weight:500">${cpEsc(l.badge_emoji || '')} ${cpEsc(l.name)}</td>
       <td>${cpFmt(l.lifetime_required)}</td><td>${count}</td>
       <td style="white-space:nowrap"><button class="btn" style="font-size:11px" onclick="cpOpenLevelModal('${l.id}')">Edit</button>
@@ -11927,20 +11957,23 @@ function cpRenderRedemptions() {
     <select onchange="cpRedemptionFilter=this.value;cpRender()">
       ${opt('open', 'Open (requested + approved)')}${opt('requested', 'Requested')}${opt('approved', 'Approved')}${opt('fulfilled', 'Fulfilled')}${opt('cancelled', 'Cancelled')}${opt('all', 'All')}
     </select></div></div>
-  <div class="users-table-wrap"><table class="users-table"><thead><tr><th>Requested</th><th>Person</th><th>Prize</th><th>Points</th><th>Status</th><th>Notes</th><th></th></tr></thead><tbody>`
+  <div class="cp-note">Points come out of the wallet when a prize is requested. Cancelling puts them back. To redeem on a coordinator's behalf, use <strong>Wallets &amp; Adjustments</strong>.</div>
+  <div class="users-table-wrap"><table class="users-table"><thead><tr><th>Requested</th><th>Studio · Coordinator</th><th>Prize</th><th>Points</th><th>Status</th><th>Note</th><th></th></tr></thead><tbody>`
   if (!rows.length) html += '<tr><td colspan="7"><div class="empty">Nothing here.</div></td></tr>'
   rows.forEach(r => {
     const p = cpPrize(r.prize_id), t = p ? cpTier(p.tier_id) : null
+    const role = cpRole(r.coordinator_role_id)
+    const ended = role && !cpRoleActive(role)
     let actions = ''
     if (r.status === 'requested') actions += `<button class="btn" style="font-size:11px" onclick="cpSetRedemption('${r.id}','approved')">Approve</button> `
     if (r.status === 'requested' || r.status === 'approved') actions += `<button class="btn" style="font-size:11px" onclick="cpSetRedemption('${r.id}','fulfilled')">Fulfilled</button>
       <button class="btn" style="font-size:11px;color:#c0392b;border-color:#f5c6cb" onclick="cpSetRedemption('${r.id}','cancelled')">Cancel</button>`
     html += `<tr><td>${cpDateLabel(r.requested_at)}</td>
-      <td style="font-size:13px;font-weight:500">${cpEsc(cpStaffName(r.staff_profile_id))}</td>
+      <td style="font-size:13px;font-weight:500">${cpEsc(cpRoleLabel(r.coordinator_role_id))}${ended ? '<span class="sc-flag">role ended</span>' : ''}</td>
       <td>${cpEsc(p ? p.name : 'Deleted prize')}${t ? `<div class="cp-muted">${cpEsc(t.name)}</div>` : ''}</td>
-      <td>${cpFmt(r.points_spent)}</td>
+      <td>${cpFmt(r.points_cost)}</td>
       <td><span class="cp-pill cp-pill-${r.status}">${r.status}</span>${r.fulfilled_at ? `<div class="cp-muted">${cpDateLabel(r.fulfilled_at)}</div>` : ''}</td>
-      <td style="color:#888;font-size:12px">${cpEsc(r.notes || '')}</td>
+      <td style="color:#888;font-size:12px">${cpEsc(r.note || '')}</td>
       <td style="white-space:nowrap">${actions}</td></tr>`
   })
   return html + '</tbody></table></div>'
@@ -11949,32 +11982,47 @@ function cpRenderRedemptions() {
 async function cpSetRedemption(id, status) {
   const r = (cpData.redemptions || []).find(x => x.id === id)
   if (!r) return
-  const who = cpStaffName(r.staff_profile_id)
-  if (status === 'cancelled' && !confirm(`Cancel this redemption? ${cpFmt(r.points_spent)} points go back to ${who}'s wallet.`)) return
+  const who = cpRoleLabel(r.coordinator_role_id)
+  if (status === 'cancelled' && !confirm(`Cancel this redemption? ${cpFmt(r.points_cost)} points go back to ${who}'s wallet.`)) return
   if (status === 'fulfilled' && !confirm(`Mark as fulfilled for ${who}?`)) return
   try { await cpRequest('set_redemption_status', { id, status }); await cpRefresh() } catch (e) { alert(e.message) }
 }
 
 // ═══ WALLETS & ADJUSTMENTS ════════════════════════
-function cpWalletPeople() {
-  const ids = new Set((cpData.balances || []).map(b => b.staff_profile_id))
-  return (cpData.staff || []).filter(s => ids.has(s.id) || (s.is_active && s.can_view_community_dashboard))
-}
-
+// Wallets belong to a coordinator role (studio_coordinators row), labelled
+// by studio. When a role ends, its unspent points are forfeited.
 function cpRenderWallets() {
-  const people = cpWalletPeople()
-  const others = (cpData.staff || []).filter(s => s.is_active && !people.some(p => p.id === s.id))
-  const personOpts = `<option value="">Choose a person…</option>
-    <optgroup label="Coordinators">${people.map(s => `<option value="${s.id}">${cpEsc(s.display_name || s.nickname)}</option>`).join('')}</optgroup>
-    <optgroup label="Other active staff">${others.map(s => `<option value="${s.id}">${cpEsc(s.display_name || s.nickname)}</option>`).join('')}</optgroup>`
-  const studioOpts = '<option value="">No studio</option>' + (typeof allStudios !== 'undefined' ? allStudios : []).map(s => `<option value="${s.id}">${cpEsc(getStudioName(s.id))}</option>`).join('')
+  const current = cpCurrentRoles()
+  const manualRules = (cpData.rules || []).filter(r => r.is_active && r.source === 'manual')
+  const prizeOpts = '<option value="">Choose a prize…</option>' + (cpData.tiers || []).filter(t => t.is_active).map(t =>
+    `<optgroup label="${cpEsc(t.name)} — ${cpFmt(t.points_cost)} pts">${(cpData.prizes || []).filter(p => p.tier_id === t.id && p.is_active)
+      .map(p => `<option value="${p.id}">${cpEsc(p.name)}${p.stock === 0 ? ' (out of stock)' : ''}</option>`).join('')}</optgroup>`).join('')
 
-  let html = `<div class="cp-card">
+  const forms = `
+  <div class="cp-card">
+    <div style="font-size:14px;font-weight:600;margin-bottom:0.25rem">Record ${manualRules.length === 1 ? cpEsc(manualRules[0].name.toLowerCase()) : 'a manual earning rule'}</div>
+    ${manualRules.length ? `
+    <div class="cp-note" style="margin-top:0">Points go to the coordinator who was in the role on that date, using the rule's points and monthly cap.</div>
+    <div class="toolbar" style="flex-wrap:wrap;gap:0.75rem">
+      ${manualRules.length > 1 ? `<div class="toolbar-group"><label>Rule</label><select id="cpm-rule">${manualRules.map(r => `<option value="${cpEsc(r.code)}">${cpEsc(r.name)} (${cpEsc(cpDescribeRule(r))})</option>`).join('')}</select></div>`
+        : `<input type="hidden" id="cpm-rule" value="${cpEsc(manualRules[0].code)}"><div class="toolbar-group"><label>Worth</label><div style="font-size:13px;padding:6px 0">${cpEsc(cpDescribeRule(manualRules[0]))}</div></div>`}
+      <div class="toolbar-group"><label>Studio</label><select id="cpm-role" style="min-width:220px">${cpCurrentRoleOptions()}</select></div>
+      <div class="toolbar-group"><label>How many</label><input id="cpm-qty" type="number" min="1" value="1" style="width:80px"></div>
+      <div class="toolbar-group"><label>Date</label><input id="cpm-date" type="date" value="${cpData.today}" max="${cpData.today}"></div>
+    </div>
+    <div class="toolbar" style="margin-top:0.75rem">
+      <div class="toolbar-group" style="flex:1"><label>Note</label><input id="cpm-note" placeholder="e.g. @handle — reel posted Oct 4" style="width:100%"></div>
+      <div class="toolbar-group"><button class="btn btn-primary" onclick="cpAddManualEarn()">Add points</button></div>
+    </div>
+    <div id="cpm-status" style="font-size:13px;margin-top:0.5rem"></div>`
+    : `<div class="cp-note" style="margin:0">No manual rules are switched on. Turn one on (or add one) under Earning Rules.</div>`}
+  </div>
+
+  <div class="cp-card">
     <div style="font-size:14px;font-weight:600;margin-bottom:0.25rem">Manual adjustment</div>
     <div class="cp-note" style="margin-top:0">For corrections or one-off recognition. Use a negative number to remove points. Every adjustment is logged with your name and note.</div>
     <div class="toolbar" style="flex-wrap:wrap;gap:0.75rem">
-      <div class="toolbar-group"><label>Person</label><select id="cpa-person" onchange="cpAdjPersonChanged()" style="min-width:200px">${personOpts}</select></div>
-      <div class="toolbar-group"><label>Studio</label><select id="cpa-studio">${studioOpts}</select></div>
+      <div class="toolbar-group"><label>Studio</label><select id="cpa-role" onchange="cpAdjRoleChanged()" style="min-width:220px">${cpCurrentRoleOptions()}</select></div>
       <div class="toolbar-group"><label>Points</label><input id="cpa-points" type="number" step="1" placeholder="e.g. 100 or -50" style="width:130px"></div>
     </div>
     <div class="toolbar" style="margin-top:0.75rem">
@@ -11985,58 +12033,112 @@ function cpRenderWallets() {
     <div id="cpa-status" style="font-size:13px;margin-top:0.5rem"></div>
   </div>
 
-  <h4 style="margin:1.25rem 0 0.5rem;font-size:14px">Wallets</h4>
-  <div class="users-table-wrap"><table class="users-table"><thead><tr><th>Person</th><th>Level</th><th>Wallet</th><th>Lifetime</th></tr></thead><tbody>`
-  const sorted = people.slice().sort((a, b) => cpBalance(b.id).lifetime - cpBalance(a.id).lifetime)
-  if (!sorted.length) html += '<tr><td colspan="4"><div class="empty">No coordinators yet. Tick "Can access Community Dashboard" on a staff profile to add them.</div></td></tr>'
-  sorted.forEach(s => {
-    const b = cpBalance(s.id)
-    html += `<tr><td style="font-size:13px;font-weight:500">${cpEsc(s.display_name || s.nickname)}${s.is_active ? '' : ' <span class="cp-pill cp-pill-off">Inactive</span>'}</td>
-      <td>${b.level_name ? cpEsc((b.badge_emoji || '') + ' ' + b.level_name) : '<span class="cp-muted">—</span>'}</td>
-      <td style="font-weight:500">${cpFmt(b.wallet)}</td><td>${cpFmt(b.lifetime)}</td></tr>`
-  })
-  html += `</tbody></table></div>
+  <div class="cp-card">
+    <div style="font-size:14px;font-weight:600;margin-bottom:0.25rem">Redeem a prize for a coordinator</div>
+    <div class="cp-note" style="margin-top:0">Takes the prize's points from their wallet now and adds it to Redemptions as requested. Checks their balance and stock first.</div>
+    <div class="toolbar" style="flex-wrap:wrap;gap:0.75rem">
+      <div class="toolbar-group"><label>Studio</label><select id="cpr2-role" style="min-width:220px">${cpCurrentRoleOptions()}</select></div>
+      <div class="toolbar-group"><label>Prize</label><select id="cpr2-prize" style="min-width:220px">${prizeOpts}</select></div>
+      <div class="toolbar-group"><button class="btn btn-primary" onclick="cpRedeemFor()">Redeem</button></div>
+    </div>
+    <div id="cpr2-status" style="font-size:13px;margin-top:0.5rem"></div>
+  </div>`
 
-  <h4 style="margin:1.25rem 0 0.5rem;font-size:14px">Recent adjustments</h4>
-  <div class="users-table-wrap"><table class="users-table"><thead><tr><th>Date</th><th>Person</th><th>Points</th><th>Note</th><th>By</th></tr></thead><tbody>`
-  const adj = cpData.adjustments || []
-  if (!adj.length) html += '<tr><td colspan="5"><div class="empty">No adjustments yet.</div></td></tr>'
-  adj.forEach(a => {
-    html += `<tr><td>${cpDateLabel(a.created_at)}</td><td>${cpEsc(cpStaffName(a.staff_profile_id))}</td>
+  // Wallet table: current coordinators
+  const rows = current.map(r => ({ r, b: cpBalanceForRole(r.id) })).sort((x, y) => y.b.wallet - x.b.wallet)
+  let html = forms + `
+  <h4 style="margin:1.25rem 0 0.5rem;font-size:14px">Wallets — current coordinators</h4>
+  <div class="users-table-wrap"><table class="users-table"><thead><tr><th>Studio</th><th>Coordinator</th><th>Level</th><th>This month</th><th>Wallet</th><th>Lifetime</th></tr></thead><tbody>`
+  if (!rows.length) html += '<tr><td colspan="6"><div class="empty">No coordinators yet. Assign them in the Coordinators sub-tab.</div></td></tr>'
+  rows.forEach(({ r, b }) => {
+    html += `<tr><td style="font-size:13px;font-weight:500">${cpEsc(getStudioName(r.studio_id))}</td>
+      <td>${cpEsc(cpStaffName(r.staff_profile_id))}<div class="cp-muted">since ${cpDateLabel(r.start_date + 'T12:00:00')}</div></td>
+      <td>${b.level_name ? cpEsc((b.badge_emoji || '') + ' ' + b.level_name) : '<span class="cp-muted">—</span>'}</td>
+      <td>${b.this_month ? '+' + cpFmt(b.this_month) : '<span class="cp-muted">0</span>'}</td>
+      <td style="font-weight:600">${cpFmt(b.wallet)}</td><td>${cpFmt(b.lifetime_earned)}</td></tr>`
+  })
+  html += '</tbody></table></div>'
+
+  const forfeited = (cpData.balances || []).filter(b => b.forfeited > 0)
+  if (forfeited.length) {
+    html += `<h4 style="margin:1.25rem 0 0.5rem;font-size:14px">Forfeited — roles that have ended</h4>
+    <div class="users-table-wrap"><table class="users-table"><thead><tr><th>Studio · Coordinator</th><th>Ended</th><th>Points forfeited</th></tr></thead><tbody>
+    ${forfeited.map(b => `<tr><td>${cpEsc(cpRoleLabel(b.coordinator_role_id))}</td><td>${cpDateLabel(b.end_date + 'T12:00:00')}</td><td>${cpFmt(b.forfeited)}</td></tr>`).join('')}
+    </tbody></table></div>`
+  }
+
+  html += `
+  <h4 style="margin:1.25rem 0 0.5rem;font-size:14px">Recent manual entries</h4>
+  <div class="users-table-wrap"><table class="users-table"><thead><tr><th>Date</th><th>Studio · Coordinator</th><th>What</th><th>Points</th><th>Note</th><th>By</th></tr></thead><tbody>`
+  const entries = cpData.entries || []
+  if (!entries.length) html += '<tr><td colspan="6"><div class="empty">No manual entries yet.</div></td></tr>'
+  const ruleName = code => { const r = (cpData.rules || []).find(x => x.code === code); return r ? r.name : code }
+  entries.forEach(a => {
+    html += `<tr><td>${cpDateLabel(a.period_start ? a.period_start + 'T12:00:00' : a.created_at)}</td><td>${cpEsc(cpRoleLabel(a.coordinator_role_id))}</td>
+      <td style="font-size:12px">${a.entry_type === 'adjust' ? 'Adjustment' : cpEsc(ruleName(a.rule_code)) + (a.metric_value > 1 ? ' × ' + cpFmt(a.metric_value) : '')}</td>
       <td style="font-weight:500;color:${a.points < 0 ? '#c0392b' : '#2e7d32'}">${a.points > 0 ? '+' : ''}${cpFmt(a.points)}</td>
-      <td style="color:#888;font-size:12px">${cpEsc(a.note || '')}</td><td class="cp-muted">${cpEsc(a.created_by)}</td></tr>`
+      <td style="color:#888;font-size:12px">${cpEsc(a.note || '')}</td><td class="cp-muted">${cpEsc(a.created_by || '')}</td></tr>`
   })
   return html + '</tbody></table></div>'
 }
 
-function cpAdjPersonChanged() {
-  const sel = document.getElementById('cpa-person')
-  if (!sel) return
-  const s = cpStaff(sel.value)
+function cpAdjRoleChanged() {
+  const sel = document.getElementById('cpa-role')
   const info = document.getElementById('cpa-wallet-info')
-  if (!s) { info.textContent = ''; return }
-  const b = cpBalance(s.id)
-  info.textContent = `Current wallet: ${cpFmt(b.wallet)} · Lifetime: ${cpFmt(b.lifetime)}`
-  const firstStudio = Array.isArray(s.studio_ids) && s.studio_ids.length ? s.studio_ids[0] : ''
-  const studioSel = document.getElementById('cpa-studio')
-  if (firstStudio && [...studioSel.options].some(o => o.value === firstStudio)) studioSel.value = firstStudio
+  if (!sel || !info) return
+  if (!sel.value) { info.textContent = ''; return }
+  const b = cpBalanceForRole(sel.value)
+  info.textContent = `Current wallet: ${cpFmt(b.wallet)} · This month: ${cpFmt(b.this_month)} · Lifetime: ${cpFmt(b.lifetime_earned)}`
+}
+// kept for cpRender's existing call
+function cpAdjPersonChanged() { cpAdjRoleChanged() }
+
+function cpStatus(id, color, text) { const el = document.getElementById(id); if (el) { el.style.color = color; el.textContent = text } }
+
+async function cpAddManualEarn() {
+  const roleId = document.getElementById('cpm-role').value
+  const rule = document.getElementById('cpm-rule').value
+  const qty = parseInt(document.getElementById('cpm-qty').value, 10) || 1
+  const date = document.getElementById('cpm-date').value
+  const note = document.getElementById('cpm-note').value.trim()
+  if (!roleId) { cpStatus('cpm-status', '#c0392b', 'Choose a studio.'); return }
+  cpStatus('cpm-status', '#888', 'Saving…')
+  try {
+    const res = await cpRequest('add_manual_earn', { coordinator_role_id: roleId, rule_code: rule, quantity: qty, date, note })
+    const who = cpRoleLabel(roleId)
+    await cpRefresh()
+    cpStatus('cpm-status', '#2e7d32', `Done — +${cpFmt(res.points)} for ${who}.`)
+  } catch (e) { cpStatus('cpm-status', '#c0392b', e.message) }
 }
 
 async function cpApplyAdjustment() {
-  const staffId = document.getElementById('cpa-person').value
+  const roleId = document.getElementById('cpa-role').value
   const points = parseInt(document.getElementById('cpa-points').value, 10)
   const note = document.getElementById('cpa-note').value.trim()
-  const statusEl = document.getElementById('cpa-status')
-  if (!staffId || !points || !note) { statusEl.style.color = '#c0392b'; statusEl.textContent = 'Person, a non-zero number of points, and a note are all required.'; return }
-  const who = cpStaffName(staffId)
+  if (!roleId || !points || !note) { cpStatus('cpa-status', '#c0392b', 'Studio, a non-zero number of points, and a note are all required.'); return }
+  const who = cpRoleLabel(roleId)
   if (!confirm(`${points > 0 ? 'Add' : 'Remove'} ${cpFmt(Math.abs(points))} points ${points > 0 ? 'to' : 'from'} ${who}?`)) return
-  statusEl.style.color = '#888'; statusEl.textContent = 'Saving…'
+  cpStatus('cpa-status', '#888', 'Saving…')
   try {
-    await cpRequest('adjust_points', { staff_profile_id: staffId, studio_id: document.getElementById('cpa-studio').value || null, points, note })
+    await cpRequest('adjust_points', { coordinator_role_id: roleId, points, note })
     await cpRefresh()
-    const s2 = document.getElementById('cpa-status')
-    s2.style.color = '#2e7d32'; s2.textContent = `Done — ${points > 0 ? '+' : ''}${cpFmt(points)} for ${who}.`
-  } catch (e) { statusEl.style.color = '#c0392b'; statusEl.textContent = e.message }
+    cpStatus('cpa-status', '#2e7d32', `Done — ${points > 0 ? '+' : ''}${cpFmt(points)} for ${who}.`)
+  } catch (e) { cpStatus('cpa-status', '#c0392b', e.message) }
+}
+
+async function cpRedeemFor() {
+  const roleId = document.getElementById('cpr2-role').value
+  const prizeId = document.getElementById('cpr2-prize').value
+  if (!roleId || !prizeId) { cpStatus('cpr2-status', '#c0392b', 'Choose a studio and a prize.'); return }
+  const p = cpPrize(prizeId), t = p ? cpTier(p.tier_id) : null
+  const who = cpRoleLabel(roleId)
+  if (!confirm(`Redeem ${p ? p.name : 'this prize'}${t ? ' (' + cpFmt(t.points_cost) + ' pts)' : ''} for ${who}?`)) return
+  cpStatus('cpr2-status', '#888', 'Saving…')
+  try {
+    await cpRequest('redeem_for', { coordinator_role_id: roleId, prize_id: prizeId })
+    await cpRefresh()
+    cpStatus('cpr2-status', '#2e7d32', `Done — added to Redemptions for ${who}.`)
+  } catch (e) { cpStatus('cpr2-status', '#c0392b', e.message) }
 }
 
 // ═══ SHARED MODAL ═════════════════════════════════
@@ -12127,11 +12229,13 @@ function scRender() {
     ].join('')
 
     const historyRow = scHistoryOpen[s.id] && hist.length ? `
-      <tr class="sc-history"><td colspan="3">${hist.map(r => `
+      <tr class="sc-history"><td colspan="4">${hist.map(r => `
         <div class="sc-history-row"><strong>${cpEsc(scName(r))}</strong> · ${scDate(r.start_date)} → ${r.end_date ? scDate(r.end_date) : 'current'}${r.note ? ' · ' + cpEsc(r.note) : ''}</div>`).join('')}
       </td></tr>` : ''
 
-    return `<tr><td>${cpEsc(getStudioName(s.id))}</td><td>${who}</td><td><div class="sc-actions">${actions}</div></td></tr>${historyRow}`
+    const waiverCell = scWaiverHtml(current) + (upcoming ? scWaiverHtml(upcoming, true) : '')
+
+    return `<tr><td>${cpEsc(getStudioName(s.id))}</td><td>${who}</td><td>${waiverCell || '<span class="cp-muted">—</span>'}</td><td><div class="sc-actions">${actions}</div></td></tr>${historyRow}`
   }).join('')
 
   const missing = allStudios.length - withSc
@@ -12141,12 +12245,57 @@ function scRender() {
         <div class="cp-stat-sub">${missing ? missing + ' still need one' : 'Every studio is covered'}</div></div>
     </div>
     <p class="cp-note">Each studio has one SC at a time. Changing the SC ends the current one the day before the new start date, so points and check-ins are always credited to whoever held the role that day. Use <strong>Undo last change</strong> to fix a mistake.</p>
+    <p class="cp-note">New SCs wait ${scWaitMonths()} month${scWaitMonths() === 1 ? '' : 's'} before party fill points count, while parties booked before they started play out. Tick <strong>Skip</strong> for someone who was already doing the job before they were entered here. If you tick it after the 2nd of a month, the month just closed can be re-scored — ask Claude.</p>
     <div class="cp-card" style="padding:0.5rem 0.75rem">
       <table class="sc-table">
-        <thead><tr><th style="width:28%">Studio</th><th>Studio Coordinator</th><th style="text-align:right">Actions</th></tr></thead>
+        <thead><tr><th style="width:24%">Studio</th><th>Studio Coordinator</th><th style="width:20%">Party points waiting period</th><th style="text-align:right">Actions</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`
+}
+
+// ── Waiting-period waiver (party fill) ─────────────
+// Role ids come from the points data (cpData.roles); the checkbox only shows
+// once the points function is live and the waiver SQL has run.
+function scWaitMonths() {
+  const r = cpData && (cpData.rules || []).find(x => x.code === 'party_fill')
+  return r ? (r.waiting_months || 0) : 2
+}
+function scRoleIdFor(row) {
+  if (!cpData || !row) return null
+  const m = (cpData.roles || []).find(x => x.studio_id === row.studio_id && x.start_date === row.start_date)
+  return m ? m.id : null
+}
+function scAddMonths(ymd, n) {
+  const [y, m] = ymd.split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1 + n, 1)).toISOString().slice(0, 10)
+}
+function scWaiverHtml(row, isUpcoming) {
+  const roleId = scRoleIdFor(row)
+  if (!roleId) return ''
+  const waived = (cpData.waivers || []).includes(roleId)
+  const wait = scWaitMonths()
+  const start = row.start_date.slice(0, 7) + '-01'
+  const from = waived || !wait ? start : scAddMonths(start, wait)
+  const fromLabel = new Date(from + 'T12:00:00').toLocaleDateString('en-CA', { month: 'long', year: 'numeric' })
+  return `<div${isUpcoming ? ' class="sc-upcoming"' : ''}>
+      <label class="cp-check"><input type="checkbox" ${waived ? 'checked' : ''} onchange="scSetWaiver('${roleId}', this.checked, this)">
+        Skip${isUpcoming ? ' (upcoming SC)' : ''}</label>
+      <div class="sc-sub">Party points from ${cpEsc(fromLabel)}</div></div>`
+}
+async function scSetWaiver(roleId, on, el) {
+  if (el) el.disabled = true
+  const { error } = await sb.rpc('community_set_waiting_waiver', { p_role_id: roleId, p_waived: on })
+  if (error) {
+    alert(/Could not find the function|does not exist/i.test(error.message || '')
+      ? 'Run community_points_waiting_waiver.sql first.' : (error.message || 'Could not save'))
+    if (el) { el.checked = !on; el.disabled = false }
+    return
+  }
+  const list = new Set(cpData.waivers || [])
+  if (on) list.add(roleId); else list.delete(roleId)
+  cpData.waivers = [...list]
+  document.getElementById('cp-body').innerHTML = scRender()
 }
 
 function scToggleHistory(studioId) {
