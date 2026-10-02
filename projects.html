@@ -184,6 +184,10 @@ button.pill { cursor: pointer; }
 .modal-bg.open { display: flex; }
 .modal { background: var(--panel); border-radius: 14px; width: 100%; max-width: 640px; padding: 1.25rem 1.4rem; }
 .modal.wide { max-width: 980px; }
+.base-row { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(220px, 2fr) auto auto auto; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid #ecebe4; }
+.base-row.archived { opacity: 0.55; }
+.base-row input { width: 100%; }
+.base-row .used { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; gap: 12px; }
 .modal-head h2 { font-size: 16px; }
 .modal-close { background: none; border: none; font-size: 22px; color: var(--muted); cursor: pointer; line-height: 1; }
@@ -272,13 +276,15 @@ button.pill { cursor: pointer; }
         <option value="image_url">Missing photo</option>
         <option value="curriculum_url">Missing curriculum</option>
         <option value="step_by_step_url">Missing step-by-steps</option>
-        <option value="printout_url">Missing printout</option>
+        <option value="base_printout_id">Missing base printout</option>
+        <option value="printout_url">Missing steps printout</option>
         <option value="medium">Missing medium</option>
         <option value="tags">Missing tags</option>
       </select>
       <label class="inline"><input type="checkbox" id="lib-archived" onchange="renderLibrary()"> Show archived</label>
       <div class="grow"></div>
       <span class="muted small" id="lib-count"></span>
+      <button class="btn" onclick="openBases()">Base printouts</button>
       <button class="btn" onclick="openImport()">Import from sheet</button>
       <button class="btn btn-primary" onclick="openProjectEditor(null)">Add project</button>
     </div>
@@ -329,11 +335,11 @@ button.pill { cursor: pointer; }
       </div>
       <div class="full"><label class="field-label" for="ed-curriculum">Curriculum link</label><input type="url" id="ed-curriculum"></div>
       <div><label class="field-label" for="ed-steps">Step-by-steps link</label><input type="url" id="ed-steps"></div>
-      <div><label class="field-label" for="ed-printout">Printout / instructions link</label><input type="url" id="ed-printout"></div>
+      <div><label class="field-label" for="ed-base">Base printout (shared) <a href="#" class="small" onclick="openBases();return false">manage</a></label><select id="ed-base" style="width:100%"></select></div>
+      <div><label class="field-label" for="ed-printout">Steps printout link (this project only)</label><input type="url" id="ed-printout"></div>
       <div><label class="field-label" for="ed-template">Template link</label><input type="url" id="ed-template"></div>
       <div><label class="field-label" for="ed-marketing">Marketing photos link</label><input type="url" id="ed-marketing"></div>
       <div><label class="field-label" for="ed-metafield">Shopify project metafield</label><input type="text" id="ed-metafield"></div>
-      <div></div>
       <div class="full"><label class="field-label" for="ed-description">Description</label><textarea id="ed-description"></textarea></div>
       <div class="full"><label class="field-label" for="ed-notes">Notes</label><textarea id="ed-notes"></textarea></div>
     </div>
@@ -345,6 +351,23 @@ button.pill { cursor: pointer; }
       </div>
       <button class="btn" onclick="closeModal('editor-modal')">Cancel</button>
       <button class="btn btn-primary" id="ed-save" onclick="saveProject()">Save project</button>
+    </div>
+  </div>
+</div>
+
+<!-- Base printouts -->
+<div class="modal-bg" id="bases-modal" onclick="if(event.target===this) closeModal('bases-modal')">
+  <div class="modal wide">
+    <div class="modal-head"><h2>Base printouts</h2><button class="modal-close" onclick="closeModal('bases-modal')" aria-label="Close">×</button></div>
+    <p class="small" style="line-height:1.5;margin-bottom:10px">Shared first printouts for projects that start from the same shape (bowl, cup, plate…). Choose one on each project under <strong>Base printout</strong>; the project's own steps go in its <strong>Steps printout</strong> link. Changing a link here updates every project that uses it. Edits save when you leave a field.</p>
+    <div id="bases-body"></div>
+    <div class="form-grid" style="margin-top:14px">
+      <div><label class="field-label" for="bp-name">New base name</label><input type="text" id="bp-name" placeholder="Pinch bowl"></div>
+      <div><label class="field-label" for="bp-url">Printout link</label><input type="url" id="bp-url" placeholder="https://drive.google.com/…" onkeydown="if(event.key==='Enter') addBasePrintout()"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('bases-modal')">Done</button>
+      <button class="btn btn-primary" id="bp-add" onclick="addBasePrintout()">Add base</button>
     </div>
   </div>
 </div>
@@ -405,6 +428,7 @@ const DAY_NAMES = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 
 let library = [], libById = {}, themes = [], themeById = {}
+let basePrintouts = [], baseById = {}   // shared base printouts (project_base_printouts)
 let week = null          // { start, row, days:{1..7}, slots:{'d-s':project_id}, minis:{1,2} }
 let pickerTarget = null  // { kind:'day', weekday, slot } | { kind:'mini', slot }
 let editing = null, editTags = []
@@ -517,7 +541,7 @@ async function initApp(user) {
   }
   document.getElementById('login-screen').style.display = 'none'
   document.getElementById('app-screen').style.display = 'block'
-  await Promise.all([loadLibrary(), loadThemes()])
+  await Promise.all([loadLibrary(), loadThemes(), loadBasePrintouts()])
   buildYearOptions()
   routeFromHash()
 }
@@ -897,7 +921,7 @@ function renderLibrary() {
     return '<button class="lib-card' + (p.is_active ? '' : ' archived') + '" onclick="openProjectEditor(\'' + p.id + '\')">' +
       imgTag(p.image_url, 'ph', p.name) +
       '<div class="body"><div class="nm">' + esc(p.name) + '</div>' +
-      '<div class="meta">' + esc([p.medium, 'makes ' + p.make_quantity, p.is_active ? '' : 'archived'].filter(Boolean).join(', ')) + '</div>' +
+      '<div class="meta">' + esc([p.medium, 'makes ' + p.make_quantity, baseById[p.base_printout_id] ? 'base: ' + baseById[p.base_printout_id].name : '', p.is_active ? '' : 'archived'].filter(Boolean).join(', ')) + '</div>' +
       ((p.tags || []).length ? '<div class="tags">' + p.tags.map(t => '<span class="tag">' + esc(t) + '</span>').join('') + '</div>' : '') +
       (missing.length ? '<div class="needs">Needs ' + missing.join(', ') + '</div>' : '') +
       '</div></button>'
@@ -919,6 +943,7 @@ function openProjectEditor(id, presetName, onSaved) {
   document.getElementById('ed-curriculum').value = p.curriculum_url || ''
   document.getElementById('ed-steps').value = p.step_by_step_url || ''
   document.getElementById('ed-printout').value = p.printout_url || ''
+  document.getElementById('ed-base').innerHTML = baseOptionsHtml(p.base_printout_id || '')
   document.getElementById('ed-metafield').value = p.shopify_metafield || ''
   document.getElementById('ed-template').value = p.template_url || ''
   document.getElementById('ed-marketing').value = p.marketing_photos_url || ''
@@ -1009,6 +1034,7 @@ async function saveProject() {
     curriculum_url: nz(document.getElementById('ed-curriculum').value),
     step_by_step_url: nz(document.getElementById('ed-steps').value),
     printout_url: nz(document.getElementById('ed-printout').value),
+    base_printout_id: document.getElementById('ed-base').value || null,
     shopify_metafield: nz(document.getElementById('ed-metafield').value),
     template_url: nz(document.getElementById('ed-template').value),
     marketing_photos_url: nz(document.getElementById('ed-marketing').value),
@@ -1028,6 +1054,82 @@ async function saveProject() {
   if (cb) cb(data)
   afterLibraryChange()
 }
+/* ---------- base printouts (shared first sheet for same-shape projects) ---------- */
+async function loadBasePrintouts() {
+  const { data, error } = await sb.from('project_base_printouts').select('*').order('name')
+  if (error) { toast(friendlyError(error), true); return }
+  basePrintouts = data || []
+  baseById = {}; basePrintouts.forEach(b => { baseById[b.id] = b })
+}
+function baseUsageCount(id) { return library.filter(p => p.base_printout_id === id).length }
+
+// Options for the editor dropdown: active bases, plus the project's current
+// base even if it has since been archived (so saving never silently drops it).
+function baseOptionsHtml(selectedId) {
+  const opts = basePrintouts.filter(b => b.is_active || b.id === selectedId)
+  return '<option value="">None</option>' + opts.map(b =>
+    '<option value="' + esc(b.id) + '"' + (b.id === selectedId ? ' selected' : '') + '>' +
+    esc(b.name) + (b.is_active ? '' : ' (archived)') + (b.url ? '' : ' (no link yet)') + '</option>').join('')
+}
+function refreshEditorBaseSelect() {
+  const sel = document.getElementById('ed-base')
+  if (!sel || !document.getElementById('editor-modal').classList.contains('open')) return
+  sel.innerHTML = baseOptionsHtml(sel.value)
+}
+
+function openBases() { renderBases(); openModal('bases-modal'); setTimeout(() => document.getElementById('bp-name').focus(), 30) }
+function renderBases() {
+  const body = document.getElementById('bases-body')
+  if (!basePrintouts.length) { body.innerHTML = '<div class="panel empty">No base printouts yet. Add the first one below.</div>'; return }
+  const sorted = basePrintouts.slice().sort((a, b) => (b.is_active - a.is_active) || a.name.localeCompare(b.name))
+  body.innerHTML = sorted.map(b => {
+    const n = baseUsageCount(b.id)
+    return '<div class="base-row' + (b.is_active ? '' : ' archived') + '">' +
+      '<input type="text" value="' + esc(b.name) + '" onchange="updateBase(\'' + b.id + '\', \'name\', this.value)" aria-label="Base name">' +
+      '<input type="url" value="' + esc(b.url || '') + '" placeholder="Printout link" onchange="updateBase(\'' + b.id + '\', \'url\', this.value)" aria-label="Printout link">' +
+      '<span class="used">' + n + ' project' + (n === 1 ? '' : 's') + '</span>' +
+      (b.url && /^https?:\/\//i.test(b.url) ? '<a class="btn" href="' + esc(b.url) + '" target="_blank" rel="noopener">Open</a>' : '<span></span>') +
+      '<button class="btn" onclick="toggleBaseActive(\'' + b.id + '\')">' + (b.is_active ? 'Archive' : 'Restore') + '</button>' +
+      '</div>'
+  }).join('')
+}
+async function addBasePrintout() {
+  const nameEl = document.getElementById('bp-name'), urlEl = document.getElementById('bp-url')
+  const name = nameEl.value.trim()
+  if (!name) { toast('Give the base printout a name first.', true); nameEl.focus(); return }
+  if (basePrintouts.some(b => b.name.toLowerCase() === name.toLowerCase())) { toast('There is already a base printout called ' + name + '.', true); return }
+  const btn = document.getElementById('bp-add'); btn.disabled = true
+  const { error } = await sb.from('project_base_printouts').insert({ name, url: nz(urlEl.value) })
+  btn.disabled = false
+  if (error) { toast(friendlyError(error), true); return }
+  nameEl.value = ''; urlEl.value = ''
+  await loadBasePrintouts()
+  renderBases(); refreshEditorBaseSelect()
+  toast('Base printout added')
+  nameEl.focus()
+}
+async function updateBase(id, field, raw) {
+  const value = field === 'name' ? String(raw || '').trim() : nz(raw)
+  if (field === 'name' && !value) { toast('A base printout needs a name.', true); renderBases(); return }
+  const { error } = await sb.from('project_base_printouts').update({ [field]: value, updated_at: new Date().toISOString() }).eq('id', id)
+  if (error) { toast(friendlyError(error), true); renderBases(); return }
+  await loadBasePrintouts()
+  renderBases(); refreshEditorBaseSelect()
+  if (document.getElementById('tab-library').classList.contains('active')) renderLibrary()
+  toast(field === 'url' ? 'Link saved — every project using this base now has it' : 'Name saved')
+}
+async function toggleBaseActive(id) {
+  const b = baseById[id]; if (!b) return
+  if (b.is_active) {
+    const n = baseUsageCount(id)
+    if (n && !confirm(b.name + ' is used by ' + n + ' project' + (n === 1 ? '' : 's') + '. Archived bases stop showing on the studio dashboard, but stay linked so you can restore them. Archive it?')) return
+  }
+  const { error } = await sb.from('project_base_printouts').update({ is_active: !b.is_active, updated_at: new Date().toISOString() }).eq('id', id)
+  if (error) { toast(friendlyError(error), true); return }
+  await loadBasePrintouts()
+  renderBases(); refreshEditorBaseSelect()
+}
+
 function upsertLocal(p) {
   const i = library.findIndex(x => x.id === p.id)
   if (i >= 0) library[i] = p; else library.push(p)
