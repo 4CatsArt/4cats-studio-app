@@ -248,6 +248,20 @@ body.preview-mode .section-head.dev-only { display: flex !important; }
 body.preview-mode .section-head.admin-only { display: flex !important; }
 body.preview-mode .card.admin-only { display: block !important; }
 
+/* ---------- studio view vs coordinator (SC) view ----------
+   .sc-only cards appear only after a coordinator PIN unlocks them; the
+   server also refuses their data without the PIN, so this is not just hiding. */
+body:not(.sc-mode) .sc-only { display: none !important; }
+.view-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; font-size: 12.5px; color: var(--ink-soft); }
+.view-bar .who { font-weight: 700; color: var(--ink); }
+.view-bar .spacer { flex: 1; }
+.view-bar button { border: 1px solid var(--border); background: #fff; color: var(--ink); border-radius: 999px; padding: 6px 14px; font: inherit; font-weight: 700; cursor: pointer; }
+.view-bar button.unlock { background: var(--accent); border-color: var(--accent); color: #fff; }
+.view-bar button.unlock:hover { background: var(--accent-deep); }
+.view-bar .sc-badge { display: inline-block; padding: 2px 9px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-deep); font-weight: 800; font-size: 11px; }
+.gate-text-input { width: 100%; box-sizing: border-box; padding: 11px 12px; border: 1px solid var(--border); border-radius: 10px; font: inherit; font-size: 14px; margin-bottom: 10px; }
+.forecast-temp { font-weight: 800; margin-left: 2px; }
+
 .admin-switcher-bar {
   display: flex; align-items: center; gap: 10px; background: var(--amber-bg); border: 1px solid #f5d99a;
   border-radius: 12px; padding: 10px 14px; margin-bottom: 18px; font-size: 13px;
@@ -611,10 +625,20 @@ body.preview-mode .card.admin-only { display: block !important; }
 <div id="dashboard-gate" class="dashboard-gate">
   <div class="gate-card">
     <div class="gate-logo">🐾</div>
-    <div class="gate-title">Community Coordinator Dashboard</div>
+    <div class="gate-title">4Cats Studio Dashboard</div>
     <div id="dashboard-gate-body"></div>
     <div class="gate-divider">or</div>
     <button class="gate-schedule-btn" onclick="openSchedule()">📅 Open Schedule</button>
+  </div>
+</div>
+
+<!-- Coordinator PIN prompt (opens over the studio view) -->
+<div id="pin-modal" class="dashboard-gate" style="display:none">
+  <div class="gate-card">
+    <div class="gate-logo">🔓</div>
+    <div class="gate-title">Coordinator view</div>
+    <div id="pin-modal-body"></div>
+    <button class="gate-schedule-btn" onclick="closePinModal()">Cancel</button>
   </div>
 </div>
 
@@ -669,6 +693,9 @@ body.preview-mode .card.admin-only { display: block !important; }
 
   <main class="main">
 
+    <!-- View bar: who's signed in, and the coordinator unlock / lock button. -->
+    <div class="view-bar" id="view-bar"></div>
+
     <!-- Greeting hero — live for everyone. Greeting text/time-of-day is
          computed client-side from the viewer's own device clock (matches
          whoever's actually looking at the screen, no server timezone
@@ -688,8 +715,8 @@ body.preview-mode .card.admin-only { display: block !important; }
 
     <!-- Suggested marketing emails — live for everyone. Weather tag reused
          from the weather card fetch above, not a second API call. -->
-    <div class="section-head ops">✉️ Suggested Emails</div>
-    <div class="card" id="card-marketing-suggestions"></div>
+    <div class="section-head ops sc-only">✉️ Suggested Emails</div>
+    <div class="card sc-only" id="card-marketing-suggestions"></div>
 
     <!-- Weather — real, per-studio, LIVE for everyone (not dev-only) -->
     <div class="top-strip-live">
@@ -762,13 +789,13 @@ body.preview-mode .card.admin-only { display: block !important; }
          enforced server-side as Sales/Kids Parties/Team Building.
          Provisional simple count, not a compliance % — that comes once
          real staff schedule/time-punch data exists. -->
-    <div class="section-head ops">📋 Daily Check-Ins</div>
-    <div class="card sales-card" id="card-checkins"></div>
+    <div class="section-head ops sc-only">📋 Daily Check-Ins</div>
+    <div class="card sales-card sc-only" id="card-checkins"></div>
 
     <!-- Instagram — moved here from the old Community Hub in index.html.
          Served by community-instagram-data (PIN-checked, own studio only). -->
-    <div class="section-head ops">📷 Instagram</div>
-    <div class="card sales-card" id="card-instagram"></div>
+    <div class="section-head ops sc-only">📷 Instagram</div>
+    <div class="card sales-card sc-only" id="card-instagram"></div>
 
     <!-- leaderboard / points&rewards / points earned -->
     <div class="trio dev-only">
@@ -792,6 +819,7 @@ body.preview-mode .card.admin-only { display: block !important; }
   </main>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 /* ==========================================================================
    LIVE CONFIG — connection details for the one real card on this page so
@@ -808,6 +836,22 @@ body.preview-mode .card.admin-only { display: block !important; }
    ========================================================================== */
 const SUPABASE_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA'; // copied from admin.html
+
+// Studio email login (Supabase Auth). Same project and default storage as
+// index.html / schedule.html, so a studio device already signed in there
+// opens the dashboard without signing in again.
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// Headers for every Edge Function call: the studio login's own access token
+// (so the server knows which studio this device is), never a secret.
+async function fnHeaders() {
+  let token = SUPABASE_ANON_KEY;
+  try {
+    const { data } = await sb.auth.getSession();
+    if (data && data.session) token = data.session.access_token;
+  } catch (e) { /* fall back to anon — the function will refuse studio-level data */ }
+  return { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}` };
+}
 
 const STUDIO_NAMES = {
   'BC-RICH-GC':'Richmond - Garden City','BC-RICH-STV':'Richmond - Steveston','BC-SUR-SSR':'Surrey - South',
@@ -911,11 +955,7 @@ function forecastDayLabel(dateStr, index) {
 async function fetchDailySnapshotWithPin(pin, studioId) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/community-daily-snapshot`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
-    },
+    headers: await fnHeaders(),
     body: JSON.stringify({ pin, studioId })
   });
   const data = await res.json();
@@ -1016,7 +1056,7 @@ function forecastPillsHtml(forecastDays) {
   const shown = _forecastExpanded ? forecastDays : forecastDays.slice(0, 2);
   const pills = shown.map((d, i) => `
       <div class="forecast-pill${i === 0 ? ' today' : ''}${i >= 2 ? ' extra' : ''}">
-        ${esc(forecastDayLabel(d.date, i))} · ${esc(weatherLabel(d.code))} ${weatherEmoji(d.code)}
+        ${esc(forecastDayLabel(d.date, i))} · ${esc(weatherLabel(d.code))} ${weatherEmoji(d.code)} <span class="forecast-temp">${d.tempMax}° / ${d.tempMin}°</span>
       </div>`).join('');
   const toggle = forecastDays.length > 2 ? `
       <button class="forecast-toggle" onclick="toggleForecastWeek()"
@@ -1141,11 +1181,7 @@ let _marketingStudioName = '';
 async function fetchMarketingSuggestionsWithPin(pin, studioId, weatherTag) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/community-marketing-suggestions`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
-    },
+    headers: await fnHeaders(),
     body: JSON.stringify({ pin, studioId, weatherTag })
   });
   const data = await res.json();
@@ -1198,14 +1234,14 @@ async function sendMarketingTemplate(templateId) {
   // send-email-blast verifies the manager PIN server-side before sending.
   // Captured once here so an inactivity lock mid-send can't swap it out.
   const pin = _sessionPin;
-  if (!pin) { alert('Your session has locked. Enter your PIN again, then retry.'); return; }
+  if (!pin) { alert('The coordinator view has locked. Unlock it again, then retry.'); return; }
 
   try {
     // Dry run first — shows the real recipient count before committing to
     // an irreversible send.
     const dryRes = await fetch(`${SUPABASE_URL}/functions/v1/send-email-blast`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+      headers: await fnHeaders(),
       body: JSON.stringify({
         pin,
         studio_id: _marketingStudioId,
@@ -1227,7 +1263,7 @@ async function sendMarketingTemplate(templateId) {
 
     const sendRes = await fetch(`${SUPABASE_URL}/functions/v1/send-email-blast`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+      headers: await fnHeaders(),
       body: JSON.stringify({
         pin,
         studio_id: _marketingStudioId,
@@ -1262,11 +1298,7 @@ async function loadMarketingSuggestions(pin, studioId) {
 async function fetchFridayFillRateWithPin(pin, studioId) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/community-dashboard-data`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
-    },
+    headers: await fnHeaders(),
     body: JSON.stringify(studioId ? { pin, studioId } : { pin })
   });
   const data = await res.json();
@@ -1280,11 +1312,7 @@ async function fetchFridayFillRateWithPin(pin, studioId) {
 async function fetchStudioSalesWithPin(pin, studioId, month) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/community-sales-data`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
-    },
+    headers: await fnHeaders(),
     body: JSON.stringify({ pin, studioId, month: month || null })
   });
   const data = await res.json();
@@ -1720,11 +1748,7 @@ function salesNextMonth() {
 async function fetchBookingBucketStatsWithPin(pin, studioId, bucket, mode, monthsBack) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/community-booking-bucket-data`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
-    },
+    headers: await fnHeaders(),
     body: JSON.stringify({ pin, studioId, bucket, mode: mode || 'event', monthsBack: monthsBack || 6 })
   });
   const data = await res.json();
@@ -1838,11 +1862,7 @@ let _goalRefreshTimer = null;
 async function fetchGoalProgressWithPin(pin, studioId) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/community-goal-progress`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
-    },
+    headers: await fnHeaders(),
     body: JSON.stringify(studioId ? { pin, studioId } : { pin })
   });
   const data = await res.json();
@@ -1986,7 +2006,7 @@ async function loadGoalProgress(pin, studioId) {
 function startGoalRefresh() {
   if (_goalRefreshTimer) clearInterval(_goalRefreshTimer);
   _goalRefreshTimer = setInterval(() => {
-    if (_sessionPin) loadGoalProgress(_sessionPin, _sessionStudioId);
+    if (_studioViewStarted) loadGoalProgress(_sessionPin, _sessionStudioId);
   }, GOAL_REFRESH_MS);
 }
 
@@ -1995,11 +2015,7 @@ function startGoalRefresh() {
 async function fetchInstagramWithPin(pin, studioId) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/community-instagram-data`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
-    },
+    headers: await fnHeaders(),
     body: JSON.stringify(studioId ? { pin, studioId } : { pin })
   });
   const data = await res.json();
@@ -2069,11 +2085,7 @@ async function loadInstagram(pin, studioId) {
 async function fetchCheckinCountWithPin(pin, studioId) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/community-checkin-data`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
-    },
+    headers: await fnHeaders(),
     body: JSON.stringify({ pin, studioId })
   });
   const data = await res.json();
@@ -2112,131 +2124,229 @@ async function loadCheckinCount(pin, studioId) {
   }
 }
 
-// PIN kept in memory only for this page load — never persisted, never sent
-// anywhere except this one Edge Function call. Gates the WHOLE dashboard,
-// not just this card — matches the can_view_community_dashboard checkbox.
-function renderDashboardPinGate(errorMsg) {
-  document.getElementById('dashboard-gate-body').innerHTML = `
-    <div class="gate-detail">Enter your manager PIN to access the dashboard.</div>
-    ${errorMsg ? `<div class="gate-error">${esc(errorMsg)}</div>` : ''}
-    <input type="password" inputmode="numeric" maxlength="4" id="dashboard-pin-input" class="gate-pin-input"
-           placeholder="PIN" onkeydown="if(event.key==='Enter') submitDashboardPin()"
-           oninput="if(this.value.length===this.maxLength) submitDashboardPin()" autofocus />
-    <button class="gate-btn" onclick="submitDashboardPin()">Unlock Dashboard</button>`;
-}
-
-let _pendingDashboardPin = null;
-
-// Kept in memory only, for this tab's session — used solely to auto-refresh
-// the "Upcoming Friday" live tile without asking for the PIN again. Never
-// persisted (no localStorage/sessionStorage), never sent anywhere except
-// the same community-dashboard-data Edge Function call used at login.
-let _sessionPin = null;
-let _sessionStudioId = null;
+// ==========================================================================
+// SIGN-IN AND VIEWS
+//   Studio view — opens with the studio email login (any staff member on the
+//     studio's device). Studio-level cards only, always that login's studio.
+//   Coordinator view — "🔓 Coordinator view" asks for a PIN. An active SC of
+//     this studio (or an admin) unlocks the SC cards on top. It locks itself
+//     after INACTIVITY_LOCK_MS idle, back to the studio view (not signed out).
+// Both levels are enforced on the server (resolveAccess in each Edge
+// Function) — hiding cards here is only the visual half. The PIN is kept in
+// memory only while unlocked: never stored, never sent anywhere else.
+// ==========================================================================
+let _sessionPin = null;        // coordinator PIN while the SC view is unlocked
+let _sessionStudioId = null;   // studio currently shown
+let _studioData = null;        // community-dashboard-data response for the studio login
+let _viewLevel = null;         // 'studio' | 'sc' | 'admin'
+let _studioViewStarted = false;
 let _fridayRefreshTimer = null;
 const FRIDAY_REFRESH_MS = 60000; // 60s — adjust if you want it faster/slower
 
-function renderDashboardStudioPicker(studioIds) {
-  const buttonsHtml = studioIds.map(id => `
-    <button class="gate-studio-btn" onclick="chooseDashboardStudio('${esc(id)}')">${esc(STUDIO_NAMES[id] || id)}</button>`).join('');
+// ---------- Studio login ----------
+function renderLoginGate(errorMsg) {
+  document.getElementById('dashboard-shell').style.display = 'none';
+  document.getElementById('dashboard-gate').style.display = 'flex';
   document.getElementById('dashboard-gate-body').innerHTML = `
-    <div class="gate-detail">You're assigned to more than one studio — which one do you want to view?</div>
-    ${buttonsHtml}`;
+    <div class="gate-detail">Sign in with your studio login.</div>
+    ${errorMsg ? `<div class="gate-error">${esc(errorMsg)}</div>` : ''}
+    <input type="email" id="login-email" class="gate-text-input" placeholder="Studio email" autocomplete="username" />
+    <input type="password" id="login-password" class="gate-text-input" placeholder="Password" autocomplete="current-password"
+           onkeydown="if(event.key==='Enter') submitStudioLogin()" />
+    <button class="gate-btn" id="login-btn" onclick="submitStudioLogin()">Sign in</button>`;
 }
 
-async function chooseDashboardStudio(studioId) {
-  if (!_pendingDashboardPin) { renderDashboardPinGate('Session expired — enter your PIN again.'); return; }
+async function submitStudioLogin() {
+  const email = (document.getElementById('login-email').value || '').trim();
+  const password = document.getElementById('login-password').value || '';
+  if (!email || !password) return;
+  const btn = document.getElementById('login-btn');
+  btn.disabled = true; btn.textContent = 'Signing in…';
+  const { error } = await sb.auth.signInWithPassword({ email, password });
+  if (error) { renderLoginGate("That email and password didn't match."); return; }
+  startStudioView();
+}
+
+async function signOutStudio() {
+  if (!confirm('Sign this device out of the studio login? The schedule will sign out too.')) return;
+  await sb.auth.signOut(); // onAuthStateChange below resets the page
+}
+
+function resetToSignedOut() {
+  endCoordinatorView(false);
+  stopStudioTimers();
+  _studioViewStarted = false; _studioData = null; _sessionStudioId = null; _viewLevel = null;
+  document.querySelectorAll('.main [id^="card-"]').forEach(el => { el.innerHTML = ''; });
+  const sw = document.getElementById('admin-studio-switcher');
+  if (sw) sw.remove();
+  const pane = document.getElementById('schedule-pane');
+  pane.innerHTML = ''; _scheduleLoaded = false;
+  renderLoginGate();
+}
+
+function stopStudioTimers() {
+  if (_fridayRefreshTimer) { clearInterval(_fridayRefreshTimer); _fridayRefreshTimer = null; }
+  if (_goalRefreshTimer) { clearInterval(_goalRefreshTimer); _goalRefreshTimer = null; }
+}
+
+// ---------- Studio view ----------
+async function startStudioView(studioId) {
+  let data;
   try {
-    const data = await fetchFridayFillRateWithPin(_pendingDashboardPin, studioId);
-    _sessionPin = _pendingDashboardPin;
-    _sessionStudioId = studioId;
-    _pendingDashboardPin = null;
-    unlockDashboard(data);
+    data = await fetchFridayFillRateWithPin(null, studioId || _sessionStudioId);
   } catch (e) {
-    _pendingDashboardPin = null;
-    renderDashboardPinGate('Invalid PIN or not authorized for this view.');
+    // Signed in, but the login can't be used here (expired, or not linked to a studio).
+    renderLoginGate(/not signed in/i.test(e.message) ? 'Your login has expired — sign in again.' : e.message);
+    return;
   }
-}
-
-async function submitDashboardPin() {
-  const input = document.getElementById('dashboard-pin-input');
-  const pin = input ? input.value.trim() : '';
-  if (!pin) return;
-  try {
-    const data = await fetchFridayFillRateWithPin(pin);
-    if (data.needsStudioSelection) {
-      _pendingDashboardPin = pin;
-      renderDashboardStudioPicker(data.studios);
-      return;
-    }
-    _sessionPin = pin;
-    _sessionStudioId = null; // single-studio manager — Edge Function resolves it automatically
-    unlockDashboard(data);
-  } catch (e) {
-    renderDashboardPinGate('Invalid PIN or not authorized for this view.');
-  }
-}
-
-function unlockDashboard(data) {
-  document.body.classList.toggle('preview-mode', !!data.isAdmin);
+  _studioData = data;
+  _studioViewStarted = true;
+  _sessionStudioId = data.studioId;
+  _viewLevel = 'studio';
   document.getElementById('dashboard-gate').style.display = 'none';
   document.getElementById('dashboard-shell').style.display = 'flex';
   showDashboardPane();
-  resetInactivityTimer();
+  renderViewBar();
   renderAdminStudioSwitcher(data);
-  initDashboard(data).then(() => {
-    // Chained (not fired in parallel) — needs _lastWeatherData, which is
-    // only set once initDashboard's internal renderWeatherCard has resolved.
-    if (_sessionPin) loadMarketingSuggestions(_sessionPin, data.studioId);
-  });
+  await initDashboard(data);
+  loadStudioCards(data.studioId);
   if (_fridayRefreshTimer) clearInterval(_fridayRefreshTimer);
   _fridayRefreshTimer = setInterval(refreshFridayFillRate, FRIDAY_REFRESH_MS);
-  // Greeting hero — live for everyone, loads first since it's the top of the page.
-  if (_sessionPin) {
-    loadDailyHero(_sessionPin, data.studioId);
-  }
-  // Today's Projects — company-wide (same for every studio), but weather
-  // forecast pills in its header are per-studio.
-  loadTodaysProjects(data.studioId);
+  startGoalRefresh();
+}
+
+// Studio-level cards (studio login is enough). _sessionPin is passed when
+// unlocked so the greeting can use the coordinator's name.
+function loadStudioCards(studioId) {
+  loadDailyHero(_sessionPin, studioId);
+  loadTodaysProjects(studioId);   // company-wide projects + this studio's forecast pills
   loadWeekInfoBar();
-  // Studio Sales — separate PIN call, not on the Friday refresh timer
-  // (sales data doesn't need 60s polling like a live Friday count). LIVE for
-  // everyone now — community-sales-data scopes managers to their own studio
-  // server-side. Explicitly pass Friday's resolved studioId so both cards
-  // show the same studio from the start.
-  // Admin only — managers see the percentage-only Sales Goals card instead.
-  if (_sessionPin && data.isAdmin) {
+  loadAllBookingBuckets(_sessionPin, studioId);
+  loadGoalProgress(_sessionPin, studioId);
+}
+
+// Coordinator-only cards (the server refuses these without a valid PIN).
+function loadCoordinatorCards(studioId) {
+  if (!_sessionPin) return;
+  loadMarketingSuggestions(_sessionPin, studioId); // weather tag already loaded by the studio view
+  loadCheckinCount(_sessionPin, studioId);
+  loadInstagram(_sessionPin, studioId);
+  // Studio sales in dollars stays ADMIN ONLY (admin PIN), as before.
+  if (_viewLevel === 'admin') {
     _salesMonth = null;
-    loadStudioSales(_sessionPin, data.studioId, null);
-  }
-  // Kids Parties / Team Building — LIVE for everyone now, same manager
-  // scoping enforced server-side as Sales.
-  if (_sessionPin) {
-    loadAllBookingBuckets(_sessionPin, data.studioId);
-  }
-  // Daily Check-Ins — LIVE for everyone now.
-  if (_sessionPin) {
-    loadCheckinCount(_sessionPin, data.studioId);
-  }
-  // Instagram — moved from index.html's Community Hub.
-  if (_sessionPin) {
-    loadInstagram(_sessionPin, data.studioId);
-  }
-  // Sales Goals — percentages only; refreshes every 5 minutes.
-  if (_sessionPin) {
-    loadGoalProgress(_sessionPin, data.studioId);
-    startGoalRefresh();
+    loadStudioSales(_sessionPin, studioId, null);
   }
 }
 
-// Admin-only: a studio dropdown pinned above the Friday card. Changing it
-// re-fetches with the same PIN + the newly chosen studioId — same Edge
-// Function call as login, just with studioId set — and re-renders only the
-// Friday data + keeps the auto-refresh polling pointed at the new studio.
+function renderViewBar() {
+  const bar = document.getElementById('view-bar');
+  if (!bar) return;
+  const studioName = STUDIO_NAMES[_sessionStudioId] || _sessionStudioId || '';
+  if (_sessionPin) {
+    bar.innerHTML = `
+      <span class="sc-badge">${_viewLevel === 'admin' ? '👁️ Admin view' : '🔓 Coordinator view'}</span>
+      <span><span class="who">${esc(studioName)}</span> · locks after ${Math.round(INACTIVITY_LOCK_MS / 1000)}s idle</span>
+      <span class="spacer"></span>
+      <button onclick="endCoordinatorView()">🔒 Lock</button>`;
+  } else {
+    bar.innerHTML = `
+      <span>Studio view · <span class="who">${esc(studioName)}</span></span>
+      <span class="spacer"></span>
+      <button class="unlock" onclick="openPinModal()">🔓 Coordinator view</button>
+      <button onclick="signOutStudio()">Sign out</button>`;
+  }
+}
+
+// ---------- Coordinator unlock ----------
+function openPinModal(errorMsg) {
+  const studioName = STUDIO_NAMES[_sessionStudioId] || _sessionStudioId || 'this studio';
+  document.getElementById('pin-modal-body').innerHTML = `
+    <div class="gate-detail">Enter your coordinator PIN to unlock the coordinator view for ${esc(studioName)}.</div>
+    ${errorMsg ? `<div class="gate-error">${esc(errorMsg)}</div>` : ''}
+    <input type="password" inputmode="numeric" maxlength="4" id="coordinator-pin-input" class="gate-pin-input"
+           placeholder="PIN" onkeydown="if(event.key==='Enter') submitCoordinatorPin()"
+           oninput="if(this.value.length===this.maxLength) submitCoordinatorPin()" />
+    <button class="gate-btn" onclick="submitCoordinatorPin()">Unlock</button>`;
+  document.getElementById('pin-modal').style.display = 'flex';
+  const input = document.getElementById('coordinator-pin-input');
+  if (input) input.focus();
+}
+
+function closePinModal() {
+  document.getElementById('pin-modal').style.display = 'none';
+  document.getElementById('pin-modal-body').innerHTML = '';
+}
+
+let _pinSubmitting = false;
+async function submitCoordinatorPin() {
+  if (_pinSubmitting) return;
+  const input = document.getElementById('coordinator-pin-input');
+  const pin = input ? input.value.trim() : '';
+  if (!pin) return;
+  _pinSubmitting = true;
+  let data;
+  try {
+    data = await fetchFridayFillRateWithPin(pin, _sessionStudioId);
+  } catch (e) {
+    _pinSubmitting = false;
+    openPinModal(e.message || 'Invalid PIN or not authorized for this view.');
+    return;
+  }
+  _pinSubmitting = false;
+  closePinModal();
+
+  _sessionPin = pin;
+  _viewLevel = data.level === 'admin' ? 'admin' : 'sc';
+  document.body.classList.add('sc-mode');
+  document.body.classList.toggle('preview-mode', _viewLevel === 'admin');
+
+  // An SC PIN always shows that SC's studio (an admin studio login may have
+  // been looking at a different one).
+  const studioChanged = data.studioId !== _sessionStudioId;
+  _sessionStudioId = data.studioId;
+  renderViewBar();
+  renderAdminStudioSwitcher(data); // admin PIN → all studios; SC PIN → no switcher
+  if (studioChanged) {
+    renderFridayFillRateBody(data);
+    await renderWeatherCard(data.studioId);
+    loadStudioCards(data.studioId);
+  } else {
+    loadDailyHero(_sessionPin, data.studioId); // greeting switches to their name
+  }
+  loadCoordinatorCards(data.studioId);
+  resetInactivityTimer();
+}
+
+// Back to the studio view: forget the PIN, empty the coordinator cards.
+function endCoordinatorView(reload = true) {
+  const wasUnlocked = !!_sessionPin;
+  _sessionPin = null;
+  if (_studioViewStarted) _viewLevel = 'studio';
+  document.body.classList.remove('sc-mode', 'preview-mode');
+  if (_inactivityTimer) { clearTimeout(_inactivityTimer); _inactivityTimer = null; }
+  ['card-marketing-suggestions', 'card-checkins', 'card-instagram', 'card-studio-sales'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = '';
+  });
+  if (!_studioViewStarted) return;
+  if (!wasUnlocked || !reload) { renderViewBar(); return; }
+
+  // A non-admin studio login always returns to its own studio.
+  if (!_studioData.isAdmin && _sessionStudioId !== _studioData.studioId) {
+    changeAdminStudio(_studioData.studioId);
+  } else {
+    loadDailyHero(null, _sessionStudioId); // greeting back to "team"
+  }
+  renderViewBar();
+  renderAdminStudioSwitcher(Object.assign({}, _studioData, { studioId: _sessionStudioId }));
+}
+
+// Studio dropdown — shown for an admin studio login or an admin PIN.
+// Changing it reloads every card for the chosen studio.
 function renderAdminStudioSwitcher(data) {
   const existing = document.getElementById('admin-studio-switcher');
   if (existing) existing.remove();
-  if (!data.isAdmin) return;
+  if (!data || !data.isAdmin) return;
 
   const optionsHtml = (data.studios || []).map(id =>
     `<option value="${esc(id)}" ${id === data.studioId ? 'selected' : ''}>${esc(STUDIO_NAMES[id] || id)}</option>`
@@ -2246,34 +2356,27 @@ function renderAdminStudioSwitcher(data) {
   bar.id = 'admin-studio-switcher';
   bar.className = 'admin-switcher-bar';
   bar.innerHTML = `
-    <span class="admin-switcher-label">👁️ Admin view — studio:</span>
+    <span class="admin-switcher-label">👁️ Admin — studio:</span>
     <select id="admin-studio-select" onchange="changeAdminStudio(this.value)">${optionsHtml}</select>`;
-  document.querySelector('.main').prepend(bar);
+  document.getElementById('view-bar').after(bar);
 }
 
 async function changeAdminStudio(studioId) {
-  if (!_sessionPin) return;
   _sessionStudioId = studioId;
   try {
     const data = await fetchFridayFillRateWithPin(_sessionPin, studioId);
     renderFridayFillRateBody(data);
     await renderWeatherCard(studioId);
-    _salesMonth = null; // reset to current month when switching studios
-    loadStudioSales(_sessionPin, studioId, null);
-    loadAllBookingBuckets(_sessionPin, studioId);
-    loadCheckinCount(_sessionPin, studioId);
-    loadGoalProgress(_sessionPin, studioId);
-    loadInstagram(_sessionPin, studioId);
-    loadDailyHero(_sessionPin, studioId);
-    loadMarketingSuggestions(_sessionPin, studioId);
-    loadTodaysProjects(studioId);
+    renderViewBar();
+    loadStudioCards(studioId);
+    loadCoordinatorCards(studioId);
   } catch (e) {
-    console.error('Failed to switch admin studio view:', e);
+    console.error('Failed to switch studio view:', e);
   }
 }
 
 async function refreshFridayFillRate() {
-  if (!_sessionPin) return;
+  if (!_studioViewStarted) return;
   try {
     const data = await fetchFridayFillRateWithPin(_sessionPin, _sessionStudioId);
     renderFridayFillRateBody(data);
@@ -2556,17 +2659,13 @@ async function loadDashboardTheme() {
 }
 
 // ---------- Schedule tab ----------
-// The schedule is schedule.html (a schedule-only copy of index.html) shown in
-// a frame. It signs in with the STUDIO login, not the manager PIN, so:
-//   - it can be opened straight from the PIN screen,
-//   - opening it ends any manager session (the PIN is cleared and manager
-//     cards are emptied), so financial cards never sit open behind it,
-//   - the 60s inactivity lock doesn't apply while it's open.
-// Going back to Dashboard asks for the PIN again.
+// schedule.html (a schedule-only copy of index.html) in a frame. It uses the
+// same studio login as this page, so it opens straight away when signed in.
+// Opening it locks the coordinator view, so SC cards never sit open behind
+// it; the studio view stays signed in.
 let _scheduleLoaded = false;
-
 function openSchedule(view) {
-  endManagerSession();
+  endCoordinatorView();
   document.getElementById('dashboard-gate').style.display = 'none';
   document.getElementById('dashboard-shell').style.display = 'flex';
   document.querySelector('.main').style.display = 'none';
@@ -2578,74 +2677,49 @@ function openSchedule(view) {
   }
   setActiveNav('nav-schedule');
 }
-
-function goToDashboard() {
-  if (_sessionPin) { showDashboardPane(); return; }
-  // Not unlocked (e.g. coming from the Schedule tab) — PIN first.
-  document.getElementById('dashboard-shell').style.display = 'none';
-  document.getElementById('dashboard-gate').style.display = 'flex';
-  renderDashboardPinGate();
+async function goToDashboard() {
+  if (_studioViewStarted) { showDashboardPane(); return; }
+  // Came from the Schedule button on the sign-in screen — the schedule may
+  // have signed this device in, in which case the dashboard opens directly.
+  const { data } = await sb.auth.getSession();
+  if (data && data.session) startStudioView();
+  else renderLoginGate();
 }
-
 function showDashboardPane() {
   document.getElementById('schedule-pane').style.display = 'none';
   document.querySelector('.main').style.display = '';
   setActiveNav('nav-dashboard');
 }
-
 function setActiveNav(id) {
   document.querySelectorAll('.sidebar .nav-item').forEach(b => b.classList.toggle('active', b.id === id));
 }
 
-// Clears the manager session and any manager-only numbers on the page,
-// without showing the PIN screen.
-function endManagerSession() {
-  _sessionPin = null;
-  _sessionStudioId = null;
-  _pendingDashboardPin = null;
-  document.body.classList.remove('preview-mode');
-  if (_fridayRefreshTimer) { clearInterval(_fridayRefreshTimer); _fridayRefreshTimer = null; }
-  if (_goalRefreshTimer) { clearInterval(_goalRefreshTimer); _goalRefreshTimer = null; }
-  if (_inactivityTimer) { clearTimeout(_inactivityTimer); _inactivityTimer = null; }
-  document.querySelectorAll('.main [id^="card-"]').forEach(el => { el.innerHTML = ''; });
-  const switcher = document.getElementById('admin-studio-switcher');
-  if (switcher) switcher.remove();
-}
-
-// ---------- Auto-logout after inactivity ----------
-// Only runs once the dashboard is actually unlocked — no point locking an
-// already-locked gate. 60 seconds; the Schedule tab is exempt because it
-// doesn't use the manager PIN at all (see openSchedule).
+// ---------- Coordinator view auto-lock ----------
+// After 60 seconds idle the coordinator view locks back to the studio view.
+// The studio login itself stays signed in.
 const INACTIVITY_LOCK_MS = 60 * 1000;
 let _inactivityTimer = null;
-
-function lockDashboard() {
-  _sessionPin = null;
-  _sessionStudioId = null;
-  document.body.classList.remove('preview-mode');
-  document.getElementById('dashboard-shell').style.display = 'none';
-  document.getElementById('dashboard-gate').style.display = 'flex';
-  renderDashboardPinGate();
-  if (_fridayRefreshTimer) { clearInterval(_fridayRefreshTimer); _fridayRefreshTimer = null; }
-  if (_goalRefreshTimer) { clearInterval(_goalRefreshTimer); _goalRefreshTimer = null; }
-  // Clear admin-only dollar figures so they can't linger for the next login.
-  const salesCard = document.getElementById('card-studio-sales');
-  if (salesCard) salesCard.innerHTML = '';
-  if (_inactivityTimer) { clearTimeout(_inactivityTimer); _inactivityTimer = null; }
-}
-
 function resetInactivityTimer() {
-  if (!_sessionPin) return; // not logged in — nothing to lock
+  if (!_sessionPin) return; // studio view only — nothing to lock
   if (_inactivityTimer) clearTimeout(_inactivityTimer);
-  _inactivityTimer = setTimeout(lockDashboard, INACTIVITY_LOCK_MS);
+  _inactivityTimer = setTimeout(() => endCoordinatorView(), INACTIVITY_LOCK_MS);
 }
-
 ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll'].forEach(evt => {
   document.addEventListener(evt, resetInactivityTimer, { passive: true });
 });
 
+// Signed out anywhere on this device (here, or in the schedule frame) →
+// back to the sign-in screen.
+sb.auth.onAuthStateChange((event) => {
+  if (event === 'SIGNED_OUT' && (_studioViewStarted || _scheduleLoaded)) resetToSignedOut();
+});
+
 loadDashboardTheme();
-renderDashboardPinGate();
+(async () => {
+  const { data } = await sb.auth.getSession();
+  if (data && data.session) startStudioView();
+  else renderLoginGate();
+})();
 </script>
 </body>
 </html>
