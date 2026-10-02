@@ -342,7 +342,8 @@ button.pill { cursor: pointer; }
       <div class="full"><label class="field-label" for="ed-curriculum">Curriculum link</label><input type="url" id="ed-curriculum"></div>
       <div><label class="field-label" for="ed-steps">Step-by-steps link</label><input type="url" id="ed-steps"></div>
       <div><label class="field-label" for="ed-base">Base printout (shared) <a href="#" class="small" onclick="openSheets('base');return false">manage</a></label><select id="ed-base" style="width:100%"></select></div>
-      <div><label class="field-label" for="ed-printout">Steps printout link (this project only)</label><input type="url" id="ed-printout"></div>
+      <div class="full"><label class="field-label">Steps printout (this project only)</label><div id="ed-steps-src"></div></div>
+      <input type="file" id="ed-steps-file" accept=".pdf,application/pdf,image/png,image/jpeg,image/webp" style="display:none" onchange="stepsFileChosen(this)">
       <div><label class="field-label" for="ed-template">Template <a href="#" class="small" onclick="openSheets('template');return false">manage</a></label><select id="ed-template" style="width:100%"></select></div>
       <div><label class="field-label" for="ed-marketing">Marketing photos link</label><input type="url" id="ed-marketing"></div>
       <div><label class="field-label" for="ed-metafield">Shopify project metafield</label><input type="text" id="ed-metafield"></div>
@@ -936,7 +937,9 @@ function renderLibrary() {
   const showArch = document.getElementById('lib-archived').checked
   const list = library.filter(p =>
     (showArch || p.is_active) && matchesSearch(p, q) && (!med || p.medium === med) && (!tag || (p.tags || []).includes(tag)) &&
-    (!needs || (needs === 'tags' ? !(p.tags || []).length : !p[needs])))
+    (!needs || (needs === 'tags' ? !(p.tags || []).length
+               : needs === 'printout_url' ? !(p.printout_url || p.printout_path)
+               : !p[needs])))
   document.getElementById('lib-count').textContent = list.length + ' of ' + library.length + ' projects'
   const body = document.getElementById('library-body')
   if (!library.length) { body.innerHTML = '<div class="panel empty">No projects yet. Add one, or use Import from sheet to bring in the PROJECTS_LIBRARY tab.</div>'; return }
@@ -971,7 +974,8 @@ function openProjectEditor(id, presetName, onSaved) {
   document.getElementById('ed-alt').value = (p.alternate_names || []).join(', ')
   document.getElementById('ed-curriculum').value = p.curriculum_url || ''
   document.getElementById('ed-steps').value = p.step_by_step_url || ''
-  document.getElementById('ed-printout').value = p.printout_url || ''
+  edSteps = { mode: p.printout_path ? 'file' : (p.printout_url ? 'link' : 'file'), url: p.printout_url || '', path: p.printout_path || null, file: null }
+  renderStepsField()
   document.getElementById('ed-base').innerHTML = sheetOptionsHtml('base', p.base_printout_id || '')
   document.getElementById('ed-metafield').value = p.shopify_metafield || ''
   document.getElementById('ed-template').innerHTML = sheetOptionsHtml('template', p.template_id || '')
@@ -1062,7 +1066,8 @@ async function saveProject() {
     tags: editTags.slice(),
     curriculum_url: nz(document.getElementById('ed-curriculum').value),
     step_by_step_url: nz(document.getElementById('ed-steps').value),
-    printout_url: nz(document.getElementById('ed-printout').value),
+    printout_url: edSteps.mode === 'link' ? nz(edSteps.url) : null,
+    printout_path: edSteps.mode === 'link' ? null : edSteps.path,
     base_printout_id: document.getElementById('ed-base').value || null,
     shopify_metafield: nz(document.getElementById('ed-metafield').value),
     template_id: document.getElementById('ed-template').value || null,
@@ -1073,9 +1078,10 @@ async function saveProject() {
   const btn = document.getElementById('ed-save')
   btn.disabled = true
   const q = editing ? sb.from('project_library').update(row).eq('id', editing.id) : sb.from('project_library').insert(row)
-  const { data, error } = await q.select().single()
+  let { data, error } = await q.select().single()
+  if (error) { btn.disabled = false; toast(friendlyError(error), true); return }
+  data = await finishStepsPrintout(data)
   btn.disabled = false
-  if (error) { toast(friendlyError(error), true); return }
   upsertLocal(data)
   closeModal('editor-modal')
   toast(editing ? 'Project saved' : 'Project added')
@@ -1263,6 +1269,75 @@ async function toggleSheetActive(id) {
   await reloadSheets(kind)
 }
 
+/* ---------- steps printout (each project's own instruction sheet) ----------
+   Upload OR link, chosen in the project editor. A chosen file uploads when
+   the project is saved (so new projects work too), into the private
+   'project-sheets' bucket under steps/<project id>/. */
+let edSteps = { mode: 'file', url: '', path: null, file: null }
+
+function renderStepsField() {
+  const box = document.getElementById('ed-steps-src')
+  if (!box) return
+  if (edSteps.mode === 'link') {
+    box.innerHTML = '<div class="sheet-src">' +
+      '<input type="url" id="ed-printout" placeholder="https://drive.google.com/…" value="' + esc(edSteps.url) + '" oninput="edSteps.url = this.value">' +
+      '<button class="btn" onclick="setStepsMode(\'file\')">Upload a file instead</button></div>'
+    return
+  }
+  let chip, buttons
+  if (edSteps.file) {
+    chip = '📎 ' + esc(edSteps.file.name) + ' <span class="muted">— uploads when you save</span>'
+    buttons = '<button class="btn" onclick="pickStepsFile()">Choose a different file</button>'
+  } else if (edSteps.path) {
+    chip = '📎 ' + esc(sheetFileLabel(edSteps.path))
+    buttons = '<button class="btn" onclick="openSheetFile(\'' + esc(edSteps.path) + '\')">Open</button>' +
+              '<button class="btn" onclick="pickStepsFile()">Replace file</button>'
+  } else {
+    chip = '<span class="muted">No file yet</span>'
+    buttons = '<button class="btn" onclick="pickStepsFile()">Choose file</button>'
+  }
+  box.innerHTML = '<div class="sheet-src"><span class="file-chip">' + chip + '</span>' + buttons +
+    '<button class="btn" onclick="setStepsMode(\'link\')">Use a link instead</button></div>'
+}
+function setStepsMode(mode) { edSteps.mode = mode; renderStepsField() }
+function pickStepsFile() {
+  const input = document.getElementById('ed-steps-file')
+  input.value = ''
+  input.click()
+}
+function stepsFileChosen(input) {
+  const file = input.files[0]
+  if (!file || !sheetFileOk(file)) return
+  edSteps.file = file
+  edSteps.mode = 'file'
+  renderStepsField()
+}
+
+// Runs after the project row is saved. Uploads a newly chosen file, and
+// removes a file that was replaced or switched to a link. Returns the
+// (possibly updated) project row.
+async function finishStepsPrintout(row) {
+  const before = editing && editing.printout_path
+  if (edSteps.mode === 'file' && edSteps.file) {
+    const file = edSteps.file
+    const safeName = file.name.toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-+|-+$/g, '') || 'steps.pdf'
+    const path = 'steps/' + row.id + '/' + Date.now() + '-' + safeName
+    toast('Uploading ' + file.name + '…')
+    const { error: upErr } = await sb.storage.from(SHEETS_BUCKET).upload(path, file, { contentType: file.type, upsert: false })
+    if (upErr) { toast('Project saved, but the steps printout upload failed: ' + friendlyError(upErr), true); return row }
+    const { data, error } = await sb.from('project_library').update({ printout_path: path }).eq('id', row.id).select().single()
+    if (error) {
+      await sb.storage.from(SHEETS_BUCKET).remove([path])
+      toast('Project saved, but the steps printout could not be attached: ' + friendlyError(error), true)
+      return row
+    }
+    if (before && before !== path) await sb.storage.from(SHEETS_BUCKET).remove([before])
+    return data
+  }
+  if (edSteps.mode === 'link' && before) await sb.storage.from(SHEETS_BUCKET).remove([before])
+  return row
+}
+
 function upsertLocal(p) {
   const i = library.findIndex(x => x.id === p.id)
   if (i >= 0) library[i] = p; else library.push(p)
@@ -1286,6 +1361,7 @@ async function deleteProject() {
   if (!editing || !confirm('Delete "' + editing.name + '" permanently?')) return
   const { error } = await sb.from('project_library').delete().eq('id', editing.id)
   if (error) { toast(friendlyError(error), true); return }
+  if (editing.printout_path) await sb.storage.from(SHEETS_BUCKET).remove([editing.printout_path]) // its uploaded steps sheet
   library = library.filter(p => p.id !== editing.id); delete libById[editing.id]
   closeModal('editor-modal'); toast('Project deleted')
   afterLibraryChange()
