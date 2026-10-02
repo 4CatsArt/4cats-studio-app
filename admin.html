@@ -12224,6 +12224,7 @@ function scRender() {
     const actions = [
       `<button class="btn btn-primary" onclick="scOpenAssignModal('${cpEsc(s.id)}')">${hist.length ? 'Change SC' : 'Assign SC'}</button>`,
       open ? `<button class="btn" onclick="scOpenEndModal('${cpEsc(s.id)}')">End</button>` : '',
+      (current || upcoming) ? `<button class="btn" onclick="scOpenEditStartModal('${cpEsc(s.id)}')">Edit start date</button>` : '',
       hist.length ? `<button class="btn" onclick="scUndo('${cpEsc(s.id)}')" title="Undo the most recent change for this studio">Undo last change</button>` : '',
       hist.length ? `<button class="btn" onclick="scToggleHistory('${cpEsc(s.id)}')">History (${hist.length})</button>` : ''
     ].join('')
@@ -12377,6 +12378,39 @@ function scOpenEndModal(studioId) {
     })
     if (error) throw error
   }, 'End role')
+}
+
+// Correct a start date (e.g. someone entered on Oct 1 who really started
+// earlier). update_studio_coordinator_start keeps a direct handover joined up
+// (the previous SC's last day moves too) and refuses changes that would leave
+// already-awarded points outside a role.
+function scOpenEditStartModal(studioId) {
+  const studioName = getStudioName(studioId)
+  const today = scToday()
+  const hist = (scRows || []).filter(r => r.studio_id === studioId) // newest first
+  const target = hist.find(r => r.start_date > today) || hist.find(r => r.start_date <= today && (!r.end_date || r.end_date >= today))
+  if (!target) return
+  const roleId = target.id || scRoleIdFor(target)
+  if (!roleId) { alert('The points data needs to load first — open another Community Points sub-tab, then come back and try again.'); return }
+  const prev = hist.find(r => r.end_date && r.end_date === scDayBefore(target.start_date))
+  const html = `
+    <p style="font-size:13px;margin-bottom:0.75rem">Correct when <strong>${cpEsc(scName(target))}</strong> started as SC (currently ${scDate(target.start_date)}).
+      ${prev ? `<br><strong>${cpEsc(scName(prev))}</strong> handed over to them, so ${cpEsc(scName(prev))}'s last day will move to the day before the new start.` : ''}</p>
+    <div class="modal-field"><label>First day in the role</label><input id="sc-new-start" type="date" value="${cpEsc(target.start_date)}"${target.end_date ? ` max="${cpEsc(target.end_date)}"` : ''}></div>
+    <div class="modal-field"><label>Note (optional)</label><input id="sc-start-note" placeholder="e.g. Was already SC before being entered here"></div>
+    <p class="cp-note" style="margin-bottom:0">An earlier start also shortens the party points waiting period. Points already awarded are protected — a change that would leave them outside someone's role is refused.</p>`
+  scOpenModal('Edit start date', studioName, html, async () => {
+    const start = document.getElementById('sc-new-start').value
+    if (!start) throw new Error('Choose a start date.')
+    const { error } = await sb.rpc('update_studio_coordinator_start', {
+      p_role_id: roleId, p_start_date: start, p_note: document.getElementById('sc-start-note').value
+    })
+    if (error) {
+      if (/Could not find the function/i.test(error.message || '')) throw new Error('Run studio_coordinator_edit_start.sql first.')
+      throw error
+    }
+    try { cpData = await cpRequest('get_all') } catch (e) { /* waiver dates refresh next load */ }
+  }, 'Save start date')
 }
 
 async function scUndo(studioId) {
