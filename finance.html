@@ -169,7 +169,7 @@ const STUDIO_IDS = Object.keys(STUDIO_NAMES)
 let currentMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1) // first of this month
 let financeRows = {} // studio_id -> row from studio_monthly_finance (or {} if none yet)
 let progressRows = {} // studio_id -> { monthly_sales_goal, daily_sales_goal, this_month_total, pace_pct } from the RPC
-let bucketTotals = {} // 'membership' | 'warehouse' -> this month's total for unattributed sales in that bucket
+let bucketTotals = {} // 'membership' | 'giftcard' | 'warehouse' -> this month's total for unattributed sales in that bucket
 let payPeriodRows = {} // studio_id -> { 1: amount, 2: amount, 3: amount }
 let prevMonthPayRows = {} // same shape, for the month before — used to estimate empty pay periods
 
@@ -271,7 +271,7 @@ async function loadMonth() {
   }))
 
   bucketTotals = {}
-  await Promise.all(['membership', 'warehouse'].map(async (bucket) => {
+  await Promise.all(['membership', 'giftcard', 'warehouse'].map(async (bucket) => {
     const { data } = await sb.rpc('get_bucket_month_total', { p_bucket: bucket, p_month: monthText })
     bucketTotals[bucket] = data != null ? Number(data) : 0
   }))
@@ -350,7 +350,7 @@ function renderUnattributed() {
   body.innerHTML = `<div style="display:flex;gap:28px;align-items:flex-end;padding:14px 18px;flex-wrap:wrap;border-bottom:0.5px solid var(--line)">
       <div><div class="muted small">Needs a studio</div><div style="font-size:20px;font-weight:700" class="${needsRows.length ? 'profit-neg' : ''}">${needsRows.length} · ${money(sum(needsRows))}</div></div>
       <div><div class="muted small">All unattributed this month</div><div style="font-size:20px;font-weight:700">${unattrRows.length} · ${money(sum(unattrRows))}</div></div>
-      <div class="muted small" style="max-width:420px;line-height:1.4"><b>Needs a studio</b> = classes, parties, add-ons or anything dated that came in without a studio — these should be assigned. Memberships, gift cards and online/warehouse items are expected and already counted in the Membership and Warehouse buckets.</div>
+      <div class="muted small" style="max-width:420px;line-height:1.4"><b>Needs a studio</b> = classes, parties, add-ons or anything dated that came in without a studio — these should be assigned. Memberships, gift cards and online/warehouse items are expected and already counted in the Membership, Gift Cards and Warehouse buckets.</div>
       <div style="margin-left:auto"><button class="btn" onclick="toggleUnattrShowAll()">${unattrShowAll ? 'Show only “Needs a studio”' : 'Show all unattributed'}</button></div>
     </div>
     ${shown.length ? `<table class="fin-table"><thead><tr>
@@ -488,10 +488,10 @@ function homeOfficeLabourTotal() {
   return vals.reduce((sum, v) => sum + (Number(v) || 0), 0)
 }
 
-// All sales this month: every studio's MTD plus the Membership and Warehouse (unattributed) buckets
+// All sales this month: every studio's MTD plus the Membership, Gift Cards and Warehouse (unattributed) buckets
 function computeSystemSalesTotal() {
   return STUDIO_IDS.reduce((sum, id) => sum + (Number((progressRows[id] || {}).this_month_total) || 0), 0)
-    + (Number(bucketTotals.membership) || 0) + (Number(bucketTotals.warehouse) || 0)
+    + (Number(bucketTotals.membership) || 0) + (Number(bucketTotals.giftcard) || 0) + (Number(bucketTotals.warehouse) || 0)
 }
 
 function computeSystemProfitPct() {
@@ -522,7 +522,7 @@ async function saveHomeOfficeLabour(periodNumber, value) {
 }
 
 /* ---------- column sorting (Monthly Summary) ---------- */
-// null key = original studio order. Membership/Warehouse rows always stay at the bottom.
+// null key = original studio order. Membership/Gift Cards/Warehouse rows always stay at the bottom.
 let summarySort = { key: null, dir: 'desc' }
 const SUMMARY_COLUMNS = [
   { key: 'studio',   label: 'Studio',       cls: 'studio-name',    get: id => STUDIO_NAMES[id] },
@@ -607,7 +607,7 @@ function summaryCell(key, studioId) {
 
 // Totals row shown at the top of the Monthly Summary. Money columns are plain
 // sums of the studio rows (pay periods include the grey estimates, same as
-// Wages Total). MTD Sales also adds Membership + Warehouse, so it matches the
+// Wages Total). MTD Sales also adds Membership + Gift Cards + Warehouse, so it matches the
 // system-wide total. The % columns are recomputed from the totals (not
 // averaged), so bigger studios count for more.
 function summaryTotalsRowHtml(cols) {
@@ -629,7 +629,7 @@ function summaryTotalsRowHtml(cols) {
   const wages = sumBy(id => wagesTotal(id))
   const wagesEst = ids.some(id => wagesEstimateExtra(id) > 0)
   const otherCosts = sumBy(id => { const f = financeRows[id] || {}; return num(f.rent) + num(f.art_supplies_budget) + num(f.utilities_estimate) })
-  const sales = computeSystemSalesTotal() // studios + Membership + Warehouse
+  const sales = computeSystemSalesTotal() // studios + Membership + Gift Cards + Warehouse
   const sys = computeSystemTotals()
   const profit = sales - otherCosts - wages
   const labourPct = sales ? (wages / sales) * 100 : null
@@ -645,7 +645,7 @@ function summaryTotalsRowHtml(cols) {
       case 'pay1': case 'pay2': case 'pay3': { const t = payTotal(Number(key.slice(3))); return `<td>${estWrap(t.est, moneyShort(t.total))}</td>` }
       case 'wages': return `<td>${estWrap(wagesEst, moneyShort(wages))}</td>`
       case 'daily': return `<td>${estWrap(anyGoalEst, moneyShort(sys.systemDailyGoal))}</td>`
-      case 'mtd': return `<td title="Studios + Membership + Warehouse">${moneyShort(sales)}</td>`
+      case 'mtd': return `<td title="Studios + Membership + Gift Cards + Warehouse">${moneyShort(sales)}</td>`
       case 'pace': return `<td class="${paceClass(sys.systemPacePct == null ? null : Math.round(sys.systemPacePct))}">${sys.systemPacePct == null ? '—' : Math.round(sys.systemPacePct) + '%'}</td>`
       case 'labour': return `<td class="${labourPct != null && labourPct > 45 ? 'pct-bad' : ''}">${labourPct == null ? '—' : labourPct.toFixed(1) + '%'}</td>`
       case 'profit': return `<td class="${profit < 0 ? 'profit-neg' : ''}" title="All sales minus all studio costs (before home office labour)">${moneyShort(profit)}</td>`
@@ -676,7 +676,7 @@ function renderTable() {
     c.key === 'studio' ? `<td class="studio-name"><em>${esc(label)}</em> <span class="muted small">(unattributed)</span></td>`
     : c.key === 'mtd' ? `<td>${moneyShort(bucketTotals[bucket])}</td>`
     : '<td>—</td>').join('')}</tr>`
-  const bucketRows = bucketRow('Membership', 'membership') + bucketRow('Warehouse', 'warehouse')
+  const bucketRows = bucketRow('Membership', 'membership') + bucketRow('Gift Cards (online)', 'giftcard') + bucketRow('Warehouse', 'warehouse')
 
   const systemProfit = computeSystemProfit()
   const systemProfitPct = computeSystemProfitPct()
@@ -2039,7 +2039,7 @@ async function loadDailyGridIfNeeded() {
     lastMonthTotals[studioId] = !lastErr && lastTotal != null ? Number(lastTotal) : null
   }))
 
-  await Promise.all(['membership', 'warehouse'].map(async (bucket) => {
+  await Promise.all(['membership', 'giftcard', 'warehouse'].map(async (bucket) => {
     const { data, error } = await sb.rpc('get_bucket_daily_sales', { p_bucket: bucket, p_month: monthText })
     const byDay = {}
     if (!error) (data || []).forEach(r => { byDay[r.sale_day] = Number(r.total) })
@@ -2132,7 +2132,7 @@ function daysElapsedInMonth(monthDate) {
 
 function computeSystemTotals() {
   const systemTotalThisMonth = STUDIO_IDS.reduce((sum, id) => sum + (Number((progressRows[id] || {}).this_month_total) || 0), 0)
-    + (Number(bucketTotals.membership) || 0) + (Number(bucketTotals.warehouse) || 0)
+    + (Number(bucketTotals.membership) || 0) + (Number(bucketTotals.giftcard) || 0) + (Number(bucketTotals.warehouse) || 0)
   const systemDailyGoal = STUDIO_IDS.reduce((sum, id) => sum + (Number((progressRows[id] || {}).daily_sales_goal) || 0), 0)
   const elapsed = daysElapsedInMonth(currentMonth)
   const pacedGoal = systemDailyGoal * elapsed
@@ -2163,8 +2163,8 @@ function renderDailyGrid() {
   const monthText = monthToText(currentMonth)
   const nDays = daysInMonth(currentMonth)
   const container = document.getElementById('daily-body')
-  const ids = sortedStudioIdsForDailyGrid().concat(['__membership__', '__warehouse__'])
-  const labelFor = id => id === '__membership__' ? 'Membership' : id === '__warehouse__' ? 'Warehouse' : STUDIO_NAMES[id]
+  const ids = sortedStudioIdsForDailyGrid().concat(['__membership__', '__giftcard__', '__warehouse__'])
+  const labelFor = id => id === '__membership__' ? 'Membership' : id === '__giftcard__' ? 'Gift Cards (online)' : id === '__warehouse__' ? 'Warehouse' : STUDIO_NAMES[id]
 
   const sys = computeSystemTotals()
   const lastYearLabel = systemTotalSameMonthLastYear == null
@@ -2195,7 +2195,7 @@ function renderDailyGrid() {
         <option value="pace_desc" ${dailyGridSortMode === 'pace_desc' ? 'selected' : ''}>Daily pace % / colour: high to low (magenta → red)</option>
       </select>
     </label>
-    <span class="muted small">Membership/Warehouse = unattributed sales with no studio signal (memberships bought standalone, gift cards, standalone kit sales, etc.)</span>
+    <span class="muted small">Membership / Gift Cards / Warehouse = sales with no studio (standalone memberships; gift cards bought online; kits, merch and everything else). Gift cards sold on a studio's POS count at that studio.</span>
   </div>`
 
   const headerCols = ids.map(id => {
