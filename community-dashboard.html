@@ -932,6 +932,32 @@ async function loadWeekInfoBar() {
   }
 }
 
+// Base printouts / templates can be uploaded files (private 'project-sheets'
+// bucket) instead of links. The lineup function returns their file paths to
+// signed-in studio logins; this swaps each path for a temporary signed link
+// (12 hours — covers a dashboard left open all day; the lineup reloads each
+// new day). A forwarded link stops working after that.
+const SHEETS_BUCKET = 'project-sheets';
+const SHEET_LINK_SECONDS = 12 * 60 * 60;
+async function resolveUploadedSheetLinks(data) {
+  if (!data) return;
+  const items = [].concat(data.projects || [], data.event || [], data.mini_make || []);
+  const paths = [...new Set(items.flatMap(p => [p.base_printout_path, p.template_path]).filter(Boolean))];
+  if (!paths.length) return;
+  try {
+    const { data: signed, error } = await sb.storage.from(SHEETS_BUCKET).createSignedUrls(paths, SHEET_LINK_SECONDS);
+    if (error) throw error;
+    const byPath = {};
+    (signed || []).forEach(x => { if (x && x.signedUrl && !x.error) byPath[x.path] = x.signedUrl; });
+    items.forEach(p => {
+      if (p.base_printout_path) p.base_printout_url = byPath[p.base_printout_path] || null;
+      if (p.template_path) p.template_url = byPath[p.template_path] || null;
+    });
+  } catch (e) {
+    console.error('Could not open uploaded printouts:', e); // links just don't show; the lineup still renders
+  }
+}
+
 async function loadTodaysProjects(studioId) {
   const today = localDateStr(new Date());
   _projectsDate = today;
@@ -943,7 +969,9 @@ async function loadTodaysProjects(studioId) {
     // Fail quietly — the header still renders fine without the pills.
   }
   try {
-    renderTodaysProjects(await fetchProjectsForDate(today), forecastDays);
+    const projects = await fetchProjectsForDate(today);
+    await resolveUploadedSheetLinks(projects);
+    renderTodaysProjects(projects, forecastDays);
   } catch (e) {
     console.error("Today's Projects load failed:", e);
     renderTodaysProjects(null); // fail quietly, like the greeting
