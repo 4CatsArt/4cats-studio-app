@@ -285,7 +285,10 @@ async function loadMonth() {
   ;(hoRows || []).forEach(r => { homeOfficeLabourPeriods[r.period_number] = r.amount })
 
   renderTable()
-  if (currentView === 'daily') loadDailyGridIfNeeded()
+  // Daily sales are needed for the rolling Daily Goal on this tab too, so
+  // load them in the background, then refresh the summary.
+  const loadingMonth = monthText
+  loadDailyGridIfNeeded().then(() => { if (currentView === 'summary' && monthToText(currentMonth) === loadingMonth) renderTable() })
   loadUnattributed() // not awaited — fills the Unattributed tab + its badge in the background
 }
 
@@ -538,7 +541,7 @@ const SUMMARY_COLUMNS = [
   { key: 'pay2',     label: () => payPeriodHeaderLabel(2), cls: 'group-editable', htmlId: 'pay2-header', get: id => (payPeriodRows[id] || {})[2] },
   { key: 'pay3',     label: () => payPeriodHeaderLabel(3), cls: 'group-editable', htmlId: 'pay3-header', get: id => (payPeriodRows[id] || {})[3] },
   { key: 'wages',    label: 'Wages Total',  cls: 'group-computed', get: id => wagesTotal(id) },
-  { key: 'daily',    label: 'Daily Goal',   cls: 'group-computed', get: id => (progressRows[id] || {}).daily_sales_goal },
+  { key: 'daily',    label: 'Daily Goal',   cls: 'group-computed', get: id => currentDailyGoal(id) },
   { key: 'mtd',      label: 'MTD Sales',    cls: 'group-computed', get: id => (progressRows[id] || {}).this_month_total },
   { key: 'pace',     label: 'Pace %',       cls: 'group-computed', get: id => (progressRows[id] || {}).pace_pct },
   { key: 'labour',   label: 'Labour %',     cls: 'group-computed', get: id => computeLabourPct(id) },
@@ -599,7 +602,7 @@ function summaryCell(key, studioId) {
     case 'pay2': return payPeriodCell(studioId, 2)
     case 'pay3': return payPeriodCell(studioId, 3)
     case 'wages': return `<td${showPayPeriods ? '' : ' style="cursor:pointer" title="Click to edit pay periods" onclick="togglePayPeriods()"'}>${estWrap(wagesEstimateExtra(studioId) > 0, moneyShort(wagesTotal(studioId)))}</td>`
-    case 'daily': return `<td>${estWrap(p._estimated, moneyShort(p.daily_sales_goal))}</td>`
+    case 'daily': { const g = currentDailyGoal(id); return `<td title="Still needed per day from today to hit the monthly goal">${dailyGoalLabel(g) || estWrap(p._estimated, moneyShort(g))}</td>` }
     case 'mtd': return `<td>${moneyShort(p.this_month_total)}</td>`
     case 'pace': return `<td class="${paceClass(p.pace_pct)}">${p.pace_pct == null ? '—' : p.pace_pct + '%'}</td>`
     case 'labour': { const v = computeLabourPct(studioId); return `<td class="${v != null && v > 45 ? 'pct-bad' : ''}">${v == null ? '—' : v.toFixed(1) + '%'}</td>` }
@@ -648,7 +651,7 @@ function summaryTotalsRowHtml(cols) {
       case 'util': return `<td>${moneyShort(sumBy(id => (financeRows[id] || {}).utilities_estimate))}</td>`
       case 'pay1': case 'pay2': case 'pay3': { const t = payTotal(Number(key.slice(3))); return `<td>${estWrap(t.est, moneyShort(t.total))}</td>` }
       case 'wages': return `<td>${estWrap(wagesEst, moneyShort(wages))}</td>`
-      case 'daily': return `<td>${estWrap(anyGoalEst, moneyShort(sys.systemDailyGoal))}</td>`
+      case 'daily': { const g = systemDailyGoalFor(goalReferenceDate()); return `<td>${g == null ? '…' : estWrap(anyGoalEst, moneyShort(g))}</td>` }
       case 'mtd': return `<td title="Studios + Membership + Gift Cards + Warehouse">${moneyShort(sales)}</td>`
       case 'pace': return `<td class="${paceClass(sys.systemPacePct == null ? null : Math.round(sys.systemPacePct))}">${sys.systemPacePct == null ? '—' : Math.round(sys.systemPacePct) + '%'}</td>`
       case 'labour': return `<td class="${labourPct != null && labourPct > 45 ? 'pct-bad' : ''}">${labourPct == null ? '—' : labourPct.toFixed(1) + '%'}</td>`
@@ -2134,6 +2137,44 @@ function daysElapsedInMonth(monthDate) {
   return daysInMonth(monthDate) // a fully past (or future) month — treat as fully elapsed either way
 }
 
+// ---------- Rolling daily goal ----------
+// Each day's goal = what's still needed to hit the monthly goal, spread over
+// the days left: (monthly goal − sales on the days BEFORE it) ÷ (days left,
+// including that day). Because it only looks at earlier days, a past day's
+// goal never changes once that day is over, and today's goal doesn't move
+// as today's sales come in. Once the monthly goal is reached, the goal is $0.
+// Pace % is NOT based on this — it still compares month-to-date sales with
+// the monthly goal spread evenly (progressRows[id].daily_sales_goal), so the
+// header colours and Yesterday's colour mean the same thing as before.
+function dailyGoalFor(id, dateStr) {
+  const p = progressRows[id]
+  const monthly = p ? Number(p.monthly_sales_goal) : NaN
+  if (!monthly || dailyLoadedForMonth !== monthToText(currentMonth) || !dailySales[id]) return null
+  const day = Number(dateStr.slice(8, 10))
+  const dim = daysInMonth(currentMonth)
+  let before = 0
+  for (let d = 1; d < day; d++) before += Number(dailySales[id][dateStr.slice(0, 8) + String(d).padStart(2, '0')]) || 0
+  const remaining = monthly - before
+  if (remaining <= 0) return 0
+  return Math.round(remaining / (dim - day + 1) * 100) / 100
+}
+// The day whose goal is shown as "the" Daily Goal: today for the current
+// month, the last day for a past month, the 1st for a future month.
+function goalReferenceDate() {
+  const pt = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Vancouver' })
+  const monthText = monthToText(currentMonth)
+  if (pt.slice(0, 7) === monthText) return pt
+  if (pt.slice(0, 7) > monthText) return monthText + '-' + String(daysInMonth(currentMonth)).padStart(2, '0')
+  return monthText + '-01'
+}
+function currentDailyGoal(id) { return dailyGoalFor(id, goalReferenceDate()) }
+function systemDailyGoalFor(dateStr) {
+  let total = 0, any = false
+  STUDIO_IDS.forEach(id => { const g = dailyGoalFor(id, dateStr); if (g != null) { total += g; any = true } })
+  return any ? total : null
+}
+function dailyGoalLabel(g) { return g === 0 ? '✓ Reached' : g == null ? '…' : null }
+
 function computeSystemTotals() {
   const systemTotalThisMonth = STUDIO_IDS.reduce((sum, id) => sum + (Number((progressRows[id] || {}).this_month_total) || 0), 0)
     + (Number(bucketTotals.membership) || 0) + (Number(bucketTotals.giftcard) || 0) + (Number(bucketTotals.warehouse) || 0)
@@ -2193,7 +2234,7 @@ function renderDailyGrid() {
   const systemPanel = `<div class="panel" style="display:flex;gap:28px;padding:14px 18px;margin-bottom:14px;flex-wrap:wrap">
     <div><div class="muted small">Total Sales This Month (System-Wide)</div><div style="font-size:20px;font-weight:700">${money(sys.systemTotalThisMonth)}</div></div>
     <div><div class="muted small">Same Month Last Year</div><div style="font-size:20px;font-weight:700">${lastYearLabel}</div></div>
-    <div><div class="muted small">Daily Avg Sales Goal (System-Wide)</div><div style="font-size:20px;font-weight:700">${money(sys.systemDailyGoal)}</div></div>
+    <div><div class="muted small">Daily Sales Goal Today (System-Wide)</div><div style="font-size:20px;font-weight:700">${money(systemDailyGoalFor(goalReferenceDate()))}</div></div>
     <div><div class="muted small">% Based on Daily Pace (System-Wide)</div><div class="${paceClass(sys.systemPacePct)}" style="font-size:20px;font-weight:700">${paceLabel}</div></div>
     ${breakevenHtml}
   </div>`
@@ -2282,7 +2323,7 @@ function renderDailyGrid() {
     summaryRow('Art Supplies', id => money((financeRows[id] || {}).art_supplies_budget), '', money(sumIds(id => (financeRows[id] || {}).art_supplies_budget))),
     summaryRow('Utilities', id => money((financeRows[id] || {}).utilities_estimate), '', money(sumIds(id => (financeRows[id] || {}).utilities_estimate))),
     summaryRow('Wages Total', id => money(wagesTotal(id)), '', money(sumIds(id => wagesTotal(id)))),
-    summaryRow('Daily Goal', id => money((progressRows[id] || {}).daily_sales_goal), 'top', money(sys.systemDailyGoal))
+    summaryRow('Daily Goal (today)', id => { if (id.startsWith('__')) return '—'; const g = currentDailyGoal(id); return dailyGoalLabel(g) || money(g) }, 'top', money(systemDailyGoalFor(goalReferenceDate())))
   ].join('')
 
   const dayRows = []
@@ -2291,16 +2332,19 @@ function renderDailyGrid() {
     const dow = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), day).toLocaleDateString('en-US', { weekday: 'short' })
     const cells = ids.map(id => {
       const total = (dailySales[id] || {})[dateStr]
-      const goal = (progressRows[id] || {}).daily_sales_goal
       if (total == null) return `<td class="daily-cell empty">—</td>`
-      const pct = goal ? (total / goal) * 100 : null
+      if (id.startsWith('__')) return `<td class="daily-cell">${money(total)}</td>`
+      const goal = dailyGoalFor(id, dateStr)
+      const pct = goal == null ? null : goal === 0 ? 150 : (total / goal) * 100 // goal already reached → full green
       const bg = dailyHeatColor(pct)
-      return `<td class="daily-cell" style="background:${bg}">${money(total)}</td>`
+      const tip = goal == null ? '' : goal === 0 ? 'Monthly goal already reached' : `Goal this day: ${money(goal)} · ${Math.round(pct)}%`
+      return `<td class="daily-cell" style="background:${bg}" title="${esc(tip)}">${money(total)}</td>`
     }).join('')
     let dayTotal = 0, anyDay = false
     ids.forEach(id => { const v = (dailySales[id] || {})[dateStr]; if (v != null) { dayTotal += Number(v) || 0; anyDay = true } })
     const totalCell = anyDay
-      ? `<td class="total-col daily-cell" style="background:${dailyHeatColor(sys.systemDailyGoal ? (dayTotal / sys.systemDailyGoal) * 100 : null)}" title="All studios + Membership + Gift Cards + Warehouse">${money(dayTotal)}</td>`
+      ? (() => { const g = systemDailyGoalFor(dateStr); const pct = g == null ? null : g === 0 ? 150 : (dayTotal / g) * 100
+          return `<td class="total-col daily-cell" style="background:${dailyHeatColor(pct)}" title="All studios + Membership + Gift Cards + Warehouse${g ? ' · goal this day ' + money(g) : ''}">${money(dayTotal)}</td>` })()
       : `<td class="total-col daily-cell empty">—</td>`
     dayRows.push(`<tr><td class="day-label">${dow}, ${monthLabel(currentMonth).split(' ')[0].slice(0,3)} ${day}</td>${totalCell}${cells}</tr>`)
   }
