@@ -209,13 +209,72 @@
     });
   }
 
+  function loadRefreshToken() { try { return localStorage.getItem('4cats_dashboard_refresh'); } catch (e) { return null; } }
+  function saveLogin(at, rt) {
+    currentAccessToken = at;
+    try { localStorage.setItem('4cats_dashboard_token', at); if (rt) localStorage.setItem('4cats_dashboard_refresh', rt); } catch (e) {}
+  }
+  function currentLoginToken() {
+    // Another tab on this device may have renewed already - pick up its newer login
+    var stored = null;
+    try { stored = localStorage.getItem('4cats_dashboard_token'); } catch (e) {}
+    if (currentAccessToken && stored && stored !== currentAccessToken && jwtExpiryMs(stored) > jwtExpiryMs(currentAccessToken)) currentAccessToken = stored;
+    return currentAccessToken;
+  }
+
+  // ── LOGIN RENEWAL ────────────────────────────────────────────
+  // Supabase logins expire after 1 hour. This swaps the refresh token for a
+  // fresh login before that happens, and again whenever the iPad wakes up or
+  // the tab comes back into view (timers pause while an iPad is asleep).
+  var loginRenewBusy = false;
+  function jwtExpiryMs(tok) {
+    try {
+      var p = String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      while (p.length % 4) p += '=';
+      return JSON.parse(atob(p)).exp * 1000;
+    } catch (e) { return 0; }
+  }
+  function renewLogin(onDone) {
+    var rt = loadRefreshToken();
+    if (!rt || loginRenewBusy) { if (onDone) onDone(false, null); return; }
+    loginRenewBusy = true;
+    fetch(SUPABASE_URL + '/auth/v1/token?grant_type=refresh_token', {
+      method: 'POST',
+      headers: { 'apikey': SUPABASE_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: rt })
+    }).then(function(r) { return r.json(); }).then(function(d) {
+      loginRenewBusy = false;
+      if (d && d.access_token) {
+        saveLogin(d.access_token, d.refresh_token);
+        if (onDone) onDone(true, d);
+      } else if (onDone) { onDone(false, null); }
+    })['catch'](function() {
+      loginRenewBusy = false;
+      if (onDone) onDone(false, null);
+    });
+  }
+  function keepLoginFresh() {
+    var tok = currentLoginToken();
+    if (!tok) return;
+    if (jwtExpiryMs(tok) - new Date().getTime() < 10 * 60 * 1000) renewLogin();
+  }
+  setInterval(keepLoginFresh, 4 * 60 * 1000);
+  document.addEventListener('visibilitychange', function() { if (!document.hidden) keepLoginFresh(); });
+  window.addEventListener('focus', keepLoginFresh);
+
   // ── Auth ─────────────────────────────────────────────────────
   document.getElementById('signin-btn').onclick = signIn;
 
   function init() {
     var stored = null;
     try { stored = localStorage.getItem('4cats_dashboard_token'); } catch(e) {}
-    if (stored) { currentAccessToken = stored; loadApp(); }
+    if (!stored) return;
+    if (jwtExpiryMs(stored) - new Date().getTime() > 60 * 1000) {
+      currentAccessToken = stored; loadApp();
+    } else {
+      // Saved login has expired - try renewing it before asking staff to sign in again
+      renewLogin(function(ok) { if (ok) loadApp(); });
+    }
   }
 
   function signIn() {
@@ -243,7 +302,7 @@
         errEl.style.display = 'block'; return;
       }
       currentAccessToken = result.data.access_token;
-      try { localStorage.setItem('4cats_dashboard_token', currentAccessToken); } catch(e) {}
+      try { localStorage.setItem('4cats_dashboard_token', currentAccessToken); if (result.data.refresh_token) localStorage.setItem('4cats_dashboard_refresh', result.data.refresh_token); } catch(e) {}
       loadApp();
     }).catch(function() {
       btn.textContent = 'Sign in'; btn.disabled = false;
@@ -255,7 +314,7 @@
   function signOut() {
     clearInterval(refreshTimer);
     currentAccessToken = null; currentStudioId = null; currentSessionId = null;
-    try { localStorage.removeItem('4cats_dashboard_token'); } catch(e) {}
+    try { localStorage.removeItem('4cats_dashboard_token'); localStorage.removeItem('4cats_dashboard_refresh'); } catch(e) {}
     document.getElementById('login-screen').style.display = '-webkit-flex';
     document.getElementById('login-screen').style.display = 'flex';
     document.getElementById('app-screen').style.display = 'none';
