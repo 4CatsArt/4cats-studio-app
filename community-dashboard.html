@@ -278,6 +278,8 @@ body:not(.sc-mode) .sc-only { display: none !important; }
   background: var(--page-bg);
 }
 .friday-tile.live { background: var(--accent-soft); border-color: #ddd4ff; }
+.participants-card { margin-bottom: 14px; }
+.participants-card .friday-tile.total .pct { color: var(--accent-deep, #8b6cf0); }
 .friday-tile .eyebrow { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; color: var(--ink-soft); text-transform: uppercase; display: flex; align-items: center; gap: 6px; }
 .friday-tile .eyebrow .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--red); display: inline-block; }
 .friday-tile .date { font-size: 12.5px; color: var(--ink-soft); margin-top: 3px; }
@@ -565,6 +567,12 @@ body:not(.sc-mode) .sc-only { display: none !important; }
          guessing needed for this part). -->
     <div class="card hero-card" id="card-daily-hero"></div>
 
+    <!-- Participants today — live for everyone (studio login is enough; it's
+         a headcount, not dollars). Same get_day_participants() SQL function
+         the Schedule tab's banner uses, so the two numbers always match.
+         From Oct 1 2026 drop-ins come from POS "STUDIO drop in" sales. -->
+    <div class="card participants-card" id="card-participants" style="display:none"></div>
+
     <!-- Week info bar — theme name, Friday event, next week preview.
          Informational only for now, no real links (per explicit request). -->
     <div id="week-info-bar" class="week-info-bar" style="display:none"></div>
@@ -816,6 +824,77 @@ async function loadDailyHero(pin, studioId) {
     console.error('Daily hero load failed:', e);
     // Fail quietly — a broken greeting shouldn't disrupt the rest of the page.
   }
+}
+
+// ---------- Participants today (live for everyone) ----------
+// Reads get_day_participants(studio, date): booked + party guests + drop-ins.
+// Date = viewer's device date, same as the greeting and Today's Projects.
+let _participantsTimer = null;
+const PARTICIPANTS_REFRESH_MS = 60000;
+
+async function fetchDayParticipants(studioId, dateStr) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_day_participants`, {
+    method: 'POST',
+    headers: await fnHeaders(),
+    body: JSON.stringify({ p_studio_id: studioId, p_date: dateStr })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error((data && data.message) || 'Request failed');
+  return data;
+}
+
+function renderParticipantsCard(d) {
+  const card = document.getElementById('card-participants');
+  if (!card) return;
+  if (!d || !d.studio_id) { card.style.display = 'none'; card.innerHTML = ''; return; }
+  const studioName = STUDIO_NAMES[d.studio_id] || d.studio_id;
+  const dropinDetail = d.dropin_source === 'pos' ? 'Rung up on POS' : 'Entered by staff';
+  card.innerHTML = `
+    <div class="card-head">
+      <div class="title">👥 Participants Today — ${esc(studioName)}</div>
+    </div>
+    <div class="ig-grid">
+      <div class="friday-tile live total">
+        <div class="eyebrow"><span class="live-dot"></span> Total</div>
+        <div class="pct">${Number(d.total) || 0}</div>
+        <div class="detail">Everyone in the studio today</div>
+      </div>
+      <div class="friday-tile">
+        <div class="eyebrow">Booked</div>
+        <div class="pct">${Number(d.booked) || 0}</div>
+        <div class="detail">Classes, workshops, camps</div>
+      </div>
+      <div class="friday-tile">
+        <div class="eyebrow">Party guests</div>
+        <div class="pct">${Number(d.party_guests) || 0}</div>
+        <div class="detail">Actual, else expected</div>
+      </div>
+      <div class="friday-tile">
+        <div class="eyebrow">Drop-ins</div>
+        <div class="pct">${Number(d.dropins) || 0}</div>
+        <div class="detail">${esc(dropinDetail)}</div>
+      </div>
+    </div>`;
+  card.style.display = '';
+}
+
+async function loadParticipants(studioId) {
+  if (!studioId) return;
+  try {
+    const data = await fetchDayParticipants(studioId, localDateStr(new Date()));
+    if (studioId !== _sessionStudioId) return; // studio switched while loading
+    renderParticipantsCard(data);
+  } catch (e) {
+    console.error('Participants load failed:', e);
+    // Fail quietly — keep whatever was last shown.
+  }
+}
+
+function startParticipantsRefresh() {
+  if (_participantsTimer) clearInterval(_participantsTimer);
+  _participantsTimer = setInterval(() => {
+    if (_studioViewStarted && _sessionStudioId) loadParticipants(_sessionStudioId);
+  }, PARTICIPANTS_REFRESH_MS);
 }
 
 // ---------- Today's Projects (live for everyone, company-wide) ----------
@@ -2087,6 +2166,8 @@ function resetToSignedOut() {
   stopStudioTimers();
   _studioViewStarted = false; _studioData = null; _sessionStudioId = null; _viewLevel = null;
   document.querySelectorAll('.main [id^="card-"]').forEach(el => { el.innerHTML = ''; });
+  const pc = document.getElementById('card-participants');
+  if (pc) pc.style.display = 'none';
   const sw = document.getElementById('admin-studio-switcher');
   if (sw) sw.remove();
   const pane = document.getElementById('schedule-pane');
@@ -2097,6 +2178,7 @@ function resetToSignedOut() {
 function stopStudioTimers() {
   if (_fridayRefreshTimer) { clearInterval(_fridayRefreshTimer); _fridayRefreshTimer = null; }
   if (_goalRefreshTimer) { clearInterval(_goalRefreshTimer); _goalRefreshTimer = null; }
+  if (_participantsTimer) { clearInterval(_participantsTimer); _participantsTimer = null; }
 }
 
 // ---------- Studio view ----------
@@ -2123,12 +2205,14 @@ async function startStudioView(studioId) {
   if (_fridayRefreshTimer) clearInterval(_fridayRefreshTimer);
   _fridayRefreshTimer = setInterval(refreshFridayFillRate, FRIDAY_REFRESH_MS);
   startGoalRefresh();
+  startParticipantsRefresh();
 }
 
 // Studio-level cards (studio login is enough). _sessionPin is passed when
 // unlocked so the greeting can use the coordinator's name.
 function loadStudioCards(studioId) {
   loadDailyHero(_sessionPin, studioId);
+  loadParticipants(studioId);
   loadTodaysProjects(studioId);   // company-wide projects + this studio's forecast pills
   loadWeekInfoBar();
 }
