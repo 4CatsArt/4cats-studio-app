@@ -3039,9 +3039,12 @@ async function loadDay2View() {
     loadDailyNotes(currentStudioId, today)
   ])
 
-  const { data: walkinData } = await sb.from('daily_walkins')
-    .select('walkins').eq('studio_id', currentStudioId).eq('report_date', today).single()
-  const currentWalkins = walkinData?.walkins || 0
+  // Participant count comes from get_day_participants (SQL) — the same
+  // function the community dashboard uses, so the two never disagree.
+  // From Oct 1 2026, drop-ins are counted from POS "STUDIO drop in" sales
+  // (people per variant via pos_dropin_variants), not the + button / box.
+  const { data: dayCount, error: dayCountErr } = await sb.rpc('get_day_participants', { p_studio_id: currentStudioId, p_date: today })
+  if (dayCountErr) console.error('get_day_participants error:', dayCountErr)
 
   const filtered = preFiltered.filter(s =>
     (s.show !== false || (bookingCountsD2[s.id] || 0) > 0) &&
@@ -3124,23 +3127,34 @@ async function loadDay2View() {
     </div>
   </div>`
 
-  // Participant totals
-  let totalNonParty = 0, totalPartyGuests = 0
-  for (const s of filtered) {
-    if (s.session_type !== 'party') {
-      totalNonParty += (bookingCountsD2[s.id] || 0)
-    } else {
-      for (const b of (partyBookingsMap[s.id] || [])) {
-        const pd = partyDetailsMap[b.id]
-        if (pd && pd.actual_guests) totalPartyGuests += parseInt(pd.actual_guests) || 0
-        else if (pd && pd.expected_guests) totalPartyGuests += parseInt(pd.expected_guests) || 0
-        else if (b.estimated_attendance) totalPartyGuests += parseInt(b.estimated_attendance) || 0
-        else totalPartyGuests += (b.qty || 0)
+  // Participant totals — server-side count; falls back to this page's own
+  // booking/party/+ button numbers only if the function call failed.
+  let grandTotal, totalPartyGuests, totalDropins, dropinsFromPos
+  if (dayCount && !dayCountErr) {
+    grandTotal = dayCount.total || 0
+    totalPartyGuests = dayCount.party_guests || 0
+    totalDropins = dayCount.dropins || 0
+    dropinsFromPos = dayCount.dropin_source === 'pos'
+  } else {
+    let totalNonParty = 0
+    totalPartyGuests = 0
+    for (const s of filtered) {
+      if (s.session_type !== 'party') {
+        totalNonParty += (bookingCountsD2[s.id] || 0)
+      } else {
+        for (const b of (partyBookingsMap[s.id] || [])) {
+          const pd = partyDetailsMap[b.id]
+          if (pd && pd.actual_guests) totalPartyGuests += parseInt(pd.actual_guests) || 0
+          else if (pd && pd.expected_guests) totalPartyGuests += parseInt(pd.expected_guests) || 0
+          else if (b.estimated_attendance) totalPartyGuests += parseInt(b.estimated_attendance) || 0
+          else totalPartyGuests += (b.qty || 0)
+        }
       }
     }
+    totalDropins = Object.values(dropinCountsD2).reduce((s, n) => s + n, 0)
+    dropinsFromPos = false
+    grandTotal = totalNonParty + totalPartyGuests + totalDropins
   }
-  const totalDropins = Object.values(dropinCountsD2).reduce((s, n) => s + n, 0)
-  const grandTotal = totalNonParty + totalPartyGuests + totalDropins + currentWalkins
 
   const STUDIO_GROUP = { 'BC-YVR-MS':'A', 'BC-YYJ-VIC':'A' }
   const group = STUDIO_GROUP[currentStudioId] || 'B'
@@ -3151,18 +3165,13 @@ async function loadDay2View() {
   }
   const thresh = thresholds[group][isWeekend ? 'weekend' : 'weekday'].find(t => grandTotal <= t.max)
   const partyNote = totalPartyGuests > 0 ? ` <span style="font-size:12px;opacity:0.8">(incl. ${totalPartyGuests} party guests)</span>` : ''
-  const dropinNote = totalDropins > 0 ? ` <span style="font-size:12px;opacity:0.8">(incl. ${totalDropins} drop-in${totalDropins !== 1 ? 's' : ''})</span>` : ''
-  const walkinsNote = currentWalkins > 0 ? ` <span style="font-size:12px;opacity:0.8">(incl. ${currentWalkins} other drop-ins)</span>` : ''
+  const dropinNote = totalDropins > 0 ? ` <span style="font-size:12px;opacity:0.8">(incl. ${totalDropins} drop-in${totalDropins !== 1 ? 's' : ''}${dropinsFromPos ? ' from POS' : ''})</span>` : ''
   const countBannerHtml = `<div style="background:${thresh.bg};color:${thresh.color};border-radius:10px;padding:12px 18px;margin-bottom:1rem;display:flex;align-items:center;justify-content:space-between;font-size:14px;gap:12px;">
-    <span><strong>${grandTotal} participants today</strong>${partyNote}${dropinNote}${walkinsNote}</span>
+    <span><strong>${grandTotal} participants today</strong>${partyNote}${dropinNote}</span>
     <span style="font-weight:500">${thresh.msg}</span>
     <div style="display:flex;align-items:center;gap:8px;margin-left:auto" class="no-print">
       <button onclick="printFullDay()" style="padding:4px 12px;background:white;color:#444;border:0.5px solid #d0d0c8;border-radius:6px;font-size:12px;cursor:pointer;white-space:nowrap">🖨 Print Full Day</button>
       <button onclick="printDayExtras()" style="padding:4px 12px;background:white;color:#444;border:0.5px solid #d0d0c8;border-radius:6px;font-size:12px;cursor:pointer;white-space:nowrap">☕ Print Extras</button>
-      <span style="color:rgba(0,0,0,0.2)">|</span>
-      <span style="font-size:12px;white-space:nowrap">Other drop-ins:</span>
-      <input type="number" id="walkins-input" value="${currentWalkins}" min="0" style="width:60px;padding:4px 8px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;outline:none;text-align:center">
-      <button onclick="saveWalkins()" style="padding:4px 12px;background:#1a1a1a;color:white;border:none;border-radius:6px;font-size:12px;cursor:pointer" id="walkins-save-btn">Save</button>
     </div>
   </div>`
 
