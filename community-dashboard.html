@@ -542,6 +542,7 @@ body:not(.sc-mode) .sc-only { display: none !important; }
       <button class="nav-item active" id="nav-dashboard" onclick="goToDashboard()"><span class="ic">◈</span> Dashboard</button>
       <button class="nav-item" id="nav-schedule" onclick="openSchedule()"><span class="ic">📅</span> Schedule</button>
       <button class="nav-item sc-only" id="nav-points" onclick="openPoints()"><span class="ic">⭐</span> My Points</button>
+      <button class="nav-item sc-only" id="nav-instagram" onclick="openInstagram()"><span class="ic">📷</span> Instagram</button>
     </div>
 
     <div class="sidebar-spacer"></div>
@@ -615,14 +616,18 @@ body:not(.sc-mode) .sc-only { display: none !important; }
 
     <!-- Instagram — moved here from the old Community Hub in index.html.
          Served by community-instagram-data (PIN-checked, own studio only). -->
-    <div class="section-head ops sc-only">📷 Instagram</div>
-    <div class="card sales-card sc-only" id="card-instagram"></div>
 
   </main>
 
   <!-- My Points — its own page (sidebar → ⭐ My Points), coordinator view only.
        community-points-data checks the PIN server-side; an SC sees and
        redeems from their own wallet, an admin PIN gets a read-only view. -->
+  <!-- Instagram — its own page (sidebar → 📷 Instagram), coordinator view only. -->
+  <main class="main" id="instagram-pane" style="display:none">
+    <div class="view-bar" id="instagram-bar"></div>
+    <div class="card sales-card" id="card-instagram"></div>
+  </main>
+
   <main class="main" id="points-pane" style="display:none">
     <div class="view-bar" id="points-bar"></div>
     <div id="card-points"></div>
@@ -1093,12 +1098,42 @@ async function requestPrize(prizeId) {
   loadPoints(_sessionPin, _sessionStudioId);
 }
 
+// The page panes: only one shows at a time. Points + Instagram are
+// coordinator-only (their sidebar buttons only appear when unlocked).
+const PANES = ['dashboard-main', 'schedule-pane', 'points-pane', 'instagram-pane'];
+function showOnlyPane(id) {
+  PANES.forEach(p => {
+    const el = document.getElementById(p);
+    if (el) el.style.display = p === id ? (p === 'schedule-pane' ? 'flex' : '') : 'none';
+  });
+}
+function paneVisible(id) {
+  const el = document.getElementById(id);
+  return !!el && el.style.display !== 'none';
+}
+function coordinatorPaneBar(barId) {
+  const bar = document.getElementById(barId);
+  if (!bar) return;
+  const studioName = STUDIO_NAMES[_sessionStudioId] || _sessionStudioId || '';
+  bar.innerHTML = `<span>${_viewLevel === 'admin' ? '👁️ Admin view' : '🔓 Coordinator view'} · <span class="who">${esc(studioName)}</span></span>
+      <span class="spacer"></span><button onclick="goToDashboard()">← Dashboard</button><button onclick="endCoordinatorView()">🔒 Lock</button>`;
+}
+
+// Sidebar → 📷 Instagram.
+function openInstagram() {
+  if (!_sessionPin) { openPinModal(); return; }
+  showOnlyPane('instagram-pane');
+  setActiveNav('nav-instagram');
+  coordinatorPaneBar('instagram-bar');
+  const el = document.getElementById('card-instagram');
+  if (el && !el.innerHTML.trim()) el.innerHTML = `<div class="goal-note">Loading Instagram…</div>`;
+  loadInstagram(_sessionPin, _sessionStudioId);
+}
+
 // Sidebar → ⭐ My Points. Only reachable with the coordinator view unlocked.
 function openPoints() {
   if (!_sessionPin) { openPinModal(); return; }
-  document.getElementById('schedule-pane').style.display = 'none';
-  document.getElementById('dashboard-main').style.display = 'none';
-  document.getElementById('points-pane').style.display = '';
+  showOnlyPane('points-pane');
   setActiveNav('nav-points');
   const el = document.getElementById('card-points');
   if (el && !el.innerHTML.trim()) el.innerHTML = `<div class="pts-empty">Loading your points…</div>`;
@@ -2102,10 +2137,10 @@ function loadStudioCards(studioId) {
 // Coordinator-only cards (the server refuses these without a valid PIN).
 function loadCoordinatorCards(studioId) {
   if (!_sessionPin) return;
-  if (document.getElementById('points-pane').style.display !== 'none') loadPoints(_sessionPin, studioId);
+  if (paneVisible('points-pane')) loadPoints(_sessionPin, studioId);
   loadMarketingSuggestions(_sessionPin, studioId); // weather tag already loaded by the studio view
   loadCheckinCount(_sessionPin, studioId);
-  loadInstagram(_sessionPin, studioId);
+  if (paneVisible('instagram-pane')) { coordinatorPaneBar('instagram-bar'); loadInstagram(_sessionPin, studioId); }
   // Studio sales in dollars stays ADMIN ONLY (admin PIN), as before.
   if (_viewLevel === 'admin') {
     _salesMonth = null;
@@ -2203,9 +2238,8 @@ function endCoordinatorView(reload = true) {
     const el = document.getElementById(id);
     if (el) el.innerHTML = '';
   });
-  const pp = document.getElementById('points-pane');
-  if (pp && pp.style.display !== 'none') showDashboardPane(); // points page is coordinator-only
-  const pb = document.getElementById('points-bar'); if (pb) pb.innerHTML = '';
+  if (paneVisible('points-pane') || paneVisible('instagram-pane')) showDashboardPane(); // coordinator-only pages
+  ['points-bar', 'instagram-bar'].forEach(id => { const b = document.getElementById(id); if (b) b.innerHTML = ''; });
   _lastPointsData = null;
   if (!_studioViewStarted) return;
   if (!wasUnlocked || !reload) { renderViewBar(); return; }
@@ -2352,10 +2386,8 @@ function openSchedule(view) {
   endCoordinatorView();
   document.getElementById('dashboard-gate').style.display = 'none';
   document.getElementById('dashboard-shell').style.display = 'flex';
-  document.getElementById('dashboard-main').style.display = 'none';
-  document.getElementById('points-pane').style.display = 'none';
+  showOnlyPane('schedule-pane');
   const pane = document.getElementById('schedule-pane');
-  pane.style.display = 'flex';
   if (!_scheduleLoaded || (_sessionStudioId && _scheduleStudioId !== _sessionStudioId)) {
     const params = new URLSearchParams();
     if (_sessionStudioId) params.set('studio', _sessionStudioId);
@@ -2376,9 +2408,7 @@ async function goToDashboard() {
   else renderLoginGate();
 }
 function showDashboardPane() {
-  document.getElementById('schedule-pane').style.display = 'none';
-  document.getElementById('points-pane').style.display = 'none';
-  document.getElementById('dashboard-main').style.display = '';
+  showOnlyPane('dashboard-main');
   setActiveNav('nav-dashboard');
 }
 function setActiveNav(id) {
