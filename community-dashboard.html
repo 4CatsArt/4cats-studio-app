@@ -169,6 +169,30 @@ body:not(.sc-mode) .sc-only { display: none !important; }
 .gate-text-input { width: 100%; box-sizing: border-box; padding: 11px 12px; border: 1px solid var(--border); border-radius: 10px; font: inherit; font-size: 14px; margin-bottom: 10px; }
 .forecast-temp { font-weight: 800; margin-left: 2px; }
 
+/* ---------- Coordinator Points card ---------- */
+.pts-top { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 14px; margin-bottom: 14px; }
+.pts-tile { background: var(--accent-soft); border-radius: 14px; padding: 14px 16px; }
+.pts-tile.plain { background: #f6f5fb; }
+.pts-big { font-family: 'IBM Plex Mono', monospace; font-size: 34px; font-weight: 700; line-height: 1.1; color: var(--ink); margin: 4px 0; }
+.pts-level { display: inline-block; margin-top: 6px; padding: 2px 10px; border-radius: 999px; background: #fff; font-size: 12px; font-weight: 800; color: var(--accent-deep); }
+.pts-wait { font-size: 12.5px; color: var(--ink-soft); background: #fff8e6; border-radius: 10px; padding: 8px 12px; margin-bottom: 12px; }
+.pts-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; margin-bottom: 14px; }
+.pts-subhead { font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 8px; }
+.pts-row { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.pts-row:last-child { border-bottom: none; }
+.pts-row .amt { font-family: 'IBM Plex Mono', monospace; font-weight: 700; white-space: nowrap; }
+.pts-row .amt.plus { color: var(--green, #1f8a4c); }
+.pts-row .amt.minus { color: #b4462f; }
+.pts-row .how { color: var(--ink-soft); font-size: 12px; text-align: right; }
+.pts-empty { font-size: 13px; color: var(--ink-soft); padding: 6px 0; }
+.pts-tiers { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.pts-tier { flex: 1 1 160px; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; font-size: 12.5px; }
+.pts-tier.unlocked { border-color: var(--accent); background: var(--accent-soft); }
+.pts-tier .t-name { font-weight: 800; }
+.pts-tier .t-cost { font-family: 'IBM Plex Mono', monospace; font-weight: 700; color: var(--accent-deep); }
+.pts-tier .t-prizes { color: var(--ink-soft); margin-top: 3px; }
+@media (max-width: 760px) { .pts-top, .pts-cols { grid-template-columns: 1fr; } }
+
 .admin-switcher-bar {
   display: flex; align-items: center; gap: 10px; background: var(--amber-bg); border: 1px solid #f5d99a;
   border-radius: 12px; padding: 10px 14px; margin-bottom: 18px; font-size: 13px;
@@ -532,14 +556,22 @@ body:not(.sc-mode) .sc-only { display: none !important; }
          same as the greeting. -->
     <div class="card projects-card" id="card-todays-projects" style="display:none"></div>
 
+    <!-- Coordinator Points — coordinator view only (community-points-data,
+         PIN-checked server-side). Wallet, level, next prize, this month,
+         ways to earn, and a this-month studio leaderboard. -->
+    <div class="section-head sc-only">⭐ Coordinator Points</div>
+    <div class="card sc-only" id="card-points"></div>
+
     <!-- Suggested marketing emails — live for everyone. Weather tag reused
          from the weather card fetch above, not a second API call. -->
     <div class="section-head ops sc-only">✉️ Suggested Emails</div>
     <div class="card sc-only" id="card-marketing-suggestions"></div>
 
-    <!-- Weather — per-studio, studio view -->
-    <div class="top-strip-live">
-      <div class="top-mini" id="mini-weather"></div>
+    <!-- Instagram followers — studio view (hidden for studios not connected
+         yet). Weather now only shows in the "Today at 4Cats" forecast pills;
+         current conditions are still fetched for the email suggestions. -->
+    <div class="top-strip-live" id="ig-strip" style="display:none">
+      <div class="top-mini" id="mini-instagram"></div>
     </div>
 
     <!-- Friday event fill rate — studio view -->
@@ -895,6 +927,120 @@ function renderTodaysProjects(data, forecastDays) {
   card.innerHTML = head + eventLine + mainHtml + miniHtml;
 }
 
+// ---------- Coordinator Points (coordinator view) ----------
+
+async function fetchPointsData(pin, studioId) {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/community-points-data`, {
+    method: 'POST',
+    headers: await fnHeaders(),
+    body: JSON.stringify({ pin, studioId })
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+async function loadPoints(pin, studioId) {
+  const el = document.getElementById('card-points');
+  if (!el) return;
+  try {
+    renderPointsCard(await fetchPointsData(pin, studioId));
+  } catch (e) {
+    console.error('Points load failed:', e);
+    el.innerHTML = `<div class="pts-empty">Points couldn't load right now.</div>`;
+  }
+}
+
+const fmtPts = n => Number(n || 0).toLocaleString('en-US');
+
+function renderPointsCard(d) {
+  const el = document.getElementById('card-points');
+  if (!el) return;
+  const studioName = STUDIO_NAMES[d.studioId] || d.studioId;
+  const head = `<div class="card-head"><div class="title">⭐ Coordinator Points — ${esc(studioName)}</div></div>`;
+
+  const ways = (d.waysToEarn || []).map(w => `
+      <div class="pts-row"><span>${esc(w.name)}</span><span class="how">${esc(w.how)}${w.manual ? ' · added by home office' : ''}</span></div>`).join('')
+    || `<div class="pts-empty">No ways to earn are switched on yet.</div>`;
+
+  const tiersHtml = (d.prizeTiers || []).length ? `<div class="pts-tiers">${d.prizeTiers.map(t => {
+      const unlocked = !d.noCoordinator && d.wallet >= t.cost;
+      const prizes = (t.prizes || []).map(p => p.name).join(', ');
+      return `<div class="pts-tier${unlocked ? ' unlocked' : ''}">
+          <div><span class="t-name">${esc(t.name)}</span> · <span class="t-cost">${fmtPts(t.cost)} pts</span>${unlocked ? ' ✓' : ''}</div>
+          <div class="t-prizes">${prizes ? esc(prizes) : 'Prizes coming soon'}</div>
+        </div>`;
+    }).join('')}</div>` : '';
+
+  const lb = d.leaderboard || { top: [] };
+  const lbMax = Math.max(1, ...(lb.top || []).map(r => r.points));
+  const lbRow = r => `
+      <div class="sglb-row${r.isYou ? ' you' : ''}">
+        ${r.rank <= 3 ? `<div class="sglb-rank">${LB_MEDALS[r.rank - 1]}</div>` : `<div class="sglb-rank num">#${r.rank}</div>`}
+        <div class="sglb-name">${esc(STUDIO_NAMES[r.studioId] || r.studioId)}${r.isYou ? '<span class="sglb-you-tag">YOU</span>' : ''}</div>
+        <div class="sglb-bar"><div style="width:${Math.round(r.points / lbMax * 100)}%"></div></div>
+        <div class="sglb-pct">${fmtPts(r.points)}</div>
+      </div>`;
+  const lbHtml = (lb.top || []).length ? `
+    <div class="sglb">
+      <div class="sglb-head"><div class="sglb-title">🏆 Top Studios — points this month</div></div>
+      ${lb.top.map(lbRow).join('')}
+      ${lb.you ? `<div class="sglb-gap">···</div>` + lbRow(Object.assign({}, lb.you, { isYou: true })) : ''}
+      <div class="sglb-foot">Points earned this month · ${lb.totalStudios} studio${lb.totalStudios === 1 ? '' : 's'} with a coordinator</div>
+    </div>` : '';
+
+  if (d.noCoordinator) {
+    el.innerHTML = head + `<div class="pts-empty">No coordinator is assigned to this studio right now, so there's no wallet to show.</div>`
+      + `<div class="pts-cols"><div><div class="pts-subhead">Ways to earn</div>${ways}</div><div></div></div>` + tiersHtml + lbHtml;
+    return;
+  }
+
+  const levelHtml = d.coordinatorLevel ? `<span class="pts-level">${esc(d.coordinatorLevel.emoji || '')} ${esc(d.coordinatorLevel.name)}</span>` : '';
+  const nextLevelNote = d.nextLevel ? `<div class="goal-note">${fmtPts(d.nextLevel.toGo)} lifetime pts to ${esc(d.nextLevel.emoji || '')} ${esc(d.nextLevel.name)}</div>` : '';
+
+  let prizeTile;
+  if (d.nextPrize) {
+    const pct = Math.max(0, Math.min(100, Math.round(d.wallet / d.nextPrize.cost * 100)));
+    prizeTile = `<div class="pts-tile plain">
+        <div class="eyebrow">🎁 Next prize — ${esc(d.nextPrize.name)}</div>
+        <div class="pts-big">${fmtPts(d.nextPrize.toGo)} <span style="font-size:15px">to go</span></div>
+        <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
+        <div class="goal-note">${fmtPts(d.wallet)} of ${fmtPts(d.nextPrize.cost)} points</div>
+      </div>`;
+  } else {
+    prizeTile = `<div class="pts-tile plain">
+        <div class="eyebrow">🎁 Prizes</div>
+        <div class="pts-big" style="font-size:22px">Every prize tier unlocked 🎉</div>
+        <div class="goal-note">Ask home office about redeeming.</div>
+      </div>`;
+  }
+
+  const waitHtml = (d.waiting || []).map(w =>
+    `<div class="pts-wait">⏳ ${esc(w.name)} points start in ${esc(w.startsLabel)} — new coordinators have a short waiting period while bookings made before they started play out.</div>`).join('');
+
+  const recent = (d.recent || []).slice(0, 8).map(e => `
+      <div class="pts-row"><span>${esc(e.label)}</span><span class="amt ${e.points > 0 ? 'plus' : 'minus'}">${e.points > 0 ? '+' : ''}${fmtPts(e.points)}</span></div>`).join('')
+    || `<div class="pts-empty">No points yet — Friday fill points arrive each Saturday morning, and party and team building points on the 2nd of each month.</div>`;
+
+  el.innerHTML = head + `
+    <div class="pts-top">
+      <div class="pts-tile">
+        <div class="eyebrow">⭐ Your points</div>
+        <div class="pts-big">${fmtPts(d.wallet)}</div>
+        <div class="goal-note">+${fmtPts(d.thisMonth)} in ${esc(d.monthLabel)}</div>
+        ${levelHtml}${nextLevelNote}
+      </div>
+      ${prizeTile}
+    </div>
+    ${waitHtml}
+    <div class="pts-cols">
+      <div><div class="pts-subhead">Recent points</div>${recent}</div>
+      <div><div class="pts-subhead">Ways to earn</div>${ways}</div>
+    </div>
+    ${tiersHtml}
+    ${lbHtml}`;
+}
+
 // ---------- Week info bar (theme, Friday event, next week) ----------
 
 async function fetchWeekHeaderInfo(dateStr) {
@@ -1175,12 +1321,15 @@ function deriveWeatherTag(w) {
   return null;
 }
 
+// Current conditions. No tile any more (the forecast pills in "Today at 4Cats"
+// cover weather), but the fetch stays: Suggested Emails use _lastWeatherData's
+// weather tag. If a #mini-weather tile is ever added back, it draws itself.
 async function renderWeatherCard(studioId) {
   const el = document.getElementById('mini-weather');
-  if (!el) return;
   try {
     const w = await WEATHER_SOURCE(studioId);
     _lastWeatherData = w;
+    if (!el) return;
     el.innerHTML = w.tempC === null ? `
       <div class="eyebrow">🌤️ Weather</div>
       <div class="sub">${esc(w.condition)}</div>` : `
@@ -1189,6 +1338,7 @@ async function renderWeatherCard(studioId) {
       <div class="sub">${esc(w.condition)} · Feels like ${w.feelsLikeC}°</div>`;
   } catch (e) {
     console.error('Weather load failed:', e);
+    if (!el) return;
     el.innerHTML = `
       <div class="eyebrow">🌤️ Weather</div>
       <div class="sub">Unable to load weather right now</div>`;
@@ -1730,6 +1880,30 @@ function renderInstagramCard(data) {
     + `<div class="ig-foot">${data.asOf ? 'As of ' + esc(data.asOf) : 'As of — (studio timezone unavailable)'}</div>`;
 }
 
+// Followers tile (studio view). Same data as the coordinator Instagram card;
+// hidden entirely for studios whose account isn't connected yet.
+async function loadInstagramMini(studioId) {
+  const strip = document.getElementById('ig-strip');
+  const el = document.getElementById('mini-instagram');
+  if (!strip || !el) return;
+  try {
+    const d = await fetchInstagramWithPin(_sessionPin, studioId);
+    if (d.followers == null || (d.state !== 'ok' && d.state !== 'stale')) { strip.style.display = 'none'; return; }
+    const change = d.followerChange;
+    const changeHtml = change == null ? '' :
+      `<div class="sub${change > 0 ? ' good' : ''}">${change > 0 ? '+' : ''}${Number(change).toLocaleString('en-US')} in ${d.changeSinceDays} day${d.changeSinceDays === 1 ? '' : 's'}</div>`;
+    el.innerHTML = `
+      <div class="eyebrow">📷 Instagram followers</div>
+      <div class="big">${Number(d.followers).toLocaleString('en-US')}</div>
+      ${changeHtml}
+      <div class="sub">@${esc(d.username || '')}${d.state === 'stale' ? ' · last sync failed' : ''}</div>`;
+    strip.style.display = '';
+  } catch (e) {
+    console.error('Instagram followers load failed:', e);
+    strip.style.display = 'none';
+  }
+}
+
 async function loadInstagram(pin, studioId) {
   try {
     renderInstagramCard(await fetchInstagramWithPin(pin, studioId));
@@ -1883,11 +2057,13 @@ function loadStudioCards(studioId) {
   loadWeekInfoBar();
   loadAllBookingBuckets(_sessionPin, studioId);
   loadGoalProgress(_sessionPin, studioId);
+  loadInstagramMini(studioId);
 }
 
 // Coordinator-only cards (the server refuses these without a valid PIN).
 function loadCoordinatorCards(studioId) {
   if (!_sessionPin) return;
+  loadPoints(_sessionPin, studioId);
   loadMarketingSuggestions(_sessionPin, studioId); // weather tag already loaded by the studio view
   loadCheckinCount(_sessionPin, studioId);
   loadInstagram(_sessionPin, studioId);
@@ -1984,7 +2160,7 @@ function endCoordinatorView(reload = true) {
   if (_studioViewStarted) _viewLevel = 'studio';
   document.body.classList.remove('sc-mode', 'preview-mode');
   if (_inactivityTimer) { clearTimeout(_inactivityTimer); _inactivityTimer = null; }
-  ['card-marketing-suggestions', 'card-checkins', 'card-instagram', 'card-studio-sales'].forEach(id => {
+  ['card-points', 'card-marketing-suggestions', 'card-checkins', 'card-instagram', 'card-studio-sales'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.innerHTML = '';
   });
