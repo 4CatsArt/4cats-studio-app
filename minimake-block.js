@@ -2,11 +2,12 @@
  *  Hosted on GitHub Pages: https://4catsart.github.io/4cats-studio-app/minimake-block.js
  *
  *  Usage (Shopify Custom Liquid block on the product template):
- *    <div id="mm-root" data-week-start="2026-09-28"></div>
+ *    <div id="mm-root" data-week-end="2026-10-04"></div>
  *    <script src="https://4catsart.github.io/4cats-studio-app/minimake-block.js"></script>
  *
  *  Dates:
- *    data-week-start = Monday of the week (YYYY-MM-DD). The widget shows Mon–Sun.
+ *    data-week-end = Sunday of the week (YYYY-MM-DD); the widget shows the Mon–Sun ending that day.
+ *    data-week-start = Monday of the week (older setup, still supported).
  *    Optional overrides: data-date-from / data-date-to (YYYY-MM-DD).
  *    If nothing is provided, falls back to the current Mon–Sun week (Toronto time).
  */
@@ -47,19 +48,24 @@
     return addDays(today, dow === 0 ? -6 : 1 - dow)
   }
 
-  var weekStart = (root.getAttribute('data-week-start') || '').trim().slice(0, 10)
+  var weekEnd   = (root.getAttribute('data-week-end') || '').trim().slice(0, 10)    // Sunday (preferred)
+  var weekStart = (root.getAttribute('data-week-start') || '').trim().slice(0, 10)  // Monday (legacy)
   var DATE_FROM = (root.getAttribute('data-date-from') || '').trim()
   var DATE_TO   = (root.getAttribute('data-date-to') || '').trim()
 
-  if (!DATE_RE.test(DATE_FROM)) {
-    if (DATE_RE.test(weekStart)) {
+  if (!DATE_RE.test(DATE_FROM) || !DATE_RE.test(DATE_TO)) {
+    if (DATE_RE.test(weekEnd)) {
+      DATE_TO = weekEnd
+      DATE_FROM = addDays(weekEnd, -6)
+    } else if (DATE_RE.test(weekStart)) {
       DATE_FROM = weekStart
+      DATE_TO = addDays(weekStart, 6)
     } else {
       DATE_FROM = currentMonday()
-      console.warn('[minimake] No valid data-week-start on #mm-root — using current week starting ' + DATE_FROM)
+      DATE_TO = addDays(DATE_FROM, 6)
+      console.warn('[minimake] No valid data-week-end / data-week-start on #mm-root — using current week starting ' + DATE_FROM)
     }
   }
-  if (!DATE_RE.test(DATE_TO)) DATE_TO = addDays(DATE_FROM, 6)
 
   // ── Inject font + styles ──────────────────────────────────────
   if (!document.getElementById('mm-font')) {
