@@ -11501,6 +11501,7 @@ async function removeAgeException(id, name) {
     <button id="cp-subbtn-levels" onclick="cpSwitchSub('levels')" class="cp-subbtn">Levels</button>
     <button id="cp-subbtn-redemptions" onclick="cpSwitchSub('redemptions')" class="cp-subbtn">Redemptions<span id="cp-sub-badge" class="tab-badge" style="display:none;margin-left:6px"></span></button>
     <button id="cp-subbtn-wallets" onclick="cpSwitchSub('wallets')" class="cp-subbtn">Wallets &amp; Adjustments</button>
+    <button id="cp-subbtn-instagram" onclick="cpSwitchSub('instagram')" class="cp-subbtn">📸 Instagram</button>
   </div>
 
   <div id="cp-body"><div class="empty">Loading…</div></div>
@@ -11623,6 +11624,7 @@ function cpSwitchSub(sub) {
 function cpRender() {
   const body = document.getElementById('cp-body')
   if (cpSub === 'coordinators') { scLoad(); return }
+  if (cpSub === 'instagram') { igLoad(); return }
   if (!cpData) { body.innerHTML = `<div class="empty" style="color:#c0392b">${cpEsc(cpLoadError || 'Points data isn\'t loaded yet.')}</div>`; return }
   if (cpSub === 'rules') body.innerHTML = cpRenderRules()
   if (cpSub === 'prizes') body.innerHTML = cpRenderPrizes()
@@ -11683,6 +11685,188 @@ function cpRuleMaxMonth(r) {
   if (r.calc_method === 'per_unit') return r.monthly_cap || null
   if (r.calc_method === 'flat') return r.flat_points || 0
   return null
+}
+
+// ═══ INSTAGRAM (bird's-eye) ══════════════════════
+// Reads admin_instagram_overview() — an admin-only SQL function over
+// studio_social_accounts, social_metrics_snapshot (follower history) and
+// instagram_daily_metrics (posting + 28-day insights). Read-only.
+let igRows = null
+let igSort = { key: 'followers', dir: -1 }
+let igRegion = 'all'
+
+async function igLoad() {
+  const body = document.getElementById('cp-body')
+  if (!igRows) body.innerHTML = '<div class="empty">Loading…</div>'
+  const { data, error } = await sb.rpc('admin_instagram_overview')
+  if (cpSub !== 'instagram') return
+  if (error) {
+    const m = (error && error.message) || String(error)
+    body.innerHTML = `<div class="empty" style="color:#c0392b">Couldn't load Instagram data: ${cpEsc(/Could not find the function|does not exist/i.test(m) ? 'the admin_instagram_overview SQL hasn\'t been run yet.' : m)}</div>`
+    return
+  }
+  igRows = (data || []).map(igPrepare)
+  body.innerHTML = igRender()
+}
+
+function igDaysAgo(ts) { return ts ? Math.floor((Date.now() - new Date(ts).getTime()) / 864e5) : null }
+
+// Follower value on or before `daysBack` days ago, from the daily series.
+// Null when history doesn't go back that far yet (never guessed).
+function igFollowersAt(series, daysBack) {
+  if (!series || !series.length) return null
+  const target = new Date(Date.now() - daysBack * 864e5).toISOString().slice(0, 10)
+  let v = null
+  for (const p of series) { if (p.d <= target) v = p.f; else break }
+  return v
+}
+
+function igPrepare(r) {
+  const series = (r.follower_series || []).filter(p => p.f != null)
+  const f = r.followers_count != null ? r.followers_count : (series.length ? series[series.length - 1].f : null)
+  const f7 = igFollowersAt(series, 7), f30 = igFollowersAt(series, 30)
+  const reach = r.r28_reach, inter = r.r28_total_interactions
+  return Object.assign({}, r, {
+    name: getStudioName(r.studio_id),
+    prov: (r.studio_id || '').slice(0, 2),
+    series,
+    followers: f,
+    ch7: f != null && f7 != null ? f - f7 : null,
+    ch30: f != null && f30 != null ? f - f30 : null,
+    pct30: f != null && f30 ? (f - f30) / f30 * 100 : null,
+    engRate: reach ? (inter || 0) / reach * 100 : null,
+    reachPerFollower: f ? (reach || 0) / f : null,
+    lastPostDays: igDaysAgo(r.last_post_at),
+    linked: !!r.username,
+  })
+}
+
+function igSetSort(key) {
+  if (igSort.key === key) igSort.dir = -igSort.dir
+  else igSort = { key, dir: key === 'name' || key === 'lastPostDays' ? 1 : -1 }
+  document.getElementById('cp-body').innerHTML = igRender()
+}
+function igSetRegion(v) { igRegion = v; document.getElementById('cp-body').innerHTML = igRender() }
+
+function igSpark(series) {
+  if (!series || series.length < 2) return '<span class="cp-muted">building</span>'
+  const w = 90, h = 24, vals = series.map(p => p.f)
+  const min = Math.min(...vals), max = Math.max(...vals), span = max - min || 1
+  const pts = vals.map((v, i) => `${(i / (vals.length - 1) * w).toFixed(1)},${(h - 2 - (v - min) / span * (h - 4)).toFixed(1)}`).join(' ')
+  const up = vals[vals.length - 1] >= vals[0]
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true"><polyline fill="none" stroke="${up ? '#2e7d32' : '#c0392b'}" stroke-width="1.5" points="${pts}"/></svg>`
+}
+
+function igChange(n, pct) {
+  if (n == null) return '<span class="cp-muted">—</span>'
+  const col = n > 0 ? '#2e7d32' : n < 0 ? '#c0392b' : '#888'
+  const p = pct == null ? '' : `<div class="cp-muted">${pct > 0 ? '+' : ''}${pct.toFixed(1)}%</div>`
+  return `<span style="color:${col};font-weight:500">${n > 0 ? '+' : ''}${cpFmt(n)}</span>${p}`
+}
+
+function igLastPost(d) {
+  if (d == null) return '<span class="cp-muted">—</span>'
+  const col = d > 14 ? '#c0392b' : d > 7 ? '#e65100' : '#1a1a1a'
+  return `<span style="color:${col}">${d === 0 ? 'Today' : d === 1 ? '1 day ago' : d + ' days ago'}</span>`
+}
+
+function igRender() {
+  const all = igRows || []
+  const rows = all.filter(r => igRegion === 'all' || (igRegion === 'west' ? r.prov !== 'ON' : r.prov === 'ON'))
+  const linked = rows.filter(r => r.linked)
+  const sum = k => linked.reduce((s, r) => s + (Number(r[k]) || 0), 0)
+  const problems = rows.filter(r => !r.linked || r.sync_problem)
+  const totalF = sum('followers')
+  const ch7Rows = linked.filter(r => r.ch7 != null)
+  const totalCh7 = ch7Rows.reduce((s, r) => s + r.ch7, 0)
+  const posts = linked.map(r => r.posts_30d || 0).sort((a, b) => a - b)
+  const medianPosts = posts.length ? posts[Math.floor(posts.length / 2)] : 0
+  const quiet = linked.filter(r => r.lastPostDays != null && r.lastPostDays > 14).length
+  const totalReach = sum('r28_reach'), totalInter = sum('r28_total_interactions')
+
+  const k = igSort.key, dir = igSort.dir
+  const sorted = rows.slice().sort((a, b) => {
+    if (k === 'name') return dir * a.name.localeCompare(b.name)
+    const av = a[k], bv = b[k]
+    if (av == null && bv == null) return a.name.localeCompare(b.name)
+    if (av == null) return 1
+    if (bv == null) return -1
+    return dir * (av - bv)
+  })
+
+  const th = (key, label, title) =>
+    `<th style="cursor:pointer;white-space:nowrap" title="${cpEsc(title || '')}" onclick="igSetSort('${key}')">${label}${k === key ? (dir > 0 ? ' ▲' : ' ▼') : ''}</th>`
+
+  const body = sorted.map(r => {
+    if (!r.linked) {
+      return `<tr class="cp-row-off"><td><b>${cpEsc(r.name)}</b><div class="sc-sub">Not linked</div></td><td colspan="9" class="cp-muted">No Instagram account connected yet.</td></tr>`
+    }
+    const flag = r.sync_problem ? '<span class="sc-flag">Sync failing</span>' : ''
+    const top = r.top_post_permalink
+      ? `<a href="${cpEsc(r.top_post_permalink)}" target="_blank" rel="noopener">View</a><div class="cp-muted">${cpFmt(r.top_post_interactions)} likes+comments</div>`
+      : '<span class="cp-muted">—</span>'
+    return `<tr>
+      <td><b>${cpEsc(r.name)}</b>${flag}<div class="sc-sub"><a href="https://www.instagram.com/${encodeURIComponent(r.username)}/" target="_blank" rel="noopener">@${cpEsc(r.username)}</a></div></td>
+      <td style="text-align:right">${r.followers == null ? '—' : cpFmt(r.followers)}</td>
+      <td style="text-align:right">${igChange(r.ch7, null)}</td>
+      <td style="text-align:right">${igChange(r.ch30, r.pct30)}</td>
+      <td>${igSpark(r.series)}</td>
+      <td style="text-align:right">${r.posts_30d == null ? '—' : cpFmt(r.posts_30d)}<div class="cp-muted">${r.reels_30d == null ? '' : cpFmt(r.reels_30d) + ' Reels'}</div></td>
+      <td>${igLastPost(r.lastPostDays)}</td>
+      <td style="text-align:right">${r.r28_reach == null ? '—' : cpFmt(r.r28_reach)}<div class="cp-muted">${r.reachPerFollower == null ? '' : r.reachPerFollower.toFixed(1) + '× followers'}</div></td>
+      <td style="text-align:right">${r.engRate == null ? '—' : r.engRate.toFixed(1) + '%'}<div class="cp-muted">${r.r28_total_interactions == null ? '' : cpFmt(r.r28_total_interactions) + ' interactions'}</div></td>
+      <td style="text-align:right">${r.r28_profile_links_taps == null ? '—' : cpFmt(r.r28_profile_links_taps)}</td>
+      <td>${top}</td>
+    </tr>`
+  }).join('')
+
+  const asOf = linked.map(r => r.metric_date).filter(Boolean).sort().pop()
+
+  return `
+    <div class="cp-summary">
+      <div class="cp-stat"><div class="cp-stat-label">Total followers</div><div class="cp-stat-value">${cpFmt(totalF)}</div>
+        <div class="cp-stat-sub">${ch7Rows.length ? `${totalCh7 >= 0 ? '+' : ''}${cpFmt(totalCh7)} this week (${ch7Rows.length} studios with a week of history)` : 'Weekly change appears once there\'s a week of history'}</div></div>
+      <div class="cp-stat"><div class="cp-stat-label">Reach, last 28 days</div><div class="cp-stat-value">${cpFmt(totalReach)}</div>
+        <div class="cp-stat-sub">${totalReach ? (totalInter / totalReach * 100).toFixed(1) + '% engagement · ' : ''}added up per studio, so one person reached by two studios counts twice</div></div>
+      <div class="cp-stat"><div class="cp-stat-label">Posts, last 30 days</div><div class="cp-stat-value">${cpFmt(sum('posts_30d'))}</div>
+        <div class="cp-stat-sub">Typical studio: ${medianPosts} · ${quiet ? `<span style="color:#c0392b">${quiet} quiet 14+ days</span>` : 'none quiet 14+ days'}</div></div>
+      <div class="cp-stat"><div class="cp-stat-label">Connected</div><div class="cp-stat-value">${linked.length} / ${rows.length}</div>
+        <div class="cp-stat-sub">${problems.length ? `<span style="color:#c0392b">${problems.length} need attention</span>` : 'All syncing'}</div></div>
+    </div>
+
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:0.75rem">
+      <select onchange="igSetRegion(this.value)" style="width:auto">
+        <option value="all"${igRegion === 'all' ? ' selected' : ''}>All studios</option>
+        <option value="west"${igRegion === 'west' ? ' selected' : ''}>BC + AB</option>
+        <option value="on"${igRegion === 'on' ? ' selected' : ''}>Ontario</option>
+      </select>
+      <button class="btn" onclick="igRows=null;igLoad()">↻ Refresh</button>
+      <span class="cp-muted">Insights as of ${asOf ? cpDateLabel(asOf + 'T12:00:00') : '—'} · click a column to sort</span>
+    </div>
+
+    <div class="cp-card" style="padding:0.5rem 0.75rem;overflow-x:auto">
+      <table class="sc-table">
+        <thead><tr>
+          ${th('name', 'Studio')}
+          ${th('followers', 'Followers')}
+          ${th('ch7', '7 days', 'Follower change over the last 7 days')}
+          ${th('pct30', '30 days', 'Follower change over the last 30 days (sorts by %)')}
+          <th>Trend</th>
+          ${th('posts_30d', 'Posts', 'Posts in the last 30 days')}
+          ${th('lastPostDays', 'Last post')}
+          ${th('r28_reach', 'Reach 28d', 'Unique accounts reached in the last 28 days')}
+          ${th('engRate', 'Engagement', 'Likes, comments, shares and saves ÷ reach, last 28 days')}
+          ${th('r28_profile_links_taps', 'Link taps', 'Taps on the profile\'s links (website, booking) in the last 28 days')}
+          <th>Top post</th>
+        </tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>
+    <p class="cp-note">
+      Follower changes fill in as history builds — most studios started syncing Oct 3, so 7-day figures appear from Oct 10 and 30-day from Nov 2 (Oak Bay has history from August).
+      Big and small accounts compare differently: raw follower gains favour large studios, % growth favours small ones, so both are shown.
+      "× followers" is reach ÷ followers — above 1 means posts are reaching people who don't follow the studio yet.
+    </p>`
 }
 
 // ═══ EARNING RULES ═══════════════════════════════
@@ -12432,3 +12616,4 @@ async function scUndo(studioId) {
 
 </body>
 </html>
+  
