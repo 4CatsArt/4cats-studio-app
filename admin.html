@@ -11491,8 +11491,9 @@ async function removeAgeException(id, name) {
 <div class="tab-content" id="tab-fillrates" style="padding:1.5rem">
   <h3 style="margin-bottom:0.5rem">📈 Fill Rates</h3>
   <p style="color:#888;font-size:13px;margin-bottom:1rem;max-width:900px">
-    How full each studio gets, by seats in its floor plan. Each cell is the studio's <b>busiest moment</b> that day
-    (% of seats taken); the small number underneath is seat-time used across the whole day.
+    How full each studio gets, by seats in its floor plan. The big number is <b>day occupancy</b> — the share of
+    seat-time used across the open hours (busier = greener). The small number is the <b>busiest moment</b> that day;
+    ⚠ means it hit 85%+ of seats, so the studio came close to running out of room.
     Only bookings take seats — a closed class never does. Open hours come from what was offered that day.
     Click a cell to see that day's timeline.
   </p>
@@ -11509,10 +11510,13 @@ async function removeAgeException(id, name) {
     </select>
   </div>
   <div style="display:flex;gap:12px;font-size:11px;color:#666;margin-bottom:10px;flex-wrap:wrap">
-    <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#eef6ee;vertical-align:-2px"></span> under 50%</span>
-    <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#c8ebcf;vertical-align:-2px"></span> 50–84%</span>
-    <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#fde4a8;vertical-align:-2px"></span> 85–99% getting full</span>
-    <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#f8b4b4;vertical-align:-2px"></span> 100%+ full</span>
+    <span style="font-weight:600">Day occupancy:</span>
+    <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#fbe3e1;vertical-align:-2px"></span> under 10%</span>
+    <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#fdf0cf;vertical-align:-2px"></span> 10–19%</span>
+    <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#dcf2e1;vertical-align:-2px"></span> 20–34%</span>
+    <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#a9dfb7;vertical-align:-2px"></span> 35–49%</span>
+    <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#6cc584;vertical-align:-2px"></span> 50%+</span>
+    <span style="margin-left:8px">⚠ busiest moment 85%+ of seats</span>
   </div>
   <div id="fr-grid" style="overflow-x:auto"></div>
   <div id="fr-detail" style="margin-top:1.25rem"></div>
@@ -11557,12 +11561,16 @@ function frTime12(hhmm) {
   h = h % 12 || 12
   return m[2] === '00' ? `${h}${ap}` : `${h}:${m[2]}${ap}`
 }
-function frCellColor(pct, amber) {
+// Day occupancy colour — higher is better, so busier = greener.
+// Day occupancy runs much lower than the busiest moment (a studio is never
+// full all day), so the steps are set for that range.
+function frCellColor(pct) {
   if (pct == null) return '#fff'
-  if (pct >= 100) return '#f8b4b4'
-  if (pct >= amber) return '#fde4a8'
-  if (pct >= 50) return '#c8ebcf'
-  return '#eef6ee'
+  if (pct >= 50) return '#6cc584'
+  if (pct >= 35) return '#a9dfb7'
+  if (pct >= 20) return '#dcf2e1'
+  if (pct >= 10) return '#fdf0cf'
+  return '#fbe3e1'
 }
 
 async function loadFillRatesTab(force) {
@@ -11597,9 +11605,13 @@ function frRender() {
   })
   const provOrder = { BC: 0, AB: 1, ON: 2 }
   let ids = Object.keys(byStudio)
-  const weekPeak = id => Math.max(0, ...Object.values(byStudio[id].days).map(r => r.peak_pct == null ? 0 : Number(r.peak_pct)))
+  // Week average day occupancy, over the days the studio was open
+  const weekAvg = id => {
+    const open = Object.values(byStudio[id].days).filter(r => r.is_open && r.utilization_pct != null)
+    return open.length ? open.reduce((t, r) => t + Number(r.utilization_pct), 0) / open.length : 0
+  }
   if (document.getElementById('fr-sort').value === 'busiest') {
-    ids.sort((a, b) => weekPeak(b) - weekPeak(a))
+    ids.sort((a, b) => weekAvg(b) - weekAvg(a))
   } else {
     ids.sort((a, b) => ((provOrder[a.slice(0, 2)] ?? 9) - (provOrder[b.slice(0, 2)] ?? 9)) || getStudioName(a).localeCompare(getStudioName(b)))
   }
@@ -11609,7 +11621,7 @@ function frRender() {
       <th style="${th};text-align:left;position:sticky;left:0;background:#fafaf8">Studio</th>
       <th style="${th};text-align:right">Seats</th>
       ${days.map(d => `<th style="${th};text-align:center;${d === today ? 'color:#5e35b1' : ''}">${new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', day: 'numeric' })}</th>`).join('')}
-      <th style="${th};text-align:center">Week peak</th>
+      <th style="${th};text-align:center">Week avg</th>
     </tr>`
 
   const body = ids.map(id => {
@@ -11623,19 +11635,21 @@ function frRender() {
     const cells = days.map(d => {
       const r = st.days[d]
       if (!r || !r.is_open) return `<td style="padding:6px;text-align:center;color:#ccc;font-size:11px">—</td>`
-      const pct = r.peak_pct == null ? 0 : Number(r.peak_pct)
-      return `<td onclick="frShowDay('${id}','${d}')" title="Busiest at ${frTime12(r.peak_start)}: ${r.peak_occupied} of ${r.seats} seats · open ${frTime12(r.open_time)}–${frTime12(r.close_time)}"
-                  style="padding:6px 8px;text-align:center;cursor:pointer;background:${frCellColor(pct, amber)};border-left:2px solid #fff">
-                <div style="font-weight:700;font-size:13px">${pct.toFixed(0)}%</div>
-                <div style="font-size:10px;color:#666">${r.utilization_pct == null ? '' : Number(r.utilization_pct).toFixed(0) + '% day'}</div>
+      const occ = r.utilization_pct == null ? 0 : Number(r.utilization_pct)
+      const peak = r.peak_pct == null ? 0 : Number(r.peak_pct)
+      const warn = peak >= amber ? ' ⚠' : ''
+      return `<td onclick="frShowDay('${id}','${d}')" title="${occ.toFixed(0)}% day occupancy · busiest at ${frTime12(r.peak_start)}: ${r.peak_occupied} of ${r.seats} seats · open ${frTime12(r.open_time)}–${frTime12(r.close_time)}"
+                  style="padding:6px 8px;text-align:center;cursor:pointer;background:${frCellColor(occ)};border-left:2px solid #fff">
+                <div style="font-weight:700;font-size:13px">${occ.toFixed(0)}%</div>
+                <div style="font-size:10px;color:#555">peak ${peak.toFixed(0)}%${warn}</div>
               </td>`
     }).join('')
-    const wp = weekPeak(id)
+    const wa = weekAvg(id)
     return `<tr style="border-bottom:0.5px solid #f5f5f0">
       <td style="padding:7px 10px;white-space:nowrap;position:sticky;left:0;background:#fff">${cpEsc(name)}</td>
       <td style="padding:7px 10px;text-align:right;color:#888">${st.seats}</td>
       ${cells}
-      <td style="padding:6px 8px;text-align:center;font-weight:700;background:${frCellColor(wp, amber)}">${wp.toFixed(0)}%</td>
+      <td style="padding:6px 8px;text-align:center;font-weight:700;background:${frCellColor(wa)}">${wa.toFixed(0)}%</td>
     </tr>`
   }).join('')
 
@@ -11673,8 +11687,8 @@ async function frShowDay(studioId, day) {
       <div style="border:0.5px solid #e0e0d8;border-radius:10px;padding:1rem 1.25rem;background:#fff;max-width:1000px">
         <h4 style="margin:0 0 4px">${title}</h4>
         <div style="font-size:12px;color:#666;margin-bottom:12px">
-          Busiest at <b>${frTime12(t.peak_start)}</b>: ${t.peak_occupied} of ${t.seats} seats (${Number(t.peak_pct || 0).toFixed(0)}%)
-          · ${Number(t.utilization_pct || 0).toFixed(0)}% of seat-time used
+          <b>${Number(t.utilization_pct || 0).toFixed(0)}% day occupancy</b>
+          · busiest at ${frTime12(t.peak_start)}: ${t.peak_occupied} of ${t.seats} seats (${Number(t.peak_pct || 0).toFixed(0)}%)
           · open ${frTime12(t.open_time)}–${frTime12(t.close_time)} (from that day's classes)
         </div>
         <div style="position:relative;display:flex;align-items:flex-end;gap:2px;height:110px;border-bottom:1px solid #e0e0d8">
