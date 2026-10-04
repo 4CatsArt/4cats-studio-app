@@ -11724,6 +11724,7 @@ async function frShowDay(studioId, day) {
     <button id="cp-subbtn-redemptions" onclick="cpSwitchSub('redemptions')" class="cp-subbtn">Redemptions<span id="cp-sub-badge" class="tab-badge" style="display:none;margin-left:6px"></span></button>
     <button id="cp-subbtn-wallets" onclick="cpSwitchSub('wallets')" class="cp-subbtn">Wallets &amp; Adjustments</button>
     <button id="cp-subbtn-mentoring" onclick="cpSwitchSub('mentoring')" class="cp-subbtn">🎓 Mentoring</button>
+    <button id="cp-subbtn-flash" onclick="cpSwitchSub('flash')" class="cp-subbtn">⚡ Flash Challenges</button>
     <button id="cp-subbtn-instagram" onclick="cpSwitchSub('instagram')" class="cp-subbtn">📸 Instagram</button>
   </div>
 
@@ -11855,6 +11856,7 @@ function cpRender() {
   if (cpSub === 'redemptions') body.innerHTML = cpRenderRedemptions()
   if (cpSub === 'wallets') { body.innerHTML = cpRenderWallets(); cpAdjPersonChanged() }
   if (cpSub === 'mentoring') body.innerHTML = cpRenderMentoring()
+  if (cpSub === 'flash') body.innerHTML = cpRenderFlash()
 }
 
 // ── Lookups ─────────────────────────────────────
@@ -12512,6 +12514,189 @@ async function cpSaveRule(isNew) {
     source_notes: document.getElementById('cpr-notes').value,
     is_active: document.getElementById('cpr-active').checked
   }) })
+}
+
+// ═══ ⚡ FLASH CHALLENGES ═══════════════════════════
+// Quick challenges to the studios ("Sell 15 hot chocolates today — 1,000
+// points!"). Sales challenges count IN-STUDIO (POS) sales automatically and
+// pay within ~5 minutes of hitting the target; claim challenges wait for the
+// SC's "We did it!" and your approval. Every studio that completes one earns
+// the points, once, into its SC's wallet.
+function cpFlashStudioIds() { return (allStudios || []).map(s => s.id) }
+function cpFlashScopeLabel(f) {
+  if (!f.studio_ids || !f.studio_ids.length) return 'All studios'
+  const all = cpFlashStudioIds()
+  for (const prov of ['BC', 'AB', 'ON']) {
+    const inProv = all.filter(id => id.startsWith(prov + '-'))
+    if (inProv.length && inProv.length === f.studio_ids.length && inProv.every(id => f.studio_ids.includes(id))) return 'All ' + prov + ' studios'
+  }
+  return f.studio_ids.length === 1 ? getStudioName(f.studio_ids[0]) : `${f.studio_ids.length} studios`
+}
+function cpFlashDays(f) {
+  const d = x => new Date(x + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })
+  return f.starts_on === f.ends_on ? d(f.starts_on) : `${d(f.starts_on)} – ${d(f.ends_on)}`
+}
+function cpFlashState(f) {
+  if (f.status === 'cancelled') return 'cancelled'
+  const t = cpData.today
+  return f.ends_on < t ? 'ended' : f.starts_on > t ? 'upcoming' : 'live'
+}
+
+function cpRenderFlash() {
+  const all = cpData.flash || []
+  const claims = []
+  all.forEach(f => (f.community_flash_completions || []).forEach(c => { if (c.status === 'claimed' && f.status === 'active') claims.push({ f, c }) }))
+  let html = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:0.75rem">
+      <div class="cp-note" style="margin:0;max-width:760px">Quick challenges that show as a ⚡ banner on every studio's dashboard (all staff can help).
+        <strong>Sales challenges</strong> count in-studio POS sales and pay automatically within about 5 minutes of hitting the target.
+        <strong>Claim challenges</strong> wait for the SC's “We did it!” and your approval. Every studio that completes one earns the points, once.</div>
+      <div style="display:flex;gap:6px"><button class="btn" onclick="cpFlashRecheck()">Check sales now</button>
+        <button class="btn btn-primary" onclick="cpOpenFlashModal(null)">+ New challenge</button></div>
+    </div>`
+  if (!(cpData.categories || []).length) html += `<div class="cp-note">Run <strong>community_flash_challenges.sql</strong> (and the categories SQL) first.</div>`
+
+  html += `<h4 style="margin:1rem 0 0.5rem;font-size:14px">Claims waiting for your approval${claims.length ? ` (${claims.length})` : ''}</h4>`
+  html += !claims.length ? '<div class="cp-muted" style="margin-bottom:0.75rem">Nothing to approve right now.</div>'
+    : `<div class="users-table-wrap"><table class="users-table"><thead><tr><th>Challenge</th><th>Studio</th><th>What they did</th><th></th></tr></thead><tbody>
+      ${claims.map(({ f, c }) => `<tr><td style="font-size:13px">${cpEsc(f.title)}<div class="cp-muted">${cpFmt(f.points)} pts</div></td>
+        <td style="font-size:13px">${cpEsc(getStudioName(c.studio_id))}</td>
+        <td style="font-size:12px">${cpEsc(c.claim_note || '')}</td>
+        <td style="white-space:nowrap"><button class="btn btn-primary" style="font-size:11px" onclick="cpReviewFlash('${f.id}','${cpEsc(c.studio_id)}','approve')">Approve</button>
+          <button class="btn" style="font-size:11px" onclick="cpReviewFlash('${f.id}','${cpEsc(c.studio_id)}','return')">Send back</button></td></tr>`).join('')}
+      </tbody></table></div>`
+
+  const groups = { live: [], upcoming: [], ended: [], cancelled: [] }
+  all.forEach(f => groups[cpFlashState(f)].push(f))
+  const card = f => {
+    const state = cpFlashState(f)
+    const done = (f.community_flash_completions || []).filter(c => c.status === 'approved')
+    const progress = (f.progress || []).slice().sort((a, b) => b.qty - a.qty)
+    const scope = f.studio_ids && f.studio_ids.length ? f.studio_ids : cpFlashStudioIds()
+    let detail = ''
+    if (f.check_type === 'pos_sales') {
+      const rows = scope.map(id => {
+        const q = (progress.find(p => p.studio_id === id) || {}).qty || 0
+        const c = (f.community_flash_completions || []).find(x => x.studio_id === id)
+        return { id, q, c }
+      }).filter(r => r.q > 0 || r.c).sort((a, b) => b.q - a.q)
+      detail = rows.length ? `<div style="margin-top:0.5rem">${rows.map(r => `
+          <div style="display:flex;justify-content:space-between;gap:1rem;font-size:12px;padding:3px 0;border-top:1px solid #f0f0f0">
+            <span>${cpEsc(getStudioName(r.id))}</span>
+            <span>${cpFmt(r.q)} / ${cpFmt(f.target_qty)} ${r.c && r.c.status === 'approved' ? (r.c.points_awarded ? `✅ +${cpFmt(r.c.points_awarded)}` : '✅ (no SC)') : ''}</span></div>`).join('')}</div>`
+        : `<div class="cp-muted" style="margin-top:0.5rem">No matching in-studio sales yet.</div>`
+    } else {
+      const cs = f.community_flash_completions || []
+      detail = cs.length ? `<div style="margin-top:0.5rem">${cs.map(c => `
+          <div style="display:flex;justify-content:space-between;gap:1rem;font-size:12px;padding:3px 0;border-top:1px solid #f0f0f0">
+            <span>${cpEsc(getStudioName(c.studio_id))} <span class="cp-muted">${cpEsc(c.claim_note || '')}</span></span>
+            <span>${c.status === 'approved' ? (c.points_awarded ? `✅ +${cpFmt(c.points_awarded)}` : '✅ (no SC)') : c.status === 'claimed' ? '🟡 waiting' : '↩️ sent back'}</span></div>`).join('')}</div>`
+        : `<div class="cp-muted" style="margin-top:0.5rem">No claims yet.</div>`
+    }
+    return `<div class="cp-card" style="${state === 'live' ? 'border-left:3px solid #f5a623' : 'opacity:0.75'}">
+      <div style="display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+        <div><div style="font-size:14px;font-weight:600">⚡ ${cpEsc(f.title)}</div>
+          ${f.description ? `<div class="cp-muted">${cpEsc(f.description)}</div>` : ''}
+          <div class="cp-muted" style="margin-top:3px">${cpEsc(cpFlashDays(f))} · ${cpEsc(cpFlashScopeLabel(f))} ·
+            ${f.check_type === 'pos_sales' ? `counts POS sales of “${cpEsc(f.match_text)}” · target ${cpFmt(f.target_qty)}` : 'claim + approve'}
+            ${f.category ? ' · ' + cpEsc(cpCategoryLabel(f.category)) : ''}</div></div>
+        <div style="text-align:right"><div style="font-weight:700">${cpFmt(f.points)} pts <span class="cp-muted" style="font-weight:400">≈ ${cpDollars(f.points)}</span></div>
+          <div class="cp-muted">${state === 'live' ? '🟢 Live' : state === 'upcoming' ? 'Upcoming' : state === 'ended' ? 'Ended' : 'Cancelled'} · ${done.length} completed</div>
+          ${f.status === 'active' && state !== 'ended' ? `<div style="margin-top:4px"><button class="btn" style="font-size:11px" onclick="cpOpenFlashModal('${f.id}')">Edit</button>
+            <button class="btn" style="font-size:11px;color:#c0392b;border-color:#f5c6cb" onclick="cpCancelFlash('${f.id}')">Cancel</button></div>` : ''}</div>
+      </div>${detail}</div>`
+  }
+  html += `<h4 style="margin:1.25rem 0 0.5rem;font-size:14px">Live now${groups.live.length ? ` (${groups.live.length})` : ''}</h4>` +
+    (groups.live.length ? groups.live.map(card).join('') : '<div class="cp-muted">Nothing live.</div>')
+  if (groups.upcoming.length) html += `<h4 style="margin:1.25rem 0 0.5rem;font-size:14px">Upcoming</h4>` + groups.upcoming.map(card).join('')
+  if (groups.ended.length || groups.cancelled.length) html += `<h4 style="margin:1.25rem 0 0.5rem;font-size:14px">Past (last 60 days)</h4>` + [...groups.ended, ...groups.cancelled].map(card).join('')
+  return html
+}
+
+function cpOpenFlashModal(id) {
+  const f = id ? (cpData.flash || []).find(x => x.id === id) : null
+  const v = f || { title: '', description: '', points: 1000, category: 'community_building', starts_on: cpData.today, ends_on: cpData.today,
+                   studio_ids: null, check_type: 'pos_sales', match_text: '', target_qty: 15 }
+  const all = cpFlashStudioIds()
+  const scope = !v.studio_ids || !v.studio_ids.length ? 'all'
+    : ['BC', 'AB', 'ON'].find(p => { const s = all.filter(x => x.startsWith(p + '-')); return s.length === v.studio_ids.length && s.every(x => v.studio_ids.includes(x)) }) || 'pick'
+  const cats = (cpData.categories || []).slice().sort((a, b) => a.sort_order - b.sort_order)
+  const html = `
+    <div class="modal-field"><label>Challenge</label><input id="cpf-title" value="${cpEsc(v.title)}" placeholder="Sell 15 hot chocolates today!"></div>
+    <div class="modal-field"><label>Details (optional)</label><input id="cpf-desc" value="${cpEsc(v.description || '')}" placeholder="Offer one with every Mini Make — they're perfect on a rainy day ☔"></div>
+    <div style="display:flex;gap:1rem;flex-wrap:wrap">
+      <div class="modal-field" style="width:150px"><label>Points</label><input id="cpf-points" type="number" min="1" value="${cpEsc(v.points)}"
+        oninput="document.getElementById('cpf-dollars').textContent = this.value ? '≈ ' + cpDollars(this.value) : ''"><div id="cpf-dollars" class="cp-muted" style="margin-top:3px">≈ ${cpDollars(v.points)}</div></div>
+      <div class="modal-field" style="width:170px"><label>First day</label><input id="cpf-start" type="date" value="${cpEsc(v.starts_on)}"></div>
+      <div class="modal-field" style="width:170px"><label>Last day</label><input id="cpf-end" type="date" value="${cpEsc(v.ends_on)}"></div>
+      <div class="modal-field" style="flex:1;min-width:180px"><label>Category</label><select id="cpf-cat">
+        ${cats.map(c => `<option value="${cpEsc(c.code)}" ${c.code === v.category ? 'selected' : ''}>${cpEsc(cpCategoryLabel(c.code))}</option>`).join('')}</select></div>
+    </div>
+    <div class="cp-muted" style="margin:-0.25rem 0 0.75rem">Days are each studio's own local day — "today" ends at midnight in Ontario and in BC.</div>
+    <div class="modal-field"><label>Which studios</label><select id="cpf-scope" onchange="document.getElementById('cpf-pick').style.display = this.value === 'pick' ? '' : 'none'">
+      <option value="all" ${scope === 'all' ? 'selected' : ''}>All studios</option>
+      <option value="BC" ${scope === 'BC' ? 'selected' : ''}>All BC studios</option>
+      <option value="AB" ${scope === 'AB' ? 'selected' : ''}>All AB studios</option>
+      <option value="ON" ${scope === 'ON' ? 'selected' : ''}>All ON studios</option>
+      <option value="pick" ${scope === 'pick' ? 'selected' : ''}>Pick studios…</option></select>
+      <div id="cpf-pick" style="${scope === 'pick' ? '' : 'display:none;'}columns:2;margin-top:6px">
+        ${all.map(sid => `<label class="cp-check" style="display:block;margin:2px 0"><input type="checkbox" class="cpf-studio" value="${cpEsc(sid)}" ${scope === 'pick' && v.studio_ids.includes(sid) ? 'checked' : ''}> ${cpEsc(getStudioName(sid))}</label>`).join('')}
+      </div></div>
+    <div class="modal-field"><label>How it's checked</label>
+      <label class="cp-check" style="display:block"><input type="radio" name="cpf-type" value="pos_sales" ${v.check_type === 'pos_sales' ? 'checked' : ''} onchange="cpFlashTypeChanged()"> Automatically from in-studio (POS) sales</label>
+      <label class="cp-check" style="display:block"><input type="radio" name="cpf-type" value="claim" ${v.check_type === 'claim' ? 'checked' : ''} onchange="cpFlashTypeChanged()"> SC claims “We did it!”, you approve</label></div>
+    <div id="cpf-sales" style="display:flex;gap:1rem;flex-wrap:wrap">
+      <div class="modal-field" style="flex:1;min-width:240px"><label>Count items called…</label><input id="cpf-match" value="${cpEsc(v.match_text || '')}" placeholder="hot chocolate">
+        <div class="cp-muted" style="margin-top:3px">Matches the product or variant name, ignoring spaces and capitals ("keychain" finds "key chain"). Several items: separate with commas — "magnet, key chain".</div></div>
+      <div class="modal-field" style="width:130px"><label>Target</label><input id="cpf-target" type="number" min="1" value="${cpEsc(v.target_qty || '')}"></div>
+    </div>`
+  cpOpenModal(f ? 'Edit flash challenge' : 'New flash challenge', 'Shows as a ⚡ banner on studio dashboards', html, async () => {
+    const sc = document.getElementById('cpf-scope').value
+    let studioIds = null
+    if (['BC', 'AB', 'ON'].includes(sc)) studioIds = all.filter(x => x.startsWith(sc + '-'))
+    if (sc === 'pick') {
+      studioIds = [...document.querySelectorAll('.cpf-studio:checked')].map(x => x.value)
+      if (!studioIds.length) throw new Error('Pick at least one studio.')
+    }
+    await cpRequest('save_flash', { flash: {
+      id: f ? f.id : null,
+      title: document.getElementById('cpf-title').value,
+      description: document.getElementById('cpf-desc').value,
+      points: document.getElementById('cpf-points').value,
+      category: document.getElementById('cpf-cat').value,
+      starts_on: document.getElementById('cpf-start').value,
+      ends_on: document.getElementById('cpf-end').value,
+      studio_ids: studioIds,
+      check_type: document.querySelector('input[name="cpf-type"]:checked').value,
+      match_text: document.getElementById('cpf-match').value,
+      target_qty: document.getElementById('cpf-target').value
+    } })
+  })
+  cpFlashTypeChanged()
+}
+function cpFlashTypeChanged() {
+  const t = (document.querySelector('input[name="cpf-type"]:checked') || {}).value
+  const el = document.getElementById('cpf-sales')
+  if (el) el.style.display = t === 'pos_sales' ? 'flex' : 'none'
+}
+async function cpCancelFlash(id) {
+  if (!confirm('Cancel this challenge? It disappears from dashboards. Points already earned stay.')) return
+  try { await cpRequest('cancel_flash', { id }); await cpRefresh() } catch (e) { alert(e.message) }
+}
+async function cpReviewFlash(id, studioId, decision) {
+  let note = ''
+  if (decision === 'return') {
+    note = prompt(`Send back to ${getStudioName(studioId)} — what's missing?`)
+    if (note === null || !note.trim()) return
+  } else if (!confirm(`Approve ${getStudioName(studioId)}'s claim? The points go to their SC.`)) return
+  try { await cpRequest('review_flash_claim', { challenge_id: id, studio_id: studioId, decision, note }); await cpRefresh() } catch (e) { alert(e.message) }
+}
+async function cpFlashRecheck() {
+  try {
+    const r = await cpRequest('flash_recheck', {})
+    await cpRefresh()
+    alert(r && r.awarded ? `${r.awarded} new completion${r.awarded === 1 ? '' : 's'} paid.` : 'Checked — no new completions.')
+  } catch (e) { alert(e.message) }
 }
 
 // ═══ MENTORING ════════════════════════════════════
