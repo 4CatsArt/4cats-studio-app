@@ -202,6 +202,20 @@ body:not(.sc-mode) .sc-only { display: none !important; }
 .pts-project-head { display: flex; justify-content: space-between; gap: 10px; font-weight: 800; font-size: 14px; }
 .pts-step { padding-left: 2px; }
 .pts-step-num { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; margin-right: 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-deep); font-size: 11px; font-weight: 800; }
+.flash-card { position: relative; border-radius: 16px; padding: 14px 18px; margin-bottom: 12px; color: #2a1a00;
+  background: linear-gradient(135deg, #ffe08a 0%, #ffc24d 100%); box-shadow: 0 4px 14px rgba(255, 170, 0, 0.25); }
+.flash-card.done { background: linear-gradient(135deg, #c9f2d7 0%, #8fdcaa 100%); box-shadow: none; color: #0f3d22; }
+.flash-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.flash-eyebrow { font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.8; }
+.flash-title { font-size: 19px; font-weight: 800; margin: 2px 0; }
+.flash-desc { font-size: 13px; opacity: 0.85; }
+.flash-pts { text-align: right; font-weight: 800; font-size: 18px; white-space: nowrap; }
+.flash-pts .flash-time { display: block; font-size: 12px; font-weight: 700; opacity: 0.8; }
+.flash-bar { height: 10px; border-radius: 999px; background: rgba(255,255,255,0.55); overflow: hidden; margin: 10px 0 4px; }
+.flash-bar > div { height: 100%; background: #2a1a00; border-radius: 999px; transition: width .4s; }
+.flash-card.done .flash-bar > div { background: #0f3d22; }
+.flash-meta { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; font-weight: 700; flex-wrap: wrap; align-items: center; }
+.flash-card button { border: none; border-radius: 999px; padding: 7px 16px; font: inherit; font-size: 13px; font-weight: 800; cursor: pointer; background: #2a1a00; color: #fff; }
 .btn-confirm { border: none; border-radius: 999px; padding: 6px 14px; font: inherit; font-size: 12px; font-weight: 800; cursor: pointer; background: var(--accent); color: #fff; white-space: nowrap; }
 .pts-status { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 800; text-transform: capitalize; background: #eee; }
 .pts-status.requested { background: #fff4d6; color: #8a6100; }
@@ -563,6 +577,10 @@ body:not(.sc-mode) .sc-only { display: none !important; }
 
     <!-- View bar: who's signed in, and the coordinator unlock / lock button. -->
     <div class="view-bar" id="view-bar"></div>
+
+    <!-- ⚡ Flash Challenges — studio view (all staff can help). Hidden when
+         nothing is running. community-flash-data; refreshes every 2 minutes. -->
+    <div id="flash-strip" style="display:none"></div>
 
     <!-- Greeting hero — live for everyone. Greeting text/time-of-day is
          computed client-side from the viewer's own device clock (matches
@@ -2219,9 +2237,92 @@ async function startStudioView(studioId) {
   startGoalRefresh();
 }
 
+// ---------- ⚡ Flash Challenges (studio view) ----------
+let _flashData = null, _flashTimer = null, _flashTick = null;
+async function loadFlashChallenges(studioId) {
+  const strip = document.getElementById('flash-strip');
+  if (!strip) return;
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/community-flash-data`, {
+      method: 'POST', headers: await fnHeaders(),
+      body: JSON.stringify({ pin: _sessionPin, studioId: studioId || _sessionStudioId })
+    });
+    const d = await res.json();
+    if (!res.ok || d.error) throw new Error(d.error || 'Request failed');
+    _flashData = d;
+    renderFlashChallenges();
+  } catch (e) {
+    console.error('Flash challenges load failed:', e);  // never block the page
+    strip.style.display = 'none';
+  }
+  if (!_flashTimer) _flashTimer = setInterval(() => { if (_studioViewStarted) loadFlashChallenges(_sessionStudioId); }, 120000);
+  if (!_flashTick) _flashTick = setInterval(updateFlashCountdowns, 30000);
+}
+function flashTimeLeft(endsAt) {
+  const ms = new Date(endsAt).getTime() - Date.now();
+  if (!(ms > 0)) return 'Ended';
+  const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000);
+  if (h >= 48) return `${Math.floor(h / 24)} days left`;
+  return h ? `${h}h ${m}m left` : `${m}m left`;
+}
+function updateFlashCountdowns() {
+  document.querySelectorAll('[data-flash-ends]').forEach(el => { el.textContent = flashTimeLeft(el.dataset.flashEnds); });
+}
+function renderFlashChallenges() {
+  const strip = document.getElementById('flash-strip');
+  const list = (_flashData && _flashData.challenges) || [];
+  if (!strip) return;
+  if (!list.length) { strip.style.display = 'none'; strip.innerHTML = ''; return; }
+  strip.innerHTML = list.map(c => {
+    const comp = c.completion || null;
+    const done = comp && comp.status === 'approved';
+    let body = '';
+    if (c.checkType === 'pos_sales') {
+      const q = Math.min(c.qty || 0, c.target || 0), pct = c.target ? Math.round(q / c.target * 100) : 0;
+      body = `<div class="flash-bar"><div style="width:${pct}%"></div></div>
+        <div class="flash-meta"><span>${fmtPts(c.qty || 0)} / ${fmtPts(c.target)} sold in studio</span>
+          <span>${done ? (comp.points ? `✅ Done! +${fmtPts(comp.points)} points` : '✅ Done!') : (c.qty >= c.target ? '✅ Target hit — points on the way' : `${fmtPts(c.target - (c.qty || 0))} to go`)}</span></div>`;
+    } else {
+      let status = '';
+      if (done) status = comp.points ? `✅ Approved! +${fmtPts(comp.points)} points` : '✅ Approved!';
+      else if (comp && comp.status === 'claimed') status = '🟡 Claimed — waiting for home office';
+      else if (comp && comp.status === 'returned') status = `↩️ Sent back${comp.reviewNote ? ': ' + esc(comp.reviewNote) : ''}`;
+      const canClaim = _flashData.canClaim && (!comp || comp.status === 'returned');
+      body = `<div class="flash-meta" style="margin-top:10px"><span>${status || (canClaim ? 'Done it? Let home office know.' : 'Your coordinator claims it when it\'s done.')}</span>
+          ${canClaim ? `<button onclick="claimFlashChallenge('${esc(c.id)}')">We did it! 🎉</button>` : ''}</div>`;
+    }
+    return `<div class="flash-card${done ? ' done' : ''}">
+        <div class="flash-top">
+          <div><div class="flash-eyebrow">⚡ Flash challenge</div>
+            <div class="flash-title">${esc(c.title)}</div>
+            ${c.description ? `<div class="flash-desc">${esc(c.description)}</div>` : ''}</div>
+          <div class="flash-pts">+${fmtPts(c.points)} pts<span class="flash-time" data-flash-ends="${esc(c.endsAt)}">${flashTimeLeft(c.endsAt)}</span></div>
+        </div>${body}</div>`;
+  }).join('');
+  strip.style.display = '';
+}
+async function claimFlashChallenge(id) {
+  const c = ((_flashData && _flashData.challenges) || []).find(x => x.id === id);
+  if (!c || !_sessionPin) return;
+  const note = prompt(`"${c.title}"\n\nWhat did you do? (a link, or a few words)`);
+  if (note === null) return;
+  if (!note.trim()) { alert('Please add a short note.'); return; }
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/community-flash-data`, {
+      method: 'POST', headers: await fnHeaders(),
+      body: JSON.stringify({ pin: _sessionPin, studioId: _sessionStudioId, action: 'claim', challengeId: id, note: note.trim() })
+    });
+    const out = await res.json();
+    if (!res.ok || out.error) throw new Error(out.error || 'Could not claim');
+    alert('Claimed! Home office will check it and approve the points.');
+  } catch (e) { alert(e.message || 'Could not claim that challenge.'); }
+  loadFlashChallenges(_sessionStudioId);
+}
+
 // Studio-level cards (studio login is enough). _sessionPin is passed when
 // unlocked so the greeting can use the coordinator's name.
 function loadStudioCards(studioId) {
+  loadFlashChallenges(studioId);
   loadDailyHero(_sessionPin, studioId);
   loadTodaysProjects(studioId);   // company-wide projects + this studio's forecast pills
   loadWeekInfoBar();
@@ -2319,6 +2420,7 @@ async function submitCoordinatorPin() {
     loadDailyHero(_sessionPin, data.studioId); // greeting switches to their name
   }
   loadCoordinatorCards(data.studioId);
+  loadFlashChallenges(data.studioId); // the SC can now claim
   resetInactivityTimer();
 }
 
@@ -2339,6 +2441,7 @@ function endCoordinatorView(reload = true) {
   _lastPointsData = null;
   if (!_studioViewStarted) return;
   if (!wasUnlocked || !reload) { renderViewBar(); return; }
+  loadFlashChallenges(_sessionStudioId); // hide "We did it!" again
 
   // A non-admin studio login always returns to its own studio.
   if (!_studioData.isAdmin && _sessionStudioId !== _studioData.studioId) {
