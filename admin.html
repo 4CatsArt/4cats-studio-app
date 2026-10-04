@@ -251,6 +251,7 @@ select:focus, input:focus { border-color: #888; }
     <button class="tab-btn" onclick="switchTab('studiopages')">🌐 Studio Pages</button>
     <button class="tab-btn" onclick="switchTab('kidsage')">🔓 Age Exceptions</button>
     <button class="tab-btn" onclick="switchTab('points')">🏆 Community Points<span id="cp-badge" class="tab-badge" style="display:none"></span></button>
+    <button class="tab-btn" onclick="switchTab('fillrates')">📈 Fill Rates</button>
     <a class="tab-btn" href="studio-setup-2026.html" target="_blank" style="text-decoration:none;display:inline-flex;align-items:center">🚚 2026 Rollout</a>
     <div class="top-bar-right"><button class="signout-btn" onclick="signOut()">Sign out</button></div>
   </div>
@@ -958,7 +959,7 @@ async function initApp() {
 }
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','emailtemplates','training','staff','parties','users','clay','reviews','guide','setup','camps','referrals','tables','studiopages','kidsage','points'][i] === tab))
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['schedule','workshop','studio','inventory','reports','curriculum','quality','tasks','announcements','emailtemplates','training','staff','parties','users','clay','reviews','guide','setup','camps','referrals','tables','studiopages','kidsage','points','fillrates'][i] === tab))
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'))
   document.getElementById(`tab-${tab}`).classList.add('active')
   if (tab === 'curriculum') loadCurriculum()
@@ -979,6 +980,7 @@ function switchTab(tab) {
   if (tab === 'kidsage') loadAgeExceptionsTab()
   if (tab === 'inventory') initSpacesLog()
   if (tab === 'points') loadPointsTab()
+  if (tab === 'fillrates') loadFillRatesTab()
 }
 
 async function loadQualityBadge() {
@@ -11486,6 +11488,208 @@ async function removeAgeException(id, name) {
 <!-- ═══════════════════════════════════════════════
      COMMUNITY POINTS TAB
      ═══════════════════════════════════════════════ -->
+<div class="tab-content" id="tab-fillrates" style="padding:1.5rem">
+  <h3 style="margin-bottom:0.5rem">📈 Fill Rates</h3>
+  <p style="color:#888;font-size:13px;margin-bottom:1rem;max-width:900px">
+    How full each studio gets, by seats in its floor plan. Each cell is the studio's <b>busiest moment</b> that day
+    (% of seats taken); the small number underneath is seat-time used across the whole day.
+    Only bookings take seats — a closed class never does. Open hours come from what was offered that day.
+    Click a cell to see that day's timeline.
+  </p>
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+    <button class="btn" onclick="frShiftWeek(-1)">← Prev week</button>
+    <button class="btn" onclick="frThisWeek()">This week</button>
+    <button class="btn" onclick="frShiftWeek(1)">Next week →</button>
+    <span id="fr-week-label" style="font-weight:600;font-size:13px;margin-left:6px"></span>
+    <span style="flex:1"></span>
+    <label style="font-size:12px;color:#888">Sort</label>
+    <select id="fr-sort" onchange="frRender()" style="font-size:12px;padding:4px 6px">
+      <option value="province">Province</option>
+      <option value="busiest">Busiest first</option>
+    </select>
+  </div>
+  <div style="display:flex;gap:12px;font-size:11px;color:#666;margin-bottom:10px;flex-wrap:wrap">
+    <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#eef6ee;vertical-align:-2px"></span> under 50%</span>
+    <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#c8ebcf;vertical-align:-2px"></span> 50–84%</span>
+    <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#fde4a8;vertical-align:-2px"></span> 85–99% getting full</span>
+    <span><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#f8b4b4;vertical-align:-2px"></span> 100%+ full</span>
+  </div>
+  <div id="fr-grid" style="overflow-x:auto"></div>
+  <div id="fr-detail" style="margin-top:1.25rem"></div>
+</div>
+
+<script>
+// ===== FILL RATES TAB =====
+// Reads community-occupancy-data (mode 'network' for the grid, one studio for
+// the detail), which checks this admin login server-side. The SQL functions
+// behind it are locked to the service role.
+const FR_URL = SUPABASE_URL + '/functions/v1/community-occupancy-data'
+let frWeekStart = null   // Monday, as a Date
+let frData = null        // { from, to, amberPct, rows }
+
+async function frRequest(body) {
+  const { data: { session } } = await sb.auth.getSession()
+  if (!session) throw new Error('Your session expired — please sign in again.')
+  const res = await fetch(FR_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${session.access_token}`, apikey: SUPABASE_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  let data
+  try { data = await res.json() } catch (e) { throw new Error(`Server error (${res.status}). Is community-occupancy-data deployed?`) }
+  if (!res.ok || data.error) throw new Error(data.error || `Server error (${res.status})`)
+  return data
+}
+
+function frMonday(d) {
+  const r = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+  r.setDate(r.getDate() - ((r.getDay() + 6) % 7))
+  return r
+}
+function frThisWeek() { frWeekStart = frMonday(new Date()); loadFillRatesTab(true) }
+function frShiftWeek(n) { frWeekStart = addDays(frWeekStart || frMonday(new Date()), 7 * n); loadFillRatesTab(true) }
+
+function frTime12(hhmm) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(hhmm || '')
+  if (!m) return hhmm || ''
+  let h = parseInt(m[1], 10) % 24
+  const ap = h >= 12 ? 'pm' : 'am'
+  h = h % 12 || 12
+  return m[2] === '00' ? `${h}${ap}` : `${h}:${m[2]}${ap}`
+}
+function frCellColor(pct, amber) {
+  if (pct == null) return '#fff'
+  if (pct >= 100) return '#f8b4b4'
+  if (pct >= amber) return '#fde4a8'
+  if (pct >= 50) return '#c8ebcf'
+  return '#eef6ee'
+}
+
+async function loadFillRatesTab(force) {
+  if (!frWeekStart) frWeekStart = frMonday(new Date())
+  const from = dateStr(frWeekStart), to = dateStr(addDays(frWeekStart, 6))
+  document.getElementById('fr-week-label').textContent =
+    frWeekStart.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) + ' – ' +
+    addDays(frWeekStart, 6).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' })
+  if (!force && frData && frData.from === from) { frRender(); return }
+  const grid = document.getElementById('fr-grid')
+  grid.innerHTML = '<div class="loading">Loading fill rates for 31 studios…</div>'
+  document.getElementById('fr-detail').innerHTML = ''
+  try {
+    frData = await frRequest({ mode: 'network', from, to })
+    frRender()
+  } catch (e) {
+    grid.innerHTML = `<div style="color:#c62828;font-size:13px;padding:1rem">Couldn't load fill rates: ${cpEsc(e.message)}</div>`
+  }
+}
+
+function frRender() {
+  if (!frData) return
+  const amber = frData.amberPct || 85
+  const days = []
+  for (let i = 0; i < 7; i++) days.push(dateStr(addDays(frWeekStart, i)))
+  const today = dateStr(new Date())
+
+  const byStudio = {}
+  ;(frData.rows || []).forEach(r => {
+    if (!byStudio[r.studio_id]) byStudio[r.studio_id] = { seats: r.seats, days: {} }
+    byStudio[r.studio_id].days[r.day] = r
+  })
+  const provOrder = { BC: 0, AB: 1, ON: 2 }
+  let ids = Object.keys(byStudio)
+  const weekPeak = id => Math.max(0, ...Object.values(byStudio[id].days).map(r => r.peak_pct == null ? 0 : Number(r.peak_pct)))
+  if (document.getElementById('fr-sort').value === 'busiest') {
+    ids.sort((a, b) => weekPeak(b) - weekPeak(a))
+  } else {
+    ids.sort((a, b) => ((provOrder[a.slice(0, 2)] ?? 9) - (provOrder[b.slice(0, 2)] ?? 9)) || getStudioName(a).localeCompare(getStudioName(b)))
+  }
+
+  const th = 'padding:8px 10px;font-size:10px;color:#888;text-transform:uppercase;font-weight:600;white-space:nowrap'
+  const head = `<tr style="background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
+      <th style="${th};text-align:left;position:sticky;left:0;background:#fafaf8">Studio</th>
+      <th style="${th};text-align:right">Seats</th>
+      ${days.map(d => `<th style="${th};text-align:center;${d === today ? 'color:#5e35b1' : ''}">${new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', day: 'numeric' })}</th>`).join('')}
+      <th style="${th};text-align:center">Week peak</th>
+    </tr>`
+
+  const body = ids.map(id => {
+    const st = byStudio[id]
+    const name = getStudioName(id)
+    if (!st.seats) {
+      return `<tr style="border-bottom:0.5px solid #f5f5f0">
+        <td style="padding:7px 10px;white-space:nowrap;position:sticky;left:0;background:#fff">${cpEsc(name)}</td>
+        <td colspan="${days.length + 2}" style="padding:7px 10px;color:#bbb;font-size:11px">No floor plan yet — set up tables in 🪑 Tables</td></tr>`
+    }
+    const cells = days.map(d => {
+      const r = st.days[d]
+      if (!r || !r.is_open) return `<td style="padding:6px;text-align:center;color:#ccc;font-size:11px">—</td>`
+      const pct = r.peak_pct == null ? 0 : Number(r.peak_pct)
+      return `<td onclick="frShowDay('${id}','${d}')" title="Busiest at ${frTime12(r.peak_start)}: ${r.peak_occupied} of ${r.seats} seats · open ${frTime12(r.open_time)}–${frTime12(r.close_time)}"
+                  style="padding:6px 8px;text-align:center;cursor:pointer;background:${frCellColor(pct, amber)};border-left:2px solid #fff">
+                <div style="font-weight:700;font-size:13px">${pct.toFixed(0)}%</div>
+                <div style="font-size:10px;color:#666">${r.utilization_pct == null ? '' : Number(r.utilization_pct).toFixed(0) + '% day'}</div>
+              </td>`
+    }).join('')
+    const wp = weekPeak(id)
+    return `<tr style="border-bottom:0.5px solid #f5f5f0">
+      <td style="padding:7px 10px;white-space:nowrap;position:sticky;left:0;background:#fff">${cpEsc(name)}</td>
+      <td style="padding:7px 10px;text-align:right;color:#888">${st.seats}</td>
+      ${cells}
+      <td style="padding:6px 8px;text-align:center;font-weight:700;background:${frCellColor(wp, amber)}">${wp.toFixed(0)}%</td>
+    </tr>`
+  }).join('')
+
+  document.getElementById('fr-grid').innerHTML =
+    `<table style="border-collapse:collapse;font-size:12px;min-width:100%">${head}<tbody>${body}</tbody></table>`
+}
+
+async function frShowDay(studioId, day) {
+  const el = document.getElementById('fr-detail')
+  el.innerHTML = '<div class="loading">Loading…</div>'
+  try {
+    const d = await frRequest({ studioId, date: day })
+    const t = d.today || {}
+    const amber = d.amberPct || 85
+    const title = `${cpEsc(getStudioName(studioId))} — ${fmtDate(day)}`
+    if (!t.is_open) { el.innerHTML = `<h4>${title}</h4><div style="color:#888;font-size:13px">Nothing offered that day.</div>`; return }
+    const slots = t.slots || []
+    const bars = slots.map(sl => {
+      const p = Number(sl.pct || 0)
+      return `<div title="${frTime12(sl.time)}: ${sl.occupied} of ${t.seats} seats (${p.toFixed(0)}%)"
+                   style="flex:1;min-width:3px;height:${Math.max(2, Math.min(p, 100))}%;border-radius:3px 3px 0 0;background:${p >= 100 ? '#e53935' : p >= amber ? '#f5a623' : '#7e57c2'}"></div>`
+    }).join('')
+    const hours = slots.map(sl => `<div style="flex:1;min-width:3px;white-space:nowrap">${/:00$/.test(sl.time) ? frTime12(sl.time) : ''}</div>`).join('')
+    const holds = (t.holds || []).map(h => `
+      <tr style="border-bottom:0.5px solid #f5f5f0">
+        <td style="padding:5px 10px;white-space:nowrap;color:#666">${frTime12(h.start)}–${frTime12(h.end)}</td>
+        <td style="padding:5px 10px">${cpEsc(h.title || '')}${h.is_party ? ' 🎉' : ''}</td>
+        <td style="padding:5px 10px;text-align:right;font-weight:600">${h.seats}</td>
+      </tr>`).join('')
+    el.innerHTML = `
+      <div style="border:0.5px solid #e0e0d8;border-radius:10px;padding:1rem 1.25rem;background:#fff;max-width:1000px">
+        <h4 style="margin:0 0 4px">${title}</h4>
+        <div style="font-size:12px;color:#666;margin-bottom:12px">
+          Busiest at <b>${frTime12(t.peak_start)}</b>: ${t.peak_occupied} of ${t.seats} seats (${Number(t.peak_pct || 0).toFixed(0)}%)
+          · ${Number(t.utilization_pct || 0).toFixed(0)}% of seat-time used
+          · open ${frTime12(t.open_time)}–${frTime12(t.close_time)} (from that day's classes)
+        </div>
+        <div style="position:relative;display:flex;align-items:flex-end;gap:2px;height:110px;border-bottom:1px solid #e0e0d8">
+          ${bars}
+          <div style="position:absolute;left:0;right:0;bottom:${amber}%;border-top:1.5px dashed #f5a623;pointer-events:none"></div>
+        </div>
+        <div style="display:flex;gap:2px;font-size:10px;color:#888;margin-top:3px">${hours}</div>
+        <table style="border-collapse:collapse;font-size:12px;margin-top:14px;width:100%">
+          <thead><tr style="background:#fafaf8"><th style="padding:6px 10px;text-align:left;font-size:10px;color:#888">HELD</th><th style="padding:6px 10px;text-align:left;font-size:10px;color:#888">WHAT</th><th style="padding:6px 10px;text-align:right;font-size:10px;color:#888">SEATS</th></tr></thead>
+          <tbody>${holds || '<tr><td colspan="3" style="padding:8px 10px;color:#888">Nothing booked.</td></tr>'}</tbody>
+        </table>
+      </div>`
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  } catch (e) {
+    el.innerHTML = `<div style="color:#c62828;font-size:13px">Couldn't load that day: ${cpEsc(e.message)}</div>`
+  }
+}
+</script>
+
 <div class="tab-content" id="tab-points" style="padding:1.5rem;max-width:1000px">
   <h3 style="margin-bottom:0.5rem">🏆 Community Points</h3>
   <p style="color:#888;font-size:13px;margin-bottom:1rem">
@@ -12616,4 +12820,3 @@ async function scUndo(studioId) {
 
 </body>
 </html>
-  
