@@ -11943,13 +11943,34 @@ function cpConverterHtml() {
     </div>`
 }
 
+// ── Mentorship steps = one project ──────────────
+// The three mentoring rules are stages of one mentorship; screens show them
+// together (heading + total, steps numbered in order).
+const CP_MENTOR_ORDER = ['mentoring_calls', 'mentoring_actions', 'mentoring_goal']
+function cpIsMentorRule(r) { return r.source === 'mentorship' || CP_MENTOR_ORDER.includes(r.code) }
+function cpMentorRules(activeOnly) {
+  return (cpData.rules || []).filter(r => cpIsMentorRule(r) && (!activeOnly || r.is_active))
+    .sort((a, b) => CP_MENTOR_ORDER.indexOf(a.code) - CP_MENTOR_ORDER.indexOf(b.code))
+}
+function cpRulePoints(r) { return Number(r.flat_points) || Number(r.points_per_unit) || 0 }
+function cpMentorStepName(r) {
+  return String(r.name).replace(/^Mentoring:\s*/i, '').replace(/^./, c => c.toUpperCase())
+}
+
 // ── Estimate a month ────────────────────────────
 // Type what a studio might do in a month; see the points each active rule
 // would give, the total in points and dollars, and how long that pace takes
 // to reach each prize tier. Uses the same maths as the scoring (stacking
 // tiers, caps, milestones). Planning only — nothing is saved.
-function cpEstimateRules() {
-  return (cpData.rules || []).filter(r => r.is_active).slice().sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
+function cpEstimateRules() {  // every active rule except the mentorship steps (those get one combined row)
+  return (cpData.rules || []).filter(r => r.is_active && !cpIsMentorRule(r)).slice().sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
+}
+function cpEstimateMentorPoints() {
+  const steps = cpMentorRules(true)
+  if (!steps.length) return 0
+  const n = Math.max(0, Math.floor(Number((document.getElementById('cpe-mentoring-n') || {}).value) || 0))
+  const per = steps.reduce((t, r) => t + ((document.getElementById('cpe-' + r.code) || {}).checked ? cpRulePoints(r) : 0), 0)
+  return n * per
 }
 function cpEstimateHtml() {
   const rules = cpEstimateRules()
@@ -11971,7 +11992,14 @@ function cpEstimateHtml() {
     return `<tr><td style="font-size:13px;font-weight:500">${cpEsc(r.name)}<div class="cp-muted">${cpEsc(cpDescribeRule(r))}</div></td>
       <td style="white-space:nowrap;font-size:13px">${input}</td>
       <td style="text-align:right;font-weight:600;white-space:nowrap" id="cpe-${r.code}-out">—</td></tr>`
-  }).join('')
+  }).join('') + (() => {
+    const steps = cpMentorRules(true)
+    if (!steps.length) return ''
+    return `<tr><td style="font-size:13px;font-weight:500">🤝 Mentorships<div class="cp-muted">up to ${cpFmt(steps.reduce((t, r) => t + cpRulePoints(r), 0))} each</div></td>
+      <td style="font-size:13px"><input type="number" min="0" step="1" id="cpe-mentoring-n" value="0" style="width:56px;padding:5px 7px;font-size:13px" oninput="cpEstimateCalc()"> mentorships reaching
+        ${steps.map((r, i) => `<label class="cp-check" style="display:inline-flex;margin:0 0 0 8px"><input type="checkbox" id="cpe-${r.code}" checked onchange="cpEstimateCalc()"> ${i + 1}. ${cpEsc(cpMentorStepName(r).toLowerCase())}</label>`).join('')}</td>
+      <td style="text-align:right;font-weight:600;white-space:nowrap" id="cpe-mentoring-out">—</td></tr>`
+  })()
   return `
     <div class="cp-card" style="margin-bottom:1rem">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:0.5rem">
@@ -12017,6 +12045,10 @@ function cpEstimateCalc() {
     const out = document.getElementById('cpe-' + r.code + '-out')
     if (out) out.innerHTML = pts ? `${cpFmt(pts)}<div class="cp-muted" style="font-weight:400">${cpDollars(pts)}</div>` : '—'
   })
+  const mentorPts = cpEstimateMentorPoints()
+  total += mentorPts
+  const mOut = document.getElementById('cpe-mentoring-out')
+  if (mOut) mOut.innerHTML = mentorPts ? `${cpFmt(mentorPts)}<div class="cp-muted" style="font-weight:400">${cpDollars(mentorPts)}</div>` : '—'
   const box = document.getElementById('cpe-total')
   if (!box) return
   if (!total) { box.innerHTML = '<div class="cp-muted">Fill in a few lines to see the total.</div>'; return }
@@ -12032,6 +12064,7 @@ function cpEstimateCalc() {
   }).join('')
   const byCat = {}
   cpEstimateRules().forEach(r => { const p = cpEstimateRulePoints(r); if (p) byCat[r.category || ''] = (byCat[r.category || ''] || 0) + p })
+  if (mentorPts) { const c = (cpMentorRules(true)[0] || {}).category || ''; byCat[c] = (byCat[c] || 0) + mentorPts }
   const catLines = Object.keys(byCat).sort((a, b) => ((cpCategory(a) || {}).sort_order ?? 1e9) - ((cpCategory(b) || {}).sort_order ?? 1e9))
     .map(c => `<div style="display:flex;justify-content:space-between;font-size:13px;padding:2px 0"><span>${cpEsc(cpCategoryLabel(c || null))}</span><span>${cpFmt(byCat[c])} pts · ${cpDollars(byCat[c])}</span></div>`).join('')
   box.innerHTML = `
@@ -12067,6 +12100,10 @@ function cpEstimatePreset(kind) {
       el.value = strong && isFinite(step) ? step : 0
     }
   })
+  // Mentorships: typical/clear = none; strong = one mentorship reaching every step.
+  const mn = document.getElementById('cpe-mentoring-n')
+  if (mn) mn.value = kind === 'strong' ? 1 : 0
+  cpMentorRules(true).forEach(r => { const c = document.getElementById('cpe-' + r.code); if (c) c.checked = true })
   cpEstimateCalc()
 }
 
@@ -12311,10 +12348,35 @@ function cpRenderRules() {
   const catOrder = c => { const x = cpCategory(c); return x ? x.sort_order : 1e9 }
   rules.sort((a, b) => (catOrder(a.category) - catOrder(b.category)) || ((a.sort_order || 0) - (b.sort_order || 0)))
   let lastCat
+  let mentorShown = false
+  const mentorAll = cpMentorRules(false)
   rules.forEach(r => {
     if ((r.category || null) !== lastCat) {
       lastCat = r.category || null
       html += `<tr><td colspan="6" style="background:#f7f6f2;font-weight:700;font-size:12px;letter-spacing:0.04em;text-transform:uppercase">${cpEsc(cpCategoryLabel(r.category))}</td></tr>`
+    }
+    if (cpIsMentorRule(r)) {
+      if (mentorShown) return
+      mentorShown = true
+      const total = mentorAll.filter(x => x.is_active).reduce((t, x) => t + cpRulePoints(x), 0)
+      html += `<tr><td colspan="6" style="border-left:3px solid #7c5cff;background:#fbfaff">
+          <div style="display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+            <div><div style="font-size:13px;font-weight:700">🤝 Mentor another studio's coordinator</div>
+              <div class="cp-muted">One two-week mentorship · each step confirmed by the mentee and approved in 🎓 Mentoring</div></div>
+            <div style="text-align:right;font-size:13px;font-weight:700">up to ${cpFmt(total)} pts per mentorship<div class="cp-muted" style="font-weight:400">≈ ${cpDollars(total)}</div></div>
+          </div></td></tr>`
+      mentorAll.forEach((m, i) => {
+        html += `<tr class="${m.is_active ? '' : 'cp-row-off'}" style="background:#fbfaff">
+          <td style="border-left:3px solid #7c5cff;padding-left:1.25rem"><div style="font-size:13px;font-weight:500">
+              <span style="display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:999px;background:#ece8ff;color:#5b3fd6;font-size:11px;font-weight:800;margin-right:6px">${i + 1}</span>${cpEsc(cpMentorStepName(m))}</div>
+            <div class="cp-muted" style="margin-left:26px">${cpEsc(m.code)}</div></td>
+          <td style="font-size:13px">${cpFmt(cpRulePoints(m))} pts<div class="cp-muted">≈ ${cpDollars(cpRulePoints(m))}</div></td>
+          <td style="font-size:12px">Step ${i + 1} of ${mentorAll.length}<div class="cp-muted">Mentorship approval</div></td>
+          <td style="font-size:12px">—</td>
+          <td>${m.is_active ? '<span class="cp-pill cp-pill-result">On</span>' : '<span class="cp-pill cp-pill-off">Off</span>'}</td>
+          <td><button class="btn" style="font-size:11px" onclick="cpOpenRuleModal('${cpEsc(m.code)}')">Edit</button></td></tr>`
+      })
+      return
     }
     html += `<tr class="${r.is_active ? '' : 'cp-row-off'}">
       <td><div style="font-size:13px;font-weight:500">${cpEsc(r.name)}</div><div class="cp-muted">${cpEsc(r.code)}${r.source_notes ? ' · ' + cpEsc(r.source_notes) : ''}</div></td>
