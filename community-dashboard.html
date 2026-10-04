@@ -198,6 +198,7 @@ body:not(.sc-mode) .sc-only { display: none !important; }
 .pts-prize .p-cost { font-family: 'IBM Plex Mono', monospace; font-weight: 700; color: var(--accent-deep); font-size: 13px; }
 .pts-prize button { margin-top: auto; border: none; border-radius: 999px; padding: 8px 12px; font: inherit; font-weight: 800; cursor: pointer; background: var(--accent); color: #fff; }
 .pts-prize button:disabled { background: #e6e4f0; color: var(--ink-soft); cursor: default; }
+.btn-confirm { border: none; border-radius: 999px; padding: 6px 14px; font: inherit; font-size: 12px; font-weight: 800; cursor: pointer; background: var(--accent); color: #fff; white-space: nowrap; }
 .pts-status { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 800; text-transform: capitalize; background: #eee; }
 .pts-status.requested { background: #fff4d6; color: #8a6100; }
 .pts-status.approved { background: #e3f0ff; color: #1d4f91; }
@@ -986,9 +987,50 @@ function renderPointsCard(d) {
   if (bar) bar.innerHTML = `<span>${d.level === 'admin' ? '👁️ Admin view (read-only)' : '🔓 Coordinator view'} · <span class="who">${esc(studioName)}</span></span>
       <span class="spacer"></span><button onclick="goToDashboard()">← Dashboard</button><button onclick="endCoordinatorView()">🔒 Lock</button>`;
 
-  const ways = (d.waysToEarn || []).map(w => `
-      <div class="pts-row"><span>${esc(w.name)}</span><span class="how">${esc(w.how)}${w.manual ? ' · added by home office' : ''}</span></div>`).join('')
-    || `<div class="pts-empty">No ways to earn are switched on yet.</div>`;
+  // Ways to earn, grouped by category (category order from home office).
+  const cats = d.categories || [];
+  const catName = code => { const c = cats.find(x => x.code === code); return c ? `${c.emoji ? c.emoji + ' ' : ''}${c.name}` : 'Other'; };
+  const catOrder = code => { const i = cats.findIndex(x => x.code === code); return i < 0 ? 999 : i; };
+  const waysSorted = (d.waysToEarn || []).slice().sort((a, b) => catOrder(a.category) - catOrder(b.category));
+  let lastCat;
+  const ways = waysSorted.map(w => {
+    const head = (cats.length && w.category !== lastCat) ? `<div class="pts-subhead" style="margin:12px 0 4px">${esc(catName(w.category))}</div>` : '';
+    lastCat = w.category;
+    return head + `
+      <div class="pts-row"><span>${esc(w.name)}</span><span class="how">${esc(w.how)}${w.manual ? ' · added by home office' : ''}${w.mentorship ? ' · approved by home office' : ''}</span></div>`;
+  }).join('') || `<div class="pts-empty">No ways to earn are switched on yet.</div>`;
+
+  // This month by category
+  const byCat = d.monthByCategory || {};
+  const catKeys = Object.keys(byCat).filter(k => byCat[k]).sort((a, b) => catOrder(a) - catOrder(b));
+  const monthByCatHtml = catKeys.length ? `<div class="card"><div class="pts-subhead">📊 ${esc(d.monthLabel || 'This month')} by category</div>${catKeys.map(k =>
+    `<div class="pts-row"><span>${esc(k === 'other' ? 'Adjustments and other' : catName(k))}</span><span class="amt ${byCat[k] > 0 ? 'plus' : 'minus'}">${byCat[k] > 0 ? '+' : ''}${fmtPts(byCat[k])}</span></div>`).join('')}</div>` : '';
+
+  // Mentorships (mentor or mentee). The mentee confirms steps; home office approves.
+  const STEP_LABEL = { calls: 'All four calls completed', actions: 'Agreed actions completed', goal: '30-day goal reached' };
+  const STEP_STATUS = { pending: 'Not confirmed yet', confirmed: 'Waiting for home office', approved: 'Approved', returned: 'Sent back — see note' };
+  const fmtDay = ymd => ymd ? new Date(ymd + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '';
+  const mentorshipsHtml = (d.mentorships || []).map(m => {
+    const other = m.role === 'mentor' ? m.mentee : m.mentor;
+    const otherLabel = other ? `${STUDIO_NAMES[other.studioId] || other.studioId}${other.name ? ' · ' + other.name : ''}` : '';
+    const steps = (m.steps || []).map(st => {
+      const icon = st.status === 'approved' ? '✅' : st.status === 'confirmed' ? '🟡' : st.status === 'returned' ? '↩️' : '⬜';
+      const canConfirm = m.role === 'mentee' && m.status === 'active' && d.canRedeem && (st.status === 'pending' || st.status === 'returned');
+      return `<div class="pts-row" style="align-items:flex-start">
+          <span>${icon} ${esc(STEP_LABEL[st.step] || st.step)}${m.role === 'mentor' && st.points ? ` <span class="how">· ${fmtPts(st.points)} pts</span>` : ''}
+            <div class="how" style="text-align:left">${esc(STEP_STATUS[st.status] || st.status)}${st.reviewNote && st.status === 'returned' ? ' — ' + esc(st.reviewNote) : ''}${st.confirmNote && st.status !== 'returned' ? ' — “' + esc(st.confirmNote) + '”' : ''}</div></span>
+          ${canConfirm ? `<button class="btn-confirm" onclick="confirmMentorshipStep('${esc(m.id)}','${esc(st.step)}')">Confirm</button>` : ''}
+        </div>`;
+    }).join('');
+    return `<div class="card">
+        <div class="pts-subhead">${m.role === 'mentor' ? '🎓 You are mentoring' : '🎓 You are being mentored by'} ${esc(otherLabel)}${m.status !== 'active' ? ' · ' + esc(m.status) : ''}</div>
+        <div style="font-weight:800;margin:2px 0">🎯 ${esc(m.goalDetail || '')}</div>
+        ${m.agreedActions ? `<div class="goal-note">Agreed actions: ${esc(m.agreedActions)}</div>` : ''}
+        <div class="goal-note">Calls by ${esc(fmtDay(m.callsEndDate))} · goal by ${esc(fmtDay(m.goalDate))}</div>
+        ${m.role === 'mentee' && m.status === 'active' ? `<div class="goal-note">When a step is done, tap <strong>Confirm</strong> and say how it was verified (dashboard numbers, certification or your coordinator). Home office approves it.</div>` : ''}
+        <div style="margin-top:8px">${steps}</div>
+      </div>`;
+  }).join('');
 
   // Prizes — request any you can afford (SC only; points come off right away,
   // home office approves it, cancelling gives the points back).
@@ -1070,6 +1112,8 @@ function renderPointsCard(d) {
     ${nextPrizeHtml}
     <div class="section-head pts-section">🎁 Prizes to redeem</div>
     <div class="pts-prize-grid">${prizeCards}</div>
+    ${monthByCatHtml}
+    ${mentorshipsHtml ? `<div class="section-head pts-section">🎓 Mentoring</div>${mentorshipsHtml}` : ''}
     ${requests ? `<div class="section-head pts-section">📦 My prize requests</div><div class="card">${requests}</div>` : ''}
     <div class="pts-cols" style="margin-top:18px">
       <div class="card"><div class="pts-subhead">✨ Ways to earn</div>${ways}</div>
@@ -1079,6 +1123,28 @@ function renderPointsCard(d) {
 }
 
 let _lastPointsData = null;
+
+// Mentee confirms a mentorship step (home office then approves it).
+async function confirmMentorshipStep(mentorshipId, step) {
+  const labels = { calls: 'All four calls completed', actions: 'Agreed actions completed', goal: '30-day goal reached' };
+  const note = prompt(`Confirm "${labels[step] || step}".\n\nHow was it verified? (e.g. dashboard numbers, certification passed, or your coordinator confirmed)`);
+  if (note === null) return;
+  if (!note.trim()) { alert('Please say how it was verified.'); return; }
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/community-points-data`, {
+      method: 'POST',
+      headers: await fnHeaders(),
+      body: JSON.stringify({ pin: _sessionPin, studioId: _sessionStudioId, action: 'confirm_mentorship_step', mentorshipId, step, note: note.trim() })
+    });
+    const out = await res.json();
+    if (!res.ok || out.error) throw new Error(out.error || 'Could not confirm');
+    alert('Confirmed — home office will review it.');
+  } catch (e) {
+    alert(e.message || 'Could not confirm that step.');
+  }
+  loadPoints(_sessionPin, _sessionStudioId);
+}
+
 async function requestPrize(prizeId) {
   const d = _lastPointsData;
   const tier = d && (d.prizeTiers || []).find(t => (t.prizes || []).some(p => p.id === prizeId));
