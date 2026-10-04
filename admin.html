@@ -624,10 +624,6 @@ select:focus, input:focus { border-color: #888; }
       <div style="font-size:13px;font-weight:600;margin-bottom:0.75rem">Pending Submissions</div>
       <div id="names-pending-container"><div class="loading">Loading...</div></div>
 
-      <div style="font-size:13px;font-weight:600;margin:2rem 0 0.25rem">Reviewed — Waiting on Staff</div>
-      <div style="font-size:11px;color:#888;margin-bottom:0.75rem">Staff who still need to pick a name or send new ideas. Use "+ Suggest a name" to give them a pre-approved option.</div>
-      <div id="names-reviewed-container"><div class="loading">Loading...</div></div>
-
       <div style="font-size:13px;font-weight:600;margin:2rem 0 0.75rem">Name Library</div>
       <div class="toolbar" style="margin-bottom:1rem">
         <div class="toolbar-group" style="gap:8px">
@@ -5806,7 +5802,6 @@ async function loadNamesBadge() {
 
 function loadNamesSubtab() {
   loadPendingSubmissions()
-  loadReviewedSubmissions()
   loadLibrary()
 }
 
@@ -5844,98 +5839,8 @@ async function loadPendingSubmissions() {
       <div style="font-size:13px;font-weight:600;margin-bottom:2px">${staff.display_name || 'Unknown staff'}</div>
       <div style="font-size:11px;color:#888;margin-bottom:8px">${studioLabel}</div>
       ${ideaRows}
-      ${extraNamesHtml(row)}
     </div>`
   }).join('')
-}
-
-// Pre-approved names on a suggestion row (home office suggestions, or names
-// approved in an earlier round that carried over when the staff resubmitted)
-function extraNamesHtml(row) {
-  const extras = row.approved_extras || []
-  const rows = extras.map((n, i) => `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:0.5px solid #f0f0ec">
-      <span style="font-size:13px">${escHtml(n)} <span style="font-size:10px;color:#888;margin-left:4px">pre-approved</span></span>
-      <span><span style="color:#2e7d32;font-size:11px;font-weight:600">✓ Approved</span>
-        <button class="btn" style="height:22px;padding:0 8px;font-size:10px;margin-left:8px" onclick="removeExtraName('${row.id}',${i})">Remove</button></span>
-    </div>`).join('')
-  return `${rows}
-    <button class="btn" style="height:26px;padding:2px 10px;font-size:11px;margin-top:8px" onclick="suggestNameFor('${row.id}')">+ Suggest a name</button>`
-}
-
-async function loadReviewedSubmissions() {
-  const container = document.getElementById('names-reviewed-container')
-  if (!container) return
-  container.innerHTML = '<div class="loading">Loading...</div>'
-  const { data, error } = await sb.from('staff_name_suggestions')
-    .select('*, staff_profiles!profile_id(display_name, studio_ids)')
-    .eq('overall_status', 'reviewed')
-    .order('reviewed_at', { ascending: true })
-  if (error) { container.innerHTML = '<div class="loading">Error loading reviewed submissions.</div>'; return }
-  if (!data || !data.length) {
-    container.innerHTML = '<div style="color:#888;font-size:13px;padding:1rem 0">Nobody waiting right now.</div>'
-    return
-  }
-  container.innerHTML = data.map(row => {
-    const staff = row.staff_profiles || {}
-    const studioLabel = (staff.studio_ids || []).map(getStudioName).join(', ') || '—'
-    const anyApproved = [1, 2, 3].some(slot => row[`name_${slot}_status`] === 'approved') || (row.approved_extras || []).length > 0
-    const waitingOn = anyApproved
-      ? '<span style="font-size:11px;color:#2e7d32">Waiting for them to pick</span>'
-      : '<span style="font-size:11px;color:#c0392b">All rejected — waiting for new ideas</span>'
-    const ideaRows = [1, 2, 3].map(slot => {
-      const name = row[`name_${slot}`]
-      const status = row[`name_${slot}_status`]
-      const note = row[`name_${slot}_note`]
-      const badge = status === 'approved'
-        ? '<span style="color:#2e7d32;font-size:11px;font-weight:600">✓ Approved</span>'
-        : `<span style="color:#c0392b;font-size:11px;font-weight:600">✕ Rejected${note ? ' — ' + escHtml(note) : ''}</span>`
-      return `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:0.5px solid #f0f0ec">
-        <span style="font-size:13px">${escHtml(name)}</span>
-        <span>${badge}</span>
-      </div>`
-    }).join('')
-    return `<div style="background:white;border:0.5px solid #e0e0d8;border-radius:10px;padding:14px 16px;margin-bottom:10px">
-      <div style="display:flex;justify-content:space-between;align-items:baseline">
-        <div style="font-size:13px;font-weight:600;margin-bottom:2px">${escHtml(staff.display_name || 'Unknown staff')}</div>
-        ${waitingOn}
-      </div>
-      <div style="font-size:11px;color:#888;margin-bottom:8px">${studioLabel}</div>
-      ${ideaRows}
-      ${extraNamesHtml(row)}
-    </div>`
-  }).join('')
-}
-
-async function suggestNameFor(rowId) {
-  const raw = window.prompt('Suggest a 4Cats name (pre-approved, they can pick it right away):', '')
-  if (raw === null) return
-  const name = raw.trim()
-  if (!name) return
-  const { data: row, error } = await sb.from('staff_name_suggestions').select('approved_extras, overall_status').eq('id', rowId).single()
-  if (error || !row) { alert('Could not load that submission — it may have just been finalized. Refreshing.'); refreshNameLists(); return }
-  if (row.overall_status === 'finalized') { alert('They already confirmed a name. Refreshing.'); refreshNameLists(); return }
-  const extras = row.approved_extras || []
-  if (extras.some(n => n.toLowerCase() === name.toLowerCase())) { alert('That name is already on their list.'); return }
-  const { error: upErr } = await sb.from('staff_name_suggestions').update({ approved_extras: [...extras, name] }).eq('id', rowId)
-  if (upErr) { alert('Could not save: ' + upErr.message); return }
-  refreshNameLists()
-}
-
-async function removeExtraName(rowId, idx) {
-  const { data: row, error } = await sb.from('staff_name_suggestions').select('approved_extras').eq('id', rowId).single()
-  if (error || !row) { refreshNameLists(); return }
-  const extras = row.approved_extras || []
-  if (!confirm(`Remove "${extras[idx]}" from their options?`)) return
-  extras.splice(idx, 1)
-  const { error: upErr } = await sb.from('staff_name_suggestions').update({ approved_extras: extras }).eq('id', rowId)
-  if (upErr) { alert('Could not save: ' + upErr.message); return }
-  refreshNameLists()
-}
-
-function refreshNameLists() {
-  loadPendingSubmissions()
-  loadReviewedSubmissions()
-  loadNamesBadge()
 }
 
 async function approveIdea(rowId, slot) {
@@ -5955,7 +5860,8 @@ async function finalizeReviewIfComplete(rowId) {
   if (row && row.name_1_status !== 'pending' && row.name_2_status !== 'pending' && row.name_3_status !== 'pending') {
     await sb.from('staff_name_suggestions').update({ overall_status: 'reviewed', reviewed_at: new Date().toISOString() }).eq('id', rowId)
   }
-  refreshNameLists()
+  loadPendingSubmissions()
+  loadNamesBadge()
 }
 
 async function loadLibrary() {
@@ -11817,6 +11723,7 @@ async function frShowDay(studioId, day) {
     <button id="cp-subbtn-levels" onclick="cpSwitchSub('levels')" class="cp-subbtn">Levels</button>
     <button id="cp-subbtn-redemptions" onclick="cpSwitchSub('redemptions')" class="cp-subbtn">Redemptions<span id="cp-sub-badge" class="tab-badge" style="display:none;margin-left:6px"></span></button>
     <button id="cp-subbtn-wallets" onclick="cpSwitchSub('wallets')" class="cp-subbtn">Wallets &amp; Adjustments</button>
+    <button id="cp-subbtn-mentoring" onclick="cpSwitchSub('mentoring')" class="cp-subbtn">🎓 Mentoring</button>
     <button id="cp-subbtn-instagram" onclick="cpSwitchSub('instagram')" class="cp-subbtn">📸 Instagram</button>
   </div>
 
@@ -11947,6 +11854,7 @@ function cpRender() {
   if (cpSub === 'levels') body.innerHTML = cpRenderLevels()
   if (cpSub === 'redemptions') body.innerHTML = cpRenderRedemptions()
   if (cpSub === 'wallets') { body.innerHTML = cpRenderWallets(); cpAdjPersonChanged() }
+  if (cpSub === 'mentoring') body.innerHTML = cpRenderMentoring()
 }
 
 // ── Lookups ─────────────────────────────────────
@@ -11999,7 +11907,7 @@ function cpDescribeRuleDollars(r) {
     return tiers.map((t, i) => `${i ? '+' : ''}${cpDollars(t.points)} at ${t.at}${cpUnitSuffix(r)}`).join(', ')
   }
   if (r.calc_method === 'per_unit') return `${cpDollars(r.points_per_unit)} each${r.monthly_cap ? ` (max ${cpDollars(r.monthly_cap)}/month)` : ''}`
-  if (r.calc_method === 'flat') return cpDollars(r.flat_points)
+  if (r.calc_method === 'flat') return cpDollars(r.flat_points) + (r.unit_label ? ' ' + r.unit_label : '')
   if (r.calc_method === 'milestone') return (r.milestones || []).map((m, i) => `${i ? '+' : ''}${cpDollars(m.points)} every ${cpFmt(m.every)}`).join(', ')
   return ''
 }
@@ -12122,7 +12030,12 @@ function cpEstimateCalc() {
     const label = months <= 1 ? 'in 1 month' : months < 24 ? `in ${months} months` : `in about ${Math.round(months / 12)} years`
     return `<div style="display:flex;justify-content:space-between;gap:1rem;font-size:13px;padding:3px 0"><span>${cpEsc(g.name)} · ${cpFmt(g.cost)} pts</span><span style="font-weight:600">${label}</span></div>`
   }).join('')
+  const byCat = {}
+  cpEstimateRules().forEach(r => { const p = cpEstimateRulePoints(r); if (p) byCat[r.category || ''] = (byCat[r.category || ''] || 0) + p })
+  const catLines = Object.keys(byCat).sort((a, b) => ((cpCategory(a) || {}).sort_order ?? 1e9) - ((cpCategory(b) || {}).sort_order ?? 1e9))
+    .map(c => `<div style="display:flex;justify-content:space-between;font-size:13px;padding:2px 0"><span>${cpEsc(cpCategoryLabel(c || null))}</span><span>${cpFmt(byCat[c])} pts · ${cpDollars(byCat[c])}</span></div>`).join('')
   box.innerHTML = `
+    ${catLines ? `<div style="padding:0.5rem 0;border-top:1px solid #eee">${catLines}</div>` : ''}
     <div style="display:flex;justify-content:space-between;align-items:baseline;gap:1rem;flex-wrap:wrap;padding:0.75rem 0;border-top:1px solid #eee">
       <div style="font-size:14px;font-weight:600">Total for the month</div>
       <div style="font-size:22px;font-weight:700">${cpFmt(total)} pts <span style="font-size:14px;color:#888;font-weight:500">≈ ${cpDollars(total)} · ${cpDollars(total * 12)} a year</span></div>
@@ -12173,7 +12086,7 @@ function cpDescribeRule(r) {
     return tiers.map((t, i) => `${i ? '+' : ''}${cpFmt(t.points)} at ${t.at}${cpUnitSuffix(r)}`).join(', ') || '—'
   }
   if (r.calc_method === 'per_unit') return `${cpFmt(r.points_per_unit)} each${r.monthly_cap ? ` (max ${cpFmt(r.monthly_cap)}/month)` : ''}`
-  if (r.calc_method === 'flat') return `${cpFmt(r.flat_points)} pts`
+  if (r.calc_method === 'flat') return `${cpFmt(r.flat_points)} pts${r.unit_label ? ' ' + r.unit_label : ''}`
   if (r.calc_method === 'milestone') return (r.milestones || []).map((m, i) => `${i ? '+' : ''}${cpFmt(m.points)} every ${cpFmt(m.every)}`).join(', ') || '—'
   return '—'
 }
@@ -12389,15 +12302,24 @@ function cpRenderRules() {
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;gap:1rem;flex-wrap:wrap">
       <div class="cp-note" style="margin:0">Tiers <strong>stack</strong>: reaching a higher tier adds its points on top. Edits apply from this month — points already awarded keep their original rule.</div>
-      <button class="btn btn-primary" onclick="cpOpenRuleModal(null)">+ Add rule</button>
+      <div style="display:flex;gap:6px"><button class="btn" onclick="cpOpenCategoriesModal()">Categories</button>
+        <button class="btn btn-primary" onclick="cpOpenRuleModal(null)">+ Add rule</button></div>
     </div>
     <div class="users-table-wrap"><table class="users-table"><thead><tr><th>Rule</th><th>How it earns</th><th>When</th><th>Waiting</th><th>Status</th><th></th></tr></thead><tbody>`
   if (!rules.length) html += '<tr><td colspan="6"><div class="empty">No rules yet.</div></td></tr>'
+  // grouped by category (in category order; uncategorised last)
+  const catOrder = c => { const x = cpCategory(c); return x ? x.sort_order : 1e9 }
+  rules.sort((a, b) => (catOrder(a.category) - catOrder(b.category)) || ((a.sort_order || 0) - (b.sort_order || 0)))
+  let lastCat
   rules.forEach(r => {
+    if ((r.category || null) !== lastCat) {
+      lastCat = r.category || null
+      html += `<tr><td colspan="6" style="background:#f7f6f2;font-weight:700;font-size:12px;letter-spacing:0.04em;text-transform:uppercase">${cpEsc(cpCategoryLabel(r.category))}</td></tr>`
+    }
     html += `<tr class="${r.is_active ? '' : 'cp-row-off'}">
       <td><div style="font-size:13px;font-weight:500">${cpEsc(r.name)}</div><div class="cp-muted">${cpEsc(r.code)}${r.source_notes ? ' · ' + cpEsc(r.source_notes) : ''}</div></td>
       <td style="font-size:13px">${cpEsc(cpDescribeRule(r))}<div class="cp-muted">≈ ${cpEsc(cpDescribeRuleDollars(r))}</div></td>
-      <td style="font-size:12px">${cpEsc(CP_PERIODS[r.period] || r.period)}<div class="cp-muted">${r.source === 'manual' ? 'Entered by home office' : 'Automatic'}</div></td>
+      <td style="font-size:12px">${cpEsc(CP_PERIODS[r.period] || r.period)}<div class="cp-muted">${r.source === 'manual' ? 'Entered by home office' : r.source === 'mentorship' ? 'Mentorship approval' : 'Automatic'}</div></td>
       <td style="font-size:12px">${r.waiting_months ? r.waiting_months + ' month' + (r.waiting_months === 1 ? '' : 's') : '—'}</td>
       <td>${r.is_active ? '<span class="cp-pill cp-pill-result">On</span>' : '<span class="cp-pill cp-pill-off">Off</span>'}</td>
       <td><button class="btn" style="font-size:11px" onclick="cpOpenRuleModal('${cpEsc(r.code)}')">Edit</button></td></tr>`
@@ -12432,10 +12354,15 @@ function cpOpenRuleModal(code) {
     <div style="display:flex;gap:1rem;flex-wrap:wrap">
       <div class="modal-field" style="flex:1;min-width:170px"><label>Type</label><select id="cpr-method" onchange="cpRuleMethodChanged()">${opt(CP_METHODS, v.calc_method)}</select></div>
       <div class="modal-field" style="flex:1;min-width:150px"><label>Period</label><select id="cpr-period" onchange="cpRulePreview()">${opt(CP_PERIODS, v.period)}</select></div>
-      <div class="modal-field" style="flex:1;min-width:190px"><label>Scored</label><select id="cpr-source" ${isNew ? 'disabled' : ''}>
-        <option value="auto" ${v.source !== 'manual' ? 'selected' : ''}>Automatically</option>
-        <option value="manual" ${v.source === 'manual' ? 'selected' : ''}>Entered by home office</option></select></div>
+      <div class="modal-field" style="flex:1;min-width:190px"><label>Scored</label><select id="cpr-source" ${isNew || v.source === 'mentorship' ? 'disabled' : ''}>
+        <option value="auto" ${v.source === 'auto' || !v.source ? 'selected' : ''}>Automatically</option>
+        <option value="manual" ${v.source === 'manual' ? 'selected' : ''}>Entered by home office</option>
+        <option value="mentorship" ${v.source === 'mentorship' ? 'selected' : ''}>Mentorship approval</option></select></div>
     </div>
+    <div class="modal-field"><label>Category</label><select id="cpr-category">
+      <option value="">Uncategorised</option>
+      ${(cpData.categories || []).slice().sort((a, b) => a.sort_order - b.sort_order).map(c => `<option value="${cpEsc(c.code)}" ${c.code === v.category ? 'selected' : ''}>${cpEsc(cpCategoryLabel(c.code))}</option>`).join('')}
+    </select></div>
     <div id="cpr-sec-threshold" class="modal-field"><label>Tiers — each one reached adds its points</label>
       <div id="cpr-tiers">${(v.tiers || []).map(t => cpTierRowHtml('tier', t.at, t.points)).join('')}</div>
       <button class="btn" style="font-size:11px" onclick="cpAddTierRow('tier')">+ Add tier</button></div>
@@ -12517,11 +12444,178 @@ async function cpSaveRule(isNew) {
   await cpRequest('save_rule', { rule: Object.assign(f, {
     code, name, is_new: isNew,
     source: isNew ? 'manual' : document.getElementById('cpr-source').value,
+    category: document.getElementById('cpr-category').value,
     waiting_months: document.getElementById('cpr-wait').value,
     sort_order: document.getElementById('cpr-sort').value,
     source_notes: document.getElementById('cpr-notes').value,
     is_active: document.getElementById('cpr-active').checked
   }) })
+}
+
+// ═══ MENTORING ════════════════════════════════════
+// Two-week mentorship: a mentor SC helps a mentee SC at another studio reach
+// one measurable goal. The MENTEE confirms each step on their dashboard (My
+// Points); home office approves here, which pays the MENTOR (once per step)
+// using the mentoring_calls / _actions / _goal rules (Earning Rules).
+const CP_GOALS = {
+  certification: 'Pass a demonstration or hospitality certification',
+  opening_closing: 'Independently complete opening and closing correctly',
+  event_fill: 'Improve event fill (e.g. 50% → 70%)',
+  influencer_visit: 'Secure an influencer visit',
+  party_followup: 'Improve party follow-up and generate two bookings',
+  community_reports: 'Submit community-building reports consistently for two weeks',
+  other: 'Other measurable goal'
+}
+const CP_STEP_LABELS = { calls: 'All four calls completed', actions: 'Agreed actions completed', goal: '30-day goal reached' }
+const CP_STEP_STATUS = { pending: 'Not confirmed yet', confirmed: 'Confirmed by mentee — needs approval', approved: 'Approved', returned: 'Sent back to mentee' }
+
+function cpMentoringPoints(step) {
+  const r = (cpData.rules || []).find(x => x.code === 'mentoring_' + step)
+  return r ? (Number(r.flat_points) || Number(r.points_per_unit) || 0) : 0
+}
+function cpRenderMentoring() {
+  const all = cpData.mentorships || []
+  const max = ['calls', 'actions', 'goal'].reduce((s, k) => s + cpMentoringPoints(k), 0)
+  const waiting = []
+  all.forEach(m => (m.community_mentorship_steps || []).forEach(st => { if (m.status === 'active' && st.status === 'confirmed') waiting.push({ m, st }) }))
+  let html = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:0.75rem">
+      <div class="cp-note" style="margin:0;max-width:760px">A mentor SC helps a mentee SC at another studio reach one measurable goal, chosen before the first call.
+        The <strong>mentee confirms</strong> each step on their dashboard (My Points); you <strong>approve</strong> here, which pays the mentor —
+        ${['calls', 'actions', 'goal'].map(k => `${cpEsc(CP_STEP_LABELS[k].toLowerCase())} ${cpFmt(cpMentoringPoints(k))}`).join(' · ')}
+        (max ${cpFmt(max)} ≈ ${cpDollars(max)}). Each step pays once.</div>
+      <button class="btn btn-primary" onclick="cpOpenMentorshipModal()">+ Start a mentorship</button>
+    </div>`
+  if (!(cpData.categories || []).length && !all.length) {
+    html += `<div class="cp-note">Run <strong>community_points_categories_mentoring.sql</strong> first.</div>`
+  }
+
+  html += `<h4 style="margin:1rem 0 0.5rem;font-size:14px">Waiting for your approval${waiting.length ? ` (${waiting.length})` : ''}</h4>`
+  if (!waiting.length) html += '<div class="cp-muted" style="margin-bottom:0.75rem">Nothing to approve right now.</div>'
+  else html += `<div class="users-table-wrap"><table class="users-table"><thead><tr><th>Mentor → Mentee</th><th>Goal</th><th>Step</th><th>How the mentee says it was verified</th><th></th></tr></thead><tbody>
+    ${waiting.map(({ m, st }) => `<tr>
+      <td style="font-size:13px">${cpEsc(cpRoleLabel(m.mentor_role_id))}<div class="cp-muted">→ ${cpEsc(cpRoleLabel(m.mentee_role_id))}</div></td>
+      <td style="font-size:12px">${cpEsc(m.goal_detail)}</td>
+      <td style="font-size:12px;white-space:nowrap">${cpEsc(CP_STEP_LABELS[st.step])}<div class="cp-muted">${cpFmt(cpMentoringPoints(st.step))} pts</div></td>
+      <td style="font-size:12px">${cpEsc(st.confirm_note || '')}</td>
+      <td style="white-space:nowrap"><button class="btn btn-primary" style="font-size:11px" onclick="cpReviewStep('${m.id}','${st.step}','approve')">Approve</button>
+        <button class="btn" style="font-size:11px" onclick="cpReviewStep('${m.id}','${st.step}','return')">Send back</button></td></tr>`).join('')}
+    </tbody></table></div>`
+
+  const active = all.filter(m => m.status === 'active')
+  const done = all.filter(m => m.status !== 'active')
+  const card = m => {
+    const steps = ['calls', 'actions', 'goal'].map(k => {
+      const st = (m.community_mentorship_steps || []).find(x => x.step === k) || { status: 'pending' }
+      const icon = st.status === 'approved' ? '✅' : st.status === 'confirmed' ? '🟡' : st.status === 'returned' ? '↩️' : '⬜'
+      const canAct = m.status === 'active' && st.status !== 'approved'
+      return `<div style="display:flex;justify-content:space-between;gap:1rem;align-items:flex-start;padding:6px 0;border-top:1px solid #f0f0f0">
+        <div style="font-size:13px">${icon} ${cpEsc(CP_STEP_LABELS[k])} <span class="cp-muted">· ${cpFmt(st.points_awarded || cpMentoringPoints(k))} pts</span>
+          <div class="cp-muted">${cpEsc(CP_STEP_STATUS[st.status] || st.status)}${st.confirm_note ? ' — mentee: “' + cpEsc(st.confirm_note) + '”' : ''}${st.review_note ? ' — you: “' + cpEsc(st.review_note) + '”' : ''}</div></div>
+        ${canAct ? `<div style="white-space:nowrap"><button class="btn" style="font-size:11px" onclick="cpReviewStep('${m.id}','${k}','approve')">Approve</button>
+          ${st.status === 'confirmed' ? `<button class="btn" style="font-size:11px" onclick="cpReviewStep('${m.id}','${k}','return')">Send back</button>` : ''}</div>` : ''}
+      </div>`
+    }).join('')
+    const earned = (m.community_mentorship_steps || []).reduce((s, x) => s + (x.status === 'approved' ? (x.points_awarded || 0) : 0), 0)
+    return `<div class="cp-card" style="${m.status === 'active' ? '' : 'opacity:0.7'}">
+      <div style="display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+        <div><div style="font-size:14px;font-weight:600">${cpEsc(cpRoleLabel(m.mentor_role_id))} <span class="cp-muted">mentoring</span> ${cpEsc(cpRoleLabel(m.mentee_role_id))}</div>
+          <div style="font-size:13px;margin-top:2px">🎯 ${cpEsc(m.goal_detail)} <span class="cp-muted">· ${cpEsc(CP_GOALS[m.goal_type] || m.goal_type)}</span></div>
+          ${m.agreed_actions ? `<div class="cp-muted" style="margin-top:2px">Agreed actions: ${cpEsc(m.agreed_actions)}</div>` : ''}
+          <div class="cp-muted" style="margin-top:2px">Started ${cpDateLabel(m.start_date + 'T12:00:00')} · calls by ${cpDateLabel(m.calls_end_date + 'T12:00:00')} · 30-day goal by ${cpDateLabel(m.goal_date + 'T12:00:00')}</div></div>
+        <div style="text-align:right"><div style="font-weight:700">${cpFmt(earned)} / ${cpFmt(max)} pts</div>
+          <div class="cp-muted">${m.status === 'active' ? 'Active' : m.status === 'completed' ? 'Completed' : 'Cancelled'}</div>
+          ${m.status === 'active' ? `<button class="btn" style="font-size:11px;margin-top:4px;color:#c0392b;border-color:#f5c6cb" onclick="cpSetMentorshipStatus('${m.id}','cancelled')">Cancel</button>` : ''}</div>
+      </div>
+      <div style="margin-top:0.5rem">${steps}</div></div>`
+  }
+  html += `<h4 style="margin:1.25rem 0 0.5rem;font-size:14px">Active mentorships${active.length ? ` (${active.length})` : ''}</h4>`
+  html += active.length ? active.map(card).join('') : '<div class="cp-muted">None yet.</div>'
+  if (done.length) html += `<h4 style="margin:1.25rem 0 0.5rem;font-size:14px">Completed and cancelled</h4>` + done.map(card).join('')
+  return html
+}
+
+function cpOpenMentorshipModal() {
+  const opts = cpCurrentRoleOptions('Choose…')
+  const goalOpts = Object.keys(CP_GOALS).map(k => `<option value="${k}">${cpEsc(CP_GOALS[k])}</option>`).join('')
+  const html = `
+    <div style="display:flex;gap:1rem;flex-wrap:wrap">
+      <div class="modal-field" style="flex:1;min-width:220px"><label>Mentor (earns the points)</label><select id="cpm-mentor">${opts}</select></div>
+      <div class="modal-field" style="flex:1;min-width:220px"><label>Mentee (another studio's SC)</label><select id="cpm-mentee">${opts}</select></div>
+    </div>
+    <div class="modal-field"><label>Goal — chosen before the first call</label><select id="cpm-goaltype">${goalOpts}</select></div>
+    <div class="modal-field"><label>The measurable target</label><input id="cpm-goal" placeholder="e.g. Event fill 50% → 70% by Nov 15"></div>
+    <div class="modal-field"><label>Agreed actions (optional)</label><textarea id="cpm-actions" placeholder="What the mentee will do between calls"></textarea></div>
+    <div style="display:flex;gap:1rem;flex-wrap:wrap">
+      <div class="modal-field" style="width:180px"><label>Start date</label><input id="cpm-start" type="date" value="${cpData.today}"></div>
+      <div class="modal-field" style="flex:1;min-width:200px"><label>Notes (optional)</label><input id="cpm-notes"></div>
+    </div>
+    <div class="cp-note" style="margin:0">Calls run two weeks from the start date; the goal is checked at 30 days. The result must be confirmed through dashboard data, a certification or the coordinator — not just the mentor saying it worked.</div>`
+  cpOpenModal('Start a mentorship', 'Mentor earns up to ' + cpFmt(['calls', 'actions', 'goal'].reduce((s, k) => s + cpMentoringPoints(k), 0)) + ' pts', html, async () => {
+    const mentor = document.getElementById('cpm-mentor').value, mentee = document.getElementById('cpm-mentee').value
+    if (!mentor || !mentee) throw new Error('Choose the mentor and the mentee.')
+    if (mentor === mentee) throw new Error('The mentor and mentee have to be different people.')
+    await cpRequest('create_mentorship', { mentorship: {
+      mentor_role_id: mentor, mentee_role_id: mentee,
+      goal_type: document.getElementById('cpm-goaltype').value,
+      goal_detail: document.getElementById('cpm-goal').value,
+      agreed_actions: document.getElementById('cpm-actions').value,
+      start_date: document.getElementById('cpm-start').value,
+      notes: document.getElementById('cpm-notes').value
+    } })
+  })
+}
+
+async function cpReviewStep(id, step, decision) {
+  const m = (cpData.mentorships || []).find(x => x.id === id)
+  const st = m && (m.community_mentorship_steps || []).find(x => x.step === step)
+  if (!m || !st) return
+  let note = ''
+  if (decision === 'return') {
+    note = prompt(`Send "${CP_STEP_LABELS[step]}" back to the mentee — what's missing?`)
+    if (note === null || !note.trim()) return
+  } else {
+    const pts = cpFmt(cpMentoringPoints(step))
+    if (st.status !== 'confirmed') {
+      note = prompt(`The mentee hasn't confirmed this step yet. How did you verify "${CP_STEP_LABELS[step]}"? (${pts} pts to ${cpRoleLabel(m.mentor_role_id)})`)
+      if (note === null || !note.trim()) return
+    } else if (!confirm(`Approve "${CP_STEP_LABELS[step]}"? ${pts} points go to ${cpRoleLabel(m.mentor_role_id)}.`)) return
+  }
+  try {
+    const res = await cpRequest('review_mentorship_step', { mentorship_id: id, step, decision, note })
+    if (res && res.warning) alert(res.warning)
+    await cpRefresh()
+  } catch (e) { alert(e.message) }
+}
+
+async function cpSetMentorshipStatus(id, status) {
+  if (status === 'cancelled' && !confirm('Cancel this mentorship? Points already approved stay with the mentor; nothing more can be approved.')) return
+  try { await cpRequest('set_mentorship_status', { id, status }); await cpRefresh() } catch (e) { alert(e.message) }
+}
+
+// ── Categories ──────────────────────────────────
+function cpCategory(code) { return (cpData.categories || []).find(c => c.code === code) }
+function cpCategoryLabel(code) { const c = cpCategory(code); return c ? `${c.emoji ? c.emoji + ' ' : ''}${c.name}` : 'Uncategorised' }
+function cpOpenCategoriesModal() {
+  const cats = (cpData.categories || []).slice().sort((a, b) => a.sort_order - b.sort_order)
+  const row = c => `<div class="cpc-row" data-code="${cpEsc(c.code || '')}" style="display:flex;gap:0.5rem;margin-bottom:6px">
+      <input class="cpc-emoji" value="${cpEsc(c.emoji || '')}" placeholder="🙂" style="width:56px">
+      <input class="cpc-name" value="${cpEsc(c.name || '')}" placeholder="Category name" style="flex:1">
+      <input class="cpc-sort" type="number" value="${cpEsc(c.sort_order == null ? '' : c.sort_order)}" style="width:80px" title="Order"></div>`
+  const html = `<div class="cp-note" style="margin-top:0">Rename or reorder (lower numbers first). To move a rule, edit the rule and pick its category.</div>
+    <div id="cpc-list">${cats.map(row).join('')}</div>
+    <button class="btn" style="font-size:11px" onclick="document.getElementById('cpc-list').insertAdjacentHTML('beforeend', ${cpEsc(JSON.stringify(row({ sort_order: (cats.length + 1) * 10 })))})">+ Add category</button>`
+  cpOpenModal('Point categories', 'Groups for ways to earn and points', html, async () => {
+    for (const el of document.querySelectorAll('#cpc-list .cpc-row')) {
+      const name = el.querySelector('.cpc-name').value.trim()
+      if (!name) continue
+      await cpRequest('save_category', { category: {
+        code: el.dataset.code || null, name,
+        emoji: el.querySelector('.cpc-emoji').value.trim(),
+        sort_order: el.querySelector('.cpc-sort').value
+      } })
+    }
+  })
 }
 
 // ═══ PRIZES ═══════════════════════════════════════
