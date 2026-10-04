@@ -11878,6 +11878,71 @@ function cpCurrentRoleOptions(placeholder) {
     `<option value="${r.id}">${cpEsc(getStudioName(r.studio_id))} — ${cpEsc(cpStaffName(r.staff_profile_id))}</option>`).join('')
 }
 
+// ── $ ⇄ points ──────────────────────────────────
+// What one point is worth, for deciding what rules and challenges should pay.
+// Default: MacBook Neo $1,100 = 500,000 pts → $0.0022 a point. Changeable on
+// the Earning Rules screen; remembered in this browser only (it's a planning
+// aid — nothing about scoring uses it).
+const CP_POINT_VALUE_DEFAULT = 1100 / 500000
+function cpPointValue() {
+  try {
+    const v = Number(localStorage.getItem('cp_point_value'))
+    if (v > 0) return v
+  } catch (e) { /* storage blocked → default */ }
+  return CP_POINT_VALUE_DEFAULT
+}
+function cpSetPointValue(raw) {
+  const v = Number(raw)
+  if (!(v > 0)) return
+  try { localStorage.setItem('cp_point_value', String(v)) } catch (e) {}
+  cpRender()
+}
+function cpMoney(n) {
+  const v = Number(n) || 0
+  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+function cpDollars(points) { return cpMoney((Number(points) || 0) * cpPointValue()) }
+function cpPointsFor(dollars) { return Math.round((Number(dollars) || 0) / cpPointValue()) }
+
+// Same wording as cpDescribeRule, in dollars.
+function cpDescribeRuleDollars(r) {
+  if (r.calc_method === 'threshold') {
+    const tiers = (r.tiers || []).slice().sort((a, b) => a.at - b.at)
+    return tiers.map((t, i) => `${i ? '+' : ''}${cpDollars(t.points)} at ${t.at}${cpUnitSuffix(r)}`).join(', ')
+  }
+  if (r.calc_method === 'per_unit') return `${cpDollars(r.points_per_unit)} each${r.monthly_cap ? ` (max ${cpDollars(r.monthly_cap)}/month)` : ''}`
+  if (r.calc_method === 'flat') return cpDollars(r.flat_points)
+  if (r.calc_method === 'milestone') return (r.milestones || []).map((m, i) => `${i ? '+' : ''}${cpDollars(m.points)} every ${cpFmt(m.every)}`).join(', ')
+  return ''
+}
+
+function cpConvDollars(raw) {
+  const out = document.getElementById('cpx-points-out')
+  if (out) out.textContent = raw === '' ? '' : `= ${cpFmt(cpPointsFor(raw))} points`
+}
+function cpConvPoints(raw) {
+  const out = document.getElementById('cpx-dollars-out')
+  if (out) out.textContent = raw === '' ? '' : `= ${cpDollars(raw)}`
+}
+function cpConverterHtml() {
+  const v = cpPointValue()
+  const perDollar = Math.round(1 / v)
+  return `
+    <div class="cp-card" style="margin-bottom:1rem">
+      <div style="font-size:14px;font-weight:600;margin-bottom:0.25rem">💲 Dollars ⇄ points</div>
+      <div class="cp-note" style="margin-top:0">Use this to decide what a rule or challenge should be worth. It doesn't change any scoring.</div>
+      <div class="toolbar" style="flex-wrap:wrap;gap:1rem;align-items:flex-end">
+        <div class="toolbar-group"><label>1 point is worth</label>
+          <div style="display:flex;align-items:center;gap:4px">$<input type="number" step="0.0001" min="0.0001" value="${v}" style="width:110px" onchange="cpSetPointValue(this.value)"></div>
+          <div class="cp-muted">$1 = ${cpFmt(perDollar)} pts${Math.abs(v - CP_POINT_VALUE_DEFAULT) < 1e-12 ? ' · MacBook Neo $1,100 = 500,000 pts' : ` · <a href="#" onclick="cpSetPointValue(${CP_POINT_VALUE_DEFAULT});return false">reset</a>`}</div></div>
+        <div class="toolbar-group"><label>Dollars → points</label>
+          <div style="display:flex;align-items:center;gap:6px">$<input type="number" step="0.01" min="0" placeholder="25" style="width:100px" oninput="cpConvDollars(this.value)"><span id="cpx-points-out" style="font-weight:600;font-size:13px"></span></div></div>
+        <div class="toolbar-group"><label>Points → dollars</label>
+          <div style="display:flex;align-items:center;gap:6px"><input type="number" step="1" min="0" placeholder="10000" style="width:120px" oninput="cpConvPoints(this.value)"><span id="cpx-dollars-out" style="font-weight:600;font-size:13px"></span></div></div>
+      </div>
+    </div>`
+}
+
 // ── Rule helpers ────────────────────────────────
 const CP_METHODS = { threshold: 'Tiers (stacking)', per_unit: 'Points per item', flat: 'Fixed points', milestone: 'Milestones (repeating)' }
 const CP_PERIODS = { weekly: 'Weekly', monthly: 'Monthly', cumulative: 'Running total' }
@@ -12099,11 +12164,12 @@ function cpRenderRules() {
     const m = cpRuleMaxMonth(r)
     if (m === null) uncapped.push(r.name); else maxMonth += m
   })
-  let html = `
+  let html = cpConverterHtml() + `
     <div class="cp-summary">
       <div class="cp-stat"><div class="cp-stat-label">Active rules</div><div class="cp-stat-value">${rules.filter(r => r.is_active).length} / ${rules.length}</div>
         <div class="cp-stat-sub">Inactive rules earn nothing and don't show on the dashboard</div></div>
       <div class="cp-stat"><div class="cp-stat-label">Max per month (one studio)</div><div class="cp-stat-value">~${cpFmt(Math.round(maxMonth))}</div>
+        <div class="cp-stat-sub">≈ ${cpDollars(maxMonth)} a month · ≈ ${cpDollars(maxMonth * 12)} a year</div>
         <div class="cp-stat-sub">${uncapped.length ? 'Plus uncapped: ' + cpEsc(uncapped.join(', ')) : 'Every active rule is capped'}</div></div>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;gap:1rem;flex-wrap:wrap">
@@ -12115,7 +12181,7 @@ function cpRenderRules() {
   rules.forEach(r => {
     html += `<tr class="${r.is_active ? '' : 'cp-row-off'}">
       <td><div style="font-size:13px;font-weight:500">${cpEsc(r.name)}</div><div class="cp-muted">${cpEsc(r.code)}${r.source_notes ? ' · ' + cpEsc(r.source_notes) : ''}</div></td>
-      <td style="font-size:13px">${cpEsc(cpDescribeRule(r))}</td>
+      <td style="font-size:13px">${cpEsc(cpDescribeRule(r))}<div class="cp-muted">≈ ${cpEsc(cpDescribeRuleDollars(r))}</div></td>
       <td style="font-size:12px">${cpEsc(CP_PERIODS[r.period] || r.period)}<div class="cp-muted">${r.source === 'manual' ? 'Entered by home office' : 'Automatic'}</div></td>
       <td style="font-size:12px">${r.waiting_months ? r.waiting_months + ' month' + (r.waiting_months === 1 ? '' : 's') : '—'}</td>
       <td>${r.is_active ? '<span class="cp-pill cp-pill-result">On</span>' : '<span class="cp-pill cp-pill-off">Off</span>'}</td>
@@ -12173,6 +12239,11 @@ function cpOpenRuleModal(code) {
       <div class="modal-field" style="flex:1;min-width:200px"><label>Notes (optional)</label><input id="cpr-notes" value="${cpEsc(v.source_notes || '')}"></div>
     </div>
     <label class="cp-check"><input type="checkbox" id="cpr-active" ${v.is_active ? 'checked' : ''}> Active (earns points and shows on the dashboard)</label>
+    <div class="toolbar" style="margin-top:0.5rem;gap:0.5rem;align-items:center">
+      <span style="font-size:12px;color:#888">Want it worth</span> $<input type="number" step="0.01" min="0" placeholder="5" style="width:90px" oninput="cpConvDollars(this.value)">
+      <span id="cpx-points-out" style="font-size:12px;font-weight:600"></span>
+      <span class="cp-muted">(1 pt = ${cpMoney(cpPointValue()).replace(/\.00$/, '')} — ${cpFmt(Math.round(1 / cpPointValue()))} pts per $1)</span>
+    </div>
     <div id="cpr-preview" class="cp-note" style="margin-top:0.75rem"></div>`
   cpOpenModal(isNew ? 'Add earning rule' : 'Edit earning rule', isNew ? 'New rule' : 'Changes apply from this month', html, () => cpSaveRule(isNew))
   cpRuleMethodChanged()
@@ -12215,9 +12286,11 @@ function cpRulePreview() {
   if (!el) return
   const r = cpRuleFromForm()
   const per = r.period === 'weekly' ? ' each week' : r.period === 'monthly' ? ' each month' : ''
-  el.innerHTML = `Shows on the dashboard as: <strong>${cpEsc(cpDescribeRule(Object.assign({}, r, {
+  const norm = Object.assign({}, r, {
     points_per_unit: Number(r.points_per_unit) || 0, flat_points: Number(r.flat_points) || 0, monthly_cap: Number(r.monthly_cap) || null
-  })))}${r.calc_method === 'threshold' || r.calc_method === 'flat' ? cpEsc(per) : ''}</strong>`
+  })
+  el.innerHTML = `Shows on the dashboard as: <strong>${cpEsc(cpDescribeRule(norm))}${r.calc_method === 'threshold' || r.calc_method === 'flat' ? cpEsc(per) : ''}</strong>
+    <div class="cp-muted" style="margin-top:3px">Worth about ${cpEsc(cpDescribeRuleDollars(norm))}</div>`
 }
 async function cpSaveRule(isNew) {
   const code = document.getElementById('cpr-code').value.trim()
@@ -12247,7 +12320,7 @@ function cpRenderPrizes() {
     html += `<div class="cp-card" style="${t.is_active ? '' : 'opacity:0.55'}">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;margin-bottom:0.75rem">
         <div><div style="font-size:15px;font-weight:600">${cpEsc(t.name)} ${t.is_active ? '' : '<span class="cp-pill cp-pill-off">Hidden</span>'}</div>
-          <div style="font-size:13px;color:#888">Tier ${t.tier_number} · <strong style="color:#1a1a1a">${cpFmt(t.points_cost)} points</strong></div></div>
+          <div style="font-size:13px;color:#888">Tier ${t.tier_number} · <strong style="color:#1a1a1a">${cpFmt(t.points_cost)} points</strong> <span class="cp-muted">≈ ${cpDollars(t.points_cost)} of prizes</span></div></div>
         <div style="display:flex;gap:6px"><button class="btn" onclick="cpOpenTierModal('${t.id}')">Edit Tier</button>
           <button class="btn" onclick="cpOpenPrizeModal(null,'${t.id}')">+ Add Prize</button></div>
       </div>`
@@ -12430,7 +12503,9 @@ function cpRenderWallets() {
     <div class="cp-note" style="margin-top:0">For corrections or one-off recognition. Use a negative number to remove points. Every adjustment is logged with your name and note.</div>
     <div class="toolbar" style="flex-wrap:wrap;gap:0.75rem">
       <div class="toolbar-group"><label>Studio</label><select id="cpa-role" onchange="cpAdjRoleChanged()" style="min-width:220px">${cpCurrentRoleOptions()}</select></div>
-      <div class="toolbar-group"><label>Points</label><input id="cpa-points" type="number" step="1" placeholder="e.g. 100 or -50" style="width:130px"></div>
+      <div class="toolbar-group"><label>Points</label><input id="cpa-points" type="number" step="1" placeholder="e.g. 10000 or -5000" style="width:150px"
+        oninput="document.getElementById('cpa-dollars').textContent = this.value ? '≈ ' + cpDollars(this.value) : ''"></div>
+      <div class="toolbar-group"><label>&nbsp;</label><div id="cpa-dollars" class="cp-muted" style="padding:6px 0"></div></div>
     </div>
     <div class="toolbar" style="margin-top:0.75rem">
       <div class="toolbar-group" style="flex:1"><label>Note</label><input id="cpa-note" placeholder="Required — why?" style="width:100%"></div>
