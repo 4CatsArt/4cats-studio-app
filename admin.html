@@ -11934,6 +11934,124 @@ function cpConverterHtml() {
     </div>`
 }
 
+// ── Estimate a month ────────────────────────────
+// Type what a studio might do in a month; see the points each active rule
+// would give, the total in points and dollars, and how long that pace takes
+// to reach each prize tier. Uses the same maths as the scoring (stacking
+// tiers, caps, milestones). Planning only — nothing is saved.
+function cpEstimateRules() {
+  return (cpData.rules || []).filter(r => r.is_active).slice().sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
+}
+function cpEstimateHtml() {
+  const rules = cpEstimateRules()
+  if (!rules.length) return ''
+  const inp = 'width:80px;padding:5px 7px;font-size:13px'
+  const rows = rules.map(r => {
+    let input = ''
+    if (r.calc_method === 'threshold') {
+      const unit = cpUnitSuffix(r).trim()
+      input = `<input type="number" min="0" step="any" id="cpe-${r.code}" style="${inp}" oninput="cpEstimateCalc()"> ${cpEsc(unit === '%' ? '%' : unit)}`
+        + (r.period === 'weekly' ? ` × <input type="number" min="0" max="5" step="1" id="cpe-${r.code}-n" value="4" style="width:56px;padding:5px 7px;font-size:13px" oninput="cpEstimateCalc()"> weeks` : '')
+    } else if (r.calc_method === 'per_unit') {
+      input = `<input type="number" min="0" step="1" id="cpe-${r.code}" style="${inp}" oninput="cpEstimateCalc()"> ${cpEsc(r.unit_label || 'times')}`
+    } else if (r.calc_method === 'flat') {
+      input = `<label class="cp-check" style="margin:0"><input type="checkbox" id="cpe-${r.code}" onchange="cpEstimateCalc()"> earned it</label>`
+    } else if (r.calc_method === 'milestone') {
+      input = `<input type="number" min="0" step="1" id="cpe-${r.code}" style="${inp}" oninput="cpEstimateCalc()"> ${cpEsc(r.unit_label || 'growth')} this month`
+    }
+    return `<tr><td style="font-size:13px;font-weight:500">${cpEsc(r.name)}<div class="cp-muted">${cpEsc(cpDescribeRule(r))}</div></td>
+      <td style="white-space:nowrap;font-size:13px">${input}</td>
+      <td style="text-align:right;font-weight:600;white-space:nowrap" id="cpe-${r.code}-out">—</td></tr>`
+  }).join('')
+  return `
+    <div class="cp-card" style="margin-bottom:1rem">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:0.5rem">
+        <div style="font-size:14px;font-weight:600">🧮 Estimate a month</div>
+        <div style="display:flex;gap:0.5rem">
+          <button class="btn" style="font-size:11px" onclick="cpEstimatePreset('typical')">Typical month</button>
+          <button class="btn" style="font-size:11px" onclick="cpEstimatePreset('strong')">Strong month</button>
+          <button class="btn" style="font-size:11px" onclick="cpEstimatePreset('clear')">Clear</button>
+        </div>
+      </div>
+      <div class="cp-note" style="margin-top:0">What might one studio do in a month? Only rules that are switched on are listed. Planning only — nothing is saved.</div>
+      <div class="users-table-wrap"><table class="users-table"><thead><tr><th>Rule</th><th>This month</th><th style="text-align:right">Points</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
+      <div id="cpe-total" style="margin-top:0.75rem"></div>
+    </div>`
+}
+// Points one rule gives for what's typed in.
+function cpEstimateRulePoints(r) {
+  const el = document.getElementById('cpe-' + r.code)
+  if (!el) return 0
+  if (r.calc_method === 'flat') return el.checked ? (Number(r.flat_points) || 0) : 0
+  const v = Number(el.value) || 0
+  if (r.calc_method === 'threshold') {
+    const once = (r.tiers || []).filter(t => v >= Number(t.at)).reduce((sum, t) => sum + (Number(t.points) || 0), 0)
+    if (r.period !== 'weekly') return once
+    const n = Math.max(0, Number((document.getElementById('cpe-' + r.code + '-n') || {}).value) || 0)
+    return once * n
+  }
+  if (r.calc_method === 'per_unit') {
+    const pts = Math.max(0, Math.floor(v)) * (Number(r.points_per_unit) || 0)
+    return r.monthly_cap ? Math.min(pts, Number(r.monthly_cap)) : pts
+  }
+  if (r.calc_method === 'milestone') {
+    return (r.milestones || []).reduce((sum, m) => sum + Math.floor(Math.max(0, v) / (Number(m.every) || Infinity)) * (Number(m.points) || 0), 0)
+  }
+  return 0
+}
+function cpEstimateCalc() {
+  let total = 0
+  cpEstimateRules().forEach(r => {
+    const pts = cpEstimateRulePoints(r)
+    total += pts
+    const out = document.getElementById('cpe-' + r.code + '-out')
+    if (out) out.innerHTML = pts ? `${cpFmt(pts)}<div class="cp-muted" style="font-weight:400">${cpDollars(pts)}</div>` : '—'
+  })
+  const box = document.getElementById('cpe-total')
+  if (!box) return
+  if (!total) { box.innerHTML = '<div class="cp-muted">Fill in a few lines to see the total.</div>'; return }
+  const tiers = (cpData.tiers || []).filter(t => t.is_active).slice().sort((a, b) => a.points_cost - b.points_cost)
+  const pace = tiers.map(t => {
+    const months = Math.ceil(t.points_cost / total)
+    const label = months <= 1 ? 'in 1 month' : months < 24 ? `in ${months} months` : `in about ${Math.round(months / 12)} years`
+    return `<div style="display:flex;justify-content:space-between;gap:1rem;font-size:13px;padding:3px 0"><span>${cpEsc(t.name)} · ${cpFmt(t.points_cost)} pts</span><span style="font-weight:600">${label}</span></div>`
+  }).join('')
+  box.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:1rem;flex-wrap:wrap;padding:0.75rem 0;border-top:1px solid #eee">
+      <div style="font-size:14px;font-weight:600">Total for the month</div>
+      <div style="font-size:22px;font-weight:700">${cpFmt(total)} pts <span style="font-size:14px;color:#888;font-weight:500">≈ ${cpDollars(total)} · ${cpDollars(total * 12)} a year</span></div>
+    </div>
+    ${pace ? `<div class="cp-muted" style="margin-bottom:4px">At this pace, a coordinator reaches…</div>${pace}` : ''}`
+}
+// Typical = each rule's first tier (1 booking/visit); Strong = its top tier
+// (enough bookings to hit the cap). Clear empties everything.
+function cpEstimatePreset(kind) {
+  cpEstimateRules().forEach(r => {
+    const el = document.getElementById('cpe-' + r.code)
+    if (!el) return
+    if (kind === 'clear') {
+      if (r.calc_method === 'flat') el.checked = false; else el.value = ''
+      return
+    }
+    const strong = kind === 'strong'
+    if (r.calc_method === 'threshold') {
+      const ats = (r.tiers || []).map(t => Number(t.at)).sort((a, b) => a - b)
+      el.value = ats.length ? (strong ? ats[ats.length - 1] : ats[0]) : ''
+      const n = document.getElementById('cpe-' + r.code + '-n'); if (n) n.value = 4
+    } else if (r.calc_method === 'per_unit') {
+      const toCap = r.monthly_cap && r.points_per_unit ? Math.ceil(r.monthly_cap / r.points_per_unit) : 3
+      el.value = strong ? toCap : 1
+    } else if (r.calc_method === 'flat') {
+      el.checked = strong
+    } else if (r.calc_method === 'milestone') {
+      const step = Math.min(...(r.milestones || []).map(m => Number(m.every) || Infinity))
+      el.value = strong && isFinite(step) ? step : 0
+    }
+  })
+  cpEstimateCalc()
+}
+
 // ── Rule helpers ────────────────────────────────
 const CP_METHODS = { threshold: 'Tiers (stacking)', per_unit: 'Points per item', flat: 'Fixed points', milestone: 'Milestones (repeating)' }
 const CP_PERIODS = { weekly: 'Weekly', monthly: 'Monthly', cumulative: 'Running total' }
@@ -12155,7 +12273,8 @@ function cpRenderRules() {
     const m = cpRuleMaxMonth(r)
     if (m === null) uncapped.push(r.name); else maxMonth += m
   })
-  let html = cpConverterHtml() + `
+  setTimeout(cpEstimateCalc, 0)
+  let html = cpConverterHtml() + cpEstimateHtml() + `
     <div class="cp-summary">
       <div class="cp-stat"><div class="cp-stat-label">Active rules</div><div class="cp-stat-value">${rules.filter(r => r.is_active).length} / ${rules.length}</div>
         <div class="cp-stat-sub">Inactive rules earn nothing and don't show on the dashboard</div></div>
