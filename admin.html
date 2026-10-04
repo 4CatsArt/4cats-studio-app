@@ -11860,6 +11860,13 @@ function cpStaff(id) { return (cpData.staff || []).find(s => s.id === id) }
 function cpStaffName(id) { const s = cpStaff(id); return s ? (s.display_name || s.nickname || 'Unnamed') : 'Unknown person' }
 function cpPrize(id) { return (cpData.prizes || []).find(p => p.id === id) }
 function cpTier(id) { return (cpData.tiers || []).find(t => t.id === id) }
+// What a prize costs: its own points if set, otherwise its tier's.
+function cpPrizeCost(p) {
+  if (!p) return 0
+  if (p.points_cost != null && p.points_cost !== '') return Number(p.points_cost)
+  const t = cpTier(p.tier_id)
+  return t ? Number(t.points_cost) : 0
+}
 function cpRole(id) { return (cpData.roles || []).find(r => r.id === id) }
 // "Main Street · Camilla" — wallets belong to a coordinator role, labelled by studio
 function cpRoleLabel(id) {
@@ -12011,11 +12018,15 @@ function cpEstimateCalc() {
   const box = document.getElementById('cpe-total')
   if (!box) return
   if (!total) { box.innerHTML = '<div class="cp-muted">Fill in a few lines to see the total.</div>'; return }
-  const tiers = (cpData.tiers || []).filter(t => t.is_active).slice().sort((a, b) => a.points_cost - b.points_cost)
-  const pace = tiers.map(t => {
-    const months = Math.ceil(t.points_cost / total)
+  // Each prize at its own cost (or its tier's); empty tiers by the tier.
+  const goals = (cpData.tiers || []).filter(t => t.is_active).flatMap(t => {
+    const prizes = (cpData.prizes || []).filter(p => p.tier_id === t.id && p.is_active)
+    return prizes.length ? prizes.map(p => ({ name: p.name, cost: cpPrizeCost(p) })) : [{ name: t.name, cost: Number(t.points_cost) }]
+  }).sort((a, b) => a.cost - b.cost)
+  const pace = goals.map(g => {
+    const months = Math.ceil(g.cost / total)
     const label = months <= 1 ? 'in 1 month' : months < 24 ? `in ${months} months` : `in about ${Math.round(months / 12)} years`
-    return `<div style="display:flex;justify-content:space-between;gap:1rem;font-size:13px;padding:3px 0"><span>${cpEsc(t.name)} · ${cpFmt(t.points_cost)} pts</span><span style="font-weight:600">${label}</span></div>`
+    return `<div style="display:flex;justify-content:space-between;gap:1rem;font-size:13px;padding:3px 0"><span>${cpEsc(g.name)} · ${cpFmt(g.cost)} pts</span><span style="font-weight:600">${label}</span></div>`
   }).join('')
   box.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:baseline;gap:1rem;flex-wrap:wrap;padding:0.75rem 0;border-top:1px solid #eee">
@@ -12431,17 +12442,18 @@ function cpRenderPrizes() {
     html += `<div class="cp-card" style="${t.is_active ? '' : 'opacity:0.55'}">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;margin-bottom:0.75rem">
         <div><div style="font-size:15px;font-weight:600">${cpEsc(t.name)} ${t.is_active ? '' : '<span class="cp-pill cp-pill-off">Hidden</span>'}</div>
-          <div style="font-size:13px;color:#888">Tier ${t.tier_number} · <strong style="color:#1a1a1a">${cpFmt(t.points_cost)} points</strong> <span class="cp-muted">≈ ${cpDollars(t.points_cost)} of prizes</span></div></div>
+          <div style="font-size:13px;color:#888">Tier ${t.tier_number} · <strong style="color:#1a1a1a">${cpFmt(t.points_cost)} points</strong> <span class="cp-muted">≈ ${cpDollars(t.points_cost)} · prizes can have their own points</span></div></div>
         <div style="display:flex;gap:6px"><button class="btn" onclick="cpOpenTierModal('${t.id}')">Edit Tier</button>
           <button class="btn" onclick="cpOpenPrizeModal(null,'${t.id}')">+ Add Prize</button></div>
       </div>`
     if (!prizes.length) html += '<div class="cp-muted" style="padding:0.5rem 0">No prizes in this tier yet.</div>'
     else {
-      html += '<table class="users-table"><thead><tr><th style="width:56px"></th><th>Prize</th><th>Stock</th><th>Status</th><th></th></tr></thead><tbody>'
+      html += '<table class="users-table"><thead><tr><th style="width:56px"></th><th>Prize</th><th>Points</th><th>Stock</th><th>Status</th><th></th></tr></thead><tbody>'
       prizes.forEach(p => {
         html += `<tr class="${p.is_active ? '' : 'cp-row-off'}">
           <td>${p.image_url ? `<img src="${cpEsc(p.image_url)}" style="width:40px;height:40px;object-fit:cover;border-radius:6px" onerror="this.style.display='none'">` : ''}</td>
           <td><div style="font-weight:500;font-size:13px">${cpEsc(p.name)}</div><div class="cp-muted">${cpEsc(p.description || '')}</div></td>
+          <td style="white-space:nowrap">${cpFmt(cpPrizeCost(p))}${p.points_cost != null ? '' : ' <span class="cp-muted">(tier)</span>'}<div class="cp-muted">≈ ${cpDollars(cpPrizeCost(p))}</div></td>
           <td>${p.stock == null ? '<span class="cp-muted">Unlimited</span>' : (p.stock === 0 ? '<span style="color:#c0392b">Out</span>' : p.stock)}</td>
           <td>${p.is_active ? 'Available' : '<span class="cp-pill cp-pill-off">Hidden</span>'}</td>
           <td><button class="btn" style="font-size:11px" onclick="cpOpenPrizeModal('${p.id}')">Edit</button></td></tr>`
@@ -12475,7 +12487,7 @@ function cpOpenTierModal(id) {
 
 function cpOpenPrizeModal(id, tierId) {
   const p = id ? cpPrize(id) : null
-  const v = p || { tier_id: tierId, name: '', description: '', image_url: '', stock: '', is_active: true }
+  const v = p || { tier_id: tierId, name: '', description: '', image_url: '', stock: '', points_cost: null, is_active: true }
   const tierOpts = (cpData.tiers || []).map(t => `<option value="${t.id}" ${t.id === v.tier_id ? 'selected' : ''}>${cpEsc(t.name)} (${cpFmt(t.points_cost)} pts)</option>`).join('')
   const html = `
     <div class="modal-field"><label>Name</label><input id="cpp-name" value="${cpEsc(v.name)}" placeholder="e.g. 4Cats hoodie"></div>
@@ -12495,7 +12507,13 @@ function cpOpenPrizeModal(id, tierId) {
           <input type="file" id="cpp-img-file" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none" onchange="cpPrizeImageUpload(this)">
         </div>
       </div></div>
-    <div class="modal-field" style="width:130px"><label>Stock</label><input id="cpp-stock" type="number" min="0" value="${cpEsc(v.stock == null ? '' : v.stock)}" placeholder="Unlimited"></div>
+    <div style="display:flex;gap:1rem;flex-wrap:wrap">
+      <div class="modal-field" style="width:210px"><label>Points (optional)</label>
+        <input id="cpp-cost" type="number" min="1" step="1" value="${cpEsc(v.points_cost == null ? '' : v.points_cost)}" placeholder="Tier's points"
+          oninput="document.getElementById('cpp-cost-hint').textContent = this.value ? '≈ ' + cpDollars(this.value) : 'Blank = the tier\'s points'">
+        <div id="cpp-cost-hint" class="cp-muted" style="margin-top:3px">${v.points_cost == null ? 'Blank = the tier\'s points' : '≈ ' + cpDollars(v.points_cost)}</div></div>
+      <div class="modal-field" style="width:130px"><label>Stock</label><input id="cpp-stock" type="number" min="0" value="${cpEsc(v.stock == null ? '' : v.stock)}" placeholder="Unlimited"></div>
+    </div>
     <label class="cp-check"><input type="checkbox" id="cpp-active" ${v.is_active ? 'checked' : ''}> Available to redeem</label>`
   _cppUploaded = []
   cpOpenModal(p ? 'Edit Prize' : 'Add Prize', 'Leave stock blank for unlimited', html, async () => {
@@ -12508,6 +12526,7 @@ function cpOpenPrizeModal(id, tierId) {
       description: document.getElementById('cpp-desc').value.trim(),
       image_url: finalUrl,
       stock: document.getElementById('cpp-stock').value,
+      points_cost: document.getElementById('cpp-cost').value,
       is_active: document.getElementById('cpp-active').checked
     } })
     // Tidy up: the photo this prize used to have, and any extra uploads that
@@ -12656,7 +12675,7 @@ function cpRenderWallets() {
   const manualRules = (cpData.rules || []).filter(r => r.is_active && r.source === 'manual')
   const prizeOpts = '<option value="">Choose a prize…</option>' + (cpData.tiers || []).filter(t => t.is_active).map(t =>
     `<optgroup label="${cpEsc(t.name)} — ${cpFmt(t.points_cost)} pts">${(cpData.prizes || []).filter(p => p.tier_id === t.id && p.is_active)
-      .map(p => `<option value="${p.id}">${cpEsc(p.name)}${p.stock === 0 ? ' (out of stock)' : ''}</option>`).join('')}</optgroup>`).join('')
+      .map(p => `<option value="${p.id}">${cpEsc(p.name)} — ${cpFmt(cpPrizeCost(p))} pts${p.stock === 0 ? ' (out of stock)' : ''}</option>`).join('')}</optgroup>`).join('')
 
   const forms = `
   <div class="cp-card">
@@ -12794,7 +12813,7 @@ async function cpRedeemFor() {
   if (!roleId || !prizeId) { cpStatus('cpr2-status', '#c0392b', 'Choose a studio and a prize.'); return }
   const p = cpPrize(prizeId), t = p ? cpTier(p.tier_id) : null
   const who = cpRoleLabel(roleId)
-  if (!confirm(`Redeem ${p ? p.name : 'this prize'}${t ? ' (' + cpFmt(t.points_cost) + ' pts)' : ''} for ${who}?`)) return
+  if (!confirm(`Redeem ${p ? p.name : 'this prize'}${p ? ' (' + cpFmt(cpPrizeCost(p)) + ' pts)' : ''} for ${who}?`)) return
   cpStatus('cpr2-status', '#888', 'Saving…')
   try {
     await cpRequest('redeem_for', { coordinator_role_id: roleId, prize_id: prizeId })
