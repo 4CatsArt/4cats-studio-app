@@ -12370,20 +12370,89 @@ function cpOpenPrizeModal(id, tierId) {
     <div class="modal-field"><label>Name</label><input id="cpp-name" value="${cpEsc(v.name)}" placeholder="e.g. 4Cats hoodie"></div>
     <div class="modal-field"><label>Tier</label><select id="cpp-tier">${tierOpts}</select></div>
     <div class="modal-field"><label>Description</label><textarea id="cpp-desc">${cpEsc(v.description || '')}</textarea></div>
-    <div style="display:flex;gap:1rem">
-      <div class="modal-field" style="flex:1"><label>Image URL (optional)</label><input id="cpp-img" value="${cpEsc(v.image_url || '')}" placeholder="https://…"></div>
-      <div class="modal-field" style="width:130px"><label>Stock</label><input id="cpp-stock" type="number" min="0" value="${cpEsc(v.stock == null ? '' : v.stock)}" placeholder="Unlimited"></div>
-    </div>
+    <div class="modal-field"><label>Photo (optional)</label>
+      <div style="display:flex;gap:0.75rem;align-items:flex-start">
+        <div id="cpp-img-preview" style="width:96px;height:72px;border-radius:8px;background:#f3f2ec;overflow:hidden;flex:none;display:flex;align-items:center;justify-content:center;font-size:11px;color:#aaa">
+          ${v.image_url ? `<img src="${cpEsc(v.image_url)}" style="width:100%;height:100%;object-fit:cover" onerror="this.replaceWith(document.createTextNode('No preview'))">` : 'No photo'}</div>
+        <div style="flex:1">
+          <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:6px">
+            <button type="button" class="btn" onclick="document.getElementById('cpp-img-file').click()">Upload image</button>
+            <button type="button" class="btn" onclick="cpPrizeImageSet('')">Remove</button>
+            <span id="cpp-img-status" class="cp-muted" style="align-self:center"></span>
+          </div>
+          <input id="cpp-img" value="${cpEsc(v.image_url || '')}" placeholder="…or paste an image link (https://…)" oninput="cpPrizeImagePreview(this.value)" style="width:100%">
+          <input type="file" id="cpp-img-file" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none" onchange="cpPrizeImageUpload(this)">
+        </div>
+      </div></div>
+    <div class="modal-field" style="width:130px"><label>Stock</label><input id="cpp-stock" type="number" min="0" value="${cpEsc(v.stock == null ? '' : v.stock)}" placeholder="Unlimited"></div>
     <label class="cp-check"><input type="checkbox" id="cpp-active" ${v.is_active ? 'checked' : ''}> Available to redeem</label>`
-  cpOpenModal(p ? 'Edit Prize' : 'Add Prize', 'Leave stock blank for unlimited', html, () => cpRequest('save_prize', { prize: {
-    id: p ? p.id : null,
-    tier_id: document.getElementById('cpp-tier').value,
-    name: document.getElementById('cpp-name').value.trim(),
-    description: document.getElementById('cpp-desc').value.trim(),
-    image_url: document.getElementById('cpp-img').value.trim(),
-    stock: document.getElementById('cpp-stock').value,
-    is_active: document.getElementById('cpp-active').checked
-  } }))
+  _cppUploaded = []
+  cpOpenModal(p ? 'Edit Prize' : 'Add Prize', 'Leave stock blank for unlimited', html, async () => {
+    if (_cppUploading) throw new Error('Wait for the photo to finish uploading.')
+    const finalUrl = document.getElementById('cpp-img').value.trim()
+    await cpRequest('save_prize', { prize: {
+      id: p ? p.id : null,
+      tier_id: document.getElementById('cpp-tier').value,
+      name: document.getElementById('cpp-name').value.trim(),
+      description: document.getElementById('cpp-desc').value.trim(),
+      image_url: finalUrl,
+      stock: document.getElementById('cpp-stock').value,
+      is_active: document.getElementById('cpp-active').checked
+    } })
+    // Tidy up: the photo this prize used to have, and any extra uploads that
+    // weren't kept (only files in our own bucket — pasted links are left alone).
+    const unused = [p && p.image_url, ..._cppUploaded].filter(u => u && u !== finalUrl).map(cpPrizeImagePath).filter(Boolean)
+    if (unused.length) await sb.storage.from(PRIZE_BUCKET).remove([...new Set(unused)])
+    _cppUploaded = []
+  })
+}
+
+/* ---------- prize photos ('prize-images' public bucket) ---------- */
+const PRIZE_BUCKET = 'prize-images'
+const PRIZE_IMG_MAX = 5 * 1024 * 1024
+const PRIZE_IMG_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif']
+let _cppUploaded = []      // uploaded during this edit (cleaned up if not kept)
+let _cppUploading = false
+
+// Our bucket's path for a stored photo URL, or null for any other link.
+function cpPrizeImagePath(url) {
+  const marker = '/storage/v1/object/public/' + PRIZE_BUCKET + '/'
+  const i = String(url || '').indexOf(marker)
+  return i >= 0 ? decodeURIComponent(String(url).slice(i + marker.length).split('?')[0]) : null
+}
+function cpPrizeImagePreview(url) {
+  const box = document.getElementById('cpp-img-preview')
+  if (!box) return
+  box.innerHTML = /^https?:\/\//i.test(url || '')
+    ? `<img src="${cpEsc(url)}" style="width:100%;height:100%;object-fit:cover" onerror="this.replaceWith(document.createTextNode('No preview'))">`
+    : 'No photo'
+}
+function cpPrizeImageSet(url) {
+  const input = document.getElementById('cpp-img')
+  if (input) input.value = url
+  cpPrizeImagePreview(url)
+}
+async function cpPrizeImageUpload(input) {
+  const file = input.files && input.files[0]
+  input.value = ''
+  const status = document.getElementById('cpp-img-status')
+  if (!file) return
+  if (!PRIZE_IMG_TYPES.includes(file.type)) { status.textContent = 'Use a JPG, PNG, WebP or GIF.'; return }
+  if (file.size > PRIZE_IMG_MAX) { status.textContent = 'That photo is over 5 MB.'; return }
+  const safe = file.name.toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-+|-+$/g, '') || 'prize.jpg'
+  const path = Date.now() + '-' + safe
+  _cppUploading = true
+  status.textContent = 'Uploading…'
+  const { error } = await sb.storage.from(PRIZE_BUCKET).upload(path, file, { contentType: file.type, upsert: false })
+  _cppUploading = false
+  if (error) {
+    status.textContent = /bucket not found/i.test(error.message || '') ? 'Run prize_images_bucket.sql first.' : 'Upload failed: ' + (error.message || '')
+    return
+  }
+  const { data } = sb.storage.from(PRIZE_BUCKET).getPublicUrl(path)
+  _cppUploaded.push(data.publicUrl)
+  cpPrizeImageSet(data.publicUrl)
+  status.textContent = 'Uploaded — save the prize to keep it.'
 }
 
 // ═══ LEVELS ═══════════════════════════════════════
@@ -12636,7 +12705,14 @@ function cpOpenModal(title, sub, innerHtml, saveFn) {
         <button class="btn btn-primary" id="cp-modal-save" onclick="cpModalSave()">Save</button></div>
     </div></div>`
 }
-function cpCloseModal() { document.getElementById('cp-modal-root').innerHTML = ''; cpModalSaveFn = null }
+function cpCloseModal() {
+  document.getElementById('cp-modal-root').innerHTML = ''; cpModalSaveFn = null
+  // A prize photo uploaded and then cancelled: don't leave the file behind.
+  // (After a successful save this list is already empty.)
+  const orphans = (_cppUploaded || []).map(cpPrizeImagePath).filter(Boolean)
+  _cppUploaded = []
+  if (orphans.length) sb.storage.from(PRIZE_BUCKET).remove(orphans)
+}
 async function cpModalSave() {
   if (!cpModalSaveFn) return
   const btn = document.getElementById('cp-modal-save'), err = document.getElementById('cp-modal-error')
