@@ -347,6 +347,35 @@ body:not(.sc-mode) .sc-only { display: none !important; }
 .friday-list-row .fl-pct { width: 44px; text-align: right; font-family: 'IBM Plex Mono', monospace; font-weight: 700; flex-shrink: 0; }
 .friday-list-row .fl-detail { width: 90px; text-align: right; color: var(--ink-soft); font-size: 11px; flex-shrink: 0; }
 
+/* ---------- Studio Space (seat-based fill rate) ---------- */
+.space-card { padding: 18px 18px 14px; }
+.space-pill { font-size: 11px; font-weight: 800; padding: 3px 10px; border-radius: 999px; background: var(--green-bg); color: var(--green); }
+.space-pill.amber { background: var(--amber-bg); color: var(--amber); }
+.space-pill.red { background: var(--red-bg); color: var(--red); }
+.space-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+@media (max-width: 760px) { .space-tiles { grid-template-columns: 1fr; } }
+.space-tiles .pct.amber { color: var(--amber); }
+.space-tiles .pct.red { color: var(--red); }
+.space-timeline-wrap { position: relative; margin: 4px 0 2px; }
+.space-timeline { display: flex; align-items: flex-end; gap: 2px; height: 96px; border-bottom: 1px solid var(--border); position: relative; }
+.space-bar { flex: 1; min-width: 3px; background: var(--accent); border-radius: 3px 3px 0 0; opacity: 0.85; }
+.space-bar.amber { background: var(--gold); }
+.space-bar.red { background: var(--red); }
+.space-amber-line { position: absolute; left: 0; right: 0; border-top: 1.5px dashed var(--amber); pointer-events: none; }
+.space-amber-line span { position: absolute; right: 0; top: -15px; font-size: 9.5px; font-weight: 700; color: var(--amber); }
+.space-hours { display: flex; gap: 2px; font-size: 9.5px; color: var(--ink-soft); margin-top: 3px; }
+.space-hours div { flex: 1; min-width: 3px; white-space: nowrap; overflow: visible; }
+.space-sub { font-size: 11px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); margin: 16px 0 4px; }
+.space-card details summary { cursor: pointer; font-size: 12px; font-weight: 700; color: var(--accent-deep); margin-top: 12px; }
+.space-holds { font-size: 12px; margin-top: 6px; }
+.space-holds div { display: flex; gap: 10px; padding: 4px 2px; border-bottom: 1px solid var(--border); }
+.space-holds .t { width: 120px; color: var(--ink-soft); flex-shrink: 0; font-family: 'IBM Plex Mono', monospace; font-size: 11px; }
+.space-holds .n { flex: 1; }
+.space-holds .s { width: 60px; text-align: right; font-weight: 700; flex-shrink: 0; }
+.friday-list-row .fl-bar-fill.amber { background: var(--gold); }
+.friday-list-row .fl-bar-fill.red { background: var(--red); }
+.space-note { font-size: 11.5px; color: var(--ink-soft); margin-top: 10px; }
+
 /* ---------- studio sales (live for everyone, per-studio) ---------- */
 .sales-card { padding: 18px 18px 14px; }
 .sales-yoy { font-size: 13px; margin-top: 4px; }
@@ -680,6 +709,13 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
     <!-- Friday fill, Sales Goals, Kids Parties, Team Building — coordinator
          view only. The functions behind them refuse a studio login without a
          PIN (community-dashboard-data just leaves the Friday numbers out). -->
+    <!-- Studio Space — seat-based fill rate (coordinator view only). Served by
+         community-occupancy-data, which refuses a studio login without a PIN.
+         Seats = active tables in the floor plan; only bookings take seats
+         (a closed class never does); open hours inferred from what's offered. -->
+    <div class="section-head ops sc-only">🪑 Studio Space</div>
+    <div class="card space-card sc-only" id="card-studio-space"></div>
+
     <div class="section-head ops sc-only">Friday Night Events — Fill Rate</div>
     <div class="card friday-card sc-only" id="card-friday-fillrate"></div>
 
@@ -1617,6 +1653,151 @@ async function renderWeatherCard(studioId) {
   }
 }
 
+// ---- STUDIO SPACE (seat-based fill rate) ----
+// community-occupancy-data → { studioId, date, amberPct, today, days }
+//   today: get_studio_day_occupancy() — seats, open/close, slots[], holds[],
+//          peak_*, utilization_pct, warning ('ok' | 'amber' | 'red' | null)
+//   days:  get_occupancy_summary() rows, 14 days back to 7 days ahead
+// Coordinator view only: the function refuses a studio login without a PIN.
+
+async function fetchStudioSpace(pin, studioId, dateStr) {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/community-occupancy-data`, {
+    method: 'POST',
+    headers: await fnHeaders(),
+    body: JSON.stringify({ pin, studioId, date: dateStr })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+function spaceLevel(pct, amberPct) {
+  if (pct == null) return '';
+  if (pct >= 100) return 'red';
+  if (pct >= amberPct) return 'amber';
+  return '';
+}
+
+// '15:00' → '3pm', '09:30' → '9:30am'
+function spaceTime12(hhmm) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(hhmm || '');
+  if (!m) return hhmm || '';
+  let h = parseInt(m[1], 10) % 24;
+  const ap = h >= 12 ? 'pm' : 'am';
+  h = h % 12 || 12;
+  return m[2] === '00' ? `${h}${ap}` : `${h}:${m[2]}${ap}`;
+}
+
+function spaceDateLabel(iso) {
+  const [y, mo, d] = iso.split('-').map(Number);
+  return new Date(y, mo - 1, d).toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+function spaceDayRows(rows, amberPct) {
+  if (!rows.length) return '<div class="space-note">Nothing on the schedule.</div>';
+  return rows.map(r => {
+    const pct = r.peak_pct == null ? 0 : Number(r.peak_pct);
+    const lvl = spaceLevel(pct, amberPct);
+    return `
+      <div class="friday-list-row" title="Busiest at ${esc(spaceTime12(r.peak_start))} · ${r.peak_occupied} of ${r.seats} seats · ${r.utilization_pct ?? 0}% of seat-time used">
+        <div class="fl-date">${esc(spaceDateLabel(r.day))}</div>
+        <div class="fl-bar-track"><div class="fl-bar-fill ${lvl}" style="width:${Math.min(pct, 100)}%"></div></div>
+        <div class="fl-pct">${pct.toFixed(0)}%</div>
+        <div class="fl-detail">peak ${esc(spaceTime12(r.peak_start))}</div>
+      </div>`;
+  }).join('');
+}
+
+function renderStudioSpace(d) {
+  const card = document.getElementById('card-studio-space');
+  if (!card) return;
+  const t = d.today || {};
+  const amberPct = d.amberPct || 85;
+  const head = (pill) => `
+    <div class="card-head">
+      <div class="title">🪑 Studio Space — Today</div>
+      ${pill || ''}
+    </div>`;
+
+  if (!t.has_floor_plan) {
+    card.innerHTML = head() + `<div class="no-cap">No floor plan for this studio yet — add its tables in admin → 🪑 Tables, then fill rates will show here.</div>`;
+    return;
+  }
+
+  const pillLabel = { red: '🔴 Full at peak', amber: '🟠 Getting full', ok: '🟢 Room to spare' };
+  const pill = t.warning ? `<span class="space-pill ${t.warning === 'ok' ? '' : t.warning}">${pillLabel[t.warning]}</span>` : '';
+
+  let todayHtml;
+  if (!t.is_open) {
+    todayHtml = `<div class="space-note" style="margin-top:0">Nothing offered today, so the studio counts as closed.</div>`;
+  } else {
+    const peakPct = Number(t.peak_pct || 0);
+    const lvl = spaceLevel(peakPct, amberPct);
+    const slots = t.slots || [];
+    const bars = slots.map(sl => {
+      const p = Number(sl.pct || 0);
+      return `<div class="space-bar ${spaceLevel(p, amberPct)}" style="height:${Math.max(2, Math.min(p, 100))}%"
+                   title="${esc(spaceTime12(sl.time))}: ${sl.occupied} of ${t.seats} seats (${p.toFixed(0)}%)"></div>`;
+    }).join('');
+    const hours = slots.map(sl => `<div>${/:00$/.test(sl.time) ? esc(spaceTime12(sl.time)) : ''}</div>`).join('');
+    const holds = (t.holds || []).map(h => `
+      <div><span class="t">${esc(spaceTime12(h.start))}–${esc(spaceTime12(h.end))}</span>
+           <span class="n">${esc(h.title || '')}${h.is_party ? ' 🎉' : ''}</span>
+           <span class="s">${h.seats}</span></div>`).join('');
+
+    todayHtml = `
+      <div class="space-tiles">
+        <div class="friday-tile live">
+          <div class="eyebrow"><span class="live-dot"></span> Busiest time</div>
+          <div class="pct ${lvl}">${peakPct.toFixed(0)}%</div>
+          <div class="detail">${esc(spaceTime12(t.peak_start))} · ${t.peak_occupied} of ${t.seats} seats</div>
+        </div>
+        <div class="friday-tile">
+          <div class="eyebrow">Seat-time used</div>
+          <div class="pct">${Number(t.utilization_pct || 0).toFixed(0)}%</div>
+          <div class="detail">Across the whole day</div>
+        </div>
+        <div class="friday-tile">
+          <div class="eyebrow">Open today</div>
+          <div class="pct" style="font-size:20px">${esc(spaceTime12(t.open_time))}–${esc(spaceTime12(t.close_time))}</div>
+          <div class="detail">From today's classes · ${t.seats} seats</div>
+        </div>
+      </div>
+      <div class="space-timeline-wrap">
+        <div class="space-timeline">${bars}
+          <div class="space-amber-line" style="bottom:${amberPct}%"><span>${amberPct}%</span></div>
+        </div>
+        <div class="space-hours">${hours}</div>
+      </div>
+      ${holds ? `<details><summary>What's taking seats today</summary><div class="space-holds">${holds}</div></details>` : ''}`;
+  }
+
+  const days = d.days || [];
+  const ahead = days.filter(r => r.day > d.date && r.is_open);
+  const past = days.filter(r => r.day < d.date && r.is_open).reverse();
+
+  card.innerHTML = head(pill) + todayHtml + `
+    <div class="space-sub">Next 7 days — busiest moment</div>
+    <div class="friday-list">${spaceDayRows(ahead, amberPct)}</div>
+    <details><summary>Past 2 weeks</summary><div class="friday-list">${spaceDayRows(past, amberPct)}</div></details>
+    <div class="space-note">Counts booked seats only — a closed class never takes seats. Drop-ins rung up on the POS aren't included (no time attached). Parties hold seats for art + party time + 15 min reset; Mini Make 90 min; other sessions 2 hrs.</div>`;
+}
+
+async function loadStudioSpace(pin, studioId) {
+  if (!pin || !studioId) return;
+  try {
+    const data = await fetchStudioSpace(pin, studioId, localDateStr(new Date()));
+    if (studioId !== _sessionStudioId || !_sessionPin) return; // switched or locked while loading
+    renderStudioSpace(data);
+  } catch (e) {
+    console.error('Studio space load failed:', e);
+    const card = document.getElementById('card-studio-space');
+    if (card && !card.innerHTML) {
+      card.innerHTML = `<div class="card-head"><div class="title">🪑 Studio Space — Today</div></div><div class="space-note">Couldn't load right now — ${esc(e.message)}</div>`;
+    }
+  }
+}
+
 // ---- FRIDAY EVENT FILL RATE ----
 // Normalized shape returned by the Edge Function:
 //   { capacityKnown:boolean,
@@ -2320,6 +2501,7 @@ function loadCoordinatorCards(studioId) {
   if (paneVisible('points-pane')) loadPoints(_sessionPin, studioId);
   loadMarketingSuggestions(_sessionPin, studioId); // weather tag already loaded by the studio view
   loadCheckinCount(_sessionPin, studioId);
+  loadStudioSpace(_sessionPin, studioId);         // seat-based fill rate
   if (paneVisible('instagram-pane')) { coordinatorPaneBar('instagram-bar'); loadInstagram(_sessionPin, studioId); }
   refreshInventory();             // an admin PIN turns on the Supplies preview
   // Studio sales in dollars stays ADMIN ONLY (admin PIN), as before.
@@ -2416,7 +2598,8 @@ function endCoordinatorView(reload = true) {
   document.body.classList.remove('sc-mode', 'preview-mode');
   if (_inactivityTimer) { clearTimeout(_inactivityTimer); _inactivityTimer = null; }
   ['card-points', 'card-marketing-suggestions', 'card-checkins', 'card-instagram', 'card-studio-sales',
-   'card-friday-fillrate', 'card-sales-goals', 'card-kids-parties', 'card-team-building'].forEach(id => {
+   'card-friday-fillrate', 'card-sales-goals', 'card-kids-parties', 'card-team-building',
+   'card-studio-space'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.innerHTML = '';
   });
@@ -2481,6 +2664,7 @@ async function changeAdminStudio(studioId) {
 async function refreshFridayFillRate() {
   if (!_studioViewStarted || !_sessionPin) return;
   try {
+    loadStudioSpace(_sessionPin, _sessionStudioId); // same 60s cadence
     const data = await fetchFridayFillRateWithPin(_sessionPin, _sessionStudioId);
     renderFridayFillRateBody(data);
   } catch (e) {
