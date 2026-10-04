@@ -1941,8 +1941,14 @@ function renderNameCard() {
     html += nameStatusRowHtml(row.name_1, row.name_1_status, row.name_1_note);
     html += nameStatusRowHtml(row.name_2, row.name_2_status, row.name_2_note);
     html += nameStatusRowHtml(row.name_3, row.name_3_status, row.name_3_note);
+    var pendingExtras = row.approved_extras || [];
+    if (pendingExtras.length > 0) {
+      html += '<div class="namecard-sub" style="margin:14px 0 8px">Already approved — you can pick one now instead of waiting:</div>';
+      html += buildPickButtonsHtml(pendingExtras);
+    }
     html += '</div>';
     card.innerHTML = html;
+    wirePickButtons(card, pendingExtras);
     return;
   }
 
@@ -1956,29 +1962,36 @@ function renderNameCard() {
     else if (status === 'rejected') rejectedInfo.push({ name: row[slots[s]], note: row[slots[s] + '_note'] });
   }
 
-  if (approved.length > 0) {
+  // Everything she can pick: approved ideas from this round, plus names
+  // home office suggested or that were approved in an earlier round
+  var options = mergeUniqueNames(approved, row.approved_extras || []);
+
+  if (options.length > 0) {
     var html2 = '<div class="namecard-header">Pick Your 4Cats Name</div><div class="namecard-body">';
     html2 += '<div class="namecard-sub" style="margin-bottom:10px">These were approved — tap one to confirm it as your 4Cats name:</div>';
-    for (var i = 0; i < approved.length; i++) {
-      html2 += '<button class="namecard-pick-btn" style="margin-bottom:8px" data-pick-idx="' + i + '">' + escHtml(approved[i]) + '</button>';
-    }
+    html2 += buildPickButtonsHtml(options);
     if (rejectedInfo.length > 0) {
       html2 += '<div class="namecard-sub" style="margin:14px 0 6px">Not approved:</div>';
       for (var r = 0; r < rejectedInfo.length; r++) {
         html2 += nameStatusRowHtml(rejectedInfo[r].name, 'rejected', rejectedInfo[r].note);
       }
     }
+    html2 += '<span class="namecard-lib-toggle" id="namecard-new-ideas-link">None of these feel right? Submit new ideas</span>';
     html2 += '</div>';
     card.innerHTML = html2;
+    wirePickButtons(card, options);
 
-    // Event delegation avoids passing quoted strings through onclick attrs (iOS 12 safety)
-    var pickBtns = card.querySelectorAll('[data-pick-idx]');
-    for (var j = 0; j < pickBtns.length; j++) {
-      pickBtns[j].addEventListener('click', function(e) {
-        var idx = parseInt(e.currentTarget.getAttribute('data-pick-idx'), 10);
-        confirmFinalName(approved[idx]);
+    document.getElementById('namecard-new-ideas-link').addEventListener('click', function() {
+      var formHtml = '<div class="namecard-header">Submit New Ideas</div><div class="namecard-body">';
+      formHtml += '<div class="namecard-sub" style="margin-bottom:10px">Your approved names stay available — you can still pick one of them after the next review.</div>';
+      formHtml += buildSubmitFormInnerHtml();
+      formHtml += '<span class="namecard-lib-toggle" id="namecard-back-link">← Back to my approved names</span>';
+      formHtml += '</div>';
+      card.innerHTML = formHtml;
+      document.getElementById('namecard-back-link').addEventListener('click', function() {
+        renderNameCard();
       });
-    }
+    });
     return;
   }
 
@@ -1992,6 +2005,40 @@ function renderNameCard() {
   rejHtml += buildSubmitFormInnerHtml();
   rejHtml += '</div>';
   card.innerHTML = rejHtml;
+}
+
+function mergeUniqueNames(a, b) {
+  var out = [];
+  var all = a.concat(b);
+  for (var i = 0; i < all.length; i++) {
+    var n = all[i];
+    if (!n) continue;
+    var dup = false;
+    for (var j = 0; j < out.length; j++) {
+      if (out[j].toLowerCase() === n.toLowerCase()) { dup = true; break; }
+    }
+    if (!dup) out.push(n);
+  }
+  return out;
+}
+
+function buildPickButtonsHtml(names) {
+  var html = '';
+  for (var i = 0; i < names.length; i++) {
+    html += '<button class="namecard-pick-btn" style="margin-bottom:8px" data-pick-idx="' + i + '">' + escHtml(names[i]) + '</button>';
+  }
+  return html;
+}
+
+// Event delegation avoids passing quoted strings through onclick attrs (iOS 12 safety)
+function wirePickButtons(card, names) {
+  var pickBtns = card.querySelectorAll('[data-pick-idx]');
+  for (var j = 0; j < pickBtns.length; j++) {
+    pickBtns[j].addEventListener('click', function(e) {
+      var idx = parseInt(e.currentTarget.getAttribute('data-pick-idx'), 10);
+      confirmFinalName(names[idx]);
+    });
+  }
 }
 
 function nameStatusRowHtml(name, status, note) {
@@ -2148,9 +2195,19 @@ function submitNameIdeas() {
   var method, body;
 
   if (isResubmit) {
+    // Keep anything already approved (this round's approved ideas + earlier extras)
+    // so resubmitting never loses a name she could have picked
+    var prevApproved = [];
+    var prevSlots = ['name_1', 'name_2', 'name_3'];
+    for (var ps = 0; ps < prevSlots.length; ps++) {
+      if (currentNameRow[prevSlots[ps] + '_status'] === 'approved') prevApproved.push(currentNameRow[prevSlots[ps]]);
+    }
+    var carryOver = mergeUniqueNames(currentNameRow.approved_extras || [], prevApproved);
+
     url += '?id=eq.' + currentNameRow.id;
     method = 'PATCH';
     body = JSON.stringify({
+      approved_extras: carryOver,
       name_1: v1, name_1_status: 'pending', name_1_note: null,
       name_2: v2, name_2_status: 'pending', name_2_note: null,
       name_3: v3, name_3_status: 'pending', name_3_note: null,
