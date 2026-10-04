@@ -624,6 +624,10 @@ select:focus, input:focus { border-color: #888; }
       <div style="font-size:13px;font-weight:600;margin-bottom:0.75rem">Pending Submissions</div>
       <div id="names-pending-container"><div class="loading">Loading...</div></div>
 
+      <div style="font-size:13px;font-weight:600;margin:2rem 0 0.25rem">Reviewed — Waiting on Staff</div>
+      <div style="font-size:11px;color:#888;margin-bottom:0.75rem">Staff who still need to pick a name or send new ideas. Use "+ Suggest a name" to give them a pre-approved option.</div>
+      <div id="names-reviewed-container"><div class="loading">Loading...</div></div>
+
       <div style="font-size:13px;font-weight:600;margin:2rem 0 0.75rem">Name Library</div>
       <div class="toolbar" style="margin-bottom:1rem">
         <div class="toolbar-group" style="gap:8px">
@@ -5802,6 +5806,7 @@ async function loadNamesBadge() {
 
 function loadNamesSubtab() {
   loadPendingSubmissions()
+  loadReviewedSubmissions()
   loadLibrary()
 }
 
@@ -5839,8 +5844,98 @@ async function loadPendingSubmissions() {
       <div style="font-size:13px;font-weight:600;margin-bottom:2px">${staff.display_name || 'Unknown staff'}</div>
       <div style="font-size:11px;color:#888;margin-bottom:8px">${studioLabel}</div>
       ${ideaRows}
+      ${extraNamesHtml(row)}
     </div>`
   }).join('')
+}
+
+// Pre-approved names on a suggestion row (home office suggestions, or names
+// approved in an earlier round that carried over when the staff resubmitted)
+function extraNamesHtml(row) {
+  const extras = row.approved_extras || []
+  const rows = extras.map((n, i) => `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:0.5px solid #f0f0ec">
+      <span style="font-size:13px">${escHtml(n)} <span style="font-size:10px;color:#888;margin-left:4px">pre-approved</span></span>
+      <span><span style="color:#2e7d32;font-size:11px;font-weight:600">✓ Approved</span>
+        <button class="btn" style="height:22px;padding:0 8px;font-size:10px;margin-left:8px" onclick="removeExtraName('${row.id}',${i})">Remove</button></span>
+    </div>`).join('')
+  return `${rows}
+    <button class="btn" style="height:26px;padding:2px 10px;font-size:11px;margin-top:8px" onclick="suggestNameFor('${row.id}')">+ Suggest a name</button>`
+}
+
+async function loadReviewedSubmissions() {
+  const container = document.getElementById('names-reviewed-container')
+  if (!container) return
+  container.innerHTML = '<div class="loading">Loading...</div>'
+  const { data, error } = await sb.from('staff_name_suggestions')
+    .select('*, staff_profiles!profile_id(display_name, studio_ids)')
+    .eq('overall_status', 'reviewed')
+    .order('reviewed_at', { ascending: true })
+  if (error) { container.innerHTML = '<div class="loading">Error loading reviewed submissions.</div>'; return }
+  if (!data || !data.length) {
+    container.innerHTML = '<div style="color:#888;font-size:13px;padding:1rem 0">Nobody waiting right now.</div>'
+    return
+  }
+  container.innerHTML = data.map(row => {
+    const staff = row.staff_profiles || {}
+    const studioLabel = (staff.studio_ids || []).map(getStudioName).join(', ') || '—'
+    const anyApproved = [1, 2, 3].some(slot => row[`name_${slot}_status`] === 'approved') || (row.approved_extras || []).length > 0
+    const waitingOn = anyApproved
+      ? '<span style="font-size:11px;color:#2e7d32">Waiting for them to pick</span>'
+      : '<span style="font-size:11px;color:#c0392b">All rejected — waiting for new ideas</span>'
+    const ideaRows = [1, 2, 3].map(slot => {
+      const name = row[`name_${slot}`]
+      const status = row[`name_${slot}_status`]
+      const note = row[`name_${slot}_note`]
+      const badge = status === 'approved'
+        ? '<span style="color:#2e7d32;font-size:11px;font-weight:600">✓ Approved</span>'
+        : `<span style="color:#c0392b;font-size:11px;font-weight:600">✕ Rejected${note ? ' — ' + escHtml(note) : ''}</span>`
+      return `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:0.5px solid #f0f0ec">
+        <span style="font-size:13px">${escHtml(name)}</span>
+        <span>${badge}</span>
+      </div>`
+    }).join('')
+    return `<div style="background:white;border:0.5px solid #e0e0d8;border-radius:10px;padding:14px 16px;margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <div style="font-size:13px;font-weight:600;margin-bottom:2px">${escHtml(staff.display_name || 'Unknown staff')}</div>
+        ${waitingOn}
+      </div>
+      <div style="font-size:11px;color:#888;margin-bottom:8px">${studioLabel}</div>
+      ${ideaRows}
+      ${extraNamesHtml(row)}
+    </div>`
+  }).join('')
+}
+
+async function suggestNameFor(rowId) {
+  const raw = window.prompt('Suggest a 4Cats name (pre-approved, they can pick it right away):', '')
+  if (raw === null) return
+  const name = raw.trim()
+  if (!name) return
+  const { data: row, error } = await sb.from('staff_name_suggestions').select('approved_extras, overall_status').eq('id', rowId).single()
+  if (error || !row) { alert('Could not load that submission — it may have just been finalized. Refreshing.'); refreshNameLists(); return }
+  if (row.overall_status === 'finalized') { alert('They already confirmed a name. Refreshing.'); refreshNameLists(); return }
+  const extras = row.approved_extras || []
+  if (extras.some(n => n.toLowerCase() === name.toLowerCase())) { alert('That name is already on their list.'); return }
+  const { error: upErr } = await sb.from('staff_name_suggestions').update({ approved_extras: [...extras, name] }).eq('id', rowId)
+  if (upErr) { alert('Could not save: ' + upErr.message); return }
+  refreshNameLists()
+}
+
+async function removeExtraName(rowId, idx) {
+  const { data: row, error } = await sb.from('staff_name_suggestions').select('approved_extras').eq('id', rowId).single()
+  if (error || !row) { refreshNameLists(); return }
+  const extras = row.approved_extras || []
+  if (!confirm(`Remove "${extras[idx]}" from their options?`)) return
+  extras.splice(idx, 1)
+  const { error: upErr } = await sb.from('staff_name_suggestions').update({ approved_extras: extras }).eq('id', rowId)
+  if (upErr) { alert('Could not save: ' + upErr.message); return }
+  refreshNameLists()
+}
+
+function refreshNameLists() {
+  loadPendingSubmissions()
+  loadReviewedSubmissions()
+  loadNamesBadge()
 }
 
 async function approveIdea(rowId, slot) {
@@ -5860,8 +5955,7 @@ async function finalizeReviewIfComplete(rowId) {
   if (row && row.name_1_status !== 'pending' && row.name_2_status !== 'pending' && row.name_3_status !== 'pending') {
     await sb.from('staff_name_suggestions').update({ overall_status: 'reviewed', reviewed_at: new Date().toISOString() }).eq('id', rowId)
   }
-  loadPendingSubmissions()
-  loadNamesBadge()
+  refreshNameLists()
 }
 
 async function loadLibrary() {
