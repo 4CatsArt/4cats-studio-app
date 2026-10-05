@@ -140,6 +140,7 @@ table.list td.actions .btn { margin-left: 4px; }
   <div class="top-bar">
     <div class="top-bar-title">Staff schedule</div>
     <button class="tab active" data-view="coverage" onclick="switchView('coverage')">Coverage</button>
+    <button class="tab" data-view="build" onclick="switchView('build')">Build schedule</button>
     <button class="tab" data-view="timeoff" onclick="switchView('timeoff')">Time off<span class="count" id="pending-count" style="display:none"></span></button>
     <button class="tab" data-view="unavail" onclick="switchView('unavail')">Unavailability</button>
     <button class="tab" data-view="import" onclick="switchView('import')">Import from Sling</button>
@@ -167,6 +168,27 @@ table.list td.actions .btn { margin-left: 4px; }
         <span>Each square is 15 minutes. Needs use the same session lengths and headcounts as Fill Rates, planned for bookings now or what the slot usually gets, whichever is higher.</span>
       </div>
       <div id="cv-body"><div class="panel"><div class="loading">Choose a studio.</div></div></div>
+    </div>
+
+    <!-- ===== BUILD SCHEDULE ===== -->
+    <div class="view" id="view-build">
+      <div class="toolbar">
+        <select class="input" id="bd-studio"></select>
+        <button class="btn" onclick="bdShiftWeek(-1)" aria-label="Previous week">&#9664;</button>
+        <strong id="bd-week" style="min-width:170px;text-align:center"></strong>
+        <button class="btn" onclick="bdShiftWeek(1)" aria-label="Next week">&#9654;</button>
+        <button class="btn primary" onclick="buildSchedule()">Build draft</button>
+        <span class="spacer"></span>
+        <button class="btn" id="bd-save" onclick="saveDraftSchedule()" disabled>Save as drafts</button>
+        <button class="btn good" id="bd-approve" onclick="approveDrafts()">Approve saved drafts</button>
+      </div>
+      <div class="note info" style="margin-bottom:1rem">
+        Builds shifts for one studio and week from what the studio needs (Coverage), who's available, home studios,
+        badges, weekly hours and overtime. Approved shifts already in the week are kept and only the gaps are filled.
+        Nothing is saved until you click <b>Save as drafts</b>; saving replaces this studio's earlier drafts for the week.
+        Hover <span style="font-weight:700">ⓘ</span> next to a name for their hours, home studio, badges and notes.
+      </div>
+      <div id="bd-body"><div class="panel"><div class="empty">Choose a studio and week, then click Build draft.</div></div></div>
     </div>
 
     <!-- ===== TIME OFF ===== -->
@@ -335,6 +357,7 @@ async function initApp(user) {
   document.getElementById('app-screen').style.display = 'block'
   await loadStaff()
   initCoverage()
+  initBuild()
   await Promise.all([loadTimeOff(), loadUnavail()])
 }
 
@@ -636,6 +659,321 @@ function renderCoverage() {
     html += '</div>'
   }
   body.innerHTML = html
+}
+
+/* =====================================================================
+   BUILD SCHEDULE (draft generator, one studio-week)
+   1. What the studio needs every 15 min: get_staffing_need (same as Coverage),
+      plus opening times on open days, minus approved/posted shifts already in.
+   2. Needs become shift blocks: one "layer" per extra person needed, padded,
+      at least 3 h, at most 8 h (longer days split in two).
+   3. Each block goes to the best available person:
+      hard rules  - not unavailable / on approved time off, one shift a day,
+                    max weekly hours, max in-studio days, managers only at their
+                    home studio, never people marked "don't schedule"
+      preferences - managers at home first, then home-studio staff, then others
+                    on this studio, then floaters; people under their minimum;
+                    fewer hours so far; stay under provincial overtime;
+                    badge holders for wheel sessions
+   ===================================================================== */
+const PROV_OF = id => (id || '').slice(0, 2)
+let bdWeek = mondayOf(todayStr())
+let bdCtx = null      // loaded data for the current build
+let bdPlan = null     // { blocks: [...], warnings: [...] }
+
+function bdShiftWeek(n) { bdWeek = addDays(bdWeek, 7 * n); bdUpdateWeekLabel(); bdPlan = null; document.getElementById('bd-save').disabled = true }
+function bdUpdateWeekLabel() {
+  const a = parseYmd(bdWeek), b = parseYmd(addDays(bdWeek, 6))
+  document.getElementById('bd-week').textContent = a.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) + ' – ' + b.toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+function initBuild() {
+  const sel = document.getElementById('bd-studio')
+  sel.innerHTML = '<option value="">Choose a studio…</option>' + Object.keys(STUDIO_NAMES).map(id => '<option value="' + id + '">' + esc(STUDIO_NAMES[id]) + '</option>').join('')
+  sel.onchange = () => { bdPlan = null; document.getElementById('bd-save').disabled = true; document.getElementById('bd-body').innerHTML = '<div class="panel"><div class="empty">Click Build draft.</div></div>' }
+  bdUpdateWeekLabel()
+}
+const hrs = m => Math.round(m / 6) / 10   // minutes → hours, 1 decimal
+const overlaps = (a1, a2, b1, b2) => a1 < b2 && b1 < a2
+
+async function bdLoad(studio) {
+  const from = bdWeek, to = addDays(bdWeek, 6)
+  const [need, rules, opening, ot, people, badges, notes, unav, toff, shifts] = await Promise.all([
+    sb.rpc('get_staffing_need', { p_studio_id: studio, p_from: from, p_to: to }),
+    sb.from('staffing_rules').select('label, required_badge').eq('active', true),
+    sb.from('studio_opening_times').select('studio_id, day_of_week, opens_at'),
+    sb.from('province_overtime_rules').select('*'),
+    sb.from('staff_profiles').select('id, display_name, role, studio_ids, home_studio_id, min_weekly_hours, max_weekly_hours, max_studio_days_per_week, exclude_from_schedule, is_active'),
+    sb.from('staff_badges').select('staff_id, badge_code'),
+    sb.from('staff_schedule_prefs').select('staff_id, notes'),
+    sb.from('staff_unavailability').select('staff_id, day_of_week, start_time, end_time, effective_from, effective_to'),
+    sb.from('staff_time_off').select('staff_id, start_date, end_date, start_time, end_time, status').in('status', ['approved', 'pending']).lte('start_date', to).gte('end_date', from),
+    sb.from('staff_shifts').select('staff_id, studio_id, shift_date, start_time, end_time, status').gte('shift_date', from).lte('shift_date', to)
+  ])
+  for (const r of [need, rules, opening, ot, people, badges, notes, unav, toff, shifts]) if (r.error) throw new Error(r.error.message)
+  const badgeLabel = {}
+  ;(await sb.from('badge_types').select('code, label')).data?.forEach(b => { badgeLabel[b.code] = b.label })
+  const ruleBadge = {}; rules.data.forEach(r => { if (r.required_badge) ruleBadge[r.label] = r.required_badge })
+  const badgesBy = {}; badges.data.forEach(b => { (badgesBy[b.staff_id] = badgesBy[b.staff_id] || new Set()).add(b.badge_code) })
+  const notesBy = {}; notes.data.forEach(n => { if (n.notes) notesBy[n.staff_id] = n.notes })
+  const pool = people.data.filter(p => p.is_active && !p.exclude_from_schedule &&
+    (!(p.studio_ids || []).length || p.studio_ids.includes(studio)))
+  return { studio, from, to, sessions: need.data || [], ruleBadge, badgeLabel, opening: opening.data, ot: ot.data,
+           pool, badgesBy, notesBy, unav: unav.data, toff: toff.data, shifts: shifts.data }
+}
+
+function bdOpensAt(ctx, date) {
+  const dow = parseYmd(date).getDay()
+  const own = ctx.opening.find(o => o.studio_id === ctx.studio && o.day_of_week === dow)
+  const def = ctx.opening.find(o => !o.studio_id && o.day_of_week === dow)
+  const o = own || def
+  return o ? toMin(o.opens_at) : null
+}
+
+// Needed people per 15-min slot for one day, minus shifts already approved/posted
+function bdDayNeed(ctx, date) {
+  const ss = ctx.sessions.filter(r => r.session_date === date && r.start_time && r.end_time && r.rule_kind !== 'none' &&
+                                     (r.is_open || r.booked > 0 || r.teachers > 0))
+  if (!ss.length) return null
+  let lo = Math.min(...ss.map(r => toMin(r.start_time))), hi = Math.max(...ss.map(r => toMin(r.end_time))) + 30
+  const opens = bdOpensAt(ctx, date)
+  if (opens != null) lo = Math.min(lo, opens)
+  lo = Math.floor(lo / 15) * 15; hi = Math.ceil(hi / 15) * 15
+  const slots = []
+  for (let t = lo; t < hi; t += 15) {
+    let dedicated = 0, pooled = 0
+    const badges = new Set()
+    ss.forEach(r => {
+      if (!(toMin(r.start_time) < t + 15 && toMin(r.end_time) > t)) return
+      if (r.rule_kind === 'pooled') pooled += (r.expected || 0) / (r.ratio || 20)
+      else dedicated += r.teachers || 0
+      const b = ctx.ruleBadge[r.rule_label]
+      if (b && (r.teachers || 0) > 0) badges.add(b)
+    })
+    let need = Math.max(1, dedicated + Math.ceil(pooled - 1e-9))   // open day: always at least one person
+    const have = ctx.shifts.filter(x => x.studio_id === ctx.studio && x.shift_date === date && x.status !== 'draft' &&
+                                       x.start_time && x.end_time && toMin(x.start_time) < t + 15 && toMin(x.end_time) > t).length
+    slots.push({ t, need: Math.max(0, need - have), badges })
+  }
+  return slots
+}
+
+// Slots → shift blocks (one layer per person needed at the same time)
+function bdBlocks(ctx, date, slots) {
+  const max = Math.max(0, ...slots.map(s => s.need))
+  const dayEnd = slots[slots.length - 1].t + 15
+  const out = []
+  for (let k = 1; k <= max; k++) {
+    let runs = [], cur = null
+    slots.forEach(s => {
+      if (s.need >= k) { if (cur && s.t - cur.end < 60) cur.end = s.t + 15; else { cur = { start: s.t, end: s.t + 15 }; runs.push(cur) } }
+    })
+    runs.forEach(r => {
+      if (k > 1) { r.start = Math.max(slots[0].t, r.start - 15); r.end = Math.min(dayEnd, r.end + 15) }
+      if (r.end - r.start < 180) { r.end = Math.min(23 * 60, r.start + 180); if (r.end - r.start < 180) r.start = r.end - 180 }
+      const parts = []
+      const len = r.end - r.start
+      const n = Math.ceil(len / 480)
+      for (let i = 0; i < n; i++) {
+        const a = r.start + Math.round(len * i / n / 30) * 30
+        const b = i === n - 1 ? r.end : r.start + Math.round(len * (i + 1) / n / 30) * 30
+        parts.push({ start: a, end: b })
+      }
+      parts.forEach(p => {
+        const badges = new Set()
+        slots.forEach(s => { if (s.t >= p.start && s.t < p.end && s.need >= k) s.badges.forEach(b => badges.add(b)) })
+        out.push({ date, start: p.start, end: p.end, layer: k, badges: [...badges], staffId: null })
+      })
+    })
+  }
+  return out
+}
+
+// Why a person can't take a block (hard rules); null = they can
+function bdBlocked(ctx, p, blk, state) {
+  const date = blk.date, dow = parseYmd(date).getDay()
+  if (p.role === 'manager' && p.home_studio_id && p.home_studio_id !== ctx.studio) return 'manager at another studio'
+  if (state.daysOf(p.id).has(date)) return 'already working that day'
+  const u = ctx.unav.find(u => u.staff_id === p.id && u.day_of_week === dow && u.effective_from <= date &&
+                               (!u.effective_to || u.effective_to >= date) &&
+                               (!u.start_time || overlaps(blk.start, blk.end, toMin(u.start_time), toMin(u.end_time))))
+  if (u) return 'unavailable'
+  const off = ctx.toff.find(o => o.staff_id === p.id && o.status === 'approved' && o.start_date <= date && o.end_date >= date &&
+                                 (!o.start_time || overlaps(blk.start, blk.end, toMin(o.start_time), toMin(o.end_time))))
+  if (off) return 'time off'
+  const len = blk.end - blk.start
+  if (p.max_weekly_hours != null && state.minutesOf(p.id) + len > p.max_weekly_hours * 60) return 'over max hours'
+  if (p.max_studio_days_per_week != null && state.daysOf(p.id).size >= p.max_studio_days_per_week) return 'max in-studio days'
+  return null
+}
+
+function bdScore(ctx, p, blk, state) {
+  const len = blk.end - blk.start, mins = state.minutesOf(p.id)
+  const ot = ctx.ot.find(o => o.province_code === PROV_OF(ctx.studio))
+  let s = mins / 60 * 5                                        // spread hours around
+  if (p.role === 'manager' && p.home_studio_id === ctx.studio) s -= (mins + len <= 40 * 60) ? 1000 : -500
+  else if (p.home_studio_id === ctx.studio) s -= 300
+  else if (!(p.studio_ids || []).length) s += 100               // floaters last
+  if (p.min_weekly_hours != null && mins < p.min_weekly_hours * 60) s -= 200
+  if (ot && mins + len > ot.weekly_hours * 60) s += 800        // avoid overtime where possible
+  const badgesHeld = ctx.badgesBy[p.id] || new Set()
+  if (blk.badges.length) s += blk.badges.every(b => badgesHeld.has(b)) ? -2000 : 2000
+  else if (badgesHeld.size) s += 20                             // keep badge holders free for badge work
+  const pend = ctx.toff.find(o => o.staff_id === p.id && o.status === 'pending' && o.start_date <= blk.date && o.end_date >= blk.date)
+  if (pend) s += 400
+  return s
+}
+
+function bdState(ctx, blocks) {
+  // hours and days per person this week: existing approved/posted shifts at any studio
+  // plus drafts at other studios, plus this plan
+  const keep = ctx.shifts.filter(x => x.start_time && x.end_time && !(x.studio_id === ctx.studio && x.status === 'draft'))
+  return {
+    minutesOf: id => keep.filter(x => x.staff_id === id).reduce((t, x) => t + toMin(x.end_time) - toMin(x.start_time), 0) +
+                     blocks.filter(b => b.staffId === id).reduce((t, b) => t + b.end - b.start, 0),
+    daysOf: id => new Set(keep.filter(x => x.staff_id === id).map(x => x.shift_date).concat(blocks.filter(b => b.staffId === id).map(b => b.date)))
+  }
+}
+
+async function buildSchedule() {
+  const studio = document.getElementById('bd-studio').value
+  if (!studio) { toast('Choose a studio first.', true); return }
+  const body = document.getElementById('bd-body')
+  body.innerHTML = '<div class="panel"><div class="loading">Building a draft…</div></div>'
+  try { bdCtx = await bdLoad(studio) } catch (e) { body.innerHTML = '<div class="note bad">Could not load: ' + esc(e.message) + '</div>'; return }
+  const ctx = bdCtx
+  let blocks = []
+  for (let i = 0; i < 7; i++) {
+    const date = addDays(ctx.from, i)
+    const slots = bdDayNeed(ctx, date)
+    if (slots && slots.some(s => s.need > 0)) blocks = blocks.concat(bdBlocks(ctx, date, slots))
+  }
+  // scarce first: badge blocks, then longest
+  const order = blocks.slice().sort((a, b) => (b.badges.length - a.badges.length) || ((b.end - b.start) - (a.end - a.start)))
+  order.forEach(blk => {
+    const state = bdState(ctx, blocks)
+    let best = null, bestScore = Infinity
+    ctx.pool.forEach(p => {
+      if (bdBlocked(ctx, p, blk, state)) return
+      const sc = bdScore(ctx, p, blk, state)
+      if (sc < bestScore) { best = p; bestScore = sc }
+    })
+    blk.staffId = best ? best.id : null
+  })
+  bdPlan = { blocks }
+  renderBuild()
+}
+
+function bdPerson(id) { return bdCtx.pool.find(p => p.id === id) || staffById[id] || { id, display_name: '(unknown)' } }
+
+function bdInfo(p) {
+  const ctx = bdCtx, state = bdState(ctx, bdPlan.blocks)
+  const lines = []
+  lines.push('Home studio: ' + (p.home_studio_id ? (STUDIO_NAMES[p.home_studio_id] || p.home_studio_id) : 'not set'))
+  if (p.role === 'manager') lines.push('Manager: 40 h/week at home studio')
+  lines.push('Hours promised: ' + (p.min_weekly_hours != null ? 'at least ' + p.min_weekly_hours : 'no minimum') +
+             ', ' + (p.max_weekly_hours != null ? 'at most ' + p.max_weekly_hours : 'no maximum (avoid overtime)'))
+  if (p.max_studio_days_per_week != null) lines.push('In-studio days: at most ' + p.max_studio_days_per_week + ' a week')
+  const b = [...(ctx.badgesBy[p.id] || [])].map(c => ctx.badgeLabel[c] || c)
+  if (b.length) lines.push('Badges: ' + b.join(', '))
+  lines.push('This week: ' + hrs(state.minutesOf(p.id)) + ' h on ' + state.daysOf(p.id).size + ' day(s), all studios')
+  if (ctx.notesBy[p.id]) lines.push('Notes: ' + ctx.notesBy[p.id])
+  return lines.join('\n')
+}
+
+function renderBuild() {
+  const ctx = bdCtx, plan = bdPlan, body = document.getElementById('bd-body')
+  if (!plan.blocks.length) { body.innerHTML = '<div class="panel"><div class="empty">Nothing to fill this week: no open days, or approved shifts already cover everything.</div></div>'; document.getElementById('bd-save').disabled = true; return }
+  const state = bdState(ctx, plan.blocks)
+  const warn = []
+  let html = ''
+  for (let i = 0; i < 7; i++) {
+    const date = addDays(ctx.from, i)
+    const day = plan.blocks.map((b, idx) => ({ b, idx })).filter(x => x.b.date === date).sort((x, y) => x.b.start - y.b.start || x.b.layer - y.b.layer)
+    const existing = ctx.shifts.filter(x => x.studio_id === ctx.studio && x.shift_date === date && x.status !== 'draft' && x.start_time)
+    if (!day.length && !existing.length) continue
+    html += '<div class="panel"><div class="panel-head"><h2>' + fmtDate(date) + '</h2></div><table class="list"><tbody>'
+    existing.forEach(x => {
+      html += '<tr><td style="width:150px">' + fmtRange(x.start_time, x.end_time) + '</td><td class="person">' + esc(bdPerson(x.staff_id).display_name) +
+              '</td><td><span class="pill approved">' + esc(x.status) + '</span></td><td class="muted small">already scheduled</td></tr>'
+    })
+    day.forEach(({ b, idx }) => {
+      const st = bdState(ctx, plan.blocks.filter((_, j) => j !== idx))
+      const opts = ctx.pool.map(p => ({ p, why: bdBlocked(ctx, p, b, st) }))
+        .sort((x, y) => (!!x.why - !!y.why) || x.p.display_name.localeCompare(y.p.display_name))
+      const sel = '<select class="input" onchange="bdAssign(' + idx + ', this.value)"><option value="">— Unfilled —</option>' +
+        opts.map(o => '<option value="' + o.p.id + '"' + (o.p.id === b.staffId ? ' selected' : '') + '>' + esc(o.p.display_name) + (o.why ? ' (' + o.why + ')' : '') + '</option>').join('') + '</select>'
+      const p = b.staffId ? bdPerson(b.staffId) : null
+      const notes = []
+      if (!p) notes.push('<span class="flag" style="background:var(--bad-bg);color:var(--bad)">Nobody available</span>')
+      b.badges.forEach(bc => {
+        const ok = p && (ctx.badgesBy[p.id] || new Set()).has(bc)
+        notes.push('<span class="flag"' + (ok ? ' style="background:var(--good-bg);color:var(--good)"' : '') + '>Needs ' + esc(ctx.badgeLabel[bc] || bc) + (ok ? ' ✓' : '') + '</span>')
+        if (!ok) warn.push(fmtDate(date) + ' ' + fmtRange(fromMin(b.start), fromMin(b.end)) + ': needs ' + (ctx.badgeLabel[bc] || bc))
+      })
+      if (!p) warn.push(fmtDate(date) + ' ' + fmtRange(fromMin(b.start), fromMin(b.end)) + ': nobody available')
+      html += '<tr><td style="width:150px">' + fmtRange(fromMin(b.start), fromMin(b.end)) + ' <span class="muted small">' + hrs(b.end - b.start) + ' h</span></td><td>' + sel +
+              (p ? ' <span title="' + esc(bdInfo(p)) + '" style="cursor:help;font-weight:700">ⓘ</span>' : '') + '</td><td colspan="2">' + notes.join(' ') + '</td></tr>'
+    })
+    html += '</tbody></table></div>'
+  }
+  // people summary: everyone scheduled here this week, plus managers / minimum-hours people at home here
+  const ot = ctx.ot.find(o => o.province_code === PROV_OF(ctx.studio))
+  const ids = new Set(plan.blocks.filter(b => b.staffId).map(b => b.staffId))
+  ctx.pool.forEach(p => { if (p.home_studio_id === ctx.studio && (p.role === 'manager' || p.min_weekly_hours != null)) ids.add(p.id) })
+  const rows = [...ids].map(id => bdPerson(id)).sort((a, b) => a.display_name.localeCompare(b.display_name)).map(p => {
+    const h = hrs(state.minutesOf(p.id)), flags = []
+    if (p.role === 'manager' && p.home_studio_id === ctx.studio && p.max_studio_days_per_week == null && h < 40) flags.push('Manager under 40 h')
+    if (p.min_weekly_hours != null && h < p.min_weekly_hours) flags.push('Under minimum (' + p.min_weekly_hours + ' h)')
+    if (ot && h > ot.weekly_hours) flags.push('Overtime (over ' + ot.weekly_hours + ' h)')
+    flags.forEach(f => warn.push(p.display_name + ': ' + f))
+    return '<tr><td class="person">' + esc(p.display_name) + ' <span title="' + esc(bdInfo(p)) + '" style="cursor:help">ⓘ</span></td><td>' + h + ' h</td><td>' +
+           state.daysOf(p.id).size + ' day(s)</td><td>' + flags.map(f => '<span class="flag">' + esc(f) + '</span>').join(' ') + '</td></tr>'
+  }).join('')
+  html += '<div class="panel"><div class="panel-head"><h2>Hours this week</h2><span class="muted small">All studios, including this draft</span></div><table class="list"><thead><tr><th>Person</th><th>Hours</th><th>Days</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+  const filled = plan.blocks.filter(b => b.staffId).length
+  const top = '<div class="panel"><div class="summary"><div><b>' + plan.blocks.length + '</b>shifts needed</div><div><b>' + filled + '</b>filled</div><div><b>' +
+    (plan.blocks.length - filled) + '</b>unfilled</div><div><b>' + hrs(plan.blocks.filter(b => b.staffId).reduce((t, b) => t + b.end - b.start, 0)) + '</b>hours</div></div></div>' +
+    (warn.length ? '<div class="note warn"><b>Check before saving:</b><br>' + warn.map(esc).join('<br>') + '</div>' : '')
+  body.innerHTML = top + html
+  document.getElementById('bd-save').disabled = false
+}
+
+function bdAssign(idx, staffId) { bdPlan.blocks[idx].staffId = staffId || null; renderBuild() }
+
+async function saveDraftSchedule() {
+  const ctx = bdCtx, plan = bdPlan
+  if (!plan) return
+  const rows = plan.blocks.filter(b => b.staffId).map(b => ({
+    staff_id: b.staffId, studio_id: ctx.studio, shift_date: b.date,
+    start_time: fromMin(b.start), end_time: fromMin(b.end), status: 'draft'
+  }))
+  const seen = new Set()
+  for (const r of rows) {
+    const k = r.staff_id + '|' + r.shift_date
+    if (seen.has(k)) { toast(bdPerson(r.staff_id).display_name + ' has two shifts on ' + fmtDate(r.shift_date) + '. Change one before saving.', true); return }
+    seen.add(k)
+  }
+  if (!confirm('Save ' + rows.length + ' draft shifts for ' + STUDIO_NAMES[ctx.studio] + '? This replaces earlier drafts for this studio and week. Approved shifts are not touched.')) return
+  const del = await sb.from('staff_shifts').delete().eq('studio_id', ctx.studio).eq('status', 'draft').gte('shift_date', ctx.from).lte('shift_date', ctx.to)
+  if (del.error) { toast(del.error.message, true); return }
+  if (rows.length) {
+    const ins = await sb.from('staff_shifts').insert(rows)
+    if (ins.error) { toast('Drafts not saved: ' + ins.error.message, true); return }
+  }
+  toast('Saved ' + rows.length + ' draft shifts')
+}
+
+async function approveDrafts() {
+  const studio = document.getElementById('bd-studio').value
+  if (!studio) { toast('Choose a studio first.', true); return }
+  const to = addDays(bdWeek, 6)
+  const { data, error } = await sb.from('staff_shifts').select('staff_id').eq('studio_id', studio).eq('status', 'draft').gte('shift_date', bdWeek).lte('shift_date', to)
+  if (error) { toast(error.message, true); return }
+  if (!data.length) { toast('No saved drafts for this studio and week.', true); return }
+  if (!confirm('Approve ' + data.length + ' draft shifts for ' + STUDIO_NAMES[studio] + ' this week?')) return
+  const up = await sb.from('staff_shifts').update({ status: 'approved' }).eq('studio_id', studio).eq('status', 'draft').gte('shift_date', bdWeek).lte('shift_date', to)
+  if (up.error) { toast(up.error.message, true); return }
+  toast('Approved ' + data.length + ' shifts')
 }
 
 /* =====================================================================
