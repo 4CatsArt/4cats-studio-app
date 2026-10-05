@@ -2415,7 +2415,22 @@ async function getSeriesAnchorSessionIds(s) {
 // Sums booking qty across every anchor covering this row's week. Uses whatever's
 // already in bookingCountsMap (populated from the day/week's own bookings query)
 // to avoid an extra round-trip when the anchor is already in view.
+// Class 2+ weeks: which bookings make up this week's class list. Asks the database
+// (get_class_week_bookings) so the iPad list, Fill Rates and Coverage always agree:
+// term sign-ups covering this week, mid-term sign-ups (span read from the purchase
+// when the session has none), and single classes booked on this week itself.
+// Returns null if the call fails, so callers fall back to the older lookup.
+async function getClassWeekBookings(sessionId) {
+  const { data, error } = await sb.rpc('get_class_week_bookings', { p_session_id: sessionId })
+  if (error) { console.error('get_class_week_bookings error:', error); return null }
+  return data || []
+}
+
 async function getSeriesRosterCount(s, bookingCountsMap) {
+  if (isSeriesClass2Plus(s.title)) {
+    const rows = await getClassWeekBookings(s.id)
+    if (rows) return rows.reduce((sum, r) => sum + (r.qty || 0), 0)
+  }
   const ids = await getSeriesAnchorSessionIds(s)
   let total = 0
   for (const id of ids) {
@@ -2999,7 +3014,7 @@ async function loadDay2View() {
   // anchor) — sum in the roster count from whichever anchor(s) cover this week so
   // the day view shows how many kids are actually enrolled in each subsequent class.
   for (const s of preFiltered) {
-    if (isSeriesClass2Plus(s.title) && (s.series_id || !bookingCountsD2[s.id])) {
+    if (isSeriesClass2Plus(s.title)) {
       bookingCountsD2[s.id] = await getSeriesRosterCount(s, bookingCountsD2)
     }
   }
@@ -4531,7 +4546,7 @@ async function loadDayView() {
 
     // Series class 2+ — sum roster count from whichever anchor(s) cover this week
     for (const s of preFiltered) {
-      if (isSeriesClass2Plus(s.title) && (s.series_id || !bookingCounts[s.id])) {
+      if (isSeriesClass2Plus(s.title)) {
         bookingCounts[s.id] = await getSeriesRosterCount(s, bookingCounts)
       }
     }
@@ -5082,7 +5097,7 @@ async function loadTableView() {
 
   // For series class 2+, sum reg count from whichever anchor(s) cover this week
   for (const s of allFiltered) {
-    if (isSeriesClass2Plus(s.title) && (s.series_id || !bookingCounts[s.id])) {
+    if (isSeriesClass2Plus(s.title)) {
       bookingCounts[s.id] = await getSeriesRosterCount(s, bookingCounts)
     }
   }
@@ -5514,7 +5529,12 @@ async function showBookings(sessionId, title, dateLabel, sessionType, sessionTim
     return showCatchupClassRoster(sessionId, title, dateLabel, sessionTime)
   }
   let bookingSessionIds = [sessionId]
-  if (isSeriesClass2Plus(title) || isSeriesClass1(title)) {
+  let classWeekBookingIds = null
+  if (isSeriesClass2Plus(title)) {
+    const rows = await getClassWeekBookings(sessionId)
+    if (rows) classWeekBookingIds = rows.map(r => r.booking_id)
+  }
+  if (!classWeekBookingIds && (isSeriesClass2Plus(title) || isSeriesClass1(title))) {
     // Only series_id actually needs a fresh lookup — title, time, and date are already
     // available from this function's own parameters. Re-fetching all of them and missing
     // session_time/session_date here previously broke the legacy (series_id-null) fallback
@@ -5526,7 +5546,9 @@ async function showBookings(sessionId, title, dateLabel, sessionType, sessionTim
   }
   const { data: bookings } = await sb.from('bookings')
     .select('id, customer_name, customer_email, customer_phone, qty, estimated_attendance, shopify_order_name, shopify_line_item_id, booked_at, raw_payload, event_date, order_note, aftercare, early_arrival, returned_at, project_preference, reason_for_gathering, hot_chocolate_qty, candy_bag_qty, customer_booking_number')
-    .in('session_id', bookingSessionIds).order('booked_at')
+    .in(classWeekBookingIds ? 'id' : 'session_id',
+         classWeekBookingIds ? (classWeekBookingIds.length ? classWeekBookingIds : ['00000000-0000-0000-0000-000000000000']) : bookingSessionIds)
+    .order('booked_at')
 
   // Dedup by order+line-item, not order alone — a family booking multiple kids under one
   // order (different projects, different participants) gets one Shopify line item per
