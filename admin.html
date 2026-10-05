@@ -4566,6 +4566,70 @@ function toggleAllStaffStudios(allChecked) {
   const list = document.getElementById('staff-studio-list')
   list.style.display = allChecked ? 'none' : 'block'
   if (allChecked) list.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = false)
+  refreshHomeStudioOptions()
+}
+
+// ── Scheduling fields: home studio, weekly hours, badges ──────────────────
+// Home studio choices are the studios ticked above (all studios for an
+// All / Floater profile). Badges come from badge_types; each award is a row
+// in staff_badges (source 'manual' here; training can award them later).
+let staffBadgeTypes = null        // [{ code, label, description }]
+let staffBadgesLoaded = new Set() // badge codes this person had when the form opened
+
+function refreshHomeStudioOptions(selected) {
+  const sel = document.getElementById('staff-home-studio')
+  if (!sel) return
+  const keep = selected !== undefined ? selected : sel.value
+  const chosen = getSelectedStaffStudios()
+  const ids = chosen.length ? chosen : Object.keys(STUDIO_VARIANT_MAP)
+  sel.innerHTML = '<option value="">— Not set —</option>' +
+    ids.map(id => `<option value="${id}">${STUDIO_VARIANT_MAP[id] || id}</option>`).join('')
+  sel.value = ids.includes(keep) ? keep : (chosen.length === 1 ? chosen[0] : '')
+}
+
+async function renderStaffBadges(staffId) {
+  const box = document.getElementById('staff-badge-list')
+  if (!box) return
+  if (!staffBadgeTypes) {
+    const { data, error } = await sb.from('badge_types').select('code, label, description').order('sort_order')
+    if (error) { box.textContent = "Couldn't load badges"; return }
+    staffBadgeTypes = data || []
+  }
+  staffBadgesLoaded = new Set()
+  if (staffId) {
+    const { data: have } = await sb.from('staff_badges').select('badge_code').eq('staff_id', staffId)
+    ;(have || []).forEach(b => staffBadgesLoaded.add(b.badge_code))
+  }
+  box.style.color = ''
+  box.innerHTML = staffBadgeTypes.length
+    ? staffBadgeTypes.map(b => `<label title="${(b.description || '').replace(/"/g, '&quot;')}" style="display:flex;align-items:center;gap:5px;cursor:pointer">
+        <input type="checkbox" class="staff-badge-cb" value="${b.code}" ${staffBadgesLoaded.has(b.code) ? 'checked' : ''}> ${b.label}</label>`).join('')
+    : '<span style="color:#bbb">No badges set up yet.</span>'
+}
+
+async function saveStaffBadges(staffId) {
+  const want = new Set(Array.from(document.querySelectorAll('.staff-badge-cb:checked')).map(cb => cb.value))
+  const add = [...want].filter(c => !staffBadgesLoaded.has(c))
+  const remove = [...staffBadgesLoaded].filter(c => !want.has(c))
+  if (remove.length) {
+    const { error } = await sb.from('staff_badges').delete().eq('staff_id', staffId).in('badge_code', remove)
+    if (error) return error
+  }
+  if (add.length) {
+    const { data: { user } } = await sb.auth.getUser()
+    const { error } = await sb.from('staff_badges').insert(add.map(c => ({ staff_id: staffId, badge_code: c, source: 'manual', awarded_by: user ? user.id : null })))
+    if (error) return error
+  }
+  return null
+}
+
+function readSchedulingFields() {
+  const num = id => { const v = document.getElementById(id).value; return v === '' ? null : Number(v) }
+  return {
+    home_studio_id: document.getElementById('staff-home-studio').value || null,
+    min_weekly_hours: num('staff-min-hours'),
+    max_weekly_hours: num('staff-max-hours'),
+  }
 }
 
 function getSelectedStaffStudios() {
@@ -4577,7 +4641,7 @@ function buildStaffStudioList(selectedIds = []) {
   const list = document.getElementById('staff-studio-list')
   list.innerHTML = Object.entries(STUDIO_VARIANT_MAP).map(([k, v]) =>
     `<label style="display:flex;align-items:center;gap:6px;padding:4px 10px;cursor:pointer;font-size:12px;break-inside:avoid">
-      <input type="checkbox" value="${k}" ${selectedIds.includes(k) ? 'checked' : ''}> ${v}
+      <input type="checkbox" value="${k}" ${selectedIds.includes(k) ? 'checked' : ''} onchange="refreshHomeStudioOptions()"> ${v}
     </label>`).join('')
   const allCb = document.getElementById('staff-studio-all')
   if (selectedIds.length > 0) { allCb.checked = false; list.style.display = 'block' }
@@ -4766,6 +4830,10 @@ async function openStaffModal(id = null) {
       }
       togglePinRow()
       buildStaffStudioList(data.studio_ids || [])
+      refreshHomeStudioOptions(data.home_studio_id || '')
+      document.getElementById('staff-min-hours').value = data.min_weekly_hours ?? ''
+      document.getElementById('staff-max-hours').value = data.max_weekly_hours ?? ''
+      renderStaffBadges(id)
       const deactivateBtn = document.getElementById('staff-deactivate-btn')
       deactivateBtn.textContent = data.is_active ? 'Deactivate' : 'Reactivate'
       deactivateBtn.style.color = data.is_active ? '#c0392b' : '#2e7d32'
@@ -4803,6 +4871,11 @@ async function openStaffModal(id = null) {
     document.getElementById('staff-hire-date').value = ''
     document.getElementById('staff-hourly-wage').value = ''
     setWageInputState(false, '$/hr')
+    buildStaffStudioList([])
+    refreshHomeStudioOptions('')
+    document.getElementById('staff-min-hours').value = ''
+    document.getElementById('staff-max-hours').value = ''
+    renderStaffBadges(null)
     togglePinRow()
   }
 
@@ -4820,6 +4893,8 @@ function togglePinRow() {
   if (pinRow) pinRow.style.display = (role === 'manager' || role === 'admin') ? 'block' : 'none'
   const adjRow = document.getElementById('staff-adjust-spaces-row')
   if (adjRow) adjRow.style.display = (role === 'manager') ? 'block' : 'none'
+  const schedNote = document.getElementById('staff-manager-sched-note')
+  if (schedNote) schedNote.style.display = (role === 'manager') ? 'block' : 'none'
 }
 
 async function saveStaff() {
@@ -4835,7 +4910,15 @@ async function saveStaff() {
   // Only touch the PIN if we know its current value, or someone typed a new one —
   // never wipe a PIN just because it failed to load.
   const shouldSetPin = staffPinLoaded || !!pinVal
+  const sched = readSchedulingFields()
+  if (sched.min_weekly_hours != null && sched.max_weekly_hours != null && sched.min_weekly_hours > sched.max_weekly_hours) {
+    alert('Min hours per week can\'t be more than max hours.'); return
+  }
+  if (document.getElementById('staff-role').value === 'manager' && !sched.home_studio_id) {
+    alert('Please choose a home studio for this manager (they\'re scheduled 40 hours a week there).'); return
+  }
   const profilePayload = {
+    ...sched,
     display_name: name,
     nickname: document.getElementById('staff-nickname').value.trim() || null,
     email,
@@ -4862,6 +4945,8 @@ async function saveStaff() {
     // Update existing profile
     const { error } = await sb.from('staff_profiles').update(profilePayload).eq('id', editingStaffId)
     if (error) { btn.textContent = 'Save'; btn.disabled = false; alert('Error: ' + error.message); return }
+    const badgeErr = await saveStaffBadges(editingStaffId)
+    if (badgeErr) { btn.textContent = 'Save'; btn.disabled = false; alert('Profile saved, but badges were not: ' + badgeErr.message); return }
     if (shouldSetPin) {
       const { error: pinErr } = await sb.rpc('admin_set_staff_pin', { p_profile_id: editingStaffId, p_pin: pinVal || null })
       if (pinErr) { btn.textContent = 'Save'; btn.disabled = false; alert('Profile saved, but the PIN was not: ' + pinErr.message); return }
@@ -4901,6 +4986,15 @@ async function saveStaff() {
     const result = await res.json()
     btn.textContent = 'Save'; btn.disabled = false
     if (result.error) { alert('Error: ' + result.error); return }
+    // Scheduling fields and badges aren't part of the create call: save them on the new profile
+    {
+      const { data: newRow3 } = await sb.from('staff_profiles').select('id').eq('email', email).maybeSingle()
+      if (newRow3) {
+        const { error: sErr } = await sb.from('staff_profiles').update(sched).eq('id', newRow3.id)
+        const bErr = sErr ? null : await saveStaffBadges(newRow3.id)
+        if (sErr || bErr) alert('Staff member created, but the scheduling details were not saved (' + (sErr || bErr).message + '). Open them and save again.')
+      }
+    }
     if (pinVal) {
       const { data: newRow } = await sb.from('staff_profiles').select('id').eq('email', email).maybeSingle()
       const { error: pinErr } = newRow
@@ -8673,6 +8767,32 @@ function showAdminToast(msg, duration = 2500) {
         </div>
         <div id="staff-studio-list" style="display:none;max-height:160px;overflow-y:auto;padding:4px 0;columns:2">
         </div>
+      </div>
+    </div>
+
+    <!-- Scheduling (used by the staff schedule generator) -->
+    <div class="modal-field" style="margin-bottom:10px">
+      <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Scheduling</label>
+      <div style="border:0.5px solid #d0d0c8;border-radius:7px;padding:10px">
+        <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px">
+          <div>
+            <label style="font-size:11px;color:#888;display:block;margin-bottom:4px">Home studio</label>
+            <select id="staff-home-studio" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;box-sizing:border-box;background:white"></select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:#888;display:block;margin-bottom:4px">Min hrs / week</label>
+            <input id="staff-min-hours" type="number" step="0.5" min="0" max="80" placeholder="—" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;box-sizing:border-box;background:white">
+          </div>
+          <div>
+            <label style="font-size:11px;color:#888;display:block;margin-bottom:4px">Max hrs / week</label>
+            <input id="staff-max-hours" type="number" step="0.5" min="0" max="80" placeholder="—" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;box-sizing:border-box;background:white">
+          </div>
+        </div>
+        <div id="staff-manager-sched-note" style="display:none;font-size:11px;color:#888;margin-top:6px">
+          Managers are scheduled 40 hours a week at their home studio, and only moved to another studio by hand.
+        </div>
+        <label style="font-size:11px;color:#888;display:block;margin:10px 0 4px">Badges</label>
+        <div id="staff-badge-list" style="display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:#bbb">Loading…</div>
       </div>
     </div>
 
