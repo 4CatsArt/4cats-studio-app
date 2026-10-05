@@ -4629,7 +4629,30 @@ function readSchedulingFields() {
     home_studio_id: document.getElementById('staff-home-studio').value || null,
     min_weekly_hours: num('staff-min-hours'),
     max_weekly_hours: num('staff-max-hours'),
+    max_studio_days_per_week: num('staff-max-days'),
+    exclude_from_schedule: document.getElementById('staff-exclude-schedule').checked,
   }
+}
+
+// Scheduling notes: separate home-office-only table (staff_schedule_prefs)
+let staffNotesLoaded = ''
+async function loadStaffScheduleNotes(staffId) {
+  const box = document.getElementById('staff-schedule-notes')
+  staffNotesLoaded = ''
+  box.value = ''
+  if (!staffId) return
+  const { data } = await sb.from('staff_schedule_prefs').select('notes').eq('staff_id', staffId).maybeSingle()
+  staffNotesLoaded = (data && data.notes) || ''
+  box.value = staffNotesLoaded
+}
+async function saveStaffScheduleNotes(staffId) {
+  const notes = document.getElementById('staff-schedule-notes').value.trim()
+  if (notes === staffNotesLoaded) return null
+  const { data: { user } } = await sb.auth.getUser()
+  const { error } = await sb.from('staff_schedule_prefs').upsert(
+    { staff_id: staffId, notes: notes || null, updated_by: user ? user.id : null, updated_at: new Date().toISOString() },
+    { onConflict: 'staff_id' })
+  return error || null
 }
 
 function getSelectedStaffStudios() {
@@ -4833,7 +4856,10 @@ async function openStaffModal(id = null) {
       refreshHomeStudioOptions(data.home_studio_id || '')
       document.getElementById('staff-min-hours').value = data.min_weekly_hours ?? ''
       document.getElementById('staff-max-hours').value = data.max_weekly_hours ?? ''
+      document.getElementById('staff-max-days').value = data.max_studio_days_per_week ?? ''
+      document.getElementById('staff-exclude-schedule').checked = !!data.exclude_from_schedule
       renderStaffBadges(id)
+      loadStaffScheduleNotes(id)
       const deactivateBtn = document.getElementById('staff-deactivate-btn')
       deactivateBtn.textContent = data.is_active ? 'Deactivate' : 'Reactivate'
       deactivateBtn.style.color = data.is_active ? '#c0392b' : '#2e7d32'
@@ -4875,7 +4901,10 @@ async function openStaffModal(id = null) {
     refreshHomeStudioOptions('')
     document.getElementById('staff-min-hours').value = ''
     document.getElementById('staff-max-hours').value = ''
+    document.getElementById('staff-max-days').value = ''
+    document.getElementById('staff-exclude-schedule').checked = false
     renderStaffBadges(null)
+    loadStaffScheduleNotes(null)
     togglePinRow()
   }
 
@@ -4911,10 +4940,13 @@ async function saveStaff() {
   // never wipe a PIN just because it failed to load.
   const shouldSetPin = staffPinLoaded || !!pinVal
   const sched = readSchedulingFields()
+  if (sched.max_studio_days_per_week != null && !(Number.isInteger(sched.max_studio_days_per_week) && sched.max_studio_days_per_week >= 1 && sched.max_studio_days_per_week <= 7)) {
+    alert('Max in-studio days must be a whole number from 1 to 7, or blank.'); return
+  }
   if (sched.min_weekly_hours != null && sched.max_weekly_hours != null && sched.min_weekly_hours > sched.max_weekly_hours) {
     alert('Min hours per week can\'t be more than max hours.'); return
   }
-  if (document.getElementById('staff-role').value === 'manager' && !sched.home_studio_id) {
+  if (document.getElementById('staff-role').value === 'manager' && !sched.home_studio_id && !sched.exclude_from_schedule) {
     alert('Please choose a home studio for this manager (they\'re scheduled 40 hours a week there).'); return
   }
   const profilePayload = {
@@ -4947,6 +4979,8 @@ async function saveStaff() {
     if (error) { btn.textContent = 'Save'; btn.disabled = false; alert('Error: ' + error.message); return }
     const badgeErr = await saveStaffBadges(editingStaffId)
     if (badgeErr) { btn.textContent = 'Save'; btn.disabled = false; alert('Profile saved, but badges were not: ' + badgeErr.message); return }
+    const notesErr = await saveStaffScheduleNotes(editingStaffId)
+    if (notesErr) { btn.textContent = 'Save'; btn.disabled = false; alert('Profile saved, but the scheduling notes were not: ' + notesErr.message); return }
     if (shouldSetPin) {
       const { error: pinErr } = await sb.rpc('admin_set_staff_pin', { p_profile_id: editingStaffId, p_pin: pinVal || null })
       if (pinErr) { btn.textContent = 'Save'; btn.disabled = false; alert('Profile saved, but the PIN was not: ' + pinErr.message); return }
@@ -4991,7 +5025,7 @@ async function saveStaff() {
       const { data: newRow3 } = await sb.from('staff_profiles').select('id').eq('email', email).maybeSingle()
       if (newRow3) {
         const { error: sErr } = await sb.from('staff_profiles').update(sched).eq('id', newRow3.id)
-        const bErr = sErr ? null : await saveStaffBadges(newRow3.id)
+        const bErr = sErr ? null : (await saveStaffBadges(newRow3.id)) || (await saveStaffScheduleNotes(newRow3.id))
         if (sErr || bErr) alert('Staff member created, but the scheduling details were not saved (' + (sErr || bErr).message + '). Open them and save again.')
       }
     }
@@ -8788,6 +8822,17 @@ function showAdminToast(msg, duration = 2500) {
             <input id="staff-max-hours" type="number" step="0.5" min="0" max="80" placeholder="—" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;box-sizing:border-box;background:white">
           </div>
         </div>
+        <div style="display:grid;grid-template-columns:1fr 2fr;gap:10px;margin-top:10px;align-items:end">
+          <div>
+            <label style="font-size:11px;color:#888;display:block;margin-bottom:4px">Max in-studio days / week</label>
+            <input id="staff-max-days" type="number" step="1" min="1" max="7" placeholder="—" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;box-sizing:border-box;background:white">
+          </div>
+          <label style="font-size:12px;display:flex;align-items:center;gap:7px;cursor:pointer;padding-bottom:9px">
+            <input type="checkbox" id="staff-exclude-schedule"> Don't schedule (e.g. home office)
+          </label>
+        </div>
+        <label style="font-size:11px;color:#888;display:block;margin:10px 0 4px">Scheduling notes <span style="color:#bbb">(home office only — preferences, not personal reasons)</span></label>
+        <textarea id="staff-schedule-notes" rows="2" placeholder="e.g. Prefers Oak Bay over Uptown · try not to schedule Fridays" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;box-sizing:border-box;background:white;resize:vertical;font-family:inherit"></textarea>
         <div id="staff-manager-sched-note" style="display:none;font-size:11px;color:#888;margin-top:6px">
           Managers are scheduled 40 hours a week at their home studio, and only moved to another studio by hand.
         </div>
