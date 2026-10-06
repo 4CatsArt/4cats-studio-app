@@ -144,6 +144,14 @@ table.wk td.drop-ok { outline: 2px dashed #4a7fd4; outline-offset: -3px; backgro
 .wk-leg { display: inline-flex; align-items: center; gap: 6px; }
 .wk-leg .wk-chip { width: 22px; height: 12px; padding: 0; margin: 0; display: inline-block; }
 table.wk tr.wk-classes td { background: #fbf8ef; }
+table.wk tr.wk-sched td { background: #f7f9fc; }
+.wk-fill { font-weight: 700; font-size: 13px; }
+.wk-fill.good { color: var(--good); } .wk-fill.mid { color: var(--warn); } .wk-fill.low { color: var(--bad); }
+.wk-ev { margin-top: 3px; background: #e3edfb; color: #0d3a80; border-radius: 5px; padding: 2px 5px; font-weight: 600; }
+.wk-sessions summary { cursor: pointer; color: var(--muted); margin-top: 3px; }
+.wk-sess { padding: 2px 0; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wk-sess.empty { color: var(--muted); }
+.wk-code { display: inline-block; border: 1px solid var(--line-2); border-radius: 4px; padding: 0 4px; font-weight: 700; font-size: 10px; background: #fff; }
 .wk-chip.class { background: #fff4d6; color: #7a5a00; border-left: 3px solid #e0a800; }
 .wk-pick { width: 100%; margin-top: 3px; font-size: 10.5px; padding: 1px 2px; border: 0.5px solid rgba(0,0,0,.15); border-radius: 4px; background: rgba(255,255,255,.7); }
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 1000; max-width: 90vw; }
@@ -717,6 +725,8 @@ function renderCoverage() {
       for all-day unavailability, approved time off, a closed day, max hours or
       in-studio days, trainees (they get training shifts), or if it would push
       someone into overtime.
+   7. Fridays are event night: the studio's manager and studio coordinator work
+      Friday, preferably through closing.
    6. Extra hours: managers below 40 h and anyone below their minimum get extra
       shifts on open days, placed at the END of the day (closing is busier).
    ===================================================================== */
@@ -776,6 +786,17 @@ async function bdLoad(studio) {
   ])
   for (const r of [need, rules, opening, ot, people, badges, notes, unav, toff, shifts]) if (r.error) throw new Error(r.error.message)
   bdBreakRules = breaks.error ? [] : (breaks.data || [])
+  // Day-by-day class schedule with bookings vs capacity (same source as finance.html's Schedule tab)
+  const daySessions = {}
+  let dayScheduleError = null
+  await Promise.all([0, 1, 2, 3, 4, 5, 6].map(async i => {
+    const d = addDays(from, i)
+    const { data, error } = await sb.rpc('get_day_session_codes', { p_studio_id: studio, p_date: d })
+    if (error) dayScheduleError = error.message
+    else daySessions[d] = data || []
+  }))
+  const scr = await sb.rpc('list_studio_coordinators')
+  const coordinators = scr.error ? [] : (scr.data || []).filter(r => r.studio_id === studio)
   const ct = await sb.from('class_teacher_assignments').select('*').eq('studio_id', studio).lte('effective_from', to)
   const classTeachers = ct.error ? [] : (ct.data || []).filter(a => !a.effective_to || a.effective_to >= from)
   const badgeLabel = {}
@@ -801,7 +822,7 @@ async function bdLoad(studio) {
     pastShifts[p.id] = count || 0
   }))
   return { studio, from, to, sessions: need.data || [], ruleBadge, badgeLabel, opening: opening.data, ot: ot.data,
-           pool, badgesBy, notesBy, pastShifts, recentWeekends, classTeachers, unav: unav.data, toff: toff.data, shifts: shifts.data }
+           pool, badgesBy, notesBy, pastShifts, recentWeekends, classTeachers, coordinators, daySessions, dayScheduleError, unav: unav.data, toff: toff.data, shifts: shifts.data }
 }
 
 function bdClosesAt(ctx, date) {
@@ -903,6 +924,16 @@ function bdAvailableDay(ctx, p, date) {
   return true
 }
 const isWeekend = date => { const d = parseYmd(date).getDay(); return d === 0 || d === 6 }
+const isFriday = date => parseYmd(date).getDay() === 5
+// Studio coordinator at this studio on that date (Community Points → Coordinators)
+function bdIsSC(ctx, p, date) {
+  return (ctx.coordinators || []).some(r => (r.staff_profile_id || r.staff_id || r.staff_profiles_id) === p.id &&
+    r.start_date <= date && (!r.end_date || r.end_date >= date))
+}
+// Leaders work Friday (event night): this studio's manager and its studio coordinator
+function bdIsLeader(ctx, p, date) {
+  return (p.role === 'manager' && p.home_studio_id === ctx.studio) || bdIsSC(ctx, p, date)
+}
 
 // Shifts done so far toward the 3 training shifts (null = already trained)
 function bdTrainingDone(ctx, p, blocks, beforeDate) {
@@ -947,6 +978,8 @@ function bdScore(ctx, p, blk, state) {
   const badgesHeld = ctx.badgesBy[p.id] || new Set()
   if (blk.badges.length) s += blk.badges.every(b => badgesHeld.has(b)) ? -2000 : 2000
   else if (badgesHeld.size) s += 20                             // keep badge holders free for badge work
+  // Friday is event night: manager / SC first, through closing if possible
+  if (isFriday(blk.date) && bdIsLeader(ctx, p, blk.date)) s -= (ctx.dayWindow && ctx.dayWindow[blk.date] && blk.end >= ctx.dayWindow[blk.date].close) ? 700 : 400
   // Days off back to back: prefer people working the day before or after (their days off stay together)
   if (state.daysOf(p.id).has(addDays(blk.date, -1)) || state.daysOf(p.id).has(addDays(blk.date, 1))) s -= 40
   if (isWeekend(blk.date)) {
@@ -1001,7 +1034,7 @@ async function buildSchedule() {
   const teacherNotes = bdPlaceTeachers(ctx, blocks)
   // Badge work first (scarce), then weekends (busiest, everyone works them), then longest
   const order = blocks.slice().sort((a, b) => (b.badges.length - a.badges.length) ||
-    (isWeekend(b.date) - isWeekend(a.date)) || ((b.end - b.start) - (a.end - a.start)))
+    (isWeekend(b.date) - isWeekend(a.date)) || (isFriday(b.date) - isFriday(a.date)) || ((b.end - b.start) - (a.end - a.start)))
   order.forEach(blk => {
     if (blk.staffId) return   // already given to a class teacher
     const state = bdState(ctx, blocks)
@@ -1013,6 +1046,22 @@ async function buildSchedule() {
     })
     blk.staffId = best ? best.id : null
   })
+  // Friday event night: a manager / SC still without a Friday shift gets a closing shift
+  ;[5].map(i => addDays(ctx.from, i)).forEach(date => {
+    const w = ctx.dayWindow[date]
+    if (!w || w.close - w.open < 180) return
+    ctx.pool.filter(p => bdIsLeader(ctx, p, date)).forEach(p => {
+      const st = bdState(ctx, blocks)
+      if (st.daysOf(p.id).has(date) || !bdAvailableDay(ctx, p, date)) return
+      const blk = { date, start: w.close - 180, end: w.close, layer: 0, badges: [], staffId: null, topUp: true, friday: true }
+      if (bdBlocked(ctx, p, blk, st)) return
+      const otR = ctx.ot.find(o => o.province_code === PROV_OF(ctx.studio))
+      if (otR && st.minutesOf(p.id) + 180 > otR.weekly_hours * 60) return
+      blk.staffId = p.id
+      blocks.push(blk)
+    })
+  })
+
   // Weekend for everyone: anyone at this studio still without a Saturday / Sunday shift gets a 3 h closing shift
   const otRule = ctx.ot.find(o => o.province_code === PROV_OF(ctx.studio))
   ;[6, 0].map(i => addDays(ctx.from, i)).forEach(date => {
@@ -1094,7 +1143,8 @@ function bdInfo(p) {
   const ctx = bdCtx, state = bdState(ctx, bdPlan.blocks)
   const lines = []
   lines.push('Home studio: ' + (p.home_studio_id ? (STUDIO_NAMES[p.home_studio_id] || p.home_studio_id) : 'not set'))
-  if (p.role === 'manager') lines.push('Manager: 40 h/week at home studio')
+  if (p.role === 'manager') lines.push('Manager: 40 h/week at home studio, works Fridays (event night)')
+  if (bdIsSC(ctx, p, ctx.from) || bdIsSC(ctx, p, ctx.to)) lines.push('Studio coordinator here: works Fridays (event night)')
   lines.push('Hours promised: ' + (p.min_weekly_hours != null ? 'at least ' + p.min_weekly_hours : 'no minimum') +
              ', ' + (p.max_weekly_hours != null ? 'at most ' + p.max_weekly_hours : 'no maximum (avoid overtime)'))
   if (p.max_studio_days_per_week != null) lines.push('In-studio days: at most ' + p.max_studio_days_per_week + ' a week')
@@ -1126,6 +1176,7 @@ function renderBuild() {
   ctx.shifts.forEach(x => { if (x.studio_id === ctx.studio && x.status !== 'draft') ids.add(x.staff_id) })
   const people = [...ids].map(bdPerson).sort((a, b) =>
     ((b.role === 'manager' && b.home_studio_id === ctx.studio) - (a.role === 'manager' && a.home_studio_id === ctx.studio)) ||
+    (bdIsSC(ctx, b, ctx.to) - bdIsSC(ctx, a, ctx.to)) ||
     ((b.home_studio_id === ctx.studio) - (a.home_studio_id === ctx.studio)) || a.display_name.localeCompare(b.display_name))
 
   // Reassign dropdown for one block
@@ -1143,7 +1194,7 @@ function renderBuild() {
       const p = bdPerson(b.staffId)
       tags.push('Training ' + (bdTrainingDone(ctx, p, plan.blocks, b.date) + 1) + '/' + TRAINING_SHIFTS_NEEDED + (b.withId ? ' · with ' + esc(bdPerson(b.withId).display_name) : ''))
     }
-    if (b.topUp) tags.push(b.weekend ? 'Weekend · closing' : 'Extra hours · closing')
+    if (b.topUp) tags.push(b.weekend ? 'Weekend · closing' : b.friday ? 'Friday event night · closing' : 'Extra hours · closing')
     ;(b.classes || []).forEach(l => tags.push('✓ Teaching ' + esc(l)))
     b.badges.forEach(bc => {
       const ok = b.staffId && (ctx.badgesBy[b.staffId] || new Set()).has(bc)
@@ -1156,10 +1207,31 @@ function renderBuild() {
   let head = '<tr><th class="wk-name">Staff</th>' + days.map(d => '<th>' + parseYmd(d).toLocaleDateString('en-CA', { weekday: 'short' }).toUpperCase() + ' ' + parseYmd(d).getDate() +
     (ctx.dayWindow[d] ? '' : '<div class="muted small" style="font-weight:400">closed</div>') + '</th>').join('') + '</tr>'
 
+  // Day schedule row: fill rate + the day's sessions (bookings / capacity)
+  const tShort = t => { const [h, m] = t.slice(0, 5).split(':').map(Number); return (h % 12 || 12) + (m ? ':' + String(m).padStart(2, '0') : '') + (h >= 12 ? 'p' : 'a') }
+  let schedRow = '<tr class="wk-sched"><td class="wk-name"><b>Day schedule</b><div class="muted small">fill rate · bookings / capacity</div>' +
+    (ctx.dayScheduleError ? '<div class="small" style="color:var(--bad)">Couldn\'t load: ' + esc(ctx.dayScheduleError) + '</div>' : '') + '</td>'
+  days.forEach(d => {
+    const rows = (ctx.daySessions[d] || []).filter(r => r.session_type !== 'festival' && ((r.capacity || 0) > 0 || (r.booking_count || 0) > 0))
+    const events = (ctx.daySessions[d] || []).filter(r => r.session_type === 'festival')
+    if (!rows.length && !events.length) { schedRow += '<td class="muted small">' + (ctx.daySessions[d] ? 'Nothing open' : '') + '</td>'; return }
+    const cap = rows.reduce((t, r) => t + (r.capacity || 0), 0), bk = rows.reduce((t, r) => t + (r.booking_count || 0), 0)
+    const pct = cap ? Math.round(bk / cap * 100) : null
+    const tone = pct == null ? '' : pct >= 75 ? 'good' : pct >= 40 ? 'mid' : 'low'
+    schedRow += '<td><div class="wk-fill ' + tone + '">' + (pct == null ? '—' : pct + '% full') + '</div><div class="muted small">' + bk + ' / ' + cap + ' booked</div>' +
+      events.map(e => '<div class="wk-ev">🎪 ' + esc(e.title) + '</div>').join('') +
+      '<details class="wk-sessions"><summary>' + rows.length + ' session' + (rows.length === 1 ? '' : 's') + '</summary>' +
+      rows.sort((a, b) => a.session_time.localeCompare(b.session_time)).map(r =>
+        '<div class="wk-sess' + ((r.booking_count || 0) === 0 ? ' empty' : '') + '" title="' + esc(r.title) + '"><b>' + tShort(r.session_time) + '</b> <span class="wk-code">' + esc(r.code || '') + '</span> ' +
+        (r.booking_count || 0) + (r.capacity != null ? '/' + r.capacity : '') + '</div>').join('') +
+      '</details></td>'
+  })
+  schedRow += '</tr>'
+
   // Unfilled row
   const unfilled = plan.blocks.map((b, idx) => ({ b, idx })).filter(x => !x.b.staffId && !x.b.training)
   unfilled.forEach(({ b }) => warn.push(fmtDate(b.date) + ' ' + blkLabel(b) + ': nobody available'))
-  let rows = '<tr class="wk-unfilled"><td class="wk-name"><b>Unfilled shifts</b><div class="muted small">' + unfilled.length + ' to fill</div></td>' +
+  let rows = schedRow + '<tr class="wk-unfilled"><td class="wk-name"><b>Unfilled shifts</b><div class="muted small">' + unfilled.length + ' to fill</div></td>' +
     days.map(d => '<td ' + bdDropAttrs('', d) + '>' + unfilled.filter(x => x.b.date === d).sort((x, y) => x.b.start - y.b.start).map(x => chipFor(x.b, x.idx).replace('wk-chip ', 'wk-chip open ')).join('') + '</td>').join('') + '</tr>'
 
   // Classes row: assign the term's teacher right here
@@ -1195,6 +1267,9 @@ function renderBuild() {
     if (p.role === 'manager' && p.home_studio_id === ctx.studio && p.max_studio_days_per_week == null && h < 40) flags.push('Manager under 40 h')
     if (p.min_weekly_hours != null && h < p.min_weekly_hours) flags.push('Under minimum')
     if (ot && h > ot.weekly_hours) flags.push('Overtime')
+    days.filter(isFriday).forEach(d => {
+      if (bdIsLeader(ctx, p, d) && ctx.dayWindow[d] && bdAvailableDay(ctx, p, d) && !state.daysOf(p.id).has(d)) flags.push('No Friday shift (event night)')
+    })
     if (p.home_studio_id === ctx.studio && bdTrainingDone(ctx, p, plan.blocks, '9999') === null)
       days.filter(isWeekend).forEach(d => {
         if (ctx.dayWindow[d] && bdAvailableDay(ctx, p, d) && !state.daysOf(p.id).has(d)) flags.push('No ' + (parseYmd(d).getDay() === 6 ? 'Sat' : 'Sun') + ' shift')
