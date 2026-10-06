@@ -131,7 +131,7 @@ table.wk tr.wk-total td { background: var(--soft); }
 .wk-chip { border-radius: 6px; padding: 4px 6px; margin-bottom: 4px; line-height: 1.35; }
 .wk-chip b { font-weight: 600; }
 .wk-chip.cover { background: #e6effc; color: #1a3f7a; border-left: 3px solid #4a7fd4; }
-.wk-chip.extra { background: #e4f4f1; color: #1d5e52; border-left: 3px solid #3aa28c; }
+.wk-chip.extra { background: #fbe6f0; color: #8a2456; border-left: 3px solid #d4568f; }
 .wk-chip.train { background: #f1e9fb; color: #5b2f8f; border-left: 3px solid #9b6bd6; }
 .wk-chip.done  { background: var(--good-bg); color: var(--good); border-left: 3px solid var(--good); }
 .wk-chip.open  { background: #fff; color: var(--bad); border: 1px dashed var(--bad); }
@@ -731,6 +731,10 @@ function renderCoverage() {
       someone into overtime.
    7. Fridays are event night: the studio's manager and studio coordinator work
       Friday, preferably through closing.
+   8. Managers are scheduled first: five full 8-hour days (40 h) at their home
+      studio: Saturday, Sunday and Friday, plus the two weekdays that keep their
+      two days off together and cover the most.
+   9. Extra hours for anyone go to Friday event night first (at least 5:30–9:30).
    6. Extra hours: managers below 40 h and anyone below their minimum get extra
       shifts on open days, placed at the END of the day (closing is busier).
    ===================================================================== */
@@ -759,7 +763,10 @@ let bdWeek = sundayOf(todayStr())
 let bdCtx = null      // loaded data for the current build
 let bdPlan = null     // { blocks: [...], warnings: [...] }
 
-function bdShiftWeek(n) { bdWeek = addDays(bdWeek, 7 * n); bdUpdateWeekLabel(); bdPlan = null; document.getElementById('bd-save').disabled = true }
+function bdShiftWeek(n) {
+  if (bdPlan && bdPlan.dirty && !confirm('You have changes on this week that aren\'t saved. Switch weeks and lose them?')) return
+  bdWeek = addDays(bdWeek, 7 * n); bdUpdateWeekLabel(); bdOpenWeek()
+}
 function bdUpdateWeekLabel() {
   const a = parseYmd(bdWeek), b = parseYmd(addDays(bdWeek, 6))
   document.getElementById('bd-week').textContent = a.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) + ' – ' + b.toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' })
@@ -767,7 +774,12 @@ function bdUpdateWeekLabel() {
 function initBuild() {
   const sel = document.getElementById('bd-studio')
   sel.innerHTML = '<option value="">Choose a studio…</option>' + Object.keys(STUDIO_NAMES).map(id => '<option value="' + id + '">' + esc(STUDIO_NAMES[id]) + '</option>').join('')
-  sel.onchange = () => { bdPlan = null; document.getElementById('bd-save').disabled = true; document.getElementById('bd-body').innerHTML = '<div class="panel"><div class="empty">Click Build draft.</div></div>' }
+  let lastStudio = ''
+  sel.onchange = () => {
+    if (bdPlan && bdPlan.dirty && !confirm('You have changes that aren\'t saved. Switch studios and lose them?')) { sel.value = lastStudio; return }
+    lastStudio = sel.value
+    bdOpenWeek()
+  }
   bdUpdateWeekLabel()
 }
 const hrs = m => Math.round(m / 6) / 10   // minutes → hours, 1 decimal
@@ -1013,6 +1025,76 @@ function bdState(ctx, blocks) {
   }
 }
 
+// Open a studio-week: shows the drafts already saved for it (editable), or an empty week to build.
+async function bdOpenWeek() {
+  const studio = document.getElementById('bd-studio').value
+  const body = document.getElementById('bd-body')
+  bdPlan = null
+  document.getElementById('bd-save').disabled = true
+  if (!studio) { body.innerHTML = '<div class="panel"><div class="empty">Choose a studio and week, then click Build draft.</div></div>'; return }
+  body.innerHTML = '<div class="panel"><div class="loading">Loading this week…</div></div>'
+  const week = bdWeek
+  let ctx
+  try { ctx = await bdLoad(studio) } catch (e) { body.innerHTML = '<div class="note bad">Could not load: ' + esc(e.message) + '</div>'; return }
+  if (week !== bdWeek || studio !== document.getElementById('bd-studio').value) return   // switched again while loading
+  bdCtx = ctx
+  bdPrepareDays(ctx)
+  const saved = ctx.shifts.filter(x => x.studio_id === studio && x.status === 'draft' && x.start_time && x.end_time)
+    .map(x => ({ date: x.shift_date, start: toMin(x.start_time), end: toMin(x.end_time), layer: 1, badges: [], staffId: x.staff_id, saved: true }))
+  bdPlan = { blocks: saved, teacherNotes: [], saved: saved.length > 0, dirty: false }
+  renderBuild()
+}
+
+// Day windows and need slots, used by the grid and by the generator
+function bdPrepareDays(ctx) {
+  ctx.dayWindow = {}
+  ctx.daySlots = {}
+  for (let i = 0; i < 7; i++) {
+    const date = addDays(ctx.from, i)
+    const slots = bdDayNeed(ctx, date)
+    if (!slots) continue
+    ctx.dayWindow[date] = { open: slots[0].t, close: slots[slots.length - 1].t + 15 }
+    ctx.daySlots[date] = slots
+  }
+}
+
+// Managers first: 5 full days (8 h paid each = 40 h). Sat, Sun and Fri (event night), plus the
+// pair of Mon–Thu that leaves their two days off back to back and covers the most needed hours.
+function bdPlaceManagers(ctx, blocks) {
+  const notes = []
+  const d = i => addDays(ctx.from, i)               // week starts Sunday: 0 Sun … 6 Sat
+  const needOn = date => ((ctx.daySlots || {})[date] || []).reduce((t, s) => t + s.rawNeed, 0)
+  ctx.pool.filter(p => p.role === 'manager' && p.home_studio_id === ctx.studio && p.max_studio_days_per_week == null).forEach(p => {
+    const canWork = date => ctx.dayWindow[date] && bdAvailableDay(ctx, p, date)
+    const fixed = [d(6), d(0), d(5)].filter(canWork)
+    // weekday pairs from Mon–Thu that leave the other two (back to back) off
+    const pairs = [[1, 2], [1, 4], [3, 4]].map(pr => pr.map(d)).filter(pr => pr.every(canWork))
+    const best = pairs.sort((a, b) => (needOn(b[0]) + needOn(b[1])) - (needOn(a[0]) + needOn(a[1])))[0] ||
+      [1, 2, 3, 4].map(d).filter(canWork).slice(0, 5 - fixed.length)
+    const chosen = fixed.concat(best).slice(0, 5)
+    chosen.forEach(date => {
+      const w = ctx.dayWindow[date]
+      const full = { start: w.open, end: Math.min(w.close, w.open + maxSpan(ctx.studio)) }
+      const own = blocks.find(b => b.staffId === p.id && b.date === date)
+      if (own) { own.start = Math.min(own.start, full.start); own.end = Math.max(own.end, full.end); return }
+      const st = bdState(ctx, blocks)
+      if (bdBlocked(ctx, p, Object.assign({ date, layer: 1, badges: [] }, full), st)) { notes.push(fmtDate(date) + ': ' + p.display_name + ' (manager) can\'t take the full day'); return }
+      // take the day's main shift and stretch it to the full 8 h; trim what it now covers
+      const l1 = blocks.filter(b => !b.staffId && b.date === date && b.layer === 1 && !b.training && !b.topUp)
+        .sort((a, b) => (Math.min(b.end, full.end) - Math.max(b.start, full.start)) - (Math.min(a.end, full.end) - Math.max(a.start, full.start)))
+      let main = l1[0]
+      if (!main) { main = { date, layer: 1, badges: [], staffId: null }; blocks.push(main) }
+      main.start = full.start; main.end = full.end; main.staffId = p.id; main.manager = true
+      l1.slice(1).forEach(b => {
+        if (b.start >= full.start && b.end <= full.end) blocks.splice(blocks.indexOf(b), 1)
+        else if (b.start < full.end && b.end > full.end) b.start = full.end
+        else if (b.end > full.start && b.start < full.start) b.end = full.start
+      })
+    })
+  })
+  return notes
+}
+
 async function buildSchedule() {
   const studio = document.getElementById('bd-studio').value
   if (!studio) { toast('Choose a studio first.', true); return }
@@ -1035,8 +1117,8 @@ async function buildSchedule() {
     blocks = blocks.concat(bdBlocks(ctx, date, slots, 0))
   }
   // scarce first: badge blocks, then longest
-  // Assigned class teachers first, on the shift covering their class
-  const teacherNotes = bdPlaceTeachers(ctx, blocks)
+  // Assigned class teachers first, on the shift covering their class; then managers' 5 full days
+  const teacherNotes = bdPlaceTeachers(ctx, blocks).concat(bdPlaceManagers(ctx, blocks))
   // Badge work first (scarce), then weekends (busiest, everyone works them), then longest
   const order = blocks.slice().sort((a, b) => (b.badges.length - a.badges.length) ||
     (isWeekend(b.date) - isWeekend(a.date)) || (isFriday(b.date) - isFriday(a.date)) || ((b.end - b.start) - (a.end - a.start)))
@@ -1085,7 +1167,7 @@ async function buildSchedule() {
 
   // Extra hours: managers under 40 h (unless limited to some studio days) and anyone under their minimum
   // get extra shifts on open days, placed at the end of the day for closing. Weekends first.
-  const order7 = [6, 0, 1, 2, 3, 4, 5].map(i => addDays(ctx.from, i))   // Sat, Sun, then Mon–Fri
+  const order7 = [5, 6, 0, 1, 2, 3, 4].map(i => addDays(ctx.from, i))   // Fri event night, Sat, Sun, then Mon–Thu
   ctx.pool.filter(p => p.home_studio_id === ctx.studio && bdTrainingDone(ctx, p, blocks, '9999') === null).forEach(p => {
     const targetH = (p.role === 'manager' && p.max_studio_days_per_week == null) ? Math.max(40, p.min_weekly_hours || 0) : (p.min_weekly_hours || 0)
     for (const date of order7) {
@@ -1102,7 +1184,9 @@ async function buildSchedule() {
       len = Math.min(len, w.close - w.open)
       if (len < 180) continue
       if (otRule && st.minutesOf(p.id) + len > otRule.weekly_hours * 60) continue   // never top up into overtime
-      const blk = { date, start: w.close - len, end: w.close, layer: 0, badges: [], staffId: null, topUp: true }
+      // Friday event night: at least 5:30–9:30
+      const startAt = isFriday(date) ? Math.min(w.close - len, 17 * 60 + 30) : w.close - len
+      const blk = { date, start: Math.max(w.open, startAt), end: w.close, layer: 0, badges: [], staffId: null, topUp: true, friday: isFriday(date) }
       if (bdBlocked(ctx, p, blk, st)) continue
       blk.staffId = p.id
       blocks.push(blk)
@@ -1146,7 +1230,7 @@ async function buildSchedule() {
       blocks.push(t)
     }
   })
-  bdPlan = { blocks, teacherNotes }
+  bdPlan = { blocks, teacherNotes, dirty: true }
   renderBuild()
 }
 
@@ -1237,11 +1321,19 @@ function renderBuild() {
   const tShort = t => { const [h, m] = t.slice(0, 5).split(':').map(Number); return (h % 12 || 12) + (m ? ':' + String(m).padStart(2, '0') : '') + (h >= 12 ? 'p' : 'a') }
   let schedRow = '<tr class="wk-sched"><td class="wk-name"><b>Day schedule</b><div class="muted small">fill rate · bookings / capacity</div>' +
     (ctx.dayScheduleError ? '<div class="small" style="color:var(--bad)">Couldn\'t load: ' + esc(ctx.dayScheduleError) + '</div>' : '') + '</td>'
+  // Multi-week classes: use the shared class-week count (term sign-ups, mid-term sign-ups, single classes),
+  // the same number as the Classes row, Fill Rates and the class lists; the day-schedule source only
+  // counts bookings made directly on that week.
+  const classSeats = {}
+  ctx.sessions.forEach(r => { if (r.rule_kind === 'one_per_session' && r.session_id) classSeats[r.session_id] = r.booked })
   days.forEach(d => {
-    const rows = (ctx.daySessions[d] || []).filter(r => r.session_type !== 'festival' && ((r.capacity || 0) > 0 || (r.booking_count || 0) > 0))
+    const rows = (ctx.daySessions[d] || []).map(r => classSeats[r.session_id] != null ? Object.assign({}, r, { booking_count: classSeats[r.session_id], isClass: true }) : r)
+      .filter(r => r.session_type !== 'festival' && ((r.capacity || 0) > 0 || (r.booking_count || 0) > 0))
     const events = (ctx.daySessions[d] || []).filter(r => r.session_type === 'festival')
     if (!rows.length && !events.length) { schedRow += '<td class="muted small">' + (ctx.daySessions[d] ? 'Nothing open' : '') + '</td>'; return }
-    const cap = rows.reduce((t, r) => t + (r.capacity || 0), 0), bk = rows.reduce((t, r) => t + (r.booking_count || 0), 0)
+    // fill rate only over sessions with a capacity (later class weeks are often closed to new sign-ups: capacity 0)
+    const withCap = rows.filter(r => (r.capacity || 0) > 0)
+    const cap = withCap.reduce((t, r) => t + r.capacity, 0), bk = withCap.reduce((t, r) => t + Math.min(r.booking_count || 0, r.capacity), 0)
     const pct = cap ? Math.round(bk / cap * 100) : null
     const tone = pct == null ? '' : pct >= 75 ? 'good' : pct >= 40 ? 'mid' : 'low'
     schedRow += '<td><div class="wk-fill ' + tone + '">' + (pct == null ? '—' : pct + '% full') + '</div><div class="muted small">' + bk + ' / ' + cap + ' booked</div>' +
@@ -1249,7 +1341,7 @@ function renderBuild() {
       '<details class="wk-sessions"><summary>' + rows.length + ' session' + (rows.length === 1 ? '' : 's') + '</summary>' +
       rows.sort((a, b) => a.session_time.localeCompare(b.session_time)).map(r =>
         '<div class="wk-sess' + ((r.booking_count || 0) === 0 ? ' empty' : '') + '" title="' + esc(r.title) + '"><b>' + tShort(r.session_time) + '</b> <span class="wk-code">' + esc(r.code || '') + '</span> ' +
-        (r.booking_count || 0) + (r.capacity != null ? '/' + r.capacity : '') + '</div>').join('') +
+        (r.booking_count || 0) + ((r.capacity || 0) > 0 ? '/' + r.capacity : (r.isClass ? ' enrolled' : '')) + '</div>').join('') +
       '</details></td>'
   })
   schedRow += '</tr>'
@@ -1359,7 +1451,11 @@ function renderBuild() {
     sw('open', 'Unfilled') +
     sw('unav', 'Unavailable') +
     sw('off', 'Time off') + '</div>'
-  body.innerHTML = top + legend + '<div class="panel wk-wrap"><table class="wk"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>'
+  const banner = plan.dirty
+    ? '<div class="note warn"><b>Not saved yet.</b> Click <b>Save as drafts</b> to keep this week\'s changes.</div>'
+    : plan.saved ? '<div class="note info">Showing the <b>saved draft</b> for this week. Edit it and save again, or click <b>Build draft</b> to start over.</div>'
+    : (!plan.blocks.length ? '<div class="note info">No draft saved for this week yet. Click <b>Build draft</b>.</div>' : '')
+  body.innerHTML = banner + top + legend + '<div class="panel wk-wrap"><table class="wk"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>'
   document.getElementById('bd-save').disabled = !plan.blocks.length
 }
 
@@ -1548,7 +1644,7 @@ function bdEditTime(ev, idx) {
     if (paid > MAX_PAID) warns.push('more than 8 paid hours (overtime in BC and AB)')
     if (w && (r.start < w.open || r.end > w.close)) warns.push('outside opening hours (' + bdFmtShort(w.open) + '–' + bdFmtShort(w.close) + ')')
     if (warns.length && !confirm('This shift would be ' + warns.join(', ') + '. Keep it?')) { renderBuild(); return }
-    b.start = r.start; b.end = r.end; b.edited = true
+    b.start = r.start; b.end = r.end; b.edited = true; bdPlan.dirty = true
     renderBuild()
   }
   input.addEventListener('keydown', e => { if (e.key === 'Enter') finish(true); else if (e.key === 'Escape') finish(false) })
@@ -1596,10 +1692,11 @@ function bdDrop(ev) {
   }
   b.staffId = staffId
   b.date = date
+  bdPlan.dirty = true
   renderBuild()
 }
 
-function bdAssign(idx, staffId) { bdPlan.blocks[idx].staffId = staffId || null; renderBuild() }
+function bdAssign(idx, staffId) { bdPlan.blocks[idx].staffId = staffId || null; bdPlan.dirty = true; renderBuild() }
 
 async function saveDraftSchedule() {
   const ctx = bdCtx, plan = bdPlan
@@ -1622,6 +1719,9 @@ async function saveDraftSchedule() {
     if (ins.error) { toast('Drafts not saved: ' + ins.error.message, true); return }
   }
   toast('Saved ' + rows.length + ' draft shifts')
+  bdPlan.dirty = false
+  bdPlan.saved = true
+  renderBuild()
 }
 
 async function approveDrafts() {
@@ -1635,6 +1735,7 @@ async function approveDrafts() {
   const up = await sb.from('staff_shifts').update({ status: 'approved' }).eq('studio_id', studio).eq('status', 'draft').gte('shift_date', bdWeek).lte('shift_date', to)
   if (up.error) { toast(up.error.message, true); return }
   toast('Approved ' + data.length + ' shifts')
+  bdOpenWeek()
 }
 
 /* =====================================================================
