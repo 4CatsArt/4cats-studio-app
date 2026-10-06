@@ -237,6 +237,195 @@ function goToCurrentMonth() {
 }
 
 /* ---------- data loading ---------- */
+let pendingPayrollUpload = null // { matched, unmapped, target: {monthDate, periodNumber}, payDate } or null
+
+async function handlePayrollCSVUpload(file) {
+  if (!file) return
+  if (!payScheduleAnchor) { alert('Set up the Pay Schedule (⚙ button below) first — needed to auto-detect which pay period this belongs to.'); return }
+
+  const text = await file.text()
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l)
+  if (!lines.length) { alert('That file looks empty.'); return }
+
+  const raw = lines[0]
+  if (!/^\d{8}$/.test(raw)) { alert('Could not read a date (expected YYYYMMDD) from the first line of this file — is this a Payworks GL export?'); return }
+  const periodEndStr = raw.slice(0, 4) + '-' + raw.slice(4, 6) + '-' + raw.slice(6, 8)
+
+  const payDate = payDateForWorkDate(periodEndStr)
+  if (!payDate) { alert("Couldn't match this period-end date to a pay date using the current pay schedule settings — check the anchor date and lag."); return }
+  const target = monthAndPeriodForPayDate(payDate)
+  if (!target) { alert(`This file's pay date (${payDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}) doesn't line up with any Pay 1/2/3 slot for its month.`); return }
+
+  const wagesByDept = {}
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(',')
+    if (cols.length >= 5 && cols[3] === 'Wages' && cols[1]) {
+      wagesByDept[cols[1]] = Math.abs(parseFloat(cols[4])) || 0
+    }
+  }
+  if (!Object.keys(wagesByDept).length) { alert('No "Wages" rows found in this file — is this the right export?'); return }
+
+  const { data: mapRows, error } = await sb.from('payroll_department_map').select('*')
+  if (error) { toast(error.message, true); return }
+  const deptMap = {}
+  ;(mapRows || []).forEach(r => { deptMap[r.department_number] = r.studio_id })
+
+  const matched = []
+  const unmapped = []
+  Object.entries(wagesByDept).forEach(([dept, amount]) => {
+    const studioId = deptMap[dept]
+    if (!studioId) { unmapped.push({ dept, amount }); return }
+    matched.push({ dept, studioId, amount })
+  })
+
+  // Has this pay period already been uploaded? (warn, don't block — re-uploading a corrected file is fine)
+  const { data: prior } = await sb.from('payroll_uploads').select('*')
+    .eq('month', monthToDate(target.monthDate)).eq('period_number', target.periodNumber).maybeSingle()
+
+  pendingPayrollUpload = { matched, unmapped, target, payDate, periodEndStr, fileName: file.name, prior: prior || null }
+  renderPayrollPreview()
+}
+
+function renderPayrollPreview() {
+  const el = document.getElementById('payroll-upload-preview')
+  if (!el) return
+  if (!pendingPayrollUpload) { el.innerHTML = ''; return }
+  const { matched, unmapped, target, payDate, prior } = pendingPayrollUpload
+
+  const priorNote = prior
+    ? `<div style="margin-top:8px;padding:8px;background:#fff3e0;border-radius:6px;font-size:13px">⚠ This pay period was already uploaded on <b>${esc(fmtUploadedAt(prior.uploaded_at))}</b>${prior.file_name ? ` (${esc(prior.file_name)})` : ''}. Saving again will replace those amounts.</div>`
+    : ''
+
+  const payLabel = `Pay ${target.periodNumber}, ${monthLabel(target.monthDate)} (pay date ${payDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })})`
+
+  const matchedRows = matched.map(m => {
+    const label = m.studioId === '__HOME_OFFICE__' ? 'Home Office' : esc(STUDIO_NAMES[m.studioId] || m.studioId)
+    return `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:13px"><span>${label}</span><span>${money(m.amount)}</span></div>`
+  }).join('')
+
+  const unmappedRows = unmapped.map((u, i) => `
+    <div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px">
+      <span style="min-width:80px">Dept ${esc(u.dept)}</span>
+      <span class="muted">${money(u.amount)}</span>
+      <select id="unmapped-select-${i}" style="font-size:12px">
+        <option value="">— assign a studio —</option>
+        <option value="__HOME_OFFICE__">Home Office</option>
+        ${STUDIO_IDS.map(id => `<option value="${id}">${esc(STUDIO_NAMES[id])}</option>`).join('')}
+      </select>
+    </div>`).join('')
+
+  el.innerHTML = `
+    <div style="margin-top:12px;border-top:1px solid var(--line-2);padding-top:12px">
+      <strong>${esc(payLabel)}</strong>
+      ${priorNote}
+      <div style="margin-top:8px;max-height:220px;overflow-y:auto">${matchedRows}</div>
+      ${unmapped.length ? `<div style="margin-top:10px;padding:8px;background:#fff3e0;border-radius:6px">
+        <strong class="muted small">Unrecognized department numbers — assign a studio to include them (saved for next time):</strong>
+        ${unmappedRows}
+      </div>` : ''}
+      <div style="margin-top:12px">
+        <button onclick="confirmPayrollUpload()" style="padding:6px 14px;border:none;border-radius:6px;background:var(--ink);color:#fff;cursor:pointer">Confirm & Save</button>
+        <button onclick="cancelPayrollUpload()" style="margin-left:8px;padding:6px 14px;border:0.5px solid var(--line-2);border-radius:6px;background:var(--panel);cursor:pointer">Cancel</button>
+      </div>
+    </div>`
+}
+
+function cancelPayrollUpload() {
+  pendingPayrollUpload = null
+  renderPayrollPreview()
+}
+
+async function confirmPayrollUpload() {
+  if (!pendingPayrollUpload) return
+  const { matched, unmapped, target } = pendingPayrollUpload
+  const monthDate = monthToDate(target.monthDate)
+
+  const newlyAssigned = []
+  unmapped.forEach((u, i) => {
+    const sel = document.getElementById('unmapped-select-' + i)
+    const studioId = sel ? sel.value : ''
+    if (studioId) newlyAssigned.push({ dept: u.dept, studioId, amount: u.amount })
+  })
+
+  if (newlyAssigned.length) {
+    const { error: mapErr } = await sb.from('payroll_department_map')
+      .upsert(newlyAssigned.map(n => ({ department_number: n.dept, studio_id: n.studioId })))
+    if (mapErr) { toast(mapErr.message, true); return }
+  }
+
+  const allRows = matched.concat(newlyAssigned)
+  const studioRows = allRows.filter(r => r.studioId !== '__HOME_OFFICE__')
+  const hoRow = allRows.find(r => r.studioId === '__HOME_OFFICE__')
+
+  for (const row of studioRows) {
+    const { error } = await sb.from('studio_pay_periods')
+      .upsert({ studio_id: row.studioId, month: monthDate, period_number: target.periodNumber, amount: row.amount, is_manual_override: true },
+        { onConflict: 'studio_id,month,period_number' })
+    if (error) { toast(error.message, true); return }
+    if (!payPeriodRows[row.studioId]) payPeriodRows[row.studioId] = {}
+    payPeriodRows[row.studioId][target.periodNumber] = row.amount
+  }
+
+  if (hoRow) {
+    const { error } = await sb.from('home_office_costs')
+      .upsert({ month: monthDate, period_number: target.periodNumber, amount: hoRow.amount }, { onConflict: 'month,period_number' })
+    if (error) { toast(error.message, true); return }
+    homeOfficeLabourPeriods[target.periodNumber] = hoRow.amount
+  }
+
+  // Record the upload so the Monthly tab can show it's done
+  const wagesTotal = studioRows.reduce((a, r) => a + (Number(r.amount) || 0), 0)
+  const { error: logErr } = await sb.from('payroll_uploads').upsert({
+    month: monthDate, period_number: target.periodNumber,
+    pay_date: dateStrOf(pendingPayrollUpload.payDate), period_end: pendingPayrollUpload.periodEndStr,
+    file_name: pendingPayrollUpload.fileName || null,
+    studio_count: studioRows.length, studio_wages_total: Math.round(wagesTotal * 100) / 100,
+    home_office_amount: hoRow ? hoRow.amount : null,
+    uploaded_at: new Date().toISOString(),
+  }, { onConflict: 'month,period_number' })
+  if (logErr) toast('Payroll saved, but the upload record was not: ' + logErr.message, true)
+  else if (monthToText(currentMonth) === monthToText(target.monthDate)) await loadPayrollUploads()
+
+  toast(`Updated Pay ${target.periodNumber} (${monthLabel(target.monthDate)}) for ${studioRows.length} studio${studioRows.length === 1 ? '' : 's'}${hoRow ? ' + Home Office' : ''}.`)
+  pendingPayrollUpload = null
+
+  if (monthToText(currentMonth) === monthToText(target.monthDate)) {
+    await Promise.all(STUDIO_IDS.map(async (id) => {
+      const { data: prog } = await sb.rpc('get_studio_sales_goal_progress', { p_studio_id: id, p_month: monthToText(currentMonth) })
+      if (prog && prog[0]) progressRows[id] = prog[0]
+    }))
+  }
+  renderTable()
+}
+
+
+// ---------- payroll upload status ----------
+let payrollUploads = {} // period_number -> payroll_uploads row, for the month being viewed
+async function loadPayrollUploads() {
+  const { data, error } = await sb.from('payroll_uploads').select('*').eq('month', monthToDate(currentMonth))
+  payrollUploads = {}
+  if (error) { console.error('payroll_uploads', error); return }
+  ;(data || []).forEach(r => { payrollUploads[r.period_number] = r })
+}
+function fmtUploadedAt(ts) {
+  return new Date(ts).toLocaleString('en-US', { timeZone: 'America/Vancouver', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+}
+// One chip per pay date in the month: uploaded (green) or not yet (grey/amber once the pay date has passed)
+function payrollStatusChipsHtml() {
+  const dates = payDatesInMonth(currentMonth)
+  if (!dates.length) return '<span class="muted small">Set up the Pay Schedule to see payroll status.</span>'
+  const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Vancouver' })
+  return dates.map((d, i) => {
+    const n = i + 1, u = payrollUploads[n]
+    const label = esc(payPeriodHeaderLabel(n))
+    if (u) {
+      return `<span title="${esc(`Uploaded ${fmtUploadedAt(u.uploaded_at)}${u.file_name ? ' · ' + u.file_name : ''} · ${u.studio_count} studios`)}" style="display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;background:#e3f4e6;color:#1b6b2e;font-size:12px;font-weight:600">✓ ${label} uploaded <span style="font-weight:400">${esc(fmtUploadedAt(u.uploaded_at))}</span></span>`
+    }
+    const due = dateStrOf(d) <= todayStr
+    return `<span style="display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;background:${due ? '#fff3e0' : '#f0f0ea'};color:${due ? '#8a4b00' : '#666'};font-size:12px;font-weight:600">${due ? '⚠' : '○'} ${label} ${due ? 'not uploaded yet' : 'upcoming'}</span>`
+  }).join(' ')
+}
+
 async function loadMonth() {
   document.getElementById('month-label').textContent = monthLabel(currentMonth)
   document.getElementById('fin-body').innerHTML = '<div class="loading">Loading…</div>'
@@ -279,6 +468,8 @@ async function loadMonth() {
     const { data } = await sb.rpc('get_bucket_month_total', { p_bucket: bucket, p_month: monthText })
     bucketTotals[bucket] = data != null ? Number(data) : 0
   }))
+
+  await loadPayrollUploads()
 
   const { data: hoRows } = await sb.from('home_office_costs').select('*').eq('month', monthDate)
   homeOfficeLabourPeriods = {}
@@ -537,9 +728,9 @@ const SUMMARY_COLUMNS = [
   { key: 'rent',     label: 'Rent',         cls: 'group-editable', get: id => (financeRows[id] || {}).rent },
   { key: 'supplies', label: 'Art Supplies', cls: 'group-editable', get: id => (financeRows[id] || {}).art_supplies_budget },
   { key: 'util',     label: 'Utilities',    cls: 'group-editable', get: id => (financeRows[id] || {}).utilities_estimate },
-  { key: 'pay1',     label: () => payPeriodHeaderLabel(1), cls: 'group-editable', htmlId: 'pay1-header', get: id => (payPeriodRows[id] || {})[1] },
-  { key: 'pay2',     label: () => payPeriodHeaderLabel(2), cls: 'group-editable', htmlId: 'pay2-header', get: id => (payPeriodRows[id] || {})[2] },
-  { key: 'pay3',     label: () => payPeriodHeaderLabel(3), cls: 'group-editable', htmlId: 'pay3-header', get: id => (payPeriodRows[id] || {})[3] },
+  { key: 'pay1',     label: () => payPeriodHeaderLabel(1) + (payrollUploads[1] ? ' ✓' : ''), cls: 'group-editable', htmlId: 'pay1-header', get: id => (payPeriodRows[id] || {})[1] },
+  { key: 'pay2',     label: () => payPeriodHeaderLabel(2) + (payrollUploads[2] ? ' ✓' : ''), cls: 'group-editable', htmlId: 'pay2-header', get: id => (payPeriodRows[id] || {})[2] },
+  { key: 'pay3',     label: () => payPeriodHeaderLabel(3) + (payrollUploads[3] ? ' ✓' : ''), cls: 'group-editable', htmlId: 'pay3-header', get: id => (payPeriodRows[id] || {})[3] },
   { key: 'wages',    label: 'Wages Total',  cls: 'group-computed', get: id => wagesTotal(id) },
   { key: 'daily',    label: 'Daily Goal',   cls: 'group-computed', get: id => currentDailyGoal(id) },
   { key: 'mtd',      label: 'MTD Sales',    cls: 'group-computed', get: id => (progressRows[id] || {}).this_month_total },
@@ -702,11 +893,24 @@ function renderTable() {
     <div style="margin-left:auto"><button onclick="togglePayPeriods()" style="padding:6px 12px;border:0.5px solid var(--line-2);border-radius:6px;background:var(--panel);cursor:pointer;font-size:12px">${showPayPeriods ? '◂ Hide pay periods' : '▸ Show pay periods'}</button></div>
   </div>`
 
-  body.innerHTML = hoPanel + `<table class="fin-table">
+  const uploadPanel = `<div class="panel" style="padding:14px 18px;margin-bottom:14px">
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+        <span style="padding:6px 12px;border:0.5px solid var(--line-2);border-radius:6px;background:var(--panel);font-size:12px">📤 Upload Payroll CSV</span>
+        <input type="file" accept=".csv" style="display:none" onchange="handlePayrollCSVUpload(this.files[0]); this.value=''">
+      </label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${payrollStatusChipsHtml()}</div>
+    </div>
+    <div class="muted small" style="margin-top:6px">Parses a Payworks GL export and fills in the matching Pay 1/2/3 slot for every studio it covers (and Home Office).</div>
+    <div id="payroll-upload-preview"></div>
+  </div>`
+
+  body.innerHTML = uploadPanel + hoPanel + `<table class="fin-table">
     <thead><tr>${summaryHeaderHtml()}
     </tr></thead>
     <tbody>${summaryTotalsRowHtml(cols)}${rows}${bucketRows}</tbody>
   </table>`
+  renderPayrollPreview() // keep an in-progress upload preview visible if the table re-renders
 }
 
 /* ---------- saving ---------- */
