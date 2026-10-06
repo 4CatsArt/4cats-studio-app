@@ -855,9 +855,10 @@ function bdDayNeed(ctx, date) {
   const slots = []
   for (let t = lo; t < hi; t += 15) {
     let dedicated = 0, pooled = 0
-    const badges = new Set()
+    const badges = new Set(), on = []
     ss.forEach(r => {
       if (!(toMin(r.start_time) < t + 15 && toMin(r.end_time) > t)) return
+      on.push(r)
       if (r.rule_kind === 'pooled') pooled += (r.expected || 0) / (r.ratio || 20)
       else dedicated += r.teachers || 0
       const b = ctx.ruleBadge[r.rule_label]
@@ -866,7 +867,7 @@ function bdDayNeed(ctx, date) {
     let need = Math.max(1, dedicated + Math.ceil(pooled - 1e-9))   // open day: always at least one person
     const have = ctx.shifts.filter(x => x.studio_id === ctx.studio && x.shift_date === date && x.status !== 'draft' &&
                                        x.start_time && x.end_time && toMin(x.start_time) < t + 15 && toMin(x.end_time) > t).length
-    slots.push({ t, need: Math.max(0, need - have), badges })
+    slots.push({ t, need: Math.max(0, need - have), badges, on, rawNeed: need, have })
   }
   return slots
 }
@@ -895,7 +896,10 @@ function bdBlocks(ctx, date, slots, target) {
       parts.forEach(p => {
         const badges = new Set()
         slots.forEach(s => { if (s.t >= p.start && s.t < p.end && s.need >= k) s.badges.forEach(b => badges.add(b)) })
-        out.push({ date, start: p.start, end: p.end, layer: k, badges: [...badges], staffId: null })
+        // why this shift exists: the busiest moment inside it and what's on then
+        let peak = null
+        slots.forEach(s => { if (s.t >= p.start && s.t < p.end && (!peak || s.rawNeed > peak.rawNeed)) peak = s })
+        out.push({ date, start: p.start, end: p.end, layer: k, badges: [...badges], staffId: null, peak })
       })
     })
   }
@@ -1187,6 +1191,19 @@ function renderBuild() {
     return '<select class="wk-pick" onchange="bdAssign(' + idx + ', this.value)" title="Change who works this shift"><option value="">— Unfilled —</option>' +
       opts.map(o => '<option value="' + o.p.id + '"' + (o.p.id === b.staffId ? ' selected' : '') + '>' + esc(o.p.display_name) + (o.why ? ' (' + o.why + ')' : '') + '</option>').join('') + '</select>'
   }
+  const whyText = b => {
+    if (b.training) return 'Training: shadowing the person scheduled'
+    if (b.topUp) return b.weekend ? 'Extra: everyone works the weekend' : b.friday ? 'Extra: manager / SC work Friday event night' : 'Extra: hours for a manager or someone under their minimum'
+    if (!b.peak) return ''
+    const pk = b.peak
+    const lines = ['Needed: person ' + b.layer + ' of ' + pk.rawNeed + ' at ' + fmtTime(fromMin(pk.t)) + (pk.have ? ' (' + pk.have + ' already approved)' : '')]
+    pk.on.forEach(r => {
+      if (r.rule_kind === 'pooled') lines.push('• ' + fmtTime(r.start_time) + ' ' + r.title + ': ' + r.booked + ' booked, planned for ' + (r.expected || 0) + ' (usually ' + (r.typical == null ? '?' : r.typical) + ')')
+      else if ((r.teachers || 0) > 0) lines.push('• ' + fmtTime(r.start_time) + ' ' + r.title + ': ' + r.teachers + ' teacher' + (r.teachers > 1 ? 's' : '') + ' (' + r.rule_label + ')')
+    })
+    if (!pk.on.some(r => r.rule_kind === 'pooled' || (r.teachers || 0) > 0)) lines.push('• Studio open: at least one person on')
+    return lines.join('\n')
+  }
   const chipFor = (b, idx) => {
     const kind = b.training ? 'train' : b.topUp ? 'extra' : 'cover'
     const tags = []
@@ -1201,7 +1218,7 @@ function renderBuild() {
       tags.push((ok ? '✓ ' : '⚠ Needs ') + esc(ctx.badgeLabel[bc] || bc))
       if (!ok) warn.push(fmtDate(b.date) + ' ' + blkLabel(b) + ': needs ' + (ctx.badgeLabel[bc] || bc))
     })
-    return '<div class="wk-chip ' + kind + '" draggable="true" ondragstart="bdDragStart(event, ' + idx + ')" ondragend="bdDragEnd()" title="Drag to another person or day"><b>' + blkLabel(b) + '</b>' + (tags.length ? '<div>' + tags.join(' · ') + '</div>' : '') + picker(b, idx) + '</div>'
+    return '<div class="wk-chip ' + kind + '" draggable="true" ondragstart="bdDragStart(event, ' + idx + ')" ondragend="bdDragEnd()" title="' + esc(whyText(b) + '\n\nDrag to another person or day') + '"><b>' + blkLabel(b) + '</b>' + (tags.length ? '<div>' + tags.join(' · ') + '</div>' : '') + picker(b, idx) + '</div>'
   }
 
   let head = '<tr><th class="wk-name">Staff</th>' + days.map(d => '<th>' + parseYmd(d).toLocaleDateString('en-CA', { weekday: 'short' }).toUpperCase() + ' ' + parseYmd(d).getDate() +
