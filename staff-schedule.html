@@ -1173,8 +1173,17 @@ function renderBuild() {
           const ab = c.badge ? (ctx.badgesBy[a.id] || new Set()).has(c.badge) : false, bb = c.badge ? (ctx.badgesBy[b.id] || new Set()).has(c.badge) : false
           return (bb - ab) || ((b.home_studio_id === ctx.studio) - (a.home_studio_id === ctx.studio)) || a.display_name.localeCompare(b.display_name)
         })
+        const active = (ctx.classTeachers || []).filter(x => x.class_key === c.key && x.day_of_week === c.dow && x.session_time === c.time &&
+          x.effective_from <= c.date && (!x.effective_to || x.effective_to >= c.date)).sort((x, y) => y.effective_from.localeCompare(x.effective_from))[0]
+        let status = ''
+        if (active && isSubRow(active)) status = '<div style="font-weight:600">Substitute this week</div>'
+        else if (tid) {
+          const tp = ctx.pool.find(x => x.id === tid)
+          const why = tp ? bdBlocked(ctx, tp, { date: c.date, start: c.start, end: c.end, badges: [] }, bdState(ctx, plan.blocks.filter(b => b.staffId !== tid || b.date !== c.date))) : 'not on this studio'
+          if (why) status = '<div style="color:var(--bad);font-weight:600">⚠ ' + esc(bdPerson(tid).display_name) + ' ' + esc(why) + ': choose a substitute</div>'
+        }
         return '<div class="wk-chip class"><b>' + fmtTime(c.time) + ' ' + esc(c.label) + '</b><div>' + c.booked + ' enrolled' +
-          (c.badge ? ' · needs ' + esc(ctx.badgeLabel[c.badge] || c.badge) : '') + '</div>' +
+          (c.badge ? ' · needs ' + esc(ctx.badgeLabel[c.badge] || c.badge) : '') + '</div>' + status +
           '<select class="wk-pick" onchange="bdSetTeacher(\'' + c.session_id + '\', this.value)"><option value="">— No teacher set —</option>' +
           opts.map(p => '<option value="' + p.id + '"' + (p.id === tid ? ' selected' : '') + '>' + esc(p.display_name) +
             (c.badge && (ctx.badgesBy[p.id] || new Set()).has(c.badge) ? ' ✓' : '') + '</option>').join('') + '</select></div>'
@@ -1314,52 +1323,90 @@ function bdPlaceTeachers(ctx, blocks) {
   return notes
 }
 
+// Small choice dialog: resolves to the chosen button's value, or null for Cancel
+function bdChoose(message, choices) {
+  return new Promise(resolve => {
+    const wrap = document.createElement('div')
+    wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:2000;padding:16px'
+    wrap.innerHTML = '<div style="background:#fff;border-radius:12px;padding:18px;max-width:440px;width:100%;font-size:13px;line-height:1.5">' +
+      '<div style="margin-bottom:14px">' + message + '</div><div style="display:flex;flex-direction:column;gap:8px">' +
+      choices.map((c, i) => '<button class="btn' + (i === 0 ? ' primary' : '') + '" data-v="' + c.value + '" style="height:auto;padding:8px 12px;text-align:left;white-space:normal">' + c.label + '</button>').join('') +
+      '<button class="btn" data-v="" style="height:auto;padding:8px 12px">Cancel</button></div></div>'
+    wrap.addEventListener('click', ev => {
+      const btn = ev.target.closest('button')
+      if (!btn && ev.target !== wrap) return
+      const v = btn ? btn.dataset.v : ''
+      wrap.remove(); resolve(v || null)
+    })
+    document.body.appendChild(wrap)
+  })
+}
+const isSubRow = a => a.effective_to && a.effective_to === a.effective_from   // one-week substitute
+
 async function bdSetTeacher(sessionId, staffId) {
   const ctx = bdCtx
   const c = bdClasses(ctx).find(x => x.session_id === sessionId)
   if (!c) return
-  const prevId = bdTeacherFor(ctx, c)
-  if ((staffId || null) === (prevId || null)) return
+  staffId = staffId || null
+  const sameClass = x => x.class_key === c.key && x.day_of_week === c.dow && x.session_time === c.time
+  const term = (ctx.classTeachers || []).filter(x => sameClass(x) && !isSubRow(x) && x.effective_from <= c.date && (!x.effective_to || x.effective_to >= c.date))
+    .sort((x, y) => y.effective_from.localeCompare(x.effective_from))[0]
+  const termId = term ? term.staff_id : null
+  const curId = bdTeacherFor(ctx, c)
+  if (staffId === curId) return
   const p = staffId ? bdPerson(staffId) : null
-  const msg = p ? 'Assign ' + p.display_name + ' to teach ' + c.label + ' (' + DAY_NAMES[c.dow] + 's ' + fmtTime(c.time) + ') from ' + fmtDate(c.date) + ' on?'
-                : 'Remove the teacher from ' + c.label + ' (' + DAY_NAMES[c.dow] + 's ' + fmtTime(c.time) + ') from ' + fmtDate(c.date) + ' on?'
-  if (!confirm(msg + '\n\nThe draft is rebuilt afterwards, so changes you dragged by hand are redone.')) { renderBuild(); return }
+  const when = c.label + ' · ' + DAY_NAMES[c.dow] + ' ' + fmtTime(c.time)
+  const scope = await bdChoose('<b>' + esc(when) + '</b><br>' + (p ? esc(p.display_name) : 'No teacher') + ' for…', [
+    { value: 'week', label: '<b>Just ' + esc(fmtDate(c.date)) + '</b> — a substitute' + (termId ? ' while ' + esc(bdPerson(termId).display_name) + ' is off' : '') + '. The term teacher comes back after.' },
+    { value: 'term', label: '<b>From ' + esc(fmtDate(c.date)) + ' on</b> — the teacher for the rest of the term.' }
+  ])
+  if (!scope) { renderBuild(); return }
   const { data: { user } } = await sb.auth.getUser()
-  // end the current assignment the day before, or replace it if it starts this same week
-  const cur = (ctx.classTeachers || []).filter(x => x.class_key === c.key && x.day_of_week === c.dow && x.session_time === c.time &&
-    (!x.effective_to || x.effective_to >= c.date))
-  for (const a of cur) {
-    const r = a.effective_from >= c.date
-      ? await sb.from('class_teacher_assignments').delete().eq('id', a.id)
-      : await sb.from('class_teacher_assignments').update({ effective_to: addDays(c.date, -1) }).eq('id', a.id)
-    if (r.error) { toast(r.error.message, true); return }
-  }
-  if (staffId) {
-    const ins = await sb.from('class_teacher_assignments').insert({ studio_id: ctx.studio, class_key: c.key, class_label: c.label,
-      day_of_week: c.dow, session_time: c.time, staff_id: staffId, effective_from: c.date, created_by: user ? user.id : null })
-    if (ins.error) { toast(ins.error.message, true); return }
-  }
-  // Teacher field on the class schedule, this week and the rest of the term (next 6 months)
-  const prevName = prevId ? schedName(bdPerson(prevId)) : ''
-  const newName = p ? schedName(p) : ''
-  const { data: future } = await sb.from('sessions').select('id, title, session_date, session_time')
-    .eq('studio_id', ctx.studio).eq('session_time', c.time).gte('session_date', c.date).lte('session_date', addDays(c.date, 183))
-  const ids = (future || []).filter(s => parseYmd(s.session_date).getDay() === c.dow && classKey(s.title) === c.key).map(s => s.id)
-  let skipped = 0, failed = null
-  if (ids.length) {
-    const { data: existing } = await sb.from('session_staff').select('id, session_id, teacher').in('session_id', ids)
-    const bySession = {}; (existing || []).forEach(r => { bySession[r.session_id] = r })
-    for (const sid of ids) {
-      const row = bySession[sid]
-      if (row && row.teacher && row.teacher !== prevName && row.teacher !== newName) { skipped++; continue }   // a studio typed someone else in
-      const r = row
-        ? await sb.from('session_staff').update({ teacher: newName, updated_at: new Date().toISOString() }).eq('id', row.id)
-        : await sb.from('session_staff').insert({ session_id: sid, studio_id: ctx.studio, teacher: newName, updated_at: new Date().toISOString() })
-      if (r.error) { failed = r.error.message; break }
+  const err = r => { if (r.error) { toast(r.error.message, true); return true } return false }
+
+  if (scope === 'week') {
+    // replace any substitute already set for this date
+    const subs = (ctx.classTeachers || []).filter(x => sameClass(x) && isSubRow(x) && x.effective_from === c.date)
+    for (const a of subs) if (err(await sb.from('class_teacher_assignments').delete().eq('id', a.id))) return
+    if (staffId && staffId !== termId &&
+        err(await sb.from('class_teacher_assignments').insert({ studio_id: ctx.studio, class_key: c.key, class_label: c.label, day_of_week: c.dow,
+          session_time: c.time, staff_id: staffId, effective_from: c.date, effective_to: c.date, created_by: user ? user.id : null }))) return
+  } else {
+    // end (or replace) the term assignment; one-week substitutes are kept
+    const cur = (ctx.classTeachers || []).filter(x => sameClass(x) && !isSubRow(x) && (!x.effective_to || x.effective_to >= c.date))
+    for (const a of cur) {
+      const r = a.effective_from >= c.date
+        ? await sb.from('class_teacher_assignments').delete().eq('id', a.id)
+        : await sb.from('class_teacher_assignments').update({ effective_to: addDays(c.date, -1) }).eq('id', a.id)
+      if (err(r)) return
     }
+    if (staffId && err(await sb.from('class_teacher_assignments').insert({ studio_id: ctx.studio, class_key: c.key, class_label: c.label,
+        day_of_week: c.dow, session_time: c.time, staff_id: staffId, effective_from: c.date, created_by: user ? user.id : null }))) return
+  }
+
+  // Teacher field on the class schedule: this week only, or this week and the rest of the term (next 6 months)
+  const prevName = curId ? schedName(bdPerson(curId)) : ''
+  const termName = termId ? schedName(bdPerson(termId)) : ''
+  const newName = p ? schedName(p) : (scope === 'week' ? termName : '')
+  let ids = [c.session_id]
+  if (scope === 'term') {
+    const { data: future } = await sb.from('sessions').select('id, title, session_date, session_time')
+      .eq('studio_id', ctx.studio).eq('session_time', c.time).gte('session_date', c.date).lte('session_date', addDays(c.date, 183))
+    ids = (future || []).filter(s => parseYmd(s.session_date).getDay() === c.dow && classKey(s.title) === c.key).map(s => s.id)
+  }
+  let skipped = 0, failed = null
+  const { data: existing } = await sb.from('session_staff').select('id, session_id, teacher').in('session_id', ids)
+  const bySession = {}; (existing || []).forEach(r => { bySession[r.session_id] = r })
+  for (const sid of ids) {
+    const row = bySession[sid]
+    if (row && row.teacher && ![prevName, termName, newName].includes(row.teacher)) { skipped++; continue }   // a studio typed someone else in
+    const r = row
+      ? await sb.from('session_staff').update({ teacher: newName, updated_at: new Date().toISOString() }).eq('id', row.id)
+      : await sb.from('session_staff').insert({ session_id: sid, studio_id: ctx.studio, teacher: newName, updated_at: new Date().toISOString() })
+    if (r.error) { failed = r.error.message; break }
   }
   if (failed) toast('Teacher saved for scheduling, but the class schedule could not be updated: ' + failed, true)
-  else toast((p ? p.display_name + ' assigned' : 'Teacher removed') + ' · ' + ids.length + ' week(s) on the class schedule' + (skipped ? ', ' + skipped + ' left as the studio set them' : ''))
+  else toast((scope === 'week' ? 'Substitute for ' + fmtDate(c.date) : 'Term teacher') + ' saved · ' + ids.length + ' week(s) on the class schedule' + (skipped ? ', ' + skipped + ' left as the studio set them' : ''))
   await buildSchedule()
 }
 
