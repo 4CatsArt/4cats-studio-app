@@ -151,6 +151,7 @@ table.wk tr.wk-sched td { background: #f7f9fc; }
 .wk-sessions summary { cursor: pointer; color: var(--muted); margin-top: 3px; }
 .wk-sess { padding: 2px 0; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wk-sess.empty { color: var(--muted); }
+.wk-sess.closed { color: #bbb; text-decoration: line-through; }
 .wk-code { display: inline-block; border: 1px solid var(--line-2); border-radius: 4px; padding: 0 4px; font-weight: 700; font-size: 10px; background: #fff; }
 .wk-chip.class { background: #fff4d6; color: #7a5a00; border-left: 3px solid #e0a800; }
 .wk-time { cursor: text; border-radius: 3px; }
@@ -1565,7 +1566,7 @@ function renderBuild(withLegend) {
   }
 
   let head = '<tr><th class="wk-name">Staff</th>' + days.map(d => '<th>' + parseYmd(d).toLocaleDateString('en-CA', { weekday: 'short' }).toUpperCase() + ' ' + parseYmd(d).getDate() +
-    (ctx.dayWindow[d] ? '' : '<div class="muted small" style="font-weight:400">closed</div>') + '</th>').join('') + '</tr>'
+    (ctx.dayWindow[d] ? '' : '<div class="muted small" style="font-weight:400" title="Nothing open for booking and nothing booked: no staff planned">nothing open</div>') + '</th>').join('') + '</tr>'
 
   // Day schedule row: fill rate + the day's sessions (bookings / capacity)
   const tShort = t => { const [h, m] = t.slice(0, 5).split(':').map(Number); return (h % 12 || 12) + (m ? ':' + String(m).padStart(2, '0') : '') + (h >= 12 ? 'p' : 'a') }
@@ -1578,23 +1579,28 @@ function renderBuild(withLegend) {
   // shared class-week count, drop-in sessions count people (quantity), parties count booked slots.
   const classSeats = {}
   ctx.sessions.forEach(r => { if ((r.rule_kind === 'one_per_session' || r.rule_kind === 'pooled') && r.session_id) classSeats[r.session_id] = r.booked })
+  // Closed for booking: 0 spaces left in Shopify and nobody booked (same test the shift planning uses)
+  const closedIds = new Set(ctx.sessions.filter(r => r.session_id && !r.is_open && !(r.booked > 0) && !((r.teachers || 0) > 0)).map(r => r.session_id))
   const risksAll = bdRisks(ctx, plan)
   days.forEach(d => {
     const rows = (ctx.daySessions[d] || []).map(r => classSeats[r.session_id] != null ? Object.assign({}, r, { booking_count: classSeats[r.session_id], isClass: ctx.sessions.some(x => x.session_id === r.session_id && x.rule_kind === 'one_per_session') }) : r)
+      .map(r => closedIds.has(r.session_id) ? Object.assign({}, r, { closed: true }) : r)
       .filter(r => r.session_type !== 'festival' && ((r.capacity || 0) > 0 || (r.booking_count || 0) > 0))
     const events = (ctx.daySessions[d] || []).filter(r => r.session_type === 'festival')
     if (!rows.length && !events.length) { schedRow += '<td class="muted small">' + (ctx.daySessions[d] ? 'Nothing open' : '') + '</td>'; return }
     // fill rate only over sessions with a capacity (later class weeks are often closed to new sign-ups: capacity 0)
-    const withCap = rows.filter(r => (r.capacity || 0) > 0)
+    const openRows = rows.filter(r => !r.closed), closedN = rows.length - openRows.length
+    const withCap = openRows.filter(r => (r.capacity || 0) > 0)
     const cap = withCap.reduce((t, r) => t + r.capacity, 0), bk = withCap.reduce((t, r) => t + Math.min(r.booking_count || 0, r.capacity), 0)
     const pct = cap ? Math.round(bk / cap * 100) : null
     const tone = pct == null ? '' : pct >= 75 ? 'good' : pct >= 40 ? 'mid' : 'low'
-    schedRow += '<td><div class="wk-fill ' + tone + '">' + (pct == null ? '—' : pct + '% full') + '</div><div class="muted small">' + bk + ' / ' + cap + ' booked</div>' +
+    schedRow += '<td><div class="wk-fill ' + tone + '">' + (pct == null ? (openRows.length ? '—' : 'Closed') : pct + '% full') + '</div><div class="muted small">' +
+      (cap ? bk + ' / ' + cap + ' booked' : 'nothing open to book') + (closedN ? ' · ' + closedN + ' closed' : '') + '</div>' +
       events.map(e => '<div class="wk-ev">🎪 ' + esc(e.title) + '</div>').join('') +
-      '<details class="wk-sessions"><summary>' + rows.length + ' session' + (rows.length === 1 ? '' : 's') + '</summary>' +
+      '<details class="wk-sessions"><summary>' + openRows.length + ' open' + (closedN ? ' · ' + closedN + ' closed' : '') + '</summary>' +
       rows.sort((a, b) => a.session_time.localeCompare(b.session_time)).map(r =>
-        '<div class="wk-sess' + ((r.booking_count || 0) === 0 ? ' empty' : '') + '" title="' + esc(r.title) + '"><b>' + tShort(r.session_time) + '</b> <span class="wk-code">' + esc(r.code || '') + '</span> ' +
-        (r.booking_count || 0) + ((r.capacity || 0) > 0 ? '/' + r.capacity : (r.isClass ? ' enrolled' : '')) + '</div>').join('') +
+        '<div class="wk-sess' + ((r.booking_count || 0) === 0 ? ' empty' : '') + (r.closed ? ' closed' : '') + '" title="' + esc(r.title) + (r.closed ? ' (closed: no spaces left in Shopify)' : '') + '"><b>' + tShort(r.session_time) + '</b> <span class="wk-code">' + esc(r.code || '') + '</span> ' +
+        (r.closed ? 'closed' : (r.booking_count || 0) + ((r.capacity || 0) > 0 ? '/' + r.capacity : (r.isClass ? ' enrolled' : ''))) + '</div>').join('') +
       '</details>' + bdDayRisksHtml(ctx, risksAll.filter(x => x.r.session_date === d)) + '</td>'
   })
   schedRow += '</tr>'
