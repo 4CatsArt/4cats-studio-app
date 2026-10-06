@@ -156,6 +156,13 @@ table.wk tr.wk-sched td { background: #f7f9fc; }
 .wk-time { cursor: text; border-radius: 3px; }
 .wk-time:hover { background: rgba(255,255,255,.7); text-decoration: underline dotted; }
 .wk-time-input { width: 100%; box-sizing: border-box; font: inherit; font-weight: 600; padding: 2px 4px; border: 1px solid #4a7fd4; border-radius: 4px; }
+.wk-studio-chips { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.wk-studio-chip { display: inline-flex; align-items: center; gap: 4px; background: var(--ink); color: #fff; border-radius: 14px; padding: 4px 6px 4px 12px; font-size: 12px; }
+.wk-studio-chip button { background: none; border: none; color: #bbb; cursor: pointer; font-size: 12px; padding: 0 4px; }
+.wk-studio-chip button:hover { color: #fff; }
+.wk-studio { margin-bottom: 2rem; }
+.wk-studio-title { font-size: 16px; font-weight: 700; margin: 0 2px 8px; }
+.btn.bad { color: var(--bad); border-color: var(--bad); }
 .wk-pick { width: 100%; margin-top: 3px; font-size: 10.5px; padding: 1px 2px; border: 0.5px solid rgba(0,0,0,.15); border-radius: 4px; background: rgba(255,255,255,.7); }
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 1000; max-width: 90vw; }
 #toast.err { background: var(--bad); }
@@ -212,12 +219,15 @@ table.wk tr.wk-sched td { background: #f7f9fc; }
     <!-- ===== BUILD SCHEDULE ===== -->
     <div class="view active" id="view-build">
       <div class="toolbar">
-        <select class="input" id="bd-studio"></select>
+        <span id="bd-studio-chips" class="wk-studio-chips"></span>
+        <select class="input" id="bd-studio-add" title="Add a studio (up to 4)"></select>
         <button class="btn" onclick="bdShiftWeek(-1)" aria-label="Previous week">&#9664;</button>
         <strong id="bd-week" style="min-width:170px;text-align:center"></strong>
         <button class="btn" onclick="bdShiftWeek(1)" aria-label="Next week">&#9654;</button>
         <button class="btn primary" onclick="buildSchedule()">Build draft</button>
         <span class="spacer"></span>
+        <button class="btn" id="bd-discard" onclick="bdDiscard()" title="Throw away changes that aren't saved and go back to what's saved">Start over</button>
+        <button class="btn bad" id="bd-delete" onclick="bdDeleteDrafts()" title="Delete the saved drafts for these studios this week (approved shifts stay)">Delete drafts</button>
         <button class="btn" id="bd-save" onclick="saveDraftSchedule()" disabled>Save as drafts</button>
         <button class="btn good" id="bd-approve" onclick="approveDrafts()">Approve saved drafts</button>
       </div>
@@ -228,6 +238,7 @@ table.wk tr.wk-sched td { background: #f7f9fc; }
         Hover <span style="font-weight:700">ⓘ</span> next to a name for their hours, home studio, badges and notes.
         Drag a shift onto another person or day to move it, or onto Unfilled shifts to take it off someone.
         Click a shift's time to change it (e.g. <b>8:30a-5p</b>).
+        Add up to 4 studios to see and build them together: someone planned at one won't be double-booked at another.
       </div>
       <div id="bd-body"><div class="panel"><div class="empty">Choose a studio and week, then click Build draft.</div></div></div>
     </div>
@@ -760,11 +771,27 @@ function paidMins(studioId, start, end) {
 }
 function maxSpan(studioId) { const br = bdBreak(studioId); return MAX_PAID + (MAX_PAID > br.over ? br.dur : 0) }
 let bdWeek = sundayOf(todayStr())
-let bdCtx = null      // loaded data for the current build
-let bdPlan = null     // { blocks: [...], warnings: [...] }
+let bdCtx = null      // the studio being worked on right now (see bdUse)
+let bdPlan = null
+// Several studios can be open at once (up to 4), each with its own data and plan.
+// Shifts planned at one open studio count against the others (hours, days, one shift a day).
+let bdStudios = []    // studio ids, in the order shown
+let bdPlans = {}      // studio -> { ctx, plan } | { loading: true } | { error }
+const BD_MAX_STUDIOS = 4
+function bdUse(studio) { const x = bdPlans[studio]; bdCtx = x && x.ctx || null; bdPlan = x && x.plan || null }
+function bdAnyDirty() { return bdStudios.some(st => bdPlans[st] && bdPlans[st].plan && bdPlans[st].plan.dirty) }
+// Shifts planned (not yet saved) at the OTHER open studios, shaped like staff_shifts rows
+function bdOtherPlanShifts(studio) {
+  const out = []
+  bdStudios.forEach(st => {
+    if (st === studio || !bdPlans[st] || !bdPlans[st].plan) return
+    bdPlans[st].plan.blocks.forEach(b => { if (b.staffId) out.push({ staff_id: b.staffId, studio_id: st, shift_date: b.date, start_time: fromMin(b.start), end_time: fromMin(b.end), status: 'plan' }) })
+  })
+  return out
+}
 
 function bdShiftWeek(n) {
-  if (bdPlan && bdPlan.dirty && !confirm('You have changes on this week that aren\'t saved. Switch weeks and lose them?')) return
+  if (bdAnyDirty() && !confirm('You have changes on this week that aren\'t saved. Switch weeks and lose them?')) return
   bdWeek = addDays(bdWeek, 7 * n); bdUpdateWeekLabel(); bdOpenWeek()
 }
 function bdUpdateWeekLabel() {
@@ -772,15 +799,32 @@ function bdUpdateWeekLabel() {
   document.getElementById('bd-week').textContent = a.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) + ' – ' + b.toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' })
 }
 function initBuild() {
-  const sel = document.getElementById('bd-studio')
-  sel.innerHTML = '<option value="">Choose a studio…</option>' + Object.keys(STUDIO_NAMES).map(id => '<option value="' + id + '">' + esc(STUDIO_NAMES[id]) + '</option>').join('')
-  let lastStudio = ''
-  sel.onchange = () => {
-    if (bdPlan && bdPlan.dirty && !confirm('You have changes that aren\'t saved. Switch studios and lose them?')) { sel.value = lastStudio; return }
-    lastStudio = sel.value
-    bdOpenWeek()
+  const add = document.getElementById('bd-studio-add')
+  add.onchange = () => {
+    const st = add.value
+    add.value = ''
+    if (!st || bdStudios.includes(st)) return
+    if (bdStudios.length >= BD_MAX_STUDIOS) { toast('Up to ' + BD_MAX_STUDIOS + ' studios at a time. Remove one first.', true); return }
+    bdStudios.push(st)
+    bdRenderStudioPicker()
+    bdOpenStudios([st])
   }
+  bdRenderStudioPicker()
   bdUpdateWeekLabel()
+}
+function bdRenderStudioPicker() {
+  document.getElementById('bd-studio-add').innerHTML = '<option value="">' + (bdStudios.length ? '＋ Add studio…' : 'Choose a studio…') + '</option>' +
+    Object.keys(STUDIO_NAMES).filter(id => !bdStudios.includes(id)).map(id => '<option value="' + id + '">' + esc(STUDIO_NAMES[id]) + '</option>').join('')
+  document.getElementById('bd-studio-chips').innerHTML = bdStudios.map(st =>
+    '<span class="wk-studio-chip">' + esc(STUDIO_NAMES[st] || st) + ' <button onclick="bdRemoveStudio(\'' + st + '\')" title="Remove">✕</button></span>').join('')
+}
+function bdRemoveStudio(st) {
+  const x = bdPlans[st]
+  if (x && x.plan && x.plan.dirty && !confirm((STUDIO_NAMES[st] || st) + ' has changes that aren\'t saved. Remove it anyway?')) return
+  bdStudios = bdStudios.filter(s => s !== st)
+  delete bdPlans[st]
+  bdRenderStudioPicker()
+  renderAll()
 }
 const hrs = m => Math.round(m / 6) / 10   // minutes → hours, 1 decimal
 const overlaps = (a1, a2, b1, b2) => a1 < b2 && b1 < a2
@@ -1016,7 +1060,9 @@ function bdScore(ctx, p, blk, state) {
 function bdState(ctx, blocks) {
   // hours and days per person this week: existing approved/posted shifts at any studio
   // plus drafts at other studios, plus this plan
-  const keep = ctx.shifts.filter(x => x.start_time && x.end_time && !(x.studio_id === ctx.studio && x.status === 'draft'))
+  const open = new Set(bdStudios.concat([ctx.studio]))
+  const keep = ctx.shifts.filter(x => x.start_time && x.end_time && !(open.has(x.studio_id) && x.status === 'draft'))
+    .concat(bdOtherPlanShifts(ctx.studio))
   return {
     blocks,
     minutesOf: id => keep.filter(x => x.staff_id === id).reduce((t, x) => t + paidMins(x.studio_id, toMin(x.start_time), toMin(x.end_time)), 0) +
@@ -1025,24 +1071,43 @@ function bdState(ctx, blocks) {
   }
 }
 
-// Open a studio-week: shows the drafts already saved for it (editable), or an empty week to build.
-async function bdOpenWeek() {
-  const studio = document.getElementById('bd-studio').value
-  const body = document.getElementById('bd-body')
-  bdPlan = null
-  document.getElementById('bd-save').disabled = true
-  if (!studio) { body.innerHTML = '<div class="panel"><div class="empty">Choose a studio and week, then click Build draft.</div></div>'; return }
-  body.innerHTML = '<div class="panel"><div class="loading">Loading this week…</div></div>'
+// Open the week for every chosen studio: shows the drafts already saved (editable), or an empty week to build.
+async function bdOpenWeek() { await bdOpenStudios(bdStudios.slice()) }
+async function bdOpenStudios(list) {
   const week = bdWeek
-  let ctx
-  try { ctx = await bdLoad(studio) } catch (e) { body.innerHTML = '<div class="note bad">Could not load: ' + esc(e.message) + '</div>'; return }
-  if (week !== bdWeek || studio !== document.getElementById('bd-studio').value) return   // switched again while loading
-  bdCtx = ctx
-  bdPrepareDays(ctx)
-  const saved = ctx.shifts.filter(x => x.studio_id === studio && x.status === 'draft' && x.start_time && x.end_time)
-    .map(x => ({ date: x.shift_date, start: toMin(x.start_time), end: toMin(x.end_time), layer: 1, badges: [], staffId: x.staff_id, saved: true }))
-  bdPlan = { blocks: saved, teacherNotes: [], saved: saved.length > 0, dirty: false }
-  renderBuild()
+  list.forEach(st => { bdPlans[st] = { loading: true } })
+  renderAll()
+  await Promise.all(list.map(async st => {
+    try {
+      const ctx = await bdLoad(st)
+      if (week !== bdWeek || !bdStudios.includes(st)) return   // switched again while loading
+      bdPrepareDays(ctx)
+      const saved = ctx.shifts.filter(x => x.studio_id === st && x.status === 'draft' && x.start_time && x.end_time)
+        .map(x => ({ date: x.shift_date, start: toMin(x.start_time), end: toMin(x.end_time), layer: 1, badges: [], staffId: x.staff_id, saved: true }))
+      bdPlans[st] = { ctx, plan: { blocks: saved, teacherNotes: [], saved: saved.length > 0, dirty: false } }
+    } catch (e) { bdPlans[st] = { error: e.message } }
+  }))
+  if (week === bdWeek) renderAll()
+}
+
+// Throw away unsaved changes: back to what's saved
+function bdDiscard() {
+  if (!bdStudios.length) return
+  if (bdAnyDirty() && !confirm('Throw away the changes that aren\'t saved and go back to what\'s saved?')) return
+  bdOpenWeek()
+}
+
+// Delete the saved drafts for the open studios this week (approved shifts are never touched)
+async function bdDeleteDrafts() {
+  if (!bdStudios.length) { toast('Choose a studio first.', true); return }
+  const names = bdStudios.map(st => STUDIO_NAMES[st] || st).join(', ')
+  if (!confirm('Delete all saved DRAFT shifts for ' + names + ' for the week of ' + fmtDate(bdWeek) + '?\n\nApproved shifts are not touched. This can\'t be undone.')) return
+  for (const st of bdStudios) {
+    const r = await sb.from('staff_shifts').delete().eq('studio_id', st).eq('status', 'draft').gte('shift_date', bdWeek).lte('shift_date', addDays(bdWeek, 6))
+    if (r.error) { toast(r.error.message, true); return }
+  }
+  toast('Drafts deleted')
+  bdOpenWeek()
 }
 
 // Day windows and need slots, used by the grid and by the generator
@@ -1096,11 +1161,19 @@ function bdPlaceManagers(ctx, blocks) {
 }
 
 async function buildSchedule() {
-  const studio = document.getElementById('bd-studio').value
-  if (!studio) { toast('Choose a studio first.', true); return }
-  const body = document.getElementById('bd-body')
-  body.innerHTML = '<div class="panel"><div class="loading">Building a draft…</div></div>'
-  try { bdCtx = await bdLoad(studio) } catch (e) { body.innerHTML = '<div class="note bad">Could not load: ' + esc(e.message) + '</div>'; return }
+  if (!bdStudios.length) { toast('Choose a studio first.', true); return }
+  if (bdAnyDirty() && !confirm('Build fresh drafts? Changes that aren\'t saved will be replaced.')) return
+  // built one after another, so a person planned at one studio isn't double-booked at the next
+  bdStudios.forEach(st => { bdPlans[st] = { loading: true } })
+  renderAll()
+  for (const st of bdStudios.slice()) {
+    try { await bdBuildOne(st) } catch (e) { bdPlans[st] = { error: e.message } }
+  }
+  renderAll()
+}
+
+async function bdBuildOne(studio) {
+  bdCtx = await bdLoad(studio)
   const ctx = bdCtx
   let blocks = []
   ctx.dayWindow = {}
@@ -1231,8 +1304,29 @@ async function buildSchedule() {
     }
   })
   bdPlan = { blocks, teacherNotes, dirty: true }
-  renderBuild()
+  bdPlans[studio] = { ctx, plan: bdPlan }
 }
+
+// Draw every open studio, one grid under another
+function renderAll() {
+  const body = document.getElementById('bd-body')
+  if (!bdStudios.length) {
+    body.innerHTML = '<div class="panel"><div class="empty">Choose a studio (or several) and a week, then click Build draft.</div></div>'
+    document.getElementById('bd-save').disabled = true
+    return
+  }
+  body.innerHTML = bdStudios.map(st => '<div class="wk-studio" id="bd-body-' + st + '"></div>').join('')
+  bdStudios.forEach((st, i) => {
+    const el = document.getElementById('bd-body-' + st), x = bdPlans[st]
+    const title = '<h2 class="wk-studio-title">' + esc(STUDIO_NAMES[st] || st) + '</h2>'
+    if (!x || x.loading) { el.innerHTML = title + '<div class="panel"><div class="loading">Loading…</div></div>'; return }
+    if (x.error) { el.innerHTML = title + '<div class="note bad">Could not load: ' + esc(x.error) + '</div>'; return }
+    bdUse(st)
+    renderBuild(i === 0)
+  })
+  document.getElementById('bd-save').disabled = !bdStudios.some(st => bdPlans[st] && bdPlans[st].plan)
+}
+function bdRefresh() { const cur = bdCtx && bdCtx.studio; renderAll(); if (cur) bdUse(cur) }
 
 function bdPerson(id) { return bdCtx.pool.find(p => p.id === id) || staffById[id] || { id, display_name: '(unknown)' } }
 
@@ -1256,8 +1350,9 @@ function bdInfo(p) {
   return lines.join('\n')
 }
 
-function renderBuild() {
-  const ctx = bdCtx, plan = bdPlan, body = document.getElementById('bd-body')
+function renderBuild(withLegend) {
+  const ctx = bdCtx, plan = bdPlan, body = document.getElementById('bd-body-' + ctx.studio)
+  const U = "bdUse('" + ctx.studio + "');"   // every control below acts on this studio
   const days = [0, 1, 2, 3, 4, 5, 6].map(i => addDays(ctx.from, i))
   const state = bdState(ctx, plan.blocks)
   const ot = ctx.ot.find(o => o.province_code === PROV_OF(ctx.studio))
@@ -1281,7 +1376,7 @@ function renderBuild() {
     const st = bdState(ctx, plan.blocks.filter((_, j) => j !== idx))
     const opts = ctx.pool.map(p => ({ p, why: bdBlocked(ctx, p, b, st) }))
       .sort((x, y) => (!!x.why - !!y.why) || x.p.display_name.localeCompare(y.p.display_name))
-    return '<select class="wk-pick" onchange="bdAssign(' + idx + ', this.value)" title="Change who works this shift"><option value="">— Unfilled —</option>' +
+    return '<select class="wk-pick" onchange="' + U + 'bdAssign(' + idx + ', this.value)" title="Change who works this shift"><option value="">— Unfilled —</option>' +
       opts.map(o => '<option value="' + o.p.id + '"' + (o.p.id === b.staffId ? ' selected' : '') + '>' + esc(o.p.display_name) + (o.why ? ' (' + o.why + ')' : '') + '</option>').join('') + '</select>'
   }
   const whyText = b => {
@@ -1311,7 +1406,7 @@ function renderBuild() {
       tags.push((ok ? '✓ ' : '⚠ Needs ') + esc(ctx.badgeLabel[bc] || bc))
       if (!ok) warn.push(fmtDate(b.date) + ' ' + blkLabel(b) + ': needs ' + (ctx.badgeLabel[bc] || bc))
     })
-    return '<div class="wk-chip ' + kind + '" draggable="true" ondragstart="bdDragStart(event, ' + idx + ')" ondragend="bdDragEnd()" title="' + esc(whyText(b) + '\n\nClick the time to change it · drag to another person or day') + '"><b class="wk-time" onclick="bdEditTime(event, ' + idx + ')">' + blkLabel(b) + ' ✎</b>' + (tags.length ? '<div>' + tags.join(' · ') + '</div>' : '') + picker(b, idx) + '</div>'
+    return '<div class="wk-chip ' + kind + '" draggable="true" ondragstart="bdDragStart(event, ' + idx + ', \'' + ctx.studio + '\')" ondragend="bdDragEnd()" title="' + esc(whyText(b) + '\n\nClick the time to change it · drag to another person or day') + '"><b class="wk-time" onclick="' + U + 'bdEditTime(event, ' + idx + ')">' + blkLabel(b) + ' ✎</b>' + (tags.length ? '<div>' + tags.join(' · ') + '</div>' : '') + picker(b, idx) + '</div>'
   }
 
   let head = '<tr><th class="wk-name">Staff</th>' + days.map(d => '<th>' + parseYmd(d).toLocaleDateString('en-CA', { weekday: 'short' }).toUpperCase() + ' ' + parseYmd(d).getDate() +
@@ -1374,7 +1469,7 @@ function renderBuild() {
         }
         return '<div class="wk-chip class"><b>' + fmtTime(c.time) + ' ' + esc(c.label) + '</b><div>' + c.booked + ' enrolled' +
           (c.badge ? ' · needs ' + esc(ctx.badgeLabel[c.badge] || c.badge) : '') + '</div>' + status +
-          '<select class="wk-pick" onchange="bdSetTeacher(\'' + c.session_id + '\', this.value)"><option value="">— No teacher set —</option>' +
+          '<select class="wk-pick" onchange="' + U + 'bdSetTeacher(\'' + c.session_id + '\', this.value)"><option value="">— No teacher set —</option>' +
           opts.map(p => '<option value="' + p.id + '"' + (p.id === tid ? ' selected' : '') + '>' + esc(p.display_name) +
             (c.badge && (ctx.badgesBy[p.id] || new Set()).has(c.badge) ? ' ✓' : '') + '</option>').join('') + '</select></div>'
       }).join('') + '</td>').join('') + '</tr>'
@@ -1407,7 +1502,8 @@ function renderBuild() {
           (x.studio_id !== ctx.studio ? ' · ' + esc(STUDIO_NAMES[x.studio_id] || x.studio_id) : '') + '</div></div>'
       })
       // drafts at OTHER studios count toward their week
-      ctx.shifts.filter(x => x.staff_id === p.id && x.shift_date === d && x.status === 'draft' && x.studio_id !== ctx.studio && x.start_time).forEach(x => {
+      ctx.shifts.filter(x => x.staff_id === p.id && x.shift_date === d && x.status === 'draft' && x.studio_id !== ctx.studio && !bdStudios.includes(x.studio_id) && x.start_time)
+        .concat(bdOtherPlanShifts(ctx.studio).filter(x => x.staff_id === p.id && x.shift_date === d)).forEach(x => {
         cell += '<div class="wk-chip done"><b>' + fmtRange(x.start_time, x.end_time) + '</b><div>draft · ' + esc(STUDIO_NAMES[x.studio_id] || x.studio_id) + '</div></div>'
       })
       plan.blocks.forEach((b, idx) => { if (b.staffId === p.id && b.date === d) cell += chipFor(b, idx) })
@@ -1455,8 +1551,7 @@ function renderBuild() {
     ? '<div class="note warn"><b>Not saved yet.</b> Click <b>Save as drafts</b> to keep this week\'s changes.</div>'
     : plan.saved ? '<div class="note info">Showing the <b>saved draft</b> for this week. Edit it and save again, or click <b>Build draft</b> to start over.</div>'
     : (!plan.blocks.length ? '<div class="note info">No draft saved for this week yet. Click <b>Build draft</b>.</div>' : '')
-  body.innerHTML = banner + top + legend + '<div class="panel wk-wrap"><table class="wk"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>'
-  document.getElementById('bd-save').disabled = !plan.blocks.length
+  body.innerHTML = '<h2 class="wk-studio-title">' + esc(STUDIO_NAMES[ctx.studio] || ctx.studio) + '</h2>' + banner + top + (withLegend ? legend : '') + '<div class="panel wk-wrap"><table class="wk"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>'
 }
 
 // ── Class teachers (whole term) ────────────────────────────────────────────
@@ -1558,7 +1653,7 @@ async function bdSetTeacher(sessionId, staffId) {
     { value: 'week', label: '<b>Just ' + esc(fmtDate(c.date)) + '</b> — a substitute' + (termId ? ' while ' + esc(bdPerson(termId).display_name) + ' is off' : '') + '. The term teacher comes back after.' },
     { value: 'term', label: '<b>From ' + esc(fmtDate(c.date)) + ' on</b> — the teacher for the rest of the term.' }
   ])
-  if (!scope) { renderBuild(); return }
+  if (!scope) { bdRefresh(); return }
   const { data: { user } } = await sb.auth.getUser()
   const err = r => { if (r.error) { toast(r.error.message, true); return true } return false }
 
@@ -1605,7 +1700,8 @@ async function bdSetTeacher(sessionId, staffId) {
   }
   if (failed) toast('Teacher saved for scheduling, but the class schedule could not be updated: ' + failed, true)
   else toast((scope === 'week' ? 'Substitute for ' + fmtDate(c.date) : 'Term teacher') + ' saved · ' + ids.length + ' week(s) on the class schedule' + (skipped ? ', ' + skipped + ' left as the studio set them' : ''))
-  await buildSchedule()
+  await bdBuildOne(ctx.studio)
+  renderAll()
 }
 
 // ── Edit a draft shift's times: same text format as finance.html's Schedule tab
@@ -1635,17 +1731,17 @@ function bdEditTime(ev, idx) {
   const finish = save => {
     if (done) return
     done = true
-    if (!save) { renderBuild(); return }
+    if (!save) { bdRefresh(); return }
     const r = bdParseRange(input.value)
-    if (!r) { toast('Use a time like 8:30a-5p, with a or p on both times.', true); renderBuild(); return }
+    if (!r) { toast('Use a time like 8:30a-5p, with a or p on both times.', true); bdRefresh(); return }
     const w = bdCtx.dayWindow[b.date], paid = paidMins(bdCtx.studio, r.start, r.end)
     const warns = []
     if (r.end - r.start < 180) warns.push('shorter than 3 hours')
     if (paid > MAX_PAID) warns.push('more than 8 paid hours (overtime in BC and AB)')
     if (w && (r.start < w.open || r.end > w.close)) warns.push('outside opening hours (' + bdFmtShort(w.open) + '–' + bdFmtShort(w.close) + ')')
-    if (warns.length && !confirm('This shift would be ' + warns.join(', ') + '. Keep it?')) { renderBuild(); return }
+    if (warns.length && !confirm('This shift would be ' + warns.join(', ') + '. Keep it?')) { bdRefresh(); return }
     b.start = r.start; b.end = r.end; b.edited = true; bdPlan.dirty = true
-    renderBuild()
+    bdRefresh()
   }
   input.addEventListener('keydown', e => { if (e.key === 'Enter') finish(true); else if (e.key === 'Escape') finish(false) })
   input.addEventListener('blur', () => finish(true))
@@ -1654,18 +1750,19 @@ function bdEditTime(ev, idx) {
 
 // ── Drag and drop: drag a draft shift onto another person (same or another day),
 // or onto the Unfilled row to take it off someone. Approved shifts don't move.
-let bdDragIdx = null
+let bdDragIdx = null, bdDragStudio = null
 function bdDropAttrs(staffId, date) {
-  return 'data-staff="' + staffId + '" data-date="' + date + '" ondragover="bdDragOver(event)" ondragleave="this.classList.remove(\'drop-ok\')" ondrop="bdDrop(event)"'
+  return 'data-studio="' + bdCtx.studio + '" data-staff="' + staffId + '" data-date="' + date + '" ondragover="bdDragOver(event)" ondragleave="this.classList.remove(\'drop-ok\')" ondrop="bdDrop(event)"'
 }
-function bdDragStart(ev, idx) {
+function bdDragStart(ev, idx, studio) {
   bdDragIdx = idx
+  bdDragStudio = studio
   ev.dataTransfer.effectAllowed = 'move'
   try { ev.dataTransfer.setData('text/plain', String(idx)) } catch (e) {}
 }
 function bdDragEnd() { bdDragIdx = null; document.querySelectorAll('.drop-ok').forEach(el => el.classList.remove('drop-ok')) }
 function bdDragOver(ev) {
-  if (bdDragIdx === null) return
+  if (bdDragIdx === null || ev.currentTarget.dataset.studio !== bdDragStudio) return
   ev.preventDefault()
   ev.dataTransfer.dropEffect = 'move'
   ev.currentTarget.classList.add('drop-ok')
@@ -1676,15 +1773,17 @@ function bdDrop(ev) {
   td.classList.remove('drop-ok')
   const idx = bdDragIdx
   bdDragIdx = null
-  if (idx === null || !bdPlan || !bdPlan.blocks[idx]) return
+  if (idx === null) return
+  if (td.dataset.studio !== bdDragStudio) { toast('Shifts can only be dragged within the same studio.', true); return }
+  bdUse(bdDragStudio)
+  if (!bdPlan || !bdPlan.blocks[idx]) return
   const b = bdPlan.blocks[idx]
   const staffId = td.dataset.staff || null, date = td.dataset.date
   if (staffId === b.staffId && date === b.date) return
   if (!bdCtx.dayWindow[date] && !confirm('The studio has nothing open on ' + fmtDate(date) + '. Move the shift there anyway?')) return
   if (staffId) {
     const p = bdPerson(staffId)
-    const clash = bdPlan.blocks.some((x, j) => j !== idx && x.staffId === staffId && x.date === date) ||
-      bdCtx.shifts.some(x => x.staff_id === staffId && x.shift_date === date && x.start_time && !(x.studio_id === bdCtx.studio && x.status === 'draft'))
+    const clash = bdState(bdCtx, bdPlan.blocks.filter((_, j) => j !== idx)).daysOf(staffId).has(date)
     if (clash) { toast(p.display_name + ' already has a shift on ' + fmtDate(date) + '. Move or remove that one first.', true); return }
     const moved = Object.assign({}, b, { date })
     const why = bdBlocked(bdCtx, p, moved, bdState(bdCtx, bdPlan.blocks.filter((_, j) => j !== idx)))
@@ -1693,48 +1792,68 @@ function bdDrop(ev) {
   b.staffId = staffId
   b.date = date
   bdPlan.dirty = true
-  renderBuild()
+  bdRefresh()
 }
 
-function bdAssign(idx, staffId) { bdPlan.blocks[idx].staffId = staffId || null; bdPlan.dirty = true; renderBuild() }
+function bdAssign(idx, staffId) { bdPlan.blocks[idx].staffId = staffId || null; bdPlan.dirty = true; bdRefresh() }
 
 async function saveDraftSchedule() {
-  const ctx = bdCtx, plan = bdPlan
-  if (!plan) return
-  const rows = plan.blocks.filter(b => b.staffId).map(b => ({
-    staff_id: b.staffId, studio_id: ctx.studio, shift_date: b.date,
-    start_time: fromMin(b.start), end_time: fromMin(b.end), status: 'draft'
-  }))
-  const seen = new Set()
-  for (const r of rows) {
+  const list = bdStudios.filter(st => bdPlans[st] && bdPlans[st].plan)
+  if (!list.length) return
+  const rowsBy = {}
+  for (const st of list) {
+    const { ctx, plan } = bdPlans[st]
+    rowsBy[st] = plan.blocks.filter(b => b.staffId).map(b => ({
+      staff_id: b.staffId, studio_id: st, shift_date: b.date,
+      start_time: fromMin(b.start), end_time: fromMin(b.end), status: 'draft'
+    }))
+  }
+  // one shift per person per day, across every open studio
+  const seen = {}
+  for (const st of list) for (const r of rowsBy[st]) {
     const k = r.staff_id + '|' + r.shift_date
-    if (seen.has(k)) { toast(bdPerson(r.staff_id).display_name + ' has two shifts on ' + fmtDate(r.shift_date) + '. Change one before saving.', true); return }
-    seen.add(k)
+    if (seen[k]) { toast(bdPersonAny(r.staff_id) + ' has two shifts on ' + fmtDate(r.shift_date) + ' (' + (STUDIO_NAMES[seen[k]] || seen[k]) + ' and ' + (STUDIO_NAMES[st] || st) + '). Change one before saving.', true); return }
+    seen[k] = st
   }
-  if (!confirm('Save ' + rows.length + ' draft shifts for ' + STUDIO_NAMES[ctx.studio] + '? This replaces earlier drafts for this studio and week. Approved shifts are not touched.')) return
-  const del = await sb.from('staff_shifts').delete().eq('studio_id', ctx.studio).eq('status', 'draft').gte('shift_date', ctx.from).lte('shift_date', ctx.to)
-  if (del.error) { toast(del.error.message, true); return }
-  if (rows.length) {
-    const ins = await sb.from('staff_shifts').insert(rows)
-    if (ins.error) { toast('Drafts not saved: ' + ins.error.message, true); return }
+  if (!confirm('Save drafts for this week?\n\n' + list.map(st => (STUDIO_NAMES[st] || st) + ': ' + rowsBy[st].length + ' shifts').join('\n') +
+               '\n\nThis replaces earlier drafts for these studios and week. Approved shifts are not touched.')) return
+  for (const st of list) {
+    const ctx = bdPlans[st].ctx
+    const del = await sb.from('staff_shifts').delete().eq('studio_id', st).eq('status', 'draft').gte('shift_date', ctx.from).lte('shift_date', ctx.to)
+    if (del.error) { toast(del.error.message, true); return }
+    if (rowsBy[st].length) {
+      const ins = await sb.from('staff_shifts').insert(rowsBy[st])
+      if (ins.error) { toast('Drafts not saved for ' + (STUDIO_NAMES[st] || st) + ': ' + ins.error.message, true); return }
+    }
+    bdPlans[st].plan.dirty = false
+    bdPlans[st].plan.saved = true
   }
-  toast('Saved ' + rows.length + ' draft shifts')
-  bdPlan.dirty = false
-  bdPlan.saved = true
-  renderBuild()
+  toast('Saved ' + list.reduce((t, st) => t + rowsBy[st].length, 0) + ' draft shifts')
+  bdRefresh()
+}
+function bdPersonAny(id) {
+  for (const st of bdStudios) { const x = bdPlans[st]; const p = x && x.ctx && x.ctx.pool.find(q => q.id === id); if (p) return p.display_name }
+  return (staffById[id] || {}).display_name || 'Someone'
 }
 
 async function approveDrafts() {
-  const studio = document.getElementById('bd-studio').value
-  if (!studio) { toast('Choose a studio first.', true); return }
-  const to = addDays(bdWeek, 6)
-  const { data, error } = await sb.from('staff_shifts').select('staff_id').eq('studio_id', studio).eq('status', 'draft').gte('shift_date', bdWeek).lte('shift_date', to)
-  if (error) { toast(error.message, true); return }
-  if (!data.length) { toast('No saved drafts for this studio and week.', true); return }
-  if (!confirm('Approve ' + data.length + ' draft shifts for ' + STUDIO_NAMES[studio] + ' this week?')) return
-  const up = await sb.from('staff_shifts').update({ status: 'approved' }).eq('studio_id', studio).eq('status', 'draft').gte('shift_date', bdWeek).lte('shift_date', to)
-  if (up.error) { toast(up.error.message, true); return }
-  toast('Approved ' + data.length + ' shifts')
+  if (!bdStudios.length) { toast('Choose a studio first.', true); return }
+  if (bdAnyDirty()) { toast('Save your changes first, then approve.', true); return }
+  const to = addDays(bdWeek, 6), counts = {}
+  for (const st of bdStudios) {
+    const { data, error } = await sb.from('staff_shifts').select('staff_id').eq('studio_id', st).eq('status', 'draft').gte('shift_date', bdWeek).lte('shift_date', to)
+    if (error) { toast(error.message, true); return }
+    counts[st] = data.length
+  }
+  const total = Object.values(counts).reduce((a, b) => a + b, 0)
+  if (!total) { toast('No saved drafts for these studios this week.', true); return }
+  if (!confirm('Approve this week\'s drafts?\n\n' + bdStudios.map(st => (STUDIO_NAMES[st] || st) + ': ' + counts[st] + ' shifts').join('\n'))) return
+  for (const st of bdStudios) {
+    if (!counts[st]) continue
+    const up = await sb.from('staff_shifts').update({ status: 'approved' }).eq('studio_id', st).eq('status', 'draft').gte('shift_date', bdWeek).lte('shift_date', to)
+    if (up.error) { toast(up.error.message, true); return }
+  }
+  toast('Approved ' + total + ' shifts')
   bdOpenWeek()
 }
 
