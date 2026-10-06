@@ -1171,6 +1171,27 @@ function bdPrepareDays(ctx) {
   }
 }
 
+// Give a manager the full day (8 h paid) on this date: take the day's main shift and stretch it, trimming what it now covers
+function bdManagerDay(ctx, blocks, p, date, notes) {
+  const w = ctx.dayWindow[date]
+  const full = { start: w.open, end: Math.min(w.close, w.open + maxSpan(ctx.studio)) }
+  const own = blocks.find(b => b.staffId === p.id && b.date === date)
+  if (own) { own.start = Math.min(own.start, full.start); own.end = Math.max(own.end, full.end); return }
+  const st = bdState(ctx, blocks)
+  if (bdBlocked(ctx, p, Object.assign({ date, layer: 1, badges: [] }, full), st)) { notes.push(fmtDate(date) + ': ' + p.display_name + ' (manager) can\'t take the full day'); return }
+  // take the day's main shift and stretch it to the full 8 h; trim what it now covers
+  const l1 = blocks.filter(b => !b.staffId && b.date === date && b.layer === 1 && !b.training && !b.topUp)
+    .sort((a, b) => (Math.min(b.end, full.end) - Math.max(b.start, full.start)) - (Math.min(a.end, full.end) - Math.max(a.start, full.start)))
+  let main = l1[0]
+  if (!main) { main = { date, layer: 1, badges: [], staffId: null }; blocks.push(main) }
+  main.start = full.start; main.end = full.end; main.staffId = p.id; main.manager = true
+  l1.slice(1).forEach(b => {
+    if (b.start >= full.start && b.end <= full.end) blocks.splice(blocks.indexOf(b), 1)
+    else if (b.start < full.end && b.end > full.end) b.start = full.end
+    else if (b.end > full.start && b.start < full.start) b.end = full.start
+  })
+}
+
 // Managers first: 5 full days (8 h paid each = 40 h). Sat, Sun and Fri (event night), plus the
 // pair of Mon–Thu that leaves their two days off back to back and covers the most needed hours.
 function bdPlaceManagers(ctx, blocks, pairPref) {
@@ -1178,7 +1199,17 @@ function bdPlaceManagers(ctx, blocks, pairPref) {
   let usedPairs = false, splitDaysOff = false
   const d = i => addDays(ctx.from, i)               // week starts Sunday: 0 Sun … 6 Sat
   const needOn = date => ((ctx.daySlots || {})[date] || []).reduce((t, s) => t + s.rawNeed, 0)
-  ctx.pool.filter(p => p.role === 'manager' && p.home_studio_id === ctx.studio && p.max_studio_days_per_week == null).forEach(p => {
+  ctx.pool.filter(p => p.role === 'manager' && p.home_studio_id === ctx.studio && !onCall(p, ctx.to)).forEach(p => {
+    // Managers who are only in the studio some days (work from home the rest): their studio days are
+    // Sat, Sun and Fri first, then the weekdays with the most to cover.
+    const limit = p.max_studio_days_per_week
+    if (limit != null) {
+      const ok = date => ctx.dayWindow[date] && bdAvailableDay(ctx, p, date)
+      const days = [d(6), d(0), d(5)].filter(ok).slice(0, limit)
+      ;[1, 2, 3, 4].map(d).filter(ok).sort((a, b) => needOn(b) - needOn(a)).forEach(x => { if (days.length < limit) days.push(x) })
+      days.forEach(date => bdManagerDay(ctx, blocks, p, date, notes))
+      return
+    }
     const canWork = date => ctx.dayWindow[date] && bdAvailableDay(ctx, p, date)
     const fixed = [d(6), d(0), d(5)].filter(canWork)
     // weekday pairs from Mon–Thu that leave the other two (back to back) off
@@ -1205,25 +1236,7 @@ function bdPlaceManagers(ctx, blocks, pairPref) {
     const best = chosenPair ||
       [1, 2, 3, 4].map(d).filter(canWork).slice(0, 5 - fixed.length)
     const chosen = fixed.concat(best).slice(0, 5)
-    chosen.forEach(date => {
-      const w = ctx.dayWindow[date]
-      const full = { start: w.open, end: Math.min(w.close, w.open + maxSpan(ctx.studio)) }
-      const own = blocks.find(b => b.staffId === p.id && b.date === date)
-      if (own) { own.start = Math.min(own.start, full.start); own.end = Math.max(own.end, full.end); return }
-      const st = bdState(ctx, blocks)
-      if (bdBlocked(ctx, p, Object.assign({ date, layer: 1, badges: [] }, full), st)) { notes.push(fmtDate(date) + ': ' + p.display_name + ' (manager) can\'t take the full day'); return }
-      // take the day's main shift and stretch it to the full 8 h; trim what it now covers
-      const l1 = blocks.filter(b => !b.staffId && b.date === date && b.layer === 1 && !b.training && !b.topUp)
-        .sort((a, b) => (Math.min(b.end, full.end) - Math.max(b.start, full.start)) - (Math.min(a.end, full.end) - Math.max(a.start, full.start)))
-      let main = l1[0]
-      if (!main) { main = { date, layer: 1, badges: [], staffId: null }; blocks.push(main) }
-      main.start = full.start; main.end = full.end; main.staffId = p.id; main.manager = true
-      l1.slice(1).forEach(b => {
-        if (b.start >= full.start && b.end <= full.end) blocks.splice(blocks.indexOf(b), 1)
-        else if (b.start < full.end && b.end > full.end) b.start = full.end
-        else if (b.end > full.start && b.start < full.start) b.end = full.start
-      })
-    })
+    chosen.forEach(date => bdManagerDay(ctx, blocks, p, date, notes))
   })
   return { notes, usedPairs, splitDaysOff }
 }
