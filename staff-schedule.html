@@ -760,6 +760,8 @@ function renderCoverage() {
       studio: Saturday, Sunday and Friday, plus the two weekdays that keep their
       two days off together and cover the most.
    9. Extra hours for anyone go to Friday event night first (at least 5:30–9:30).
+  10. On-call staff are only used for a needed shift nobody else can take: never for
+      extra, weekend, training or top-up shifts, and never flagged for missing hours.
    6. Extra hours: managers below 40 h and anyone below their minimum get extra
       shifts on open days, placed at the END of the day (closing is busier).
    ===================================================================== */
@@ -860,7 +862,7 @@ async function bdLoad(studio) {
     sb.from('studio_opening_times').select('*'),
     sb.from('province_overtime_rules').select('*'),
     sb.from('province_break_rules').select('*'),
-    sb.from('staff_profiles').select('id, display_name, nickname, role, studio_ids, home_studio_id, min_weekly_hours, max_weekly_hours, max_studio_days_per_week, exclude_from_schedule, is_active'),
+    sb.from('staff_profiles').select('id, display_name, nickname, role, on_call, on_call_until, studio_ids, home_studio_id, min_weekly_hours, max_weekly_hours, max_studio_days_per_week, exclude_from_schedule, is_active'),
     sb.from('staff_badges').select('staff_id, badge_code'),
     sb.from('staff_schedule_prefs').select('staff_id, notes'),
     sb.from('staff_unavailability').select('staff_id, day_of_week, start_time, end_time, effective_from, effective_to'),
@@ -1020,6 +1022,8 @@ function bdAvailableDay(ctx, p, date) {
 }
 const isWeekend = date => { const d = parseYmd(date).getDay(); return d === 0 || d === 6 }
 const isFriday = date => parseYmd(date).getDay() === 5
+// On call on that date (on_call ticked, and either no end date or not past it)
+const onCall = (p, date) => !!(p && p.on_call && (!p.on_call_until || date <= p.on_call_until))
 // Studio coordinator at this studio on that date (Community Points → Coordinators)
 function bdIsSC(ctx, p, date) {
   return (ctx.coordinators || []).some(r => (r.staff_profile_id || r.staff_id || r.staff_profiles_id) === p.id &&
@@ -1233,7 +1237,7 @@ async function bdBuildOne(studio) {
     const r = bdGenerate(ctx, pref)
     const unfilled = r.blocks.filter(b => !b.staffId && !b.training && !b.topUp).reduce((t, b) => t + b.end - b.start, 0)
     const st = bdState(ctx, r.blocks)
-    const shortMin = ctx.pool.filter(p => p.home_studio_id === ctx.studio && p.min_weekly_hours != null)
+    const shortMin = ctx.pool.filter(p => p.home_studio_id === ctx.studio && p.min_weekly_hours != null && !onCall(p, ctx.to))
       .reduce((t, p) => t + Math.max(0, p.min_weekly_hours * 60 - st.minutesOf(p.id)), 0)
     // uncovered time matters most; then a manager's days off being split; then people under their minimum
     const score = unfilled * 100 + (r.splitDaysOff ? 5000 : 0) + shortMin + r.notes.length * 30
@@ -1300,7 +1304,7 @@ function bdGenerate(ctx, pairPref) {
     if (blk.staffId) return   // already given to a class teacher
     const state = bdState(ctx, blocks)
     let best = null, bestScore = Infinity
-    ctx.pool.forEach(p => {
+    ctx.pool.filter(p => !onCall(p, blk.date)).forEach(p => {
       if (bdBlocked(ctx, p, blk, state)) return
       const sc = bdScore(ctx, p, blk, state)
       if (sc < bestScore) { best = p; bestScore = sc }
@@ -1314,7 +1318,7 @@ function bdGenerate(ctx, pairPref) {
   ;[5].map(i => addDays(ctx.from, i)).forEach(date => {
     const w = ctx.dayWindow[date]
     if (!w || w.close - w.open < 180) return
-    ctx.pool.filter(p => bdIsLeader(ctx, p, date)).forEach(p => {
+    ctx.pool.filter(p => bdIsLeader(ctx, p, date) && !onCall(p, date)).forEach(p => {
       const st = bdState(ctx, blocks)
       if (st.daysOf(p.id).has(date) || !bdAvailableDay(ctx, p, date)) return
       const blk = { date, start: w.close - 180, end: w.close, layer: 0, badges: [], staffId: null, topUp: true, friday: true }
@@ -1331,7 +1335,7 @@ function bdGenerate(ctx, pairPref) {
   ;[6, 0].map(i => addDays(ctx.from, i)).forEach(date => {
     const w = ctx.dayWindow[date]
     if (!w || w.close - w.open < 180) return
-    ctx.pool.filter(p => p.home_studio_id === ctx.studio && bdTrainingDone(ctx, p, blocks, '9999') === null).forEach(p => {
+    ctx.pool.filter(p => p.home_studio_id === ctx.studio && !onCall(p, date) && bdTrainingDone(ctx, p, blocks, '9999') === null).forEach(p => {
       const st = bdState(ctx, blocks)
       if (st.daysOf(p.id).has(date) || !bdAvailableDay(ctx, p, date)) return
       const blk = { date, start: Math.max(w.open, w.close - 240), end: w.close, layer: 0, badges: [], staffId: null, topUp: true, weekend: true }   // 1–5
@@ -1345,7 +1349,7 @@ function bdGenerate(ctx, pairPref) {
   // Extra hours: managers under 40 h (unless limited to some studio days) and anyone under their minimum
   // get extra shifts on open days, placed at the end of the day for closing. Weekends first.
   const order7 = [5, 6, 0, 1, 2, 3, 4].map(i => addDays(ctx.from, i))   // Fri event night, Sat, Sun, then Mon–Thu
-  ctx.pool.filter(p => p.home_studio_id === ctx.studio && bdTrainingDone(ctx, p, blocks, '9999') === null).forEach(p => {
+  ctx.pool.filter(p => p.home_studio_id === ctx.studio && !onCall(p, ctx.to) && bdTrainingDone(ctx, p, blocks, '9999') === null).forEach(p => {
     const targetH = (p.role === 'manager' && p.max_studio_days_per_week == null) ? Math.max(40, p.min_weekly_hours || 0) : (p.min_weekly_hours || 0)
     for (const date of order7) {
       const st = bdState(ctx, blocks)
@@ -1396,7 +1400,7 @@ function bdGenerate(ctx, pairPref) {
   })
 
   // Training shifts: home-studio trainees shadow someone already scheduled, one a day, until they reach 3
-  ctx.pool.filter(p => p.home_studio_id === ctx.studio).forEach(p => {
+  ctx.pool.filter(p => p.home_studio_id === ctx.studio && !onCall(p, ctx.to)).forEach(p => {
     for (let i = 0; i < 7; i++) {
       const date = addDays(ctx.from, i)
       const done = bdTrainingDone(ctx, p, blocks, '9999')
@@ -1409,6 +1413,18 @@ function bdGenerate(ctx, pairPref) {
       blocks.push(t)
     }
   })
+  // Last resort: on-call staff take needed shifts nobody else could
+  blocks.filter(b => !b.staffId && !b.training && !b.topUp).forEach(blk => {
+    const st = bdState(ctx, blocks)
+    let best = null, bestScore = Infinity
+    ctx.pool.filter(p => onCall(p, blk.date)).forEach(p => {
+      if (bdBlocked(ctx, p, blk, st)) return
+      const sc = bdScore(ctx, p, blk, st)
+      if (sc < bestScore) { best = p; bestScore = sc }
+    })
+    if (best) { blk.staffId = best.id; blk.onCall = true }
+  })
+
   bdSnapToStandard(ctx, blocks)
   return { blocks, teacherNotes, notes: teacherNotes, usedPairs: mgr.usedPairs, splitDaysOff: mgr.splitDaysOff }
 }
@@ -1445,6 +1461,7 @@ function bdInfo(p) {
   lines.push('Hours promised: ' + (p.min_weekly_hours != null ? 'at least ' + p.min_weekly_hours : 'no minimum') +
              ', ' + (p.max_weekly_hours != null ? 'at most ' + p.max_weekly_hours : 'no maximum (avoid overtime)'))
   if (p.max_studio_days_per_week != null) lines.push('In-studio days: at most ' + p.max_studio_days_per_week + ' a week')
+  if (p.on_call) lines.push('On call' + (p.on_call_until ? ' until ' + fmtDate(p.on_call_until) : '') + ': only scheduled when nobody else can cover')
   const b = [...(ctx.badgesBy[p.id] || [])].map(c => ctx.badgeLabel[c] || c)
   if (b.length) lines.push('Badges: ' + b.join(', '))
   const tdone = bdTrainingDone(ctx, p, bdPlan.blocks, '9999')
@@ -1483,7 +1500,7 @@ function renderBuild(withLegend) {
     const opts = ctx.pool.map(p => ({ p, why: bdBlocked(ctx, p, b, st) }))
       .sort((x, y) => (!!x.why - !!y.why) || x.p.display_name.localeCompare(y.p.display_name))
     return '<select class="wk-pick" onchange="' + U + 'bdAssign(' + idx + ', this.value)" title="Change who works this shift"><option value="">— Unfilled —</option>' +
-      opts.map(o => '<option value="' + o.p.id + '"' + (o.p.id === b.staffId ? ' selected' : '') + '>' + esc(o.p.display_name) + (o.why ? ' (' + o.why + ')' : '') + '</option>').join('') + '</select>'
+      opts.map(o => '<option value="' + o.p.id + '"' + (o.p.id === b.staffId ? ' selected' : '') + '>' + esc(o.p.display_name) + (onCall(o.p, b.date) ? ' · on call' : '') + (o.why ? ' (' + o.why + ')' : '') + '</option>').join('') + '</select>'
   }
   const whyText = b => {
     if (b.training) return 'Training: shadowing the person scheduled'
@@ -1507,6 +1524,7 @@ function renderBuild(withLegend) {
     }
     if (b.topUp) tags.push(b.weekend ? 'Weekend · closing' : b.friday ? 'Friday event night · closing' : 'Extra hours · closing')
     ;(b.classes || []).forEach(l => tags.push('✓ Teaching ' + esc(l)))
+    if (b.staffId && onCall(bdPerson(b.staffId), b.date)) tags.push('On call: nobody else could take this')
     b.badges.forEach(bc => {
       const ok = b.staffId && (ctx.badgesBy[b.staffId] || new Set()).has(bc)
       tags.push((ok ? '✓ ' : '⚠ Needs ') + esc(ctx.badgeLabel[bc] || bc))
@@ -1601,7 +1619,10 @@ function renderBuild(withLegend) {
       days.filter(isWeekend).forEach(d => {
         if (ctx.dayWindow[d] && bdAvailableDay(ctx, p, d) && !state.daysOf(p.id).has(d)) flags.push('No ' + (parseYmd(d).getDay() === 6 ? 'Sat' : 'Sun') + ' shift')
       })
+    const oc = onCall(p, ctx.from) || onCall(p, ctx.to)
+    if (oc) { for (let k = flags.length - 1; k >= 0; k--) if (/^No (Sat|Sun) shift|Under minimum|Manager under/.test(flags[k])) flags.splice(k, 1) }
     flags.forEach(f => warn.push(p.display_name + ': ' + f))
+    if (oc) flags.unshift('On call' + (p.on_call_until ? ' until ' + parseYmd(p.on_call_until).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : ''))
     const range = (p.min_weekly_hours != null || p.max_weekly_hours != null)
       ? ' / ' + (p.min_weekly_hours != null ? p.min_weekly_hours : 0) + '–' + (p.max_weekly_hours != null ? p.max_weekly_hours : '') : (p.role === 'manager' ? ' / 40' : '')
     rows += '<tr><td class="wk-name"><b>' + esc(p.display_name) + '</b> <span title="' + esc(bdInfo(p)) + '" style="cursor:help">ⓘ</span>' +
