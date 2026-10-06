@@ -163,6 +163,11 @@ table.wk tr.wk-sched td { background: #f7f9fc; }
 .wk-studio { margin-bottom: 2rem; }
 .wk-studio-title { font-size: 16px; font-weight: 700; margin: 0 2px 8px; }
 .btn.bad { color: var(--bad); border-color: var(--bad); }
+.wk-chip { position: relative; }
+.wk-del { position: absolute; top: 2px; right: 2px; border: none; background: transparent; color: inherit; opacity: .45; cursor: pointer; font-size: 11px; line-height: 1; padding: 2px 3px; border-radius: 3px; }
+.wk-del:hover { opacity: 1; background: rgba(0,0,0,.08); }
+.wk-chip .wk-time { padding-right: 14px; }
+.wk-risks table.list td { border-bottom-color: rgba(180,83,9,.2); font-size: 12px; }
 .wk-pick { width: 100%; margin-top: 3px; font-size: 10.5px; padding: 1px 2px; border: 0.5px solid rgba(0,0,0,.15); border-radius: 4px; background: rgba(255,255,255,.7); }
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 1000; max-width: 90vw; }
 #toast.err { background: var(--bad); }
@@ -754,6 +759,15 @@ function renderCoverage() {
 const MAX_PAID = 480
 const MAX_DAYS = 5
 const TRAINING_SHIFTS_NEEDED = 3
+// A class teacher also looks after the studio while the class runs, when the studio is quiet:
+// no party running and at most this many people booked into drop-in sessions at that time.
+const QUIET_BOOKED = 2
+// Standard shift shapes (finance.html's Quick Shifts plus the 8:30–1 morning). Every shift the
+// generator makes is rounded out to the shortest of these that covers it.
+const STANDARD_SHIFTS = [
+  ['08:30', '17:00'], ['08:30', '13:00'], ['13:00', '17:00'], ['12:00', '17:00'], ['10:30', '17:00'], ['08:45', '17:00'],
+  ['13:00', '21:30'], ['14:30', '21:30'], ['15:30', '21:30'], ['16:30', '21:30'], ['16:00', '21:00']
+].map(([a, b]) => ({ start: toMin(a), end: toMin(b) }))
 const SOLO_BADGE = 'solo_ready'
 const PROV_OF = id => (id || '').slice(0, 2)
 // Unpaid break by province (province_break_rules, the same table finance.html uses).
@@ -914,17 +928,21 @@ function bdDayNeed(ctx, date) {
   lo = Math.floor(lo / 15) * 15; hi = Math.ceil(hi / 15) * 15
   const slots = []
   for (let t = lo; t < hi; t += 15) {
-    let dedicated = 0, pooled = 0
+    let dedicated = 0, pooled = 0, pooledBooked = 0, partyOn = false, classOn = false
     const badges = new Set(), on = []
     ss.forEach(r => {
       if (!(toMin(r.start_time) < t + 15 && toMin(r.end_time) > t)) return
       on.push(r)
-      if (r.rule_kind === 'pooled') pooled += (r.expected || 0) / (r.ratio || 20)
+      if (r.rule_kind === 'pooled') { pooled += (r.expected || 0) / (r.ratio || 20); pooledBooked += r.booked || 0 }
       else dedicated += r.teachers || 0
+      if (r.rule_kind === 'per_group' && (r.teachers || 0) > 0) partyOn = true
+      if (r.rule_kind === 'one_per_session' && (r.teachers || 0) > 0) classOn = true
       const b = ctx.ruleBadge[r.rule_label]
       if (b && (r.teachers || 0) > 0) badges.add(b)
     })
-    let need = Math.max(1, dedicated + Math.ceil(pooled - 1e-9))   // open day: always at least one person
+    // Quiet studio during a class: the class teacher looks after the studio too (no separate floor person)
+    const quiet = classOn && !partyOn && pooledBooked <= QUIET_BOOKED
+    let need = Math.max(1, dedicated + (quiet ? 0 : Math.ceil(pooled - 1e-9)))   // open day: always at least one person
     const have = ctx.shifts.filter(x => x.studio_id === ctx.studio && x.shift_date === date && x.status !== 'draft' &&
                                        x.start_time && x.end_time && toMin(x.start_time) < t + 15 && toMin(x.end_time) > t).length
     slots.push({ t, need: Math.max(0, need - have), badges, on, rawNeed: need, have })
@@ -944,7 +962,11 @@ function bdBlocks(ctx, date, slots, target) {
     })
     runs.forEach(r => {
       if (k > 1) { r.start = Math.max(slots[0].t, r.start - 15); r.end = Math.min(dayEnd, r.end + 15) }
-      if (r.end - r.start < 180) { r.end = Math.min(23 * 60, r.start + 180); if (r.end - r.start < 180) r.start = r.end - 180 }
+      // at least 3 h: a morning need grows earlier (stays a morning shift), later ones grow toward closing
+      if (r.end - r.start < 180) {
+        if (r.end <= 13 * 60) { r.start = Math.max(slots[0].t, r.end - 180); if (r.end - r.start < 180) r.end = r.start + 180 }
+        else { r.end = Math.min(dayEnd, r.start + 180); if (r.end - r.start < 180) r.start = Math.max(slots[0].t, r.end - 180) }
+      }
       const parts = []
       const len = r.end - r.start
       const n = Math.ceil(len / maxSpan(ctx.studio))
@@ -1125,16 +1147,36 @@ function bdPrepareDays(ctx) {
 
 // Managers first: 5 full days (8 h paid each = 40 h). Sat, Sun and Fri (event night), plus the
 // pair of Mon–Thu that leaves their two days off back to back and covers the most needed hours.
-function bdPlaceManagers(ctx, blocks) {
+function bdPlaceManagers(ctx, blocks, pairPref) {
   const notes = []
+  let usedPairs = false, splitDaysOff = false
   const d = i => addDays(ctx.from, i)               // week starts Sunday: 0 Sun … 6 Sat
   const needOn = date => ((ctx.daySlots || {})[date] || []).reduce((t, s) => t + s.rawNeed, 0)
   ctx.pool.filter(p => p.role === 'manager' && p.home_studio_id === ctx.studio && p.max_studio_days_per_week == null).forEach(p => {
     const canWork = date => ctx.dayWindow[date] && bdAvailableDay(ctx, p, date)
     const fixed = [d(6), d(0), d(5)].filter(canWork)
     // weekday pairs from Mon–Thu that leave the other two (back to back) off
-    const pairs = [[1, 2], [1, 4], [3, 4]].map(pr => pr.map(d)).filter(pr => pr.every(canWork))
-    const best = pairs.sort((a, b) => (needOn(b[0]) + needOn(b[1])) - (needOn(a[0]) + needOn(a[1])))[0] ||
+    // Weekday pairs they WORK (Mon–Thu). The first three leave the other two days off back to back;
+    // the last three split the days off and are only used when that's the only way to cover the week.
+    const PAIRS = [[1, 2], [1, 4], [3, 4], [2, 3], [1, 3], [2, 4]]
+    const pairs = PAIRS.map(pr => pr.map(d)).filter(pr => pr.every(canWork))
+    // Work the days nobody else can easily cover; take days off when others are already there
+    // (e.g. a class teacher working all day) or available.
+    const others = date => {
+      const st = bdState(ctx, blocks)
+      const placed = blocks.filter(b => b.date === date && b.staffId && b.staffId !== p.id).length
+      const avail = ctx.pool.filter(o => o.id !== p.id && bdAvailableDay(ctx, o, date) && bdTrainingDone(ctx, o, blocks, date) === null &&
+        !(o.role === 'manager' && o.home_studio_id !== ctx.studio) &&
+        (o.max_studio_days_per_week == null ? st.daysOf(o.id).size < MAX_DAYS || st.daysOf(o.id).has(date) : st.daysOf(o.id).size < o.max_studio_days_per_week)).length
+      return avail + 2 * placed
+    }
+    const pairScore = pr => pr.reduce((t, x) => t + needOn(x) / (1 + others(x)), 0)
+    const together = pr => { const off = [1, 2, 3, 4].map(d).filter(x => !pr.includes(x)); return daysBetween(off[0], off[1]) === 1 }
+    pairs.sort((a, b) => (together(b) - together(a)) || (pairScore(b) - pairScore(a)))
+    if (pairs.length > 1) usedPairs = true
+    const chosenPair = (pairPref != null && pairs[pairPref]) || pairs[0]
+    if (chosenPair && !together(chosenPair)) splitDaysOff = true
+    const best = chosenPair ||
       [1, 2, 3, 4].map(d).filter(canWork).slice(0, 5 - fixed.length)
     const chosen = fixed.concat(best).slice(0, 5)
     chosen.forEach(date => {
@@ -1157,7 +1199,7 @@ function bdPlaceManagers(ctx, blocks) {
       })
     })
   })
-  return notes
+  return { notes, usedPairs, splitDaysOff }
 }
 
 async function buildSchedule() {
@@ -1175,6 +1217,53 @@ async function buildSchedule() {
 async function bdBuildOne(studio) {
   bdCtx = await bdLoad(studio)
   const ctx = bdCtx
+  // Managers' two weekday days off can fall several ways. Build the week each way and keep the one that
+  // leaves the least uncovered; back-to-back days off win unless splitting them is the only way to cover.
+  let best = null
+  for (const pref of [0, 1, 2, 3, 4, 5]) {
+    const r = bdGenerate(ctx, pref)
+    const unfilled = r.blocks.filter(b => !b.staffId && !b.training && !b.topUp).reduce((t, b) => t + b.end - b.start, 0)
+    const st = bdState(ctx, r.blocks)
+    const shortMin = ctx.pool.filter(p => p.home_studio_id === ctx.studio && p.min_weekly_hours != null)
+      .reduce((t, p) => t + Math.max(0, p.min_weekly_hours * 60 - st.minutesOf(p.id)), 0)
+    // uncovered time matters most; then a manager's days off being split; then people under their minimum
+    const score = unfilled * 100 + (r.splitDaysOff ? 5000 : 0) + shortMin + r.notes.length * 30
+    if (!best || score < best.score) best = { score, r }
+    if (!r.usedPairs) break   // no manager pairs to try
+  }
+  if (best.r.splitDaysOff) best.r.teacherNotes.push('Manager\'s days off aren\'t back to back this week: it was the only way to cover every day')
+  bdPlan = { blocks: best.r.blocks, teacherNotes: best.r.teacherNotes, dirty: true }
+  bdPlans[studio] = { ctx, plan: bdPlan }
+}
+
+// Round every shift out to the shortest standard shape that covers it (within opening hours),
+// unless that would push the person over their max hours or into overtime.
+function bdSnapToStandard(ctx, blocks) {
+  const ot = ctx.ot.find(o => o.province_code === PROV_OF(ctx.studio))
+  blocks.forEach(b => {
+    const w = ctx.dayWindow[b.date]
+    if (!w) return
+    const fit = STANDARD_SHIFTS.filter(t => t.start <= b.start && t.end >= b.end && t.start >= w.open && t.end <= w.close)
+      .sort((x, y) => (x.end - x.start) - (y.end - y.start))[0]
+    if (!fit || (fit.start === b.start && fit.end === b.end)) return
+    if (b.staffId) {
+      const p = ctx.pool.find(x => x.id === b.staffId)
+      const extra = paidMins(ctx.studio, fit.start, fit.end) - paidMins(ctx.studio, b.start, b.end)
+      const now = bdState(ctx, blocks).minutesOf(b.staffId)
+      if (p && p.max_weekly_hours != null && now + extra > p.max_weekly_hours * 60) return
+      if (ot && now + extra > ot.weekly_hours * 60 && now <= ot.weekly_hours * 60) return
+    }
+    b.start = fit.start; b.end = fit.end
+  })
+  // a training shift follows its lead's shift
+  blocks.filter(b => b.training).forEach(t => {
+    const lead = blocks.find(b => b.date === t.date && b.staffId === t.withId && !b.training)
+    if (lead) { t.start = lead.start; t.end = lead.end }
+  })
+}
+
+// One full generation of a studio-week. pairPref picks which weekday pair managers work (see bdPlaceManagers).
+function bdGenerate(ctx, pairPref) {
   let blocks = []
   ctx.dayWindow = {}
   for (let i = 0; i < 7; i++) {
@@ -1191,7 +1280,10 @@ async function bdBuildOne(studio) {
   }
   // scarce first: badge blocks, then longest
   // Assigned class teachers first, on the shift covering their class; then managers' 5 full days
-  const teacherNotes = bdPlaceTeachers(ctx, blocks).concat(bdPlaceManagers(ctx, blocks))
+  // Managers' full days first, then class teachers (who get their own shift when the day's main one is taken)
+  const mgr = bdPlaceManagers(ctx, blocks, pairPref)
+  const tNotes = bdPlaceTeachers(ctx, blocks)
+  const teacherNotes = tNotes.concat(mgr.notes)
   // Badge work first (scarce), then weekends (busiest, everyone works them), then longest
   const order = blocks.slice().sort((a, b) => (b.badges.length - a.badges.length) ||
     (isWeekend(b.date) - isWeekend(a.date)) || (isFriday(b.date) - isFriday(a.date)) || ((b.end - b.start) - (a.end - a.start)))
@@ -1206,6 +1298,9 @@ async function bdBuildOne(studio) {
     })
     blk.staffId = best ? best.id : null
   })
+  // Round the needed shifts to standard shapes now, so the extra-hours steps below see real hours
+  bdSnapToStandard(ctx, blocks)
+
   // Friday event night: a manager / SC still without a Friday shift gets a closing shift
   ;[5].map(i => addDays(ctx.from, i)).forEach(date => {
     const w = ctx.dayWindow[date]
@@ -1230,9 +1325,9 @@ async function bdBuildOne(studio) {
     ctx.pool.filter(p => p.home_studio_id === ctx.studio && bdTrainingDone(ctx, p, blocks, '9999') === null).forEach(p => {
       const st = bdState(ctx, blocks)
       if (st.daysOf(p.id).has(date) || !bdAvailableDay(ctx, p, date)) return
-      const blk = { date, start: w.close - 180, end: w.close, layer: 0, badges: [], staffId: null, topUp: true, weekend: true }
+      const blk = { date, start: Math.max(w.open, w.close - 240), end: w.close, layer: 0, badges: [], staffId: null, topUp: true, weekend: true }   // 1–5
       if (bdBlocked(ctx, p, blk, st)) return
-      if (otRule && st.minutesOf(p.id) + 180 > otRule.weekly_hours * 60) return
+      if (otRule && st.minutesOf(p.id) + paidMins(ctx.studio, blk.start, blk.end) > otRule.weekly_hours * 60) return
       blk.staffId = p.id
       blocks.push(blk)
     })
@@ -1267,7 +1362,7 @@ async function bdBuildOne(studio) {
     // Still short (no free days left, e.g. a manager on 5 days)? Lengthen their shifts here, up to 8 h,
     // later first (towards closing), then earlier.
     let short = targetH * 60 - bdState(ctx, blocks).minutesOf(p.id)
-    blocks.filter(b => b.staffId === p.id && !b.training).sort((a, b) => (a.end - a.start) - (b.end - b.start)).forEach(b => {
+    blocks.filter(b => b.staffId === p.id && !b.training).sort((a, b) => (isFriday(b.date) - isFriday(a.date)) || ((a.end - a.start) - (b.end - b.start))).forEach(b => {
       const w = ctx.dayWindow[b.date]
       if (!w) return
       // only stretch into time where fewer people are on than the studio needs
@@ -1280,8 +1375,10 @@ async function bdBuildOne(studio) {
       }
       while (short > 0 && b.end - b.start < maxSpan(ctx.studio)) {
         const before = paidMins(ctx.studio, b.start, b.end)
-        if (b.end < w.close && understaffed(b.end, b.end + 30)) b.end = Math.min(w.close, b.end + 30)
-        else if (b.start > w.open && understaffed(b.start - 30, b.start)) b.start = Math.max(w.open, b.start - 30)
+        // later toward closing is always fine (closing is busier, and these are promised hours);
+        // earlier only into time that's short of people
+        if (b.end < w.close) b.end = Math.min(w.close, b.end + 30)
+        else if (b.start > w.open && (isFriday(b.date) || understaffed(b.start - 30, b.start))) b.start = Math.max(w.open, b.start - 30)   // Friday: extra hands for event night
         else break
         short -= paidMins(ctx.studio, b.start, b.end) - before
         if (otRule && bdState(ctx, blocks).minutesOf(p.id) > otRule.weekly_hours * 60) { b.end -= 30; short += 30; break }
@@ -1303,8 +1400,8 @@ async function bdBuildOne(studio) {
       blocks.push(t)
     }
   })
-  bdPlan = { blocks, teacherNotes, dirty: true }
-  bdPlans[studio] = { ctx, plan: bdPlan }
+  bdSnapToStandard(ctx, blocks)
+  return { blocks, teacherNotes, notes: teacherNotes, usedPairs: mgr.usedPairs, splitDaysOff: mgr.splitDaysOff }
 }
 
 // Draw every open studio, one grid under another
@@ -1406,7 +1503,7 @@ function renderBuild(withLegend) {
       tags.push((ok ? '✓ ' : '⚠ Needs ') + esc(ctx.badgeLabel[bc] || bc))
       if (!ok) warn.push(fmtDate(b.date) + ' ' + blkLabel(b) + ': needs ' + (ctx.badgeLabel[bc] || bc))
     })
-    return '<div class="wk-chip ' + kind + '" draggable="true" ondragstart="bdDragStart(event, ' + idx + ', \'' + ctx.studio + '\')" ondragend="bdDragEnd()" title="' + esc(whyText(b) + '\n\nClick the time to change it · drag to another person or day') + '"><b class="wk-time" onclick="' + U + 'bdEditTime(event, ' + idx + ')">' + blkLabel(b) + ' ✎</b>' + (tags.length ? '<div>' + tags.join(' · ') + '</div>' : '') + picker(b, idx) + '</div>'
+    return '<div class="wk-chip ' + kind + '" draggable="true" ondragstart="bdDragStart(event, ' + idx + ', \'' + ctx.studio + '\')" ondragend="bdDragEnd()" title="' + esc(whyText(b) + '\n\nClick the time to change it · drag to another person or day') + '"><button class="wk-del" title="Delete this shift" onclick="' + U + 'bdDeleteShift(event, ' + idx + ')">✕</button><b class="wk-time" onclick="' + U + 'bdEditTime(event, ' + idx + ')">' + blkLabel(b) + ' ✎</b>' + (tags.length ? '<div>' + tags.join(' · ') + '</div>' : '') + picker(b, idx) + '</div>'
   }
 
   let head = '<tr><th class="wk-name">Staff</th>' + days.map(d => '<th>' + parseYmd(d).toLocaleDateString('en-CA', { weekday: 'short' }).toUpperCase() + ' ' + parseYmd(d).getDate() +
@@ -1551,7 +1648,13 @@ function renderBuild(withLegend) {
     ? '<div class="note warn"><b>Not saved yet.</b> Click <b>Save as drafts</b> to keep this week\'s changes.</div>'
     : plan.saved ? '<div class="note info">Showing the <b>saved draft</b> for this week. Edit it and save again, or click <b>Build draft</b> to start over.</div>'
     : (!plan.blocks.length ? '<div class="note info">No draft saved for this week yet. Click <b>Build draft</b>.</div>' : '')
-  body.innerHTML = '<h2 class="wk-studio-title">' + esc(STUDIO_NAMES[ctx.studio] || ctx.studio) + '</h2>' + banner + top + (withLegend ? legend : '') + '<div class="panel wk-wrap"><table class="wk"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>'
+  const risks = bdRisks(ctx, plan)
+  const riskHtml = risks.length ? '<details class="note warn wk-risks" open><summary><b>⚠ Could leave you short (' + risks.length + ')</b> · open sessions that would need another person if they\'re booked</summary>' +
+    '<table class="list" style="margin-top:6px;background:transparent"><tbody>' + risks.map(x =>
+      '<tr><td style="white-space:nowrap">' + fmtDate(x.r.session_date) + '</td><td style="white-space:nowrap">' + fmtTime(x.r.start_time) + '</td><td>' + esc(x.r.title) +
+      '</td><td style="white-space:nowrap">' + (x.r.booked || 0) + ' booked</td><td class="small">' + esc(x.why) + '</td><td class="actions"><button class="btn small bad" onclick="bdCloseSession(\'' + ctx.studio + '\', \'' + x.r.session_id + '\')">Close in Shopify</button></td></tr>').join('') +
+    '</tbody></table><div class="small" style="margin-top:4px">Or add a second person: build again after changes, or drag someone onto that day.</div></details>' : ''
+  body.innerHTML = '<h2 class="wk-studio-title">' + esc(STUDIO_NAMES[ctx.studio] || ctx.studio) + '</h2>' + banner + top + riskHtml + (withLegend ? legend : '') + '<div class="panel wk-wrap"><table class="wk"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>'
 }
 
 // ── Class teachers (whole term) ────────────────────────────────────────────
@@ -1604,8 +1707,18 @@ function bdPlaceTeachers(ctx, blocks) {
     const cands = blocks.filter(b => !b.staffId && b.date === c.date && !b.training && !b.topUp && overlaps(b.start, b.end, c.start, c.end))
       .sort((a, b) => ((Math.min(b.end, c.end) - Math.max(b.start, c.start)) - (Math.min(a.end, c.end) - Math.max(a.start, c.start))) ||
                       (b.layer - a.layer) || ((a.end - a.start) - (b.end - b.start)))
-    const blk = cands[0]   // fully covers the class; prefer the extra-person shift, so the all-day shift stays for the floor
-    if (!p || !blk) { notes.push(fmtDate(c.date) + ' ' + c.label + ' ' + fmtTime(c.time) + ': no shift for ' + nm + ' to take'); return }
+    let blk = cands[0]   // fully covers the class; prefer the extra-person shift, so the all-day shift stays for the floor
+    if (!p) { notes.push(fmtDate(c.date) + ' ' + c.label + ' ' + fmtTime(c.time) + ': no shift for ' + nm + ' to take'); return }
+    if (!blk) {
+      // the day's main shift is already someone else's (e.g. the manager): the teacher gets a shift of their own
+      blk = { date: c.date, start: Math.max((ctx.dayWindow[c.date] || {}).open || c.start, c.start - 15), end: c.end + 15, layer: 2, badges: c.badge ? [c.badge] : [], staffId: null, ownClass: true }
+      blocks.push(blk)
+    }
+    // an extra-person shift starting within an hour of this one (a party after the class, say) goes to the same teacher
+    blocks.filter(b => b !== blk && !b.staffId && b.date === c.date && b.layer > 1 && !b.training && !b.topUp &&
+                       b.start <= Math.max(blk.end, c.end) + 60 && b.end >= Math.min(blk.start, c.start) - 60 &&
+                       Math.max(b.end, blk.end, c.end) - Math.min(b.start, blk.start, c.start) <= maxSpan(ctx.studio))
+      .forEach(b => { blk.start = Math.min(blk.start, b.start); blk.end = Math.max(blk.end, b.end); b.badges.forEach(x => blk.badges.includes(x) || blk.badges.push(x)); blocks.splice(blocks.indexOf(b), 1) })
     const why = bdBlocked(ctx, p, Object.assign({}, blk, { start: Math.min(blk.start, c.start), end: Math.max(blk.end, c.end) }), bdState(ctx, blocks))
     if (why) { notes.push(fmtDate(c.date) + ' ' + c.label + ' ' + fmtTime(c.time) + ': ' + nm + ' ' + why + ', substitute needed'); return }
     const s0 = Math.min(blk.start, c.start), e0 = Math.max(blk.end, c.end)
@@ -1704,6 +1817,112 @@ async function bdSetTeacher(sessionId, staffId) {
   renderAll()
 }
 
+
+// ── "Could leave you short": open sessions that would need a second person if they get booked ──
+// (a) a class teacher is the only person on while the class runs, and something else is open then
+// (b) a party slot is open while only one person is on (a party needs its own teacher)
+// Each can be closed right here: live Shopify inventory set to 0, same Edge Function and title
+// matching as finance.html's ✏️ Adjust (buildShopifyTitle below is copied verbatim from finance.html).
+const SHOPIFY_INV_URL = SUPABASE_URL + '/functions/v1/shopify-inventory'
+function buildShopifyTitle(sessionDate, sessionTime, sessionTitle) {
+  const d = new Date(sessionDate + 'T12:00:00')
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  const day = days[d.getDay()], month = months[d.getMonth()], date = d.getDate()
+  const suffix = date===1||date===21||date===31?'st':date===2||date===22?'nd':date===3||date===23?'rd':'th'
+  const [h, m] = sessionTime.split(':').map(Number)
+  const hour = h===0?12:h>12?h-12:h
+  const ampm = h<12?'am':'pm'
+  const timeStr = m===0?`${hour}${ampm}`:`${hour}:${String(m).padStart(2,'0')}${ampm}`
+  const starPrefix = (h===9&&m===0)?'*':''
+  const titleLower = sessionTitle.toLowerCase().trim()
+  const TITLE_MAP = {
+    'kids party':'Kids Party','splatter party':'Splatter Party','field trip':'Field Trip',
+    'party time slot':null,'splatter party time slot':null,'field trip time slot':null,
+    'adult get-together time slot':'Adult Get Togethers, Parties & Group Booking',
+    'wheel workshop (adult & teen)':'Wheel Workshop','wheel workshop':'Wheel Workshop','friday night mixer':'Friday Night Mixer','friday night mixer (ages 16+)':'Friday Night Mixer',
+    'sunday early bird workshop':'Sunday Early Bird Workshop',
+    'sunday morning family time mixer':'Sunday Morning Family Time Mixer',
+    'mixed media class for kids ($10 for members)':'Mixed Media Class',
+    'thursday clay night':'Thursday Clay Night','thursdays: clay night':'Thursday Clay Night','natureware mugs':'Natureware Mug',
+    'summer camp half day morning':'Summer Camp Half Day','summer camp half day afternoon':'Summer Camp Half Day',
+    'no school day camp (ages 6-12)':'PA/PD Day','pd day':'PA/PD Day','pa day':'PA/PD Day','pa/pd day':'PA/PD Day',
+    'afternoon art meetup':'Afternoon Art Meetup','saturday early bird workshop':'Saturday Early Bird Workshop',
+    'dragons session (ages 5-12) class 1 of 5':'Dragons 5 Week Kids Session',
+    "mother's day celebration":"Mother's Day",'early drop off (mixed media class)':null,
+    'half day camp afternoon (ages 5-12)':'Summer Camp Half Day','half day camp morning (ages 5-12)':'Summer Camp Half Day',
+    'full day camp (ages 6-12)':'Summer Camp Full Day','natureware':'Natureware Mug','mini make drop in':'Mini Make Drop In',
+  }
+  if (/\b(class|week|session|part)\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(sessionTitle)) return null
+  if (titleLower in TITLE_MAP && TITLE_MAP[titleLower] === null) return null
+  if (titleLower === 'weekend workshop') return 'OVERRIDE'
+  if (/^weekend workshop:\s*/i.test(sessionTitle)) return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${sessionTitle.replace(/^weekend workshop:\s*/i,'').trim()}`
+  if (titleLower.includes('wednesday paint night')) return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | Wednesday Paint Night`
+  if (TITLE_MAP[titleLower]) return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${TITLE_MAP[titleLower]}`
+  const seriesMatch = sessionTitle.match(/(\|\s*\d+\s+Week\s+Session.*)/i)
+  const seriesSuffix = seriesMatch ? ` ${seriesMatch[1].trim()}` : ''
+  let cleanTitle = sessionTitle.replace(/\s*\|.*$/, '').trim()
+  return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${cleanTitle}${seriesSuffix}`
+}
+
+function bdRisks(ctx, plan) {
+  const out = []
+  const onAt = (date, t) => plan.blocks.filter(b => b.staffId && !b.training && b.date === date && b.start <= t && b.end > t).length +
+    ctx.shifts.filter(x => x.studio_id === ctx.studio && x.shift_date === date && x.status !== 'draft' && x.start_time && toMin(x.start_time) <= t && toMin(x.end_time) > t).length
+  const minOn = (date, a, b) => { let m = Infinity; for (let t = a; t < b; t += 15) m = Math.min(m, onAt(date, t)); return m }
+  const open = ctx.sessions.filter(r => r.is_open && r.start_time && r.end_time && !(ctx.closedNow || {})[r.session_id])
+  // (a) teacher alone during a class
+  ctx.sessions.filter(r => r.rule_kind === 'one_per_session' && (r.teachers || 0) > 0 && r.start_time && r.end_time).forEach(c => {
+    const a = toMin(c.start_time), b = toMin(c.end_time)
+    if (minOn(c.session_date, a, b) > 1) return
+    open.filter(r => r.session_date === c.session_date && r.session_id !== c.session_id && r.rule_kind !== 'one_per_session' &&
+                     overlaps(toMin(r.start_time), toMin(r.end_time), a, b))
+      .forEach(r => {
+        const have = out.find(x => x.r.session_id === r.session_id)
+        if (have) { have.classes.push(fmtTime(c.start_time) + ' ' + classLabel(c.title)); have.why = 'Only the teacher for ' + have.classes.join(' and ') + ' is on: a booking here would need a second person'; return }
+        out.push({ r, classes: [fmtTime(c.start_time) + ' ' + classLabel(c.title)], why: 'Only the ' + fmtTime(c.start_time) + ' ' + classLabel(c.title) + ' teacher is on: a booking here would need a second person' })
+      })
+  })
+  // (b) open party slots with one person on
+  open.filter(r => r.rule_kind === 'per_group' && (r.teachers || 0) === 0).forEach(r => {
+    if (minOn(r.session_date, toMin(r.start_time), toMin(r.end_time)) > 1) return
+    if (out.some(x => x.r.session_id === r.session_id)) return
+    out.push({ r, why: 'Only one person is on: a party booked here needs its own teacher' })
+  })
+  return out.sort((x, y) => x.r.session_date.localeCompare(y.r.session_date) || x.r.start_time.localeCompare(y.r.start_time))
+}
+
+async function bdCloseSession(studio, sessionId) {
+  bdUse(studio)
+  const ctx = bdCtx
+  const r = ctx.sessions.find(x => x.session_id === sessionId)
+  if (!r) return
+  // the session's own start time (get_staffing_need's start includes any setup time)
+  const { data: srow } = await sb.from('sessions').select('session_time, title').eq('id', sessionId).maybeSingle()
+  const sTime = (srow && srow.session_time) || r.start_time, sTitle = (srow && srow.title) || r.title
+  const shopifyTitle = buildShopifyTitle(r.session_date, sTime, sTitle)
+  if (!shopifyTitle || shopifyTitle === 'OVERRIDE') { toast('No matching Shopify product for this session. Close it in admin.html instead.', true); return }
+  if (!confirm('Close "' + sTitle + '" on ' + fmtDate(r.session_date) + ' at ' + fmtTime(sTime) + ' at ' + (STUDIO_NAMES[studio] || studio) + '?\n\n' +
+               'This sets its LIVE Shopify inventory to 0, so customers can\'t book it. Existing bookings aren\'t affected.')) return
+  const { data: v } = await sb.from('shopify_variants').select('inventory_item_id').eq('shopify_title', shopifyTitle).eq('studio_id', studio)
+    .not('inventory_item_id', 'is', null).limit(1)
+  const itemId = v && v[0] && v[0].inventory_item_id
+  if (!itemId) { toast('Couldn\'t find this studio\'s Shopify variant for "' + shopifyTitle + '".', true); return }
+  const { data: { session } } = await sb.auth.getSession()
+  try {
+    const res = await fetch(SHOPIFY_INV_URL, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + (session ? session.access_token : SUPABASE_KEY), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'set', inventory_item_id: itemId, quantity: 0 })
+    })
+    const data = await res.json()
+    if (!data.inventory_level) { toast('Shopify update failed. Nothing changed.', true); return }
+  } catch (e) { toast('Shopify update failed: ' + e.message, true); return }
+  ;(ctx.closedNow = ctx.closedNow || {})[sessionId] = true
+  toast('Closed in Shopify: ' + sTitle + ', ' + fmtDate(r.session_date))
+  bdRefresh()
+}
+
 // ── Edit a draft shift's times: same text format as finance.html's Schedule tab
 // (e.g. "8:30a-5p", "1p-9:30p"); am/pm is required on both sides so nothing is guessed.
 function bdFmtShort(m) { const h = Math.floor(m / 60), mm = m % 60; return (h % 12 || 12) + (mm ? ':' + String(mm).padStart(2, '0') : '') + (h >= 12 ? 'p' : 'a') }
@@ -1791,6 +2010,17 @@ function bdDrop(ev) {
   }
   b.staffId = staffId
   b.date = date
+  bdPlan.dirty = true
+  bdRefresh()
+}
+
+function bdDeleteShift(ev, idx) {
+  ev.stopPropagation(); ev.preventDefault()
+  const b = bdPlan.blocks[idx]
+  if (!b) return
+  const who = b.staffId ? bdPerson(b.staffId).display_name + ', ' : ''
+  if (!confirm('Delete this shift? ' + who + fmtDate(b.date) + ' ' + bdFmtShort(b.start) + '-' + bdFmtShort(b.end))) return
+  bdPlan.blocks.splice(idx, 1)
   bdPlan.dirty = true
   bdRefresh()
 }
