@@ -323,7 +323,7 @@ table.wk tr.wk-sched td { background: #f7f9fc; }
     <!-- ===== IMPORT ===== -->
     <div class="view" id="view-import">
       <div class="panel">
-        <div class="panel-head"><h2>Import unavailability from Sling</h2></div>
+        <div class="panel-head"><h2>Import unavailability or time off from Sling</h2></div>
         <div class="panel-body">
           <div class="form-row">
             <label class="field"><span>Region this export covers</span>
@@ -2156,6 +2156,7 @@ function parseSlingExport(text) {
   const now = new Date()
   let year = null, prevMonth = null
   const entries = []       // {name, date, start, end, pending}
+  const timeOffDays = []   // from the Sling time-off report
   const allDates = []
   const unrecognized = []
   let phantom = 0
@@ -2179,7 +2180,23 @@ function parseSlingExport(text) {
     blocks.slice(1).forEach(b => {
       const lines = b.split('\n').map(l => l.trim()).filter(Boolean)
       if (lines.length < 3) return
-      const [timeLine, status, name] = [lines[0], lines[1], lines.slice(2).join(' ')]
+      const [timeLine, status] = [lines[0], lines[1]]
+      const name = lines.slice(2).join(' ').replace(/^zz-?\s*/i, '').trim()   // Sling marks some people "zz- Name"
+      if (/time off/i.test(status)) {
+        // Sling time-off report: "Time off • Unpaid vacation", "Time off • Pending • Sick"
+        const parts = status.split('•').map(x => x.trim())
+        const tPending = parts.some(x => /^pending$/i.test(x))
+        const kind = parts.filter(x => !/^time off$/i.test(x) && !/^pending$/i.test(x)).join(' ')
+        if (/^all day/i.test(timeLine)) { timeOffDays.push({ name, date, start: null, end: null, pending: tPending, kind }); return }
+        const rt = /(\d{1,2}:\d{2}\s*[AP]M)\s*-\s*(\d{1,2}:\d{2}\s*[AP]M)/gi
+        let mt
+        while ((mt = rt.exec(timeLine))) {
+          const a = time12to24(mt[1]), z = time12to24(mt[2])
+          if (!a || !z || z <= a) continue
+          timeOffDays.push({ name, date, start: a, end: z, pending: tPending, kind })
+        }
+        return
+      }
       if (!/unavailable/i.test(status)) { unrecognized.push(date + ': ' + status + ' (' + name + ')'); return }
       const pending = /pending/i.test(status)
       if (/^all day/i.test(timeLine)) { entries.push({ name, date, start: null, end: null, pending }); return }
@@ -2271,8 +2288,21 @@ function parseSlingExport(text) {
     })
   })
 
-  const names = Array.from(new Set(entries.map(e => e.name))).sort()
-  return { windowStart, windowEnd, entries: entries.length, phantom, dstFixed, recurring, waitingInSling, oneOffs, names, unrecognized }
+  // time off: consecutive all-day days for the same person, kind and status become one request
+  const timeOffs = []
+  const tby = {}
+  timeOffDays.forEach(t => { (tby[t.name + '|' + t.kind + '|' + t.pending] = tby[t.name + '|' + t.kind + '|' + t.pending] || []).push(t) })
+  Object.values(tby).forEach(list => {
+    list.sort((a, b) => a.date.localeCompare(b.date) || String(a.start).localeCompare(String(b.start)))
+    let cur = null
+    list.forEach(t => {
+      if (!t.start && cur && !cur.start && daysBetween(cur.end_date, t.date) === 1) { cur.end_date = t.date; return }
+      cur = { name: t.name, start_date: t.date, end_date: t.date, start: t.start, end: t.end, pending: t.pending, kind: t.kind }
+      timeOffs.push(cur)
+    })
+  })
+  const names = Array.from(new Set(entries.map(e => e.name).concat(timeOffs.map(t => t.name)))).sort()
+  return { windowStart, windowEnd, entries: entries.length, phantom, dstFixed, recurring, waitingInSling, oneOffs, names, unrecognized, timeOffs }
 }
 
 /* ---------- name matching ---------- */
@@ -2309,7 +2339,7 @@ async function previewImport() {
   let parsed
   try { parsed = parseSlingExport(await file.text()) }
   catch (e) { out.innerHTML = '<div class="note bad">' + esc(e.message) + '</div>'; return }
-  if (!parsed.entries) { out.innerHTML = '<div class="note bad">No unavailability entries found in this file.</div>'; return }
+  if (!parsed.entries && !parsed.timeOffs.length) { out.innerHTML = '<div class="note bad">No unavailability or time off found in this file.</div>'; return }
   const matches = await matchNames(parsed.names)
   importPlan = { region, parsed, matches }
   renderPreview()
@@ -2345,6 +2375,8 @@ function renderPreview() {
       return '<tr><td class="person">' + esc(n) + '</td><td>' + sel + '</td><td class="muted small">' + how + '</td></tr>'
     }).join('') + '</tbody></table></div>'
 
+  if (!p.entries) html += '<div class="note info">This file has time off only, so repeating unavailability isn\'t touched.</div>'
+  if (p.entries) {
   // recurring
   html += '<div class="panel"><div class="panel-head"><h2>Repeating unavailability</h2><span class="muted small">Replaces what was imported from Sling before for ' + esc(region) + ' staff, from ' + fmtDate(p.windowStart) + ' on</span></div>' +
     '<table class="list"><thead><tr><th>Person</th><th>Day</th><th>Time</th><th>From</th><th>Until</th><th>Note</th></tr></thead><tbody>' +
@@ -2361,6 +2393,15 @@ function renderPreview() {
         '<tr><td class="person">' + esc(o.name) + '</td><td>' + (o.start_date === o.end_date ? fmtDate(o.start_date) : fmtDate(o.start_date) + ' to ' + fmtDate(o.end_date)) +
         '</td><td>' + fmtRange(o.start, o.end) + '</td><td class="small muted">' + (o.nearEnd ? 'At the end of the export, so this may be a new repeating pattern' : '') + '</td></tr>').join('') +
       '</tbody></table>' : '<div class="empty">None</div>') + '</div>'
+
+  }
+  // time off (Sling time-off report)
+  if (p.timeOffs.length) html += '<div class="panel"><div class="panel-head"><h2>Time off</h2><span class="muted small">Approved in Sling come in approved; pending stay pending. Already imported ones are skipped (a pending one approved since is updated). Sling time off that\'s gone from Sling for these dates is cancelled here.</span></div>' +
+    '<table class="list"><thead><tr><th>Person</th><th>Dates</th><th>Time</th><th>Type</th><th>In Sling</th></tr></thead><tbody>' +
+    p.timeOffs.slice().sort((a, b) => a.name.localeCompare(b.name) || a.start_date.localeCompare(b.start_date)).map(t =>
+      '<tr><td class="person">' + esc(t.name) + '</td><td>' + (t.start_date === t.end_date ? fmtDate(t.start_date) : fmtDate(t.start_date) + ' to ' + fmtDate(t.end_date)) +
+      '</td><td>' + fmtRange(t.start, t.end) + '</td><td>' + esc(t.kind || 'Time off') + '</td><td><span class="pill ' + (t.pending ? 'pending' : 'approved') + '">' + (t.pending ? 'Pending' : 'Approved') + '</span></td></tr>').join('') +
+    '</tbody></table></div>'
 
   // waiting in Sling
   if (p.waitingInSling.length) html += '<div class="panel"><div class="panel-head"><h2>Not imported: still pending in Sling</h2><span class="muted small">Approve these in Sling, then import again</span></div>' +
@@ -2397,12 +2438,14 @@ async function runImport() {
     const scope = new Set(p.names.map(idFor).filter(Boolean))
     staff.forEach(s => { if (s.is_active && (s.studio_ids || []).some(id => id.indexOf(region + '-') === 0)) scope.add(s.id) })
     const scopeIds = Array.from(scope)
+    let toTrim = [], toDelete = [], unRows = []
+    if (p.entries) {   // only a file with unavailability in it replaces repeating patterns
     const { data: oldRows, error: oldErr } = await sb.from('staff_unavailability').select('id, effective_from, effective_to')
       .eq('source', 'sling').in('staff_id', scopeIds)
     if (oldErr) throw oldErr
     const overlapping = (oldRows || []).filter(r => !r.effective_to || r.effective_to >= p.windowStart)
-    const toTrim = overlapping.filter(r => r.effective_from < p.windowStart).map(r => r.id)
-    const toDelete = overlapping.filter(r => r.effective_from >= p.windowStart).map(r => r.id)
+    toTrim = overlapping.filter(r => r.effective_from < p.windowStart).map(r => r.id)
+    toDelete = overlapping.filter(r => r.effective_from >= p.windowStart).map(r => r.id)
     if (toTrim.length) {
       const { error } = await sb.from('staff_unavailability').update({ effective_to: addDays(p.windowStart, -1), updated_at: new Date().toISOString() }).in('id', toTrim)
       if (error) throw error
@@ -2413,12 +2456,13 @@ async function runImport() {
     }
 
     // 3. insert repeating patterns
-    const unRows = p.recurring.filter(r => idFor(r.name)).map(r => ({
+    unRows = p.recurring.filter(r => idFor(r.name)).map(r => ({
       staff_id: idFor(r.name), day_of_week: r.dow, start_time: r.start, end_time: r.end,
       effective_from: r.from, effective_to: r.to, source: 'sling',
       sling_ref: 'unavail:' + idFor(r.name) + ':' + DAY_SHORT[r.dow] + ':' + (r.start || 'allday') + '-' + (r.end || '')
     }))
     if (unRows.length) { const { error } = await sb.from('staff_unavailability').insert(unRows); if (error) throw error }
+    }
 
     // 4. one-offs as pending time off, skipping any already imported (so denied ones don't come back)
     const toRows = p.oneOffs.filter(o => idFor(o.name)).map(o => ({
@@ -2436,8 +2480,37 @@ async function runImport() {
       addedTo = fresh.length
     }
 
-    document.getElementById('im-preview').innerHTML = '<div class="note info">Imported ' + unRows.length + ' repeating patterns and ' + addedTo +
-      ' time off requests waiting for approval. Earlier Sling patterns: ' + toTrim.length + ' ended at the start of this export, ' + toDelete.length + ' replaced.</div>'
+    // 5. Sling time-off report: approved stays approved, pending stays pending; no duplicates
+    const kindOf = k => /unpaid/i.test(k) ? 'unpaid' : /sick/i.test(k) ? 'sick' : /personal/i.test(k) ? 'personal' : /vacation|holiday|paid/i.test(k) ? 'vacation' : 'other'
+    let tAdded = 0, tApproved = 0, tCancelled = 0
+    if (p.timeOffs.length) {
+      const tRows = p.timeOffs.filter(t => idFor(t.name)).map(t => ({
+        staff_id: idFor(t.name), start_date: t.start_date, end_date: t.end_date, start_time: t.start, end_time: t.end,
+        type: kindOf(t.kind), status: t.pending ? 'pending' : 'approved', source: 'sling',
+        sling_ref: 'timeoff:' + idFor(t.name) + ':' + t.start_date + ':' + t.end_date + ':' + (t.start || 'allday')
+      }))
+      const { data: prev, error: pErr } = await sb.from('staff_time_off').select('id, sling_ref, status, start_date, staff_id')
+        .eq('source', 'sling').like('sling_ref', 'timeoff:%').in('staff_id', scopeIds)
+      if (pErr) throw pErr
+      const byRef = {}; (prev || []).forEach(r => { byRef[r.sling_ref] = r })
+      const fresh = tRows.filter(r => !byRef[r.sling_ref])
+      if (fresh.length) { const { error } = await sb.from('staff_time_off').insert(fresh); if (error) throw error }
+      tAdded = fresh.length
+      // pending here, approved in Sling since: approve
+      const nowApproved = tRows.filter(r => r.status === 'approved' && byRef[r.sling_ref] && byRef[r.sling_ref].status === 'pending').map(r => byRef[r.sling_ref].id)
+      if (nowApproved.length) { const { error } = await sb.from('staff_time_off').update({ status: 'approved', updated_at: new Date().toISOString() }).in('id', nowApproved); if (error) throw error }
+      tApproved = nowApproved.length
+      // imported from Sling before, inside this export's dates, but no longer in Sling: cancel
+      const inFile = new Set(tRows.map(r => r.sling_ref))
+      const gone = (prev || []).filter(r => !inFile.has(r.sling_ref) && r.start_date >= p.windowStart && r.start_date <= p.windowEnd && ['pending', 'approved'].includes(r.status)).map(r => r.id)
+      if (gone.length) { const { error } = await sb.from('staff_time_off').update({ status: 'cancelled', updated_at: new Date().toISOString() }).in('id', gone); if (error) throw error }
+      tCancelled = gone.length
+    }
+
+    const msg = []
+    if (p.entries) msg.push('Imported ' + unRows.length + ' repeating patterns and ' + addedTo + ' one-off days as time off waiting for approval. Earlier Sling patterns: ' + toTrim.length + ' ended at the start of this export, ' + toDelete.length + ' replaced.')
+    if (p.timeOffs.length) msg.push('Time off: ' + tAdded + ' added, ' + tApproved + ' now approved, ' + tCancelled + ' cancelled (no longer in Sling).')
+    document.getElementById('im-preview').innerHTML = '<div class="note info">' + msg.join('<br>') + '</div>'
     toast('Import finished')
     await Promise.all([loadTimeOff(), loadUnavail()])
   } catch (e) {
