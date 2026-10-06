@@ -167,7 +167,12 @@ table.wk tr.wk-sched td { background: #f7f9fc; }
 .wk-del { position: absolute; top: 2px; right: 2px; border: none; background: transparent; color: inherit; opacity: .45; cursor: pointer; font-size: 11px; line-height: 1; padding: 2px 3px; border-radius: 3px; }
 .wk-del:hover { opacity: 1; background: rgba(0,0,0,.08); }
 .wk-chip .wk-time { padding-right: 14px; }
-.wk-risks table.list td { border-bottom-color: rgba(180,83,9,.2); font-size: 12px; }
+.wk-risk-sum { padding: 8px 12px; font-size: 12px; }
+.wk-dayrisk { margin-top: 4px; }
+.wk-dayrisk summary { cursor: pointer; color: var(--warn); font-weight: 600; }
+.wk-riskrow { display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 3px 0; border-bottom: 1px solid var(--line); }
+.wk-riskrow span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wk-riskrow .btn.small { height: 20px; padding: 0 6px; font-size: 10px; flex: none; }
 .wk-pick { width: 100%; margin-top: 3px; font-size: 10.5px; padding: 1px 2px; border: 0.5px solid rgba(0,0,0,.15); border-radius: 4px; background: rgba(255,255,255,.7); }
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 1000; max-width: 90vw; }
 #toast.err { background: var(--bad); }
@@ -1516,10 +1521,13 @@ function renderBuild(withLegend) {
   // Multi-week classes: use the shared class-week count (term sign-ups, mid-term sign-ups, single classes),
   // the same number as the Classes row, Fill Rates and the class lists; the day-schedule source only
   // counts bookings made directly on that week.
+  // Bookings: the same seat counts as Fill Rates and the rest of this page (get_staffing_need). Classes use the
+  // shared class-week count, drop-in sessions count people (quantity), parties count booked slots.
   const classSeats = {}
-  ctx.sessions.forEach(r => { if (r.rule_kind === 'one_per_session' && r.session_id) classSeats[r.session_id] = r.booked })
+  ctx.sessions.forEach(r => { if ((r.rule_kind === 'one_per_session' || r.rule_kind === 'pooled') && r.session_id) classSeats[r.session_id] = r.booked })
+  const risksAll = bdRisks(ctx, plan)
   days.forEach(d => {
-    const rows = (ctx.daySessions[d] || []).map(r => classSeats[r.session_id] != null ? Object.assign({}, r, { booking_count: classSeats[r.session_id], isClass: true }) : r)
+    const rows = (ctx.daySessions[d] || []).map(r => classSeats[r.session_id] != null ? Object.assign({}, r, { booking_count: classSeats[r.session_id], isClass: ctx.sessions.some(x => x.session_id === r.session_id && x.rule_kind === 'one_per_session') }) : r)
       .filter(r => r.session_type !== 'festival' && ((r.capacity || 0) > 0 || (r.booking_count || 0) > 0))
     const events = (ctx.daySessions[d] || []).filter(r => r.session_type === 'festival')
     if (!rows.length && !events.length) { schedRow += '<td class="muted small">' + (ctx.daySessions[d] ? 'Nothing open' : '') + '</td>'; return }
@@ -1534,7 +1542,7 @@ function renderBuild(withLegend) {
       rows.sort((a, b) => a.session_time.localeCompare(b.session_time)).map(r =>
         '<div class="wk-sess' + ((r.booking_count || 0) === 0 ? ' empty' : '') + '" title="' + esc(r.title) + '"><b>' + tShort(r.session_time) + '</b> <span class="wk-code">' + esc(r.code || '') + '</span> ' +
         (r.booking_count || 0) + ((r.capacity || 0) > 0 ? '/' + r.capacity : (r.isClass ? ' enrolled' : '')) + '</div>').join('') +
-      '</details></td>'
+      '</details>' + bdDayRisksHtml(ctx, risksAll.filter(x => x.r.session_date === d)) + '</td>'
   })
   schedRow += '</tr>'
 
@@ -1649,11 +1657,9 @@ function renderBuild(withLegend) {
     : plan.saved ? '<div class="note info">Showing the <b>saved draft</b> for this week. Edit it and save again, or click <b>Build draft</b> to start over.</div>'
     : (!plan.blocks.length ? '<div class="note info">No draft saved for this week yet. Click <b>Build draft</b>.</div>' : '')
   const risks = bdRisks(ctx, plan)
-  const riskHtml = risks.length ? '<details class="note warn wk-risks" open><summary><b>⚠ Could leave you short (' + risks.length + ')</b> · open sessions that would need another person if they\'re booked</summary>' +
-    '<table class="list" style="margin-top:6px;background:transparent"><tbody>' + risks.map(x =>
-      '<tr><td style="white-space:nowrap">' + fmtDate(x.r.session_date) + '</td><td style="white-space:nowrap">' + fmtTime(x.r.start_time) + '</td><td>' + esc(x.r.title) +
-      '</td><td style="white-space:nowrap">' + (x.r.booked || 0) + ' booked</td><td class="small">' + esc(x.why) + '</td><td class="actions"><button class="btn small bad" onclick="bdCloseSession(\'' + ctx.studio + '\', \'' + x.r.session_id + '\')">Close in Shopify</button></td></tr>').join('') +
-    '</tbody></table><div class="small" style="margin-top:4px">Or add a second person: build again after changes, or drag someone onto that day.</div></details>' : ''
+  const riskHtml = risks.length ? '<div class="note warn wk-risk-sum">⚠ <b>' + risks.length + ' open session' + (risks.length === 1 ? '' : 's') +
+    ' could leave you short</b> if booked, on ' + [...new Set(risks.map(x => parseYmd(x.r.session_date).toLocaleDateString('en-CA', { weekday: 'short' })))].join(', ') +
+    '. Open <b>⚠</b> under each day to close them or add a second person.</div>' : ''
   body.innerHTML = '<h2 class="wk-studio-title">' + esc(STUDIO_NAMES[ctx.studio] || ctx.studio) + '</h2>' + banner + top + riskHtml + (withLegend ? legend : '') + '<div class="panel wk-wrap"><table class="wk"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>'
 }
 
@@ -1876,7 +1882,7 @@ function bdRisks(ctx, plan) {
     const a = toMin(c.start_time), b = toMin(c.end_time)
     if (minOn(c.session_date, a, b) > 1) return
     open.filter(r => r.session_date === c.session_date && r.session_id !== c.session_id && r.rule_kind !== 'one_per_session' &&
-                     overlaps(toMin(r.start_time), toMin(r.end_time), a, b))
+                     toMin(r.start_time) >= a - 30 && toMin(r.start_time) < b)
       .forEach(r => {
         const have = out.find(x => x.r.session_id === r.session_id)
         if (have) { have.classes.push(fmtTime(c.start_time) + ' ' + classLabel(c.title)); have.why = 'Only the teacher for ' + have.classes.join(' and ') + ' is on: a booking here would need a second person'; return }
@@ -1890,6 +1896,14 @@ function bdRisks(ctx, plan) {
     out.push({ r, why: 'Only one person is on: a party booked here needs its own teacher' })
   })
   return out.sort((x, y) => x.r.session_date.localeCompare(y.r.session_date) || x.r.start_time.localeCompare(y.r.start_time))
+}
+
+function bdDayRisksHtml(ctx, list) {
+  if (!list.length) return ''
+  return '<details class="wk-dayrisk"><summary>⚠ ' + list.length + ' could leave you short</summary>' + list.map(x =>
+    '<div class="wk-riskrow" title="' + esc(x.why) + '"><span><b>' + bdFmtShort(toMin(x.r.start_time)) + '</b> ' + esc(x.r.title) + ' · ' + (x.r.booked || 0) + ' booked</span>' +
+    '<button class="btn small bad" onclick="bdCloseSession(\'' + ctx.studio + '\', \'' + x.r.session_id + '\')" title="Set live Shopify inventory to 0">Close</button></div>').join('') +
+    '<div class="muted small" style="margin-top:3px">Hover a line for why · or add a second person</div></details>'
 }
 
 async function bdCloseSession(studio, sessionId) {
