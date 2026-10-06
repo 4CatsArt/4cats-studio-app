@@ -1028,14 +1028,11 @@ async function buildSchedule() {
     if (!slots) continue
     ctx.dayWindow[date] = { open: slots[0].t, close: slots[slots.length - 1].t + 15 }
     if (!slots.some(s => s.need > 0)) continue
-    let target = 0
-    if (isWeekend(date)) {
-      const here = ctx.pool.filter(p => p.home_studio_id === ctx.studio && bdAvailableDay(ctx, p, date) &&
-        bdTrainingDone(ctx, p, [], date) === null && !(p.role === 'manager' && p.home_studio_id !== ctx.studio))
-      const approvedHere = ctx.shifts.filter(x => x.studio_id === ctx.studio && x.shift_date === date && x.status !== 'draft').length
-      target = Math.max(0, here.length - approvedHere)
-    }
-    blocks = blocks.concat(bdBlocks(ctx, date, slots, target))
+    // (Weekend days are no longer split up to share hours: everyone gets their own
+    // closing shift instead, below, so the day's main shift stays whole.)
+    ctx.daySlots = ctx.daySlots || {}
+    ctx.daySlots[date] = slots
+    blocks = blocks.concat(bdBlocks(ctx, date, slots, 0))
   }
   // scarce first: badge blocks, then longest
   // Assigned class teachers first, on the shift covering their class
@@ -1116,10 +1113,18 @@ async function buildSchedule() {
     blocks.filter(b => b.staffId === p.id && !b.training).sort((a, b) => (a.end - a.start) - (b.end - b.start)).forEach(b => {
       const w = ctx.dayWindow[b.date]
       if (!w) return
+      // only stretch into time where fewer people are on than the studio needs
+      const understaffed = (a1, a2) => {
+        const sl = (ctx.daySlots || {})[b.date] || []
+        return sl.filter(x => x.t >= a1 && x.t < a2).every(x => {
+          const on = blocks.filter(o => o !== b && o.staffId && !o.training && o.date === b.date && o.start <= x.t && o.end > x.t).length + (x.have || 0)
+          return on < Math.max(1, x.rawNeed)
+        })
+      }
       while (short > 0 && b.end - b.start < maxSpan(ctx.studio)) {
         const before = paidMins(ctx.studio, b.start, b.end)
-        if (b.end < w.close) b.end = Math.min(w.close, b.end + 30)
-        else if (b.start > w.open) b.start = Math.max(w.open, b.start - 30)
+        if (b.end < w.close && understaffed(b.end, b.end + 30)) b.end = Math.min(w.close, b.end + 30)
+        else if (b.start > w.open && understaffed(b.start - 30, b.start)) b.start = Math.max(w.open, b.start - 30)
         else break
         short -= paidMins(ctx.studio, b.start, b.end) - before
         if (otRule && bdState(ctx, blocks).minutesOf(p.id) > otRule.weekly_hours * 60) { b.end -= 30; short += 30; break }
@@ -1406,8 +1411,9 @@ function bdPlaceTeachers(ctx, blocks) {
       return
     }
     const cands = blocks.filter(b => !b.staffId && b.date === c.date && !b.training && !b.topUp && overlaps(b.start, b.end, c.start, c.end))
-      .sort((a, b) => (Math.min(b.end, c.end) - Math.max(b.start, c.start)) - (Math.min(a.end, c.end) - Math.max(a.start, c.start)))
-    const blk = cands[0]
+      .sort((a, b) => ((Math.min(b.end, c.end) - Math.max(b.start, c.start)) - (Math.min(a.end, c.end) - Math.max(a.start, c.start))) ||
+                      (b.layer - a.layer) || ((a.end - a.start) - (b.end - b.start)))
+    const blk = cands[0]   // fully covers the class; prefer the extra-person shift, so the all-day shift stays for the floor
     if (!p || !blk) { notes.push(fmtDate(c.date) + ' ' + c.label + ' ' + fmtTime(c.time) + ': no shift for ' + nm + ' to take'); return }
     const why = bdBlocked(ctx, p, Object.assign({}, blk, { start: Math.min(blk.start, c.start), end: Math.max(blk.end, c.end) }), bdState(ctx, blocks))
     if (why) { notes.push(fmtDate(c.date) + ' ' + c.label + ' ' + fmtTime(c.time) + ': ' + nm + ' ' + why + ', substitute needed'); return }
