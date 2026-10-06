@@ -137,6 +137,9 @@ table.wk tr.wk-total td { background: var(--soft); }
 .wk-chip.open  { background: #fff; color: var(--bad); border: 1px dashed var(--bad); }
 .wk-chip.unav  { background: #ececE6; color: #777; }
 .wk-chip.off   { background: #6b6b66; color: #fff; }
+.wk-chip[draggable="true"] { cursor: grab; }
+.wk-chip[draggable="true"]:active { cursor: grabbing; }
+table.wk td.drop-ok { outline: 2px dashed #4a7fd4; outline-offset: -3px; background: #f0f6ff !important; }
 .wk-pick { width: 100%; margin-top: 3px; font-size: 10.5px; padding: 1px 2px; border: 0.5px solid rgba(0,0,0,.15); border-radius: 4px; background: rgba(255,255,255,.7); }
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 1000; max-width: 90vw; }
 #toast.err { background: var(--bad); }
@@ -207,6 +210,7 @@ table.wk tr.wk-total td { background: var(--soft); }
         badges, weekly hours and overtime. Approved shifts already in the week are kept and only the gaps are filled.
         Nothing is saved until you click <b>Save as drafts</b>; saving replaces this studio's earlier drafts for the week.
         Hover <span style="font-weight:700">ⓘ</span> next to a name for their hours, home studio, badges and notes.
+        Drag a shift onto another person or day to move it, or onto Unfilled shifts to take it off someone.
       </div>
       <div id="bd-body"><div class="panel"><div class="empty">Choose a studio and week, then click Build draft.</div></div></div>
     </div>
@@ -1096,7 +1100,7 @@ function renderBuild() {
       tags.push((ok ? '✓ ' : '⚠ Needs ') + esc(ctx.badgeLabel[bc] || bc))
       if (!ok) warn.push(fmtDate(b.date) + ' ' + blkLabel(b) + ': needs ' + (ctx.badgeLabel[bc] || bc))
     })
-    return '<div class="wk-chip ' + kind + '"><b>' + blkLabel(b) + '</b>' + (tags.length ? '<div>' + tags.join(' · ') + '</div>' : '') + picker(b, idx) + '</div>'
+    return '<div class="wk-chip ' + kind + '" draggable="true" ondragstart="bdDragStart(event, ' + idx + ')" ondragend="bdDragEnd()" title="Drag to another person or day"><b>' + blkLabel(b) + '</b>' + (tags.length ? '<div>' + tags.join(' · ') + '</div>' : '') + picker(b, idx) + '</div>'
   }
 
   let head = '<tr><th class="wk-name">Staff</th>' + days.map(d => '<th>' + parseYmd(d).toLocaleDateString('en-CA', { weekday: 'short' }).toUpperCase() + ' ' + parseYmd(d).getDate() +
@@ -1106,7 +1110,7 @@ function renderBuild() {
   const unfilled = plan.blocks.map((b, idx) => ({ b, idx })).filter(x => !x.b.staffId && !x.b.training)
   unfilled.forEach(({ b }) => warn.push(fmtDate(b.date) + ' ' + blkLabel(b) + ': nobody available'))
   let rows = '<tr class="wk-unfilled"><td class="wk-name"><b>Unfilled shifts</b><div class="muted small">' + unfilled.length + ' to fill</div></td>' +
-    days.map(d => '<td>' + unfilled.filter(x => x.b.date === d).sort((x, y) => x.b.start - y.b.start).map(x => chipFor(x.b, x.idx).replace('wk-chip ', 'wk-chip open ')).join('') + '</td>').join('') + '</tr>'
+    days.map(d => '<td ' + bdDropAttrs('', d) + '>' + unfilled.filter(x => x.b.date === d).sort((x, y) => x.b.start - y.b.start).map(x => chipFor(x.b, x.idx).replace('wk-chip ', 'wk-chip open ')).join('') + '</td>').join('') + '</tr>'
 
   people.forEach(p => {
     const h = hrs(state.minutesOf(p.id)), flags = []
@@ -1143,7 +1147,7 @@ function renderBuild() {
       ctx.toff.filter(o => o.staff_id === p.id && o.start_date <= d && o.end_date >= d).forEach(o => {
         cell += '<div class="wk-chip off">' + (o.start_time ? fmtRange(o.start_time, o.end_time) : 'All day') + '<div>Time off' + (o.status === 'pending' ? ' (pending)' : '') + '</div></div>'
       })
-      rows += '<td>' + cell + '</td>'
+      rows += '<td ' + bdDropAttrs(p.id, d) + '>' + cell + '</td>'
     })
     rows += '</tr>'
   })
@@ -1168,6 +1172,49 @@ function renderBuild() {
     (warn.length ? '<details class="note warn" open><summary><b>Check before saving (' + warn.length + ')</b></summary>' + [...new Set(warn)].map(esc).join('<br>') + '</details>' : '')
   body.innerHTML = top + '<div class="panel wk-wrap"><table class="wk"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>'
   document.getElementById('bd-save').disabled = !plan.blocks.length
+}
+
+// ── Drag and drop: drag a draft shift onto another person (same or another day),
+// or onto the Unfilled row to take it off someone. Approved shifts don't move.
+let bdDragIdx = null
+function bdDropAttrs(staffId, date) {
+  return 'data-staff="' + staffId + '" data-date="' + date + '" ondragover="bdDragOver(event)" ondragleave="this.classList.remove(\'drop-ok\')" ondrop="bdDrop(event)"'
+}
+function bdDragStart(ev, idx) {
+  bdDragIdx = idx
+  ev.dataTransfer.effectAllowed = 'move'
+  try { ev.dataTransfer.setData('text/plain', String(idx)) } catch (e) {}
+}
+function bdDragEnd() { bdDragIdx = null; document.querySelectorAll('.drop-ok').forEach(el => el.classList.remove('drop-ok')) }
+function bdDragOver(ev) {
+  if (bdDragIdx === null) return
+  ev.preventDefault()
+  ev.dataTransfer.dropEffect = 'move'
+  ev.currentTarget.classList.add('drop-ok')
+}
+function bdDrop(ev) {
+  ev.preventDefault()
+  const td = ev.currentTarget
+  td.classList.remove('drop-ok')
+  const idx = bdDragIdx
+  bdDragIdx = null
+  if (idx === null || !bdPlan || !bdPlan.blocks[idx]) return
+  const b = bdPlan.blocks[idx]
+  const staffId = td.dataset.staff || null, date = td.dataset.date
+  if (staffId === b.staffId && date === b.date) return
+  if (!bdCtx.dayWindow[date] && !confirm('The studio has nothing open on ' + fmtDate(date) + '. Move the shift there anyway?')) return
+  if (staffId) {
+    const p = bdPerson(staffId)
+    const clash = bdPlan.blocks.some((x, j) => j !== idx && x.staffId === staffId && x.date === date) ||
+      bdCtx.shifts.some(x => x.staff_id === staffId && x.shift_date === date && x.start_time && !(x.studio_id === bdCtx.studio && x.status === 'draft'))
+    if (clash) { toast(p.display_name + ' already has a shift on ' + fmtDate(date) + '. Move or remove that one first.', true); return }
+    const moved = Object.assign({}, b, { date })
+    const why = bdBlocked(bdCtx, p, moved, bdState(bdCtx, bdPlan.blocks.filter((_, j) => j !== idx)))
+    if (why && !confirm(p.display_name + ': ' + why + ' on ' + fmtDate(date) + '. Give them this shift anyway?')) return
+  }
+  b.staffId = staffId
+  b.date = date
+  renderBuild()
 }
 
 function bdAssign(idx, staffId) { bdPlan.blocks[idx].staffId = staffId || null; renderBuild() }
