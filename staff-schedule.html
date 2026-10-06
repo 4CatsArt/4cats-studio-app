@@ -140,6 +140,11 @@ table.wk tr.wk-total td { background: var(--soft); }
 .wk-chip[draggable="true"] { cursor: grab; }
 .wk-chip[draggable="true"]:active { cursor: grabbing; }
 table.wk td.drop-ok { outline: 2px dashed #4a7fd4; outline-offset: -3px; background: #f0f6ff !important; }
+.wk-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 11px; color: var(--muted); margin: 0 2px 8px; }
+.wk-leg { display: inline-flex; align-items: center; gap: 6px; }
+.wk-leg .wk-chip { width: 22px; height: 12px; padding: 0; margin: 0; display: inline-block; }
+table.wk tr.wk-classes td { background: #fbf8ef; }
+.wk-chip.class { background: #fff4d6; color: #7a5a00; border-left: 3px solid #e0a800; }
 .wk-pick { width: 100%; margin-top: 3px; font-size: 10.5px; padding: 1px 2px; border: 0.5px solid rgba(0,0,0,.15); border-radius: 4px; background: rgba(255,255,255,.7); }
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 1000; max-width: 90vw; }
 #toast.err { background: var(--bad); }
@@ -715,9 +720,27 @@ function renderCoverage() {
    6. Extra hours: managers below 40 h and anyone below their minimum get extra
       shifts on open days, placed at the END of the day (closing is busier).
    ===================================================================== */
+// Every shift: at most 8 h PAID. With the unpaid break that's an 8.5 h span (e.g. 1:00–9:30pm).
+// Everyone gets at least 2 days off a week (max 5 days), ideally back to back.
+const MAX_PAID = 480
+const MAX_DAYS = 5
 const TRAINING_SHIFTS_NEEDED = 3
 const SOLO_BADGE = 'solo_ready'
 const PROV_OF = id => (id || '').slice(0, 2)
+// Unpaid break by province (province_break_rules, the same table finance.html uses).
+// Defaults if a column isn't found: 30 min for shifts over 5 h.
+let bdBreakRules = []
+function bdBreak(studioId) {
+  const r = bdBreakRules.find(x => (x.province_code || x.province) === PROV_OF(studioId)) || {}
+  const over = Number(r.break_threshold_hours ?? r.min_shift_hours ?? r.threshold_hours ?? 5) * 60
+  const dur = Number(r.break_duration_hours != null ? r.break_duration_hours * 60 : (r.break_minutes ?? 30))
+  return { over, dur }
+}
+function paidMins(studioId, start, end) {
+  const span = end - start, br = bdBreak(studioId)
+  return span > br.over ? span - br.dur : span
+}
+function maxSpan(studioId) { const br = bdBreak(studioId); return MAX_PAID + (MAX_PAID > br.over ? br.dur : 0) }
 let bdWeek = sundayOf(todayStr())
 let bdCtx = null      // loaded data for the current build
 let bdPlan = null     // { blocks: [...], warnings: [...] }
@@ -738,12 +761,13 @@ const overlaps = (a1, a2, b1, b2) => a1 < b2 && b1 < a2
 
 async function bdLoad(studio) {
   const from = bdWeek, to = addDays(bdWeek, 6)
-  const [need, rules, opening, ot, people, badges, notes, unav, toff, shifts] = await Promise.all([
+  const [need, rules, opening, ot, breaks, people, badges, notes, unav, toff, shifts] = await Promise.all([
     sb.rpc('get_staffing_need', { p_studio_id: studio, p_from: from, p_to: to }),
     sb.from('staffing_rules').select('label, required_badge').eq('active', true),
-    sb.from('studio_opening_times').select('studio_id, day_of_week, opens_at'),
+    sb.from('studio_opening_times').select('*'),
     sb.from('province_overtime_rules').select('*'),
-    sb.from('staff_profiles').select('id, display_name, role, studio_ids, home_studio_id, min_weekly_hours, max_weekly_hours, max_studio_days_per_week, exclude_from_schedule, is_active'),
+    sb.from('province_break_rules').select('*'),
+    sb.from('staff_profiles').select('id, display_name, nickname, role, studio_ids, home_studio_id, min_weekly_hours, max_weekly_hours, max_studio_days_per_week, exclude_from_schedule, is_active'),
     sb.from('staff_badges').select('staff_id, badge_code'),
     sb.from('staff_schedule_prefs').select('staff_id, notes'),
     sb.from('staff_unavailability').select('staff_id, day_of_week, start_time, end_time, effective_from, effective_to'),
@@ -751,6 +775,9 @@ async function bdLoad(studio) {
     sb.from('staff_shifts').select('staff_id, studio_id, shift_date, start_time, end_time, status').gte('shift_date', from).lte('shift_date', to)
   ])
   for (const r of [need, rules, opening, ot, people, badges, notes, unav, toff, shifts]) if (r.error) throw new Error(r.error.message)
+  bdBreakRules = breaks.error ? [] : (breaks.data || [])
+  const ct = await sb.from('class_teacher_assignments').select('*').eq('studio_id', studio).lte('effective_from', to)
+  const classTeachers = ct.error ? [] : (ct.data || []).filter(a => !a.effective_to || a.effective_to >= from)
   const badgeLabel = {}
   ;(await sb.from('badge_types').select('code, label')).data?.forEach(b => { badgeLabel[b.code] = b.label })
   const ruleBadge = {}; rules.data.forEach(r => { if (r.required_badge) ruleBadge[r.label] = r.required_badge })
@@ -774,7 +801,15 @@ async function bdLoad(studio) {
     pastShifts[p.id] = count || 0
   }))
   return { studio, from, to, sessions: need.data || [], ruleBadge, badgeLabel, opening: opening.data, ot: ot.data,
-           pool, badgesBy, notesBy, pastShifts, recentWeekends, unav: unav.data, toff: toff.data, shifts: shifts.data }
+           pool, badgesBy, notesBy, pastShifts, recentWeekends, classTeachers, unav: unav.data, toff: toff.data, shifts: shifts.data }
+}
+
+function bdClosesAt(ctx, date) {
+  const dow = parseYmd(date).getDay()
+  const own = ctx.opening.find(o => o.studio_id === ctx.studio && o.day_of_week === dow && o.closes_at)
+  const def = ctx.opening.find(o => !o.studio_id && o.day_of_week === dow && o.closes_at)
+  const o = own || def
+  return o ? toMin(o.closes_at) : null
 }
 
 function bdOpensAt(ctx, date) {
@@ -793,6 +828,8 @@ function bdDayNeed(ctx, date) {
   let lo = Math.min(...ss.map(r => toMin(r.start_time))), hi = Math.max(...ss.map(r => toMin(r.end_time))) + 30
   const opens = bdOpensAt(ctx, date)
   if (opens != null) lo = Math.min(lo, opens)
+  const closes = bdClosesAt(ctx, date)
+  if (closes != null) hi = Math.min(hi, closes)   // staff leave at closing time, even if a seat hold runs later
   lo = Math.floor(lo / 15) * 15; hi = Math.ceil(hi / 15) * 15
   const slots = []
   for (let t = lo; t < hi; t += 15) {
@@ -828,7 +865,7 @@ function bdBlocks(ctx, date, slots, target) {
       if (r.end - r.start < 180) { r.end = Math.min(23 * 60, r.start + 180); if (r.end - r.start < 180) r.start = r.end - 180 }
       const parts = []
       const len = r.end - r.start
-      const n = Math.ceil(len / 480)
+      const n = Math.ceil(len / maxSpan(ctx.studio))
       for (let i = 0; i < n; i++) {
         const a = r.start + Math.round(len * i / n / 30) * 30
         const b = i === n - 1 ? r.end : r.start + Math.round(len * (i + 1) / n / 30) * 30
@@ -894,7 +931,7 @@ function bdBlocked(ctx, p, blk, state) {
   const len = blk.end - blk.start
   if (p.max_weekly_hours != null && state.minutesOf(p.id) + len > p.max_weekly_hours * 60) return 'over max hours'
   if (p.max_studio_days_per_week != null && state.daysOf(p.id).size >= p.max_studio_days_per_week) return 'max in-studio days'
-  if (p.role === 'manager' && p.max_studio_days_per_week == null && state.daysOf(p.id).size >= 5 && !state.daysOf(p.id).has(date)) return 'already 5 days'
+  if (p.max_studio_days_per_week == null && state.daysOf(p.id).size >= MAX_DAYS && !state.daysOf(p.id).has(date)) return 'already ' + MAX_DAYS + ' days (needs 2 off)'
   return null
 }
 
@@ -910,6 +947,8 @@ function bdScore(ctx, p, blk, state) {
   const badgesHeld = ctx.badgesBy[p.id] || new Set()
   if (blk.badges.length) s += blk.badges.every(b => badgesHeld.has(b)) ? -2000 : 2000
   else if (badgesHeld.size) s += 20                             // keep badge holders free for badge work
+  // Days off back to back: prefer people working the day before or after (their days off stay together)
+  if (state.daysOf(p.id).has(addDays(blk.date, -1)) || state.daysOf(p.id).has(addDays(blk.date, 1))) s -= 40
   if (isWeekend(blk.date)) {
     const otherDay = addDays(blk.date, parseYmd(blk.date).getDay() === 6 ? 1 : -1)
     if (state.daysOf(p.id).has(otherDay)) s -= 150                   // worked the other weekend day: give them this one too
@@ -927,8 +966,8 @@ function bdState(ctx, blocks) {
   const keep = ctx.shifts.filter(x => x.start_time && x.end_time && !(x.studio_id === ctx.studio && x.status === 'draft'))
   return {
     blocks,
-    minutesOf: id => keep.filter(x => x.staff_id === id).reduce((t, x) => t + toMin(x.end_time) - toMin(x.start_time), 0) +
-                     blocks.filter(b => b.staffId === id).reduce((t, b) => t + b.end - b.start, 0),
+    minutesOf: id => keep.filter(x => x.staff_id === id).reduce((t, x) => t + paidMins(x.studio_id, toMin(x.start_time), toMin(x.end_time)), 0) +
+                     blocks.filter(b => b.staffId === id).reduce((t, b) => t + paidMins(ctx.studio, b.start, b.end), 0),
     daysOf: id => new Set(keep.filter(x => x.staff_id === id).map(x => x.shift_date).concat(blocks.filter(b => b.staffId === id).map(b => b.date)))
   }
 }
@@ -958,10 +997,13 @@ async function buildSchedule() {
     blocks = blocks.concat(bdBlocks(ctx, date, slots, target))
   }
   // scarce first: badge blocks, then longest
+  // Assigned class teachers first, on the shift covering their class
+  const teacherNotes = bdPlaceTeachers(ctx, blocks)
   // Badge work first (scarce), then weekends (busiest, everyone works them), then longest
   const order = blocks.slice().sort((a, b) => (b.badges.length - a.badges.length) ||
     (isWeekend(b.date) - isWeekend(a.date)) || ((b.end - b.start) - (a.end - a.start)))
   order.forEach(blk => {
+    if (blk.staffId) return   // already given to a class teacher
     const state = bdState(ctx, blocks)
     let best = null, bestScore = Infinity
     ctx.pool.forEach(p => {
@@ -1001,7 +1043,9 @@ async function buildSchedule() {
       // Spread what's missing over the days still free, so extra shifts stay short (3 h minimum)
       const free = order7.filter(d => d >= date || isWeekend(d)).filter(d => ctx.dayWindow[d] && !st.daysOf(p.id).has(d) &&
         !bdBlocked(ctx, p, { date: d, start: ctx.dayWindow[d].close - 180, end: ctx.dayWindow[d].close, layer: 0, badges: [], topUp: true }, st)).length || 1
-      const len = Math.min(480, Math.max(180, Math.ceil(short / free / 30) * 30), w.close - w.open)
+      let len = Math.min(MAX_PAID, Math.max(180, Math.ceil(short / free / 30) * 30))
+      if (len > bdBreak(ctx.studio).over) len += bdBreak(ctx.studio).dur   // add the unpaid break to the span
+      len = Math.min(len, w.close - w.open)
       if (len < 180) continue
       if (otRule && st.minutesOf(p.id) + len > otRule.weekly_hours * 60) continue   // never top up into overtime
       const blk = { date, start: w.close - len, end: w.close, layer: 0, badges: [], staffId: null, topUp: true }
@@ -1015,12 +1059,12 @@ async function buildSchedule() {
     blocks.filter(b => b.staffId === p.id && !b.training).sort((a, b) => (a.end - a.start) - (b.end - b.start)).forEach(b => {
       const w = ctx.dayWindow[b.date]
       if (!w) return
-      while (short > 0 && b.end - b.start < 480) {
-        const before = b.end - b.start
+      while (short > 0 && b.end - b.start < maxSpan(ctx.studio)) {
+        const before = paidMins(ctx.studio, b.start, b.end)
         if (b.end < w.close) b.end = Math.min(w.close, b.end + 30)
         else if (b.start > w.open) b.start = Math.max(w.open, b.start - 30)
         else break
-        short -= (b.end - b.start) - before
+        short -= paidMins(ctx.studio, b.start, b.end) - before
         if (otRule && bdState(ctx, blocks).minutesOf(p.id) > otRule.weekly_hours * 60) { b.end -= 30; short += 30; break }
       }
     })
@@ -1040,7 +1084,7 @@ async function buildSchedule() {
       blocks.push(t)
     }
   })
-  bdPlan = { blocks }
+  bdPlan = { blocks, teacherNotes }
   renderBuild()
 }
 
@@ -1058,7 +1102,9 @@ function bdInfo(p) {
   if (b.length) lines.push('Badges: ' + b.join(', '))
   const tdone = bdTrainingDone(ctx, p, bdPlan.blocks, '9999')
   if (tdone !== null) lines.push('In training: ' + tdone + ' of ' + TRAINING_SHIFTS_NEEDED + ' shifts done (including this draft)')
-  lines.push('This week: ' + hrs(state.minutesOf(p.id)) + ' h on ' + state.daysOf(p.id).size + ' day(s), all studios')
+  lines.push('This week: ' + hrs(state.minutesOf(p.id)) + ' h paid on ' + state.daysOf(p.id).size + ' day(s), all studios')
+  const teaches = [...new Set((ctx.classTeachers || []).filter(a => a.staff_id === p.id).map(a => (a.class_label || a.class_key) + ' (' + DAY_SHORT[a.day_of_week] + ' ' + fmtTime(a.session_time) + ')'))]
+  if (teaches.length) lines.push('Teaches: ' + teaches.join(', '))
   if (ctx.notesBy[p.id]) lines.push('Notes: ' + ctx.notesBy[p.id])
   return lines.join('\n')
 }
@@ -1069,7 +1115,10 @@ function renderBuild() {
   const state = bdState(ctx, plan.blocks)
   const ot = ctx.ot.find(o => o.province_code === PROV_OF(ctx.studio))
   const warn = []
-  const blkLabel = b => fmtRange(fromMin(b.start), fromMin(b.end)) + ' · ' + hrs(b.end - b.start) + 'h'
+  const blkLabel = b => {
+    const paid = paidMins(ctx.studio, b.start, b.end), brk = (b.end - b.start) - paid
+    return fmtRange(fromMin(b.start), fromMin(b.end)) + ' · ' + hrs(paid) + 'h' + (brk ? ' + ' + brk + 'm break' : '')
+  }
 
   // Rows: everyone at this studio, plus anyone with a shift here this week (draft plan or already approved)
   const ids = new Set(ctx.pool.filter(p => p.home_studio_id === ctx.studio).map(p => p.id))
@@ -1095,6 +1144,7 @@ function renderBuild() {
       tags.push('Training ' + (bdTrainingDone(ctx, p, plan.blocks, b.date) + 1) + '/' + TRAINING_SHIFTS_NEEDED + (b.withId ? ' · with ' + esc(bdPerson(b.withId).display_name) : ''))
     }
     if (b.topUp) tags.push(b.weekend ? 'Weekend · closing' : 'Extra hours · closing')
+    ;(b.classes || []).forEach(l => tags.push('✓ Teaching ' + esc(l)))
     b.badges.forEach(bc => {
       const ok = b.staffId && (ctx.badgesBy[b.staffId] || new Set()).has(bc)
       tags.push((ok ? '✓ ' : '⚠ Needs ') + esc(ctx.badgeLabel[bc] || bc))
@@ -1111,6 +1161,25 @@ function renderBuild() {
   unfilled.forEach(({ b }) => warn.push(fmtDate(b.date) + ' ' + blkLabel(b) + ': nobody available'))
   let rows = '<tr class="wk-unfilled"><td class="wk-name"><b>Unfilled shifts</b><div class="muted small">' + unfilled.length + ' to fill</div></td>' +
     days.map(d => '<td ' + bdDropAttrs('', d) + '>' + unfilled.filter(x => x.b.date === d).sort((x, y) => x.b.start - y.b.start).map(x => chipFor(x.b, x.idx).replace('wk-chip ', 'wk-chip open ')).join('') + '</td>').join('') + '</tr>'
+
+  // Classes row: assign the term's teacher right here
+  const classes = bdClasses(ctx)
+  ;(plan.teacherNotes || []).forEach(n => warn.push(n))
+  if (classes.length) {
+    rows += '<tr class="wk-classes"><td class="wk-name"><b>Classes</b><div class="muted small">teacher for the term</div></td>' + days.map(d => '<td>' +
+      classes.filter(c => c.date === d).sort((a, b) => a.start - b.start).map(c => {
+        const tid = bdTeacherFor(ctx, c)
+        const opts = ctx.pool.slice().sort((a, b) => {
+          const ab = c.badge ? (ctx.badgesBy[a.id] || new Set()).has(c.badge) : false, bb = c.badge ? (ctx.badgesBy[b.id] || new Set()).has(c.badge) : false
+          return (bb - ab) || ((b.home_studio_id === ctx.studio) - (a.home_studio_id === ctx.studio)) || a.display_name.localeCompare(b.display_name)
+        })
+        return '<div class="wk-chip class"><b>' + fmtTime(c.time) + ' ' + esc(c.label) + '</b><div>' + c.booked + ' enrolled' +
+          (c.badge ? ' · needs ' + esc(ctx.badgeLabel[c.badge] || c.badge) : '') + '</div>' +
+          '<select class="wk-pick" onchange="bdSetTeacher(\'' + c.session_id + '\', this.value)"><option value="">— No teacher set —</option>' +
+          opts.map(p => '<option value="' + p.id + '"' + (p.id === tid ? ' selected' : '') + '>' + esc(p.display_name) +
+            (c.badge && (ctx.badgesBy[p.id] || new Set()).has(c.badge) ? ' ✓' : '') + '</option>').join('') + '</select></div>'
+      }).join('') + '</td>').join('') + '</tr>'
+  }
 
   people.forEach(p => {
     const h = hrs(state.minutesOf(p.id)), flags = []
@@ -1153,8 +1222,8 @@ function renderBuild() {
   })
 
   // Daily totals for this studio (approved + this draft)
-  const dayMins = d => plan.blocks.filter(b => b.staffId && b.date === d).reduce((t, b) => t + b.end - b.start, 0) +
-    ctx.shifts.filter(x => x.studio_id === ctx.studio && x.shift_date === d && x.status !== 'draft' && x.start_time).reduce((t, x) => t + toMin(x.end_time) - toMin(x.start_time), 0)
+  const dayMins = d => plan.blocks.filter(b => b.staffId && b.date === d).reduce((t, b) => t + paidMins(ctx.studio, b.start, b.end), 0) +
+    ctx.shifts.filter(x => x.studio_id === ctx.studio && x.shift_date === d && x.status !== 'draft' && x.start_time).reduce((t, x) => t + paidMins(x.studio_id, toMin(x.start_time), toMin(x.end_time)), 0)
   const dayPeople = d => new Set(plan.blocks.filter(b => b.staffId && b.date === d).map(b => b.staffId)
     .concat(ctx.shifts.filter(x => x.studio_id === ctx.studio && x.shift_date === d && x.status !== 'draft' && x.start_time).map(x => x.staff_id))).size
   rows += '<tr class="wk-total"><td class="wk-name"><b>Scheduled</b><div class="muted small">hours · people</div></td>' +
@@ -1170,8 +1239,128 @@ function renderBuild() {
     '<div><b>' + plan.blocks.filter(b => b.topUp && !b.weekend).length + '</b>extra-hours shifts</div>' +
     '<div><b>' + plan.blocks.filter(b => b.training && b.staffId).length + '</b>training shifts</div></div></div>' +
     (warn.length ? '<details class="note warn" open><summary><b>Check before saving (' + warn.length + ')</b></summary>' + [...new Set(warn)].map(esc).join('<br>') + '</details>' : '')
-  body.innerHTML = top + '<div class="panel wk-wrap"><table class="wk"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>'
+  const sw = (cls, label) => '<span class="wk-leg"><span class="wk-chip ' + cls + '"></span>' + label + '</span>'
+  const legend = '<div class="wk-legend">' +
+    sw('cover', 'Needed shift') +
+    sw('extra', 'Extra: weekend or extra hours, at closing (easiest to cut)') +
+    sw('train', 'Training shift (with someone)') +
+    sw('class', 'Class (choose the term\'s teacher)') +
+    sw('done', 'Already approved (here or another studio)') +
+    sw('open', 'Unfilled') +
+    sw('unav', 'Unavailable') +
+    sw('off', 'Time off') + '</div>'
+  body.innerHTML = top + legend + '<div class="panel wk-wrap"><table class="wk"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>'
   document.getElementById('bd-save').disabled = !plan.blocks.length
+}
+
+// ── Class teachers (whole term) ────────────────────────────────────────────
+// A class is the same studio + weekday + time + class name, whichever week it is.
+// Assigning a teacher saves it from that week on (class_teacher_assignments) and fills the
+// Teacher field the class schedule shows (session_staff.teacher, same name format as
+// schedule.html: 4Cats name, else full name) for this and later weeks, without touching
+// a Teacher a studio already typed in for one day.
+function classKey(title) {
+  return String(title || '')
+    .replace(/\|?\s*-?\s*class\s+\d+\s+of\s+\d+/ig, '')
+    .replace(/\|?\s*\d+\s*week\s+session/ig, '')
+    .replace(/\|\s*\|/g, '|').replace(/\s*\|\s*$/, '').replace(/^\s*\|\s*/, '')
+    .replace(/\s+/g, ' ').trim().toLowerCase()
+}
+function classLabel(title) {
+  return String(title || '').replace(/\|?\s*-?\s*class\s+\d+\s+of\s+\d+/ig, '').replace(/\|?\s*\d+\s*week\s+session/ig, '')
+    .replace(/\|\s*\|/g, '|').replace(/\s*\|\s*$/, '').replace(/^\s*\|\s*/, '').replace(/\s+/g, ' ').trim()
+}
+function bdClasses(ctx) {
+  return ctx.sessions.filter(r => r.rule_kind === 'one_per_session' && r.start_time && r.end_time && (r.teachers || 0) > 0)
+    .map(r => ({ session_id: r.session_id, date: r.session_date, start: toMin(r.start_time), end: toMin(r.end_time),
+                 time: r.start_time, dow: parseYmd(r.session_date).getDay(), key: classKey(r.title), label: classLabel(r.title),
+                 title: r.title, booked: r.booked, badge: ctx.ruleBadge[r.rule_label] || null }))
+}
+function bdTeacherFor(ctx, c) {
+  const a = (ctx.classTeachers || []).filter(x => x.class_key === c.key && x.day_of_week === c.dow && x.session_time === c.time &&
+    x.effective_from <= c.date && (!x.effective_to || x.effective_to >= c.date))
+    .sort((x, y) => y.effective_from.localeCompare(x.effective_from))[0]
+  return a ? a.staff_id : null
+}
+const schedName = p => p.nickname || p.display_name
+
+// Put each class's teacher on the shift covering it (before anything else is filled)
+function bdPlaceTeachers(ctx, blocks) {
+  const notes = []
+  bdClasses(ctx).forEach(c => {
+    const tid = bdTeacherFor(ctx, c)
+    if (!tid) return
+    const p = ctx.pool.find(x => x.id === tid) || null
+    const nm = p ? p.display_name : 'The assigned teacher'
+    // already has a shift that day here? stretch it to cover the class if it can
+    const own = blocks.find(b => b.staffId === tid && b.date === c.date)
+    if (own) {
+      const s0 = Math.min(own.start, c.start), e0 = Math.max(own.end, c.end)
+      if (e0 - s0 <= maxSpan(ctx.studio)) { own.start = s0; own.end = e0; (own.classes = own.classes || []).push(c.label) }
+      else notes.push(fmtDate(c.date) + ' ' + c.label + ' ' + fmtTime(c.time) + ': ' + nm + "'s shift can't stretch to cover it")
+      return
+    }
+    const cands = blocks.filter(b => !b.staffId && b.date === c.date && !b.training && !b.topUp && overlaps(b.start, b.end, c.start, c.end))
+      .sort((a, b) => (Math.min(b.end, c.end) - Math.max(b.start, c.start)) - (Math.min(a.end, c.end) - Math.max(a.start, c.start)))
+    const blk = cands[0]
+    if (!p || !blk) { notes.push(fmtDate(c.date) + ' ' + c.label + ' ' + fmtTime(c.time) + ': no shift for ' + nm + ' to take'); return }
+    const why = bdBlocked(ctx, p, Object.assign({}, blk, { start: Math.min(blk.start, c.start), end: Math.max(blk.end, c.end) }), bdState(ctx, blocks))
+    if (why) { notes.push(fmtDate(c.date) + ' ' + c.label + ' ' + fmtTime(c.time) + ': ' + nm + ' ' + why + ', substitute needed'); return }
+    const s0 = Math.min(blk.start, c.start), e0 = Math.max(blk.end, c.end)
+    if (e0 - s0 <= maxSpan(ctx.studio)) { blk.start = s0; blk.end = e0 }
+    blk.staffId = tid
+    ;(blk.classes = blk.classes || []).push(c.label)
+  })
+  return notes
+}
+
+async function bdSetTeacher(sessionId, staffId) {
+  const ctx = bdCtx
+  const c = bdClasses(ctx).find(x => x.session_id === sessionId)
+  if (!c) return
+  const prevId = bdTeacherFor(ctx, c)
+  if ((staffId || null) === (prevId || null)) return
+  const p = staffId ? bdPerson(staffId) : null
+  const msg = p ? 'Assign ' + p.display_name + ' to teach ' + c.label + ' (' + DAY_NAMES[c.dow] + 's ' + fmtTime(c.time) + ') from ' + fmtDate(c.date) + ' on?'
+                : 'Remove the teacher from ' + c.label + ' (' + DAY_NAMES[c.dow] + 's ' + fmtTime(c.time) + ') from ' + fmtDate(c.date) + ' on?'
+  if (!confirm(msg + '\n\nThe draft is rebuilt afterwards, so changes you dragged by hand are redone.')) { renderBuild(); return }
+  const { data: { user } } = await sb.auth.getUser()
+  // end the current assignment the day before, or replace it if it starts this same week
+  const cur = (ctx.classTeachers || []).filter(x => x.class_key === c.key && x.day_of_week === c.dow && x.session_time === c.time &&
+    (!x.effective_to || x.effective_to >= c.date))
+  for (const a of cur) {
+    const r = a.effective_from >= c.date
+      ? await sb.from('class_teacher_assignments').delete().eq('id', a.id)
+      : await sb.from('class_teacher_assignments').update({ effective_to: addDays(c.date, -1) }).eq('id', a.id)
+    if (r.error) { toast(r.error.message, true); return }
+  }
+  if (staffId) {
+    const ins = await sb.from('class_teacher_assignments').insert({ studio_id: ctx.studio, class_key: c.key, class_label: c.label,
+      day_of_week: c.dow, session_time: c.time, staff_id: staffId, effective_from: c.date, created_by: user ? user.id : null })
+    if (ins.error) { toast(ins.error.message, true); return }
+  }
+  // Teacher field on the class schedule, this week and the rest of the term (next 6 months)
+  const prevName = prevId ? schedName(bdPerson(prevId)) : ''
+  const newName = p ? schedName(p) : ''
+  const { data: future } = await sb.from('sessions').select('id, title, session_date, session_time')
+    .eq('studio_id', ctx.studio).eq('session_time', c.time).gte('session_date', c.date).lte('session_date', addDays(c.date, 183))
+  const ids = (future || []).filter(s => parseYmd(s.session_date).getDay() === c.dow && classKey(s.title) === c.key).map(s => s.id)
+  let skipped = 0, failed = null
+  if (ids.length) {
+    const { data: existing } = await sb.from('session_staff').select('id, session_id, teacher').in('session_id', ids)
+    const bySession = {}; (existing || []).forEach(r => { bySession[r.session_id] = r })
+    for (const sid of ids) {
+      const row = bySession[sid]
+      if (row && row.teacher && row.teacher !== prevName && row.teacher !== newName) { skipped++; continue }   // a studio typed someone else in
+      const r = row
+        ? await sb.from('session_staff').update({ teacher: newName, updated_at: new Date().toISOString() }).eq('id', row.id)
+        : await sb.from('session_staff').insert({ session_id: sid, studio_id: ctx.studio, teacher: newName, updated_at: new Date().toISOString() })
+      if (r.error) { failed = r.error.message; break }
+    }
+  }
+  if (failed) toast('Teacher saved for scheduling, but the class schedule could not be updated: ' + failed, true)
+  else toast((p ? p.display_name + ' assigned' : 'Teacher removed') + ' · ' + ids.length + ' week(s) on the class schedule' + (skipped ? ', ' + skipped + ' left as the studio set them' : ''))
+  await buildSchedule()
 }
 
 // ── Drag and drop: drag a draft shift onto another person (same or another day),
