@@ -118,6 +118,26 @@ table.list td.actions .btn { margin-left: 4px; }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted); }
 .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 2px; vertical-align: -2px; margin-right: 4px; }
 
+/* build schedule: week grid */
+.wk-wrap { overflow-x: auto; }
+table.wk { border-collapse: collapse; width: 100%; min-width: 1100px; table-layout: fixed; font-size: 11px; }
+table.wk th, table.wk td { border-bottom: 1px solid var(--line); border-left: 1px solid var(--line); padding: 5px; vertical-align: top; text-align: left; }
+table.wk th { background: var(--soft); font-size: 11px; color: var(--muted); font-weight: 600; text-align: center; position: sticky; top: 0; z-index: 2; }
+table.wk .wk-name { width: 170px; position: sticky; left: 0; background: var(--panel); z-index: 1; border-left: none; }
+table.wk th.wk-name { z-index: 3; text-align: left; background: var(--soft); }
+table.wk tr.wk-unfilled td { background: #fff7f6; }
+table.wk tr.wk-unfilled td.wk-name { background: #fff7f6; }
+table.wk tr.wk-total td { background: var(--soft); }
+.wk-chip { border-radius: 6px; padding: 4px 6px; margin-bottom: 4px; line-height: 1.35; }
+.wk-chip b { font-weight: 600; }
+.wk-chip.cover { background: #e6effc; color: #1a3f7a; border-left: 3px solid #4a7fd4; }
+.wk-chip.extra { background: #e4f4f1; color: #1d5e52; border-left: 3px solid #3aa28c; }
+.wk-chip.train { background: #f1e9fb; color: #5b2f8f; border-left: 3px solid #9b6bd6; }
+.wk-chip.done  { background: var(--good-bg); color: var(--good); border-left: 3px solid var(--good); }
+.wk-chip.open  { background: #fff; color: var(--bad); border: 1px dashed var(--bad); }
+.wk-chip.unav  { background: #ececE6; color: #777; }
+.wk-chip.off   { background: #6b6b66; color: #fff; }
+.wk-pick { width: 100%; margin-top: 3px; font-size: 10.5px; padding: 1px 2px; border: 0.5px solid rgba(0,0,0,.15); border-radius: 4px; background: rgba(255,255,255,.7); }
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 1000; max-width: 90vw; }
 #toast.err { background: var(--bad); }
 @media (max-width: 640px) { .content { padding: .75rem; } .top-bar { padding: 0 .75rem; gap: .9rem; } }
@@ -545,12 +565,14 @@ const FLAG_TEXT = {
   no_enrollment: 'Nobody enrolled, no teacher counted',
   walk_in: 'Walk-in rung at the till'
 }
-let weekStart = mondayOf(todayStr())
+let weekStart = sundayOf(todayStr())
 let cvSessions = [], cvShifts = []
 
 function mondayOf(s) { const d = parseYmd(s); const off = (d.getDay() + 6) % 7; d.setDate(d.getDate() - off); return ymd(d) }
+// Weeks run Sunday to Saturday, matching pay periods
+function sundayOf(s) { const d = parseYmd(s); d.setDate(d.getDate() - d.getDay()); return ymd(d) }
 function shiftWeek(n) { weekStart = addDays(weekStart, 7 * n); loadCoverage() }
-function thisWeek() { weekStart = mondayOf(todayStr()); loadCoverage() }
+function thisWeek() { weekStart = sundayOf(todayStr()); loadCoverage() }
 function fmtMin(n) { return fmtTime(fromMin(n)) }
 
 function initCoverage() {
@@ -692,7 +714,7 @@ function renderCoverage() {
 const TRAINING_SHIFTS_NEEDED = 3
 const SOLO_BADGE = 'solo_ready'
 const PROV_OF = id => (id || '').slice(0, 2)
-let bdWeek = mondayOf(todayStr())
+let bdWeek = sundayOf(todayStr())
 let bdCtx = null      // loaded data for the current build
 let bdPlan = null     // { blocks: [...], warnings: [...] }
 
@@ -868,6 +890,7 @@ function bdBlocked(ctx, p, blk, state) {
   const len = blk.end - blk.start
   if (p.max_weekly_hours != null && state.minutesOf(p.id) + len > p.max_weekly_hours * 60) return 'over max hours'
   if (p.max_studio_days_per_week != null && state.daysOf(p.id).size >= p.max_studio_days_per_week) return 'max in-studio days'
+  if (p.role === 'manager' && p.max_studio_days_per_week == null && state.daysOf(p.id).size >= 5 && !state.daysOf(p.id).has(date)) return 'already 5 days'
   return null
 }
 
@@ -931,7 +954,9 @@ async function buildSchedule() {
     blocks = blocks.concat(bdBlocks(ctx, date, slots, target))
   }
   // scarce first: badge blocks, then longest
-  const order = blocks.slice().sort((a, b) => (b.badges.length - a.badges.length) || ((b.end - b.start) - (a.end - a.start)))
+  // Badge work first (scarce), then weekends (busiest, everyone works them), then longest
+  const order = blocks.slice().sort((a, b) => (b.badges.length - a.badges.length) ||
+    (isWeekend(b.date) - isWeekend(a.date)) || ((b.end - b.start) - (a.end - a.start)))
   order.forEach(blk => {
     const state = bdState(ctx, blocks)
     let best = null, bestScore = Infinity
@@ -944,7 +969,7 @@ async function buildSchedule() {
   })
   // Weekend for everyone: anyone at this studio still without a Saturday / Sunday shift gets a 3 h closing shift
   const otRule = ctx.ot.find(o => o.province_code === PROV_OF(ctx.studio))
-  ;[5, 6].map(i => addDays(ctx.from, i)).forEach(date => {
+  ;[6, 0].map(i => addDays(ctx.from, i)).forEach(date => {
     const w = ctx.dayWindow[date]
     if (!w || w.close - w.open < 180) return
     ctx.pool.filter(p => p.home_studio_id === ctx.studio && bdTrainingDone(ctx, p, blocks, '9999') === null).forEach(p => {
@@ -960,7 +985,7 @@ async function buildSchedule() {
 
   // Extra hours: managers under 40 h (unless limited to some studio days) and anyone under their minimum
   // get extra shifts on open days, placed at the end of the day for closing. Weekends first.
-  const order7 = [5, 6, 0, 1, 2, 3, 4].map(i => addDays(ctx.from, i))   // Sat, Sun, then Mon–Fri
+  const order7 = [6, 0, 1, 2, 3, 4, 5].map(i => addDays(ctx.from, i))   // Sat, Sun, then Mon–Fri
   ctx.pool.filter(p => p.home_studio_id === ctx.studio && bdTrainingDone(ctx, p, blocks, '9999') === null).forEach(p => {
     const targetH = (p.role === 'manager' && p.max_studio_days_per_week == null) ? Math.max(40, p.min_weekly_hours || 0) : (p.min_weekly_hours || 0)
     for (const date of order7) {
@@ -974,11 +999,27 @@ async function buildSchedule() {
         !bdBlocked(ctx, p, { date: d, start: ctx.dayWindow[d].close - 180, end: ctx.dayWindow[d].close, layer: 0, badges: [], topUp: true }, st)).length || 1
       const len = Math.min(480, Math.max(180, Math.ceil(short / free / 30) * 30), w.close - w.open)
       if (len < 180) continue
+      if (otRule && st.minutesOf(p.id) + len > otRule.weekly_hours * 60) continue   // never top up into overtime
       const blk = { date, start: w.close - len, end: w.close, layer: 0, badges: [], staffId: null, topUp: true }
       if (bdBlocked(ctx, p, blk, st)) continue
       blk.staffId = p.id
       blocks.push(blk)
     }
+    // Still short (no free days left, e.g. a manager on 5 days)? Lengthen their shifts here, up to 8 h,
+    // later first (towards closing), then earlier.
+    let short = targetH * 60 - bdState(ctx, blocks).minutesOf(p.id)
+    blocks.filter(b => b.staffId === p.id && !b.training).sort((a, b) => (a.end - a.start) - (b.end - b.start)).forEach(b => {
+      const w = ctx.dayWindow[b.date]
+      if (!w) return
+      while (short > 0 && b.end - b.start < 480) {
+        const before = b.end - b.start
+        if (b.end < w.close) b.end = Math.min(w.close, b.end + 30)
+        else if (b.start > w.open) b.start = Math.max(w.open, b.start - 30)
+        else break
+        short -= (b.end - b.start) - before
+        if (otRule && bdState(ctx, blocks).minutesOf(p.id) > otRule.weekly_hours * 60) { b.end -= 30; short += 30; break }
+      }
+    })
   })
 
   // Training shifts: home-studio trainees shadow someone already scheduled, one a day, until they reach 3
@@ -1020,74 +1061,113 @@ function bdInfo(p) {
 
 function renderBuild() {
   const ctx = bdCtx, plan = bdPlan, body = document.getElementById('bd-body')
-  if (!plan.blocks.length) { body.innerHTML = '<div class="panel"><div class="empty">Nothing to fill this week: no open days, or approved shifts already cover everything.</div></div>'; document.getElementById('bd-save').disabled = true; return }
+  const days = [0, 1, 2, 3, 4, 5, 6].map(i => addDays(ctx.from, i))
   const state = bdState(ctx, plan.blocks)
-  const warn = []
-  let html = ''
-  for (let i = 0; i < 7; i++) {
-    const date = addDays(ctx.from, i)
-    const day = plan.blocks.map((b, idx) => ({ b, idx })).filter(x => x.b.date === date).sort((x, y) => x.b.start - y.b.start || x.b.layer - y.b.layer)
-    const existing = ctx.shifts.filter(x => x.studio_id === ctx.studio && x.shift_date === date && x.status !== 'draft' && x.start_time)
-    if (!day.length && !existing.length) continue
-    html += '<div class="panel"><div class="panel-head"><h2>' + fmtDate(date) + '</h2></div><table class="list"><tbody>'
-    existing.forEach(x => {
-      html += '<tr><td style="width:150px">' + fmtRange(x.start_time, x.end_time) + '</td><td class="person">' + esc(bdPerson(x.staff_id).display_name) +
-              '</td><td><span class="pill approved">' + esc(x.status) + '</span></td><td class="muted small">already scheduled</td></tr>'
-    })
-    day.forEach(({ b, idx }) => {
-      const st = bdState(ctx, plan.blocks.filter((_, j) => j !== idx))
-      const opts = ctx.pool.map(p => ({ p, why: bdBlocked(ctx, p, b, st) }))
-        .sort((x, y) => (!!x.why - !!y.why) || x.p.display_name.localeCompare(y.p.display_name))
-      const sel = '<select class="input" onchange="bdAssign(' + idx + ', this.value)"><option value="">— Unfilled —</option>' +
-        opts.map(o => '<option value="' + o.p.id + '"' + (o.p.id === b.staffId ? ' selected' : '') + '>' + esc(o.p.display_name) + (o.why ? ' (' + o.why + ')' : '') + '</option>').join('') + '</select>'
-      const p = b.staffId ? bdPerson(b.staffId) : null
-      const notes = []
-      if (b.training) {
-        const lead = plan.blocks.find(x => x.date === b.date && x.staffId === b.withId && !x.training)
-        notes.push('<span class="flag" style="background:var(--info-bg);color:var(--info)">Training shift' +
-          (p ? ' ' + (bdTrainingDone(ctx, p, plan.blocks, b.date) + 1) + ' of ' + TRAINING_SHIFTS_NEEDED : '') +
-          (lead ? ' · with ' + esc(bdPerson(lead.staffId).display_name) : '') + '</span>')
-      }
-      if (b.topUp) notes.push('<span class="flag" style="background:var(--info-bg);color:var(--info)">' + (b.weekend ? 'Weekend shift' : 'Extra hours') + ' · closing</span>')
-      if (!p && !b.training && !b.topUp) notes.push('<span class="flag" style="background:var(--bad-bg);color:var(--bad)">Nobody available</span>')
-      b.badges.forEach(bc => {
-        const ok = p && (ctx.badgesBy[p.id] || new Set()).has(bc)
-        notes.push('<span class="flag"' + (ok ? ' style="background:var(--good-bg);color:var(--good)"' : '') + '>Needs ' + esc(ctx.badgeLabel[bc] || bc) + (ok ? ' ✓' : '') + '</span>')
-        if (!ok) warn.push(fmtDate(date) + ' ' + fmtRange(fromMin(b.start), fromMin(b.end)) + ': needs ' + (ctx.badgeLabel[bc] || bc))
-      })
-      if (!p && !b.training) warn.push(fmtDate(date) + ' ' + fmtRange(fromMin(b.start), fromMin(b.end)) + ': nobody available')
-      html += '<tr><td style="width:150px">' + fmtRange(fromMin(b.start), fromMin(b.end)) + ' <span class="muted small">' + hrs(b.end - b.start) + ' h</span></td><td>' + sel +
-              (p ? ' <span title="' + esc(bdInfo(p)) + '" style="cursor:help;font-weight:700">ⓘ</span>' : '') + '</td><td colspan="2">' + notes.join(' ') + '</td></tr>'
-    })
-    html += '</tbody></table></div>'
-  }
-  // people summary: everyone scheduled here this week, plus managers / minimum-hours people at home here
   const ot = ctx.ot.find(o => o.province_code === PROV_OF(ctx.studio))
-  const ids = new Set(plan.blocks.filter(b => b.staffId).map(b => b.staffId))
-  ctx.pool.forEach(p => { if (p.home_studio_id === ctx.studio) ids.add(p.id) })
-  const rows = [...ids].map(id => bdPerson(id)).sort((a, b) => a.display_name.localeCompare(b.display_name)).map(p => {
+  const warn = []
+  const blkLabel = b => fmtRange(fromMin(b.start), fromMin(b.end)) + ' · ' + hrs(b.end - b.start) + 'h'
+
+  // Rows: everyone at this studio, plus anyone with a shift here this week (draft plan or already approved)
+  const ids = new Set(ctx.pool.filter(p => p.home_studio_id === ctx.studio).map(p => p.id))
+  plan.blocks.forEach(b => { if (b.staffId) ids.add(b.staffId) })
+  ctx.shifts.forEach(x => { if (x.studio_id === ctx.studio && x.status !== 'draft') ids.add(x.staff_id) })
+  const people = [...ids].map(bdPerson).sort((a, b) =>
+    ((b.role === 'manager' && b.home_studio_id === ctx.studio) - (a.role === 'manager' && a.home_studio_id === ctx.studio)) ||
+    ((b.home_studio_id === ctx.studio) - (a.home_studio_id === ctx.studio)) || a.display_name.localeCompare(b.display_name))
+
+  // Reassign dropdown for one block
+  const picker = (b, idx) => {
+    const st = bdState(ctx, plan.blocks.filter((_, j) => j !== idx))
+    const opts = ctx.pool.map(p => ({ p, why: bdBlocked(ctx, p, b, st) }))
+      .sort((x, y) => (!!x.why - !!y.why) || x.p.display_name.localeCompare(y.p.display_name))
+    return '<select class="wk-pick" onchange="bdAssign(' + idx + ', this.value)" title="Change who works this shift"><option value="">— Unfilled —</option>' +
+      opts.map(o => '<option value="' + o.p.id + '"' + (o.p.id === b.staffId ? ' selected' : '') + '>' + esc(o.p.display_name) + (o.why ? ' (' + o.why + ')' : '') + '</option>').join('') + '</select>'
+  }
+  const chipFor = (b, idx) => {
+    const kind = b.training ? 'train' : b.topUp ? 'extra' : 'cover'
+    const tags = []
+    if (b.training) {
+      const p = bdPerson(b.staffId)
+      tags.push('Training ' + (bdTrainingDone(ctx, p, plan.blocks, b.date) + 1) + '/' + TRAINING_SHIFTS_NEEDED + (b.withId ? ' · with ' + esc(bdPerson(b.withId).display_name) : ''))
+    }
+    if (b.topUp) tags.push(b.weekend ? 'Weekend · closing' : 'Extra hours · closing')
+    b.badges.forEach(bc => {
+      const ok = b.staffId && (ctx.badgesBy[b.staffId] || new Set()).has(bc)
+      tags.push((ok ? '✓ ' : '⚠ Needs ') + esc(ctx.badgeLabel[bc] || bc))
+      if (!ok) warn.push(fmtDate(b.date) + ' ' + blkLabel(b) + ': needs ' + (ctx.badgeLabel[bc] || bc))
+    })
+    return '<div class="wk-chip ' + kind + '"><b>' + blkLabel(b) + '</b>' + (tags.length ? '<div>' + tags.join(' · ') + '</div>' : '') + picker(b, idx) + '</div>'
+  }
+
+  let head = '<tr><th class="wk-name">Staff</th>' + days.map(d => '<th>' + parseYmd(d).toLocaleDateString('en-CA', { weekday: 'short' }).toUpperCase() + ' ' + parseYmd(d).getDate() +
+    (ctx.dayWindow[d] ? '' : '<div class="muted small" style="font-weight:400">closed</div>') + '</th>').join('') + '</tr>'
+
+  // Unfilled row
+  const unfilled = plan.blocks.map((b, idx) => ({ b, idx })).filter(x => !x.b.staffId && !x.b.training)
+  unfilled.forEach(({ b }) => warn.push(fmtDate(b.date) + ' ' + blkLabel(b) + ': nobody available'))
+  let rows = '<tr class="wk-unfilled"><td class="wk-name"><b>Unfilled shifts</b><div class="muted small">' + unfilled.length + ' to fill</div></td>' +
+    days.map(d => '<td>' + unfilled.filter(x => x.b.date === d).sort((x, y) => x.b.start - y.b.start).map(x => chipFor(x.b, x.idx).replace('wk-chip ', 'wk-chip open ')).join('') + '</td>').join('') + '</tr>'
+
+  people.forEach(p => {
     const h = hrs(state.minutesOf(p.id)), flags = []
     if (p.role === 'manager' && p.home_studio_id === ctx.studio && p.max_studio_days_per_week == null && h < 40) flags.push('Manager under 40 h')
-    if (p.min_weekly_hours != null && h < p.min_weekly_hours) flags.push('Under minimum (' + p.min_weekly_hours + ' h)')
-    if (ot && h > ot.weekly_hours) flags.push('Overtime (over ' + ot.weekly_hours + ' h)')
+    if (p.min_weekly_hours != null && h < p.min_weekly_hours) flags.push('Under minimum')
+    if (ot && h > ot.weekly_hours) flags.push('Overtime')
     if (p.home_studio_id === ctx.studio && bdTrainingDone(ctx, p, plan.blocks, '9999') === null)
-      [5, 6].map(i => addDays(ctx.from, i)).forEach(d => {
-        if (ctx.dayWindow && ctx.dayWindow[d] && bdAvailableDay(ctx, p, d) && !state.daysOf(p.id).has(d))
-          flags.push('No ' + (parseYmd(d).getDay() === 6 ? 'Saturday' : 'Sunday') + ' shift')
+      days.filter(isWeekend).forEach(d => {
+        if (ctx.dayWindow[d] && bdAvailableDay(ctx, p, d) && !state.daysOf(p.id).has(d)) flags.push('No ' + (parseYmd(d).getDay() === 6 ? 'Sat' : 'Sun') + ' shift')
       })
     flags.forEach(f => warn.push(p.display_name + ': ' + f))
-    return '<tr><td class="person">' + esc(p.display_name) + ' <span title="' + esc(bdInfo(p)) + '" style="cursor:help">ⓘ</span></td><td>' + h + ' h</td><td>' +
-           state.daysOf(p.id).size + ' day(s)</td><td>' + flags.map(f => '<span class="flag">' + esc(f) + '</span>').join(' ') + '</td></tr>'
-  }).join('')
-  html += '<div class="panel"><div class="panel-head"><h2>Hours this week</h2><span class="muted small">All studios, including this draft</span></div><table class="list"><thead><tr><th>Person</th><th>Hours</th><th>Days</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+    const range = (p.min_weekly_hours != null || p.max_weekly_hours != null)
+      ? ' / ' + (p.min_weekly_hours != null ? p.min_weekly_hours : 0) + '–' + (p.max_weekly_hours != null ? p.max_weekly_hours : '') : (p.role === 'manager' ? ' / 40' : '')
+    rows += '<tr><td class="wk-name"><b>' + esc(p.display_name) + '</b> <span title="' + esc(bdInfo(p)) + '" style="cursor:help">ⓘ</span>' +
+      (p.home_studio_id && p.home_studio_id !== ctx.studio ? '<div class="muted small">' + esc(STUDIO_NAMES[p.home_studio_id] || p.home_studio_id) + '</div>' : '') +
+      '<div class="small">' + h + 'h' + range + '</div>' + flags.map(f => '<span class="flag">' + esc(f) + '</span>').join(' ') + '</td>'
+    days.forEach(d => {
+      const dow = parseYmd(d).getDay()
+      let cell = ''
+      // already-approved shifts (this or another studio)
+      ctx.shifts.filter(x => x.staff_id === p.id && x.shift_date === d && x.status !== 'draft' && x.start_time).forEach(x => {
+        cell += '<div class="wk-chip done"><b>' + fmtRange(x.start_time, x.end_time) + '</b><div>' + esc(x.status) +
+          (x.studio_id !== ctx.studio ? ' · ' + esc(STUDIO_NAMES[x.studio_id] || x.studio_id) : '') + '</div></div>'
+      })
+      // drafts at OTHER studios count toward their week
+      ctx.shifts.filter(x => x.staff_id === p.id && x.shift_date === d && x.status === 'draft' && x.studio_id !== ctx.studio && x.start_time).forEach(x => {
+        cell += '<div class="wk-chip done"><b>' + fmtRange(x.start_time, x.end_time) + '</b><div>draft · ' + esc(STUDIO_NAMES[x.studio_id] || x.studio_id) + '</div></div>'
+      })
+      plan.blocks.forEach((b, idx) => { if (b.staffId === p.id && b.date === d) cell += chipFor(b, idx) })
+      // unavailability and time off
+      ctx.unav.filter(u => u.staff_id === p.id && u.day_of_week === dow && u.effective_from <= d && (!u.effective_to || u.effective_to >= d)).forEach(u => {
+        cell += '<div class="wk-chip unav">' + (u.start_time ? fmtRange(u.start_time, u.end_time) : 'All day') + '<div>Unavailable</div></div>'
+      })
+      ctx.toff.filter(o => o.staff_id === p.id && o.start_date <= d && o.end_date >= d).forEach(o => {
+        cell += '<div class="wk-chip off">' + (o.start_time ? fmtRange(o.start_time, o.end_time) : 'All day') + '<div>Time off' + (o.status === 'pending' ? ' (pending)' : '') + '</div></div>'
+      })
+      rows += '<td>' + cell + '</td>'
+    })
+    rows += '</tr>'
+  })
+
+  // Daily totals for this studio (approved + this draft)
+  const dayMins = d => plan.blocks.filter(b => b.staffId && b.date === d).reduce((t, b) => t + b.end - b.start, 0) +
+    ctx.shifts.filter(x => x.studio_id === ctx.studio && x.shift_date === d && x.status !== 'draft' && x.start_time).reduce((t, x) => t + toMin(x.end_time) - toMin(x.start_time), 0)
+  const dayPeople = d => new Set(plan.blocks.filter(b => b.staffId && b.date === d).map(b => b.staffId)
+    .concat(ctx.shifts.filter(x => x.studio_id === ctx.studio && x.shift_date === d && x.status !== 'draft' && x.start_time).map(x => x.staff_id))).size
+  rows += '<tr class="wk-total"><td class="wk-name"><b>Scheduled</b><div class="muted small">hours · people</div></td>' +
+    days.map(d => '<td><b>' + hrs(dayMins(d)) + 'h</b> · ' + dayPeople(d) + '</td>').join('') + '</tr>'
+
   const cover = plan.blocks.filter(b => !b.training && !b.topUp)
   const filled = cover.filter(b => b.staffId).length
-  const trainingN = plan.blocks.filter(b => b.training && b.staffId).length
-  const top = '<div class="panel"><div class="summary"><div><b>' + cover.length + '</b>shifts needed</div><div><b>' + filled + '</b>filled</div><div><b>' +
-    (cover.length - filled) + '</b>unfilled</div><div><b>' + trainingN + '</b>training shifts</div><div><b>' + plan.blocks.filter(b => b.weekend).length + '</b>extra weekend shifts</div><div><b>' + plan.blocks.filter(b => b.topUp && !b.weekend).length + '</b>extra-hours shifts</div><div><b>' + hrs(plan.blocks.filter(b => b.staffId).reduce((t, b) => t + b.end - b.start, 0)) + '</b>hours</div></div></div>' +
-    (warn.length ? '<div class="note warn"><b>Check before saving:</b><br>' + warn.map(esc).join('<br>') + '</div>' : '')
-  body.innerHTML = top + html
-  document.getElementById('bd-save').disabled = false
+  const totalMins = days.reduce((t, d) => t + dayMins(d), 0)
+  const top = '<div class="panel"><div class="summary">' +
+    '<div><b>' + hrs(totalMins) + 'h</b>scheduled</div>' +
+    '<div><b>' + filled + ' / ' + cover.length + '</b>needed shifts filled</div>' +
+    '<div><b>' + plan.blocks.filter(b => b.weekend).length + '</b>extra weekend shifts</div>' +
+    '<div><b>' + plan.blocks.filter(b => b.topUp && !b.weekend).length + '</b>extra-hours shifts</div>' +
+    '<div><b>' + plan.blocks.filter(b => b.training && b.staffId).length + '</b>training shifts</div></div></div>' +
+    (warn.length ? '<details class="note warn" open><summary><b>Check before saving (' + warn.length + ')</b></summary>' + [...new Set(warn)].map(esc).join('<br>') + '</details>' : '')
+  body.innerHTML = top + '<div class="panel wk-wrap"><table class="wk"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>'
+  document.getElementById('bd-save').disabled = !plan.blocks.length
 }
 
 function bdAssign(idx, staffId) { bdPlan.blocks[idx].staffId = staffId || null; renderBuild() }
