@@ -189,6 +189,15 @@ body:not(.sc-mode) .sc-only { display: none !important; }
 .pts-page-title { font-size: 22px; font-weight: 800; color: var(--ink); margin: 2px 0 14px; }
 .pts-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
 .pts-section { margin: 18px 0 8px; }
+.friday-ahead { border-top: 1px solid var(--border); margin-top: 14px; }
+.fa-row { display: grid; grid-template-columns: 64px minmax(0, 1fr) 46px; grid-template-areas: "d b p" ". s s"; gap: 2px 10px; align-items: center; padding: 6px 0; }
+.fa-date { grid-area: d; font-size: 13px; font-weight: 700; }
+.fa-bar { grid-area: b; position: relative; height: 12px; border-radius: 999px; background: #f0eef7; overflow: visible; }
+.fa-bar > div { height: 100%; border-radius: 999px; }
+.fa-tick { position: absolute; top: -3px; width: 2px; height: 18px; background: var(--amber); border-radius: 1px; transform: translateX(-1px); }
+.fa-pct { grid-area: p; text-align: right; font-family: 'IBM Plex Mono', monospace; font-weight: 700; font-size: 13px; }
+.fa-sub { grid-area: s; font-size: 11.5px; color: var(--ink-soft); }
+.occ-noplan { background: var(--amber-bg); color: #6b4a00; border-radius: 12px; padding: 12px 14px; font-size: 13.5px; line-height: 1.45; }
 .occ-cal { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
 .occ-dow { font-size: 11px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); text-align: center; padding: 2px 0 4px; }
 .occ-cell { min-height: 74px; border: 1px solid rgba(0,0,0,0.05); border-radius: 10px; padding: 7px 8px; text-align: left; font: inherit; color: var(--ink); cursor: pointer; display: flex; flex-direction: column; }
@@ -1481,6 +1490,17 @@ async function openOccupancy() {
 function renderOccupancyDays() {
   const d = _occStrip; if (!d) return;
   const t = d.today || {};
+  // No floor plan (0 seats) → there's nothing to measure against. Say so
+  // instead of showing 0% everywhere; days can still be tapped to see bookings.
+  if (!(Number(t.seats) > 0)) {
+    const studioName = STUDIO_NAMES[_sessionStudioId] || _sessionStudioId || 'This studio';
+    document.getElementById('occ-days').innerHTML = `
+      <div class="occ-noplan">🪑 <strong>${esc(studioName)} doesn't have a floor plan yet</strong>, so fill rates can't be worked out —
+        there are no seats to measure against. Once home office sets up its tables (admin → Floor Plans), fill rates appear here
+        for every day, including past ones.</div>
+      <div class="goal-note" style="margin-top:8px">Bookings for the selected day are still listed below.</div>`;
+    return;
+  }
   const todayRow = { day: d.date, is_open: t.is_open, utilization_pct: t.utilization_pct, peak_pct: t.peak_pct, seats: t.seats };
   const byDay = {};
   [...(d.days || []), todayRow].forEach(r => { if (r && r.day) byDay[r.day] = r; });
@@ -1538,6 +1558,16 @@ function renderOccupancyDay(day, d) {
   const amber = d.amberPct || 85;
   const title = new Date(day + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' });
   if (!t.is_open) { el.innerHTML = `<div class="card"><div class="pts-subhead">${esc(title)}</div><div class="goal-note">Nothing on that day.</div></div>`; return; }
+  if (!(Number(t.seats) > 0)) {
+    const held = (t.holds || []).map(h => `
+      <div class="pts-row"><span><span class="how" style="display:inline-block;min-width:118px;text-align:left">${occTime12(h.start)}–${occTime12(h.end)}</span>${esc(h.title || '')}${h.is_party ? ' 🎉' : ''}</span><span class="amt">${h.seats}</span></div>`).join('');
+    el.innerHTML = `<div class="card">
+        <div class="pts-subhead" style="font-size:13px">${esc(title)}</div>
+        <div class="goal-note" style="margin-bottom:12px">No floor plan yet, so no fill % — here's what was booked.</div>
+        ${held || '<div class="pts-empty">Nothing booked.</div>'}
+      </div>`;
+    return;
+  }
   const slots = t.slots || [];
   const bars = slots.map(sl => {
     const p = Number(sl.pct || 0);
@@ -1971,7 +2001,31 @@ function renderFridayFillRateBody(f) {
     <div class="goal-note" style="margin:-4px 0 10px">How full the studio is from 5:30 to 9:30 pm — the Friday event, parties, Mini Make and every other booking — against a realistic full night of ${f.mostRecent ? f.mostRecent.effectiveTotal : (f.upcoming ? f.upcoming.effectiveTotal : '')} guests (2 hours each).</div>
     <div class="friday-summary">${upcomingTile}${recentTile}</div>
     <div id="friday-chart-view" class="friday-chart-scroll">${fridayChartSvg(f.history, f.bonusThresholdPct)}</div>
-    <div id="friday-list-view" class="friday-list" style="display:none">${fridayListHtml(f.history, f.bonusThresholdPct)}</div>`;
+    <div id="friday-list-view" class="friday-list" style="display:none">${fridayListHtml(f.history, f.bonusThresholdPct)}</div>
+    ${fridayAheadHtml(f.upcomingFridays)}`;
+}
+
+// The next 8 Fridays, booked so far (from community-dashboard-data) — which
+// ones are filling and which need promoting. Same tier lines as the history.
+function fridayAheadHtml(list) {
+  if (!Array.isArray(list) || !list.length) return '';
+  const rows = list.map(u => {
+    const pct = Math.max(0, u.pct || 0);
+    const tier = fridayTierReached(pct);
+    const toTier1 = Math.max(0, Math.ceil(u.effectiveTotal * _fridayTiers[0] / 100) - (u.guests || 0));
+    return `<div class="fa-row">
+        <div class="fa-date">${esc(u.dateLabel)}</div>
+        <div class="fa-bar"><div style="width:${Math.min(pct, 100)}%;background:${tier ? 'var(--green)' : 'var(--accent)'}"></div>
+          ${_fridayTiers.map((t, i) => `<span class="fa-tick" style="left:${Math.min(t, 100)}%" title="Tier ${i + 1} · ${t}%"></span>`).join('')}</div>
+        <div class="fa-pct">${pct.toFixed(0)}%</div>
+        <div class="fa-sub">${u.hadEvent || u.guests ? `${u.guests} / ${u.effectiveTotal} guests${tier ? ` · tier ${tier} 🎉` : ` · ${toTier1} more for tier 1`}` : 'no event scheduled yet'}</div>
+      </div>`;
+  }).join('');
+  return `<div class="friday-ahead">
+      <div class="pts-subhead" style="margin:16px 0 8px">📅 Next ${list.length} Fridays — booked so far</div>
+      ${rows}
+      <div class="goal-note" style="margin-top:6px">Ticks mark the points tiers (${_fridayTiers.map(t => t + '%').join(' / ')}). Bookings so far — these fill up as Friday gets closer.</div>
+    </div>`;
 }
 
 function setFridayView(view) {
