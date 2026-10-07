@@ -12239,6 +12239,7 @@ async function frShowDay(studioId, day) {
     <button id="cp-subbtn-levels" onclick="cpSwitchSub('levels')" class="cp-subbtn">Levels</button>
     <button id="cp-subbtn-redemptions" onclick="cpSwitchSub('redemptions')" class="cp-subbtn">Redemptions<span id="cp-sub-badge" class="tab-badge" style="display:none;margin-left:6px"></span></button>
     <button id="cp-subbtn-wallets" onclick="cpSwitchSub('wallets')" class="cp-subbtn">Wallets &amp; Adjustments</button>
+    <button id="cp-subbtn-studiopoints" onclick="cpSwitchSub('studiopoints')" class="cp-subbtn">📈 Studio Points</button>
     <button id="cp-subbtn-mentoring" onclick="cpSwitchSub('mentoring')" class="cp-subbtn">🎓 Mentoring</button>
     <button id="cp-subbtn-flash" onclick="cpSwitchSub('flash')" class="cp-subbtn">⚡ Flash Challenges</button>
     <button id="cp-subbtn-instagram" onclick="cpSwitchSub('instagram')" class="cp-subbtn">📸 Instagram</button>
@@ -12372,6 +12373,7 @@ function cpRender() {
   if (cpSub === 'redemptions') body.innerHTML = cpRenderRedemptions()
   if (cpSub === 'wallets') { body.innerHTML = cpRenderWallets(); cpAdjPersonChanged() }
   if (cpSub === 'mentoring') body.innerHTML = cpRenderMentoring()
+  if (cpSub === 'studiopoints') body.innerHTML = cpRenderStudioPoints()
   if (cpSub === 'flash') body.innerHTML = cpRenderFlash()
 }
 
@@ -13030,6 +13032,105 @@ async function cpSaveRule(isNew) {
     source_notes: document.getElementById('cpr-notes').value,
     is_active: document.getElementById('cpr-active').checked
   }) })
+}
+
+// ═══ 📈 STUDIO POINTS ═════════════════════════════
+// What every studio WOULD earn each month under the current rules — with or
+// without an SC — next to what was actually paid to an SC, plus a running
+// total since the points program started. Read only
+// (community_points_would_earn.sql via the would_earn action).
+const CP_PROGRAM_START = '2026-10-01'
+let cpWould = null          // { rows, loadedAt }
+let cpWouldMonth = null     // 'YYYY-MM-01' shown
+
+function cpMonthsSinceStart() {
+  const out = []
+  const end = cpData.today.slice(0, 7) + '-01'
+  for (let d = new Date(CP_PROGRAM_START + 'T12:00:00'); ; d.setMonth(d.getMonth() + 1)) {
+    const m = d.toISOString().slice(0, 7) + '-01'
+    out.push(m)
+    if (m >= end) break
+  }
+  return out
+}
+function cpMonthName(m) { return new Date(m + 'T12:00:00').toLocaleDateString('en-CA', { month: 'long', year: 'numeric' }) }
+
+async function cpLoadWould() {
+  const body = document.getElementById('cp-body')
+  try {
+    const r = await cpRequest('would_earn', { from: CP_PROGRAM_START, to: cpData.today })
+    cpWould = { rows: r.rows || [], loadedAt: new Date() }
+  } catch (e) {
+    cpWould = { error: e.message }
+  }
+  if (cpSub === 'studiopoints') body.innerHTML = cpRenderStudioPoints()
+}
+
+function cpRenderStudioPoints() {
+  if (!cpWould) { setTimeout(cpLoadWould, 0); return '<div class="empty">Working out every studio\'s points…</div>' }
+  if (cpWould.error) return `<div class="cp-note">${cpEsc(cpWould.error)}</div>`
+  const months = cpMonthsSinceStart()
+  if (!cpWouldMonth || !months.includes(cpWouldMonth)) cpWouldMonth = months[months.length - 1]
+  const isCurrent = cpWouldMonth === months[months.length - 1]
+
+  // per studio: this month + running total (program start → selected month)
+  const byStudio = {}
+  ;(cpWould.rows || []).forEach(r => {
+    const m = String(r.month).slice(0, 10)
+    if (m > cpWouldMonth) return
+    const s = byStudio[r.studio_id] || (byStudio[r.studio_id] = { id: r.studio_id, month: null, runWould: 0, runPaid: 0 })
+    const would = (r.friday_pts || 0) + (r.party_pts || 0) + (r.team_pts || 0) + (r.flash_pts || 0)
+    s.runWould += would
+    s.runPaid += r.awarded_pts || 0
+    if (m === cpWouldMonth) s.month = Object.assign({ would }, r)
+  })
+  const currentSC = id => {
+    const r = cpCurrentRoles().find(x => x.studio_id === id)
+    return r ? cpStaffName(r.staff_profile_id) : null
+  }
+  const rows = Object.values(byStudio).filter(s => s.month)
+    .sort((a, b) => (b.runWould - a.runWould) || getStudioName(a.id).localeCompare(getStudioName(b.id)))
+  const tot = rows.reduce((t, s) => ({ would: t.would + s.month.would, paid: t.paid + (s.month.awarded_pts || 0), run: t.run + s.runWould, runPaid: t.runPaid + s.runPaid }), { would: 0, paid: 0, run: 0, runPaid: 0 })
+  const unclaimed = rows.filter(s => !currentSC(s.id) && s.runWould > 0)
+  const cell = (pts, sub) => pts ? `${cpFmt(pts)}${sub ? `<div class="cp-muted">${sub}</div>` : ''}` : '<span class="cp-muted">—</span>'
+
+  return `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:0.75rem">
+      <div class="cp-note" style="margin:0;max-width:760px">What every studio <strong>would earn</strong> under the current rules — whether or not it has an SC —
+        next to what was actually <strong>paid</strong> to an SC (which also includes mentoring and adjustments). Running totals start ${cpEsc(cpMonthName(CP_PROGRAM_START))}.
+        ${isCurrent ? 'This month is month-to-date: parties and team building already booked for later this month are included.' : ''}</div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <select onchange="cpWouldMonth=this.value;document.getElementById('cp-body').innerHTML=cpRenderStudioPoints()">
+          ${months.slice().reverse().map(m => `<option value="${m}" ${m === cpWouldMonth ? 'selected' : ''}>${cpEsc(cpMonthName(m))}</option>`).join('')}
+        </select>
+        <button class="btn" onclick="cpWould=null;document.getElementById('cp-body').innerHTML=cpRenderStudioPoints()">Refresh</button>
+      </div>
+    </div>
+    <div class="cp-summary">
+      <div class="cp-stat"><div class="cp-stat-label">Would earn · ${cpEsc(cpMonthName(cpWouldMonth))}</div><div class="cp-stat-value">${cpFmt(tot.would)}</div><div class="cp-stat-sub">≈ ${cpDollars(tot.would)} across ${rows.filter(s => s.month.would).length} studios</div></div>
+      <div class="cp-stat"><div class="cp-stat-label">Paid to SCs · ${cpEsc(cpMonthName(cpWouldMonth))}</div><div class="cp-stat-value">${cpFmt(tot.paid)}</div><div class="cp-stat-sub">≈ ${cpDollars(tot.paid)}</div></div>
+      <div class="cp-stat"><div class="cp-stat-label">Running total since ${cpEsc(cpMonthName(CP_PROGRAM_START))}</div><div class="cp-stat-value">${cpFmt(tot.run)}</div><div class="cp-stat-sub">would earn · ${cpFmt(tot.runPaid)} paid</div></div>
+      <div class="cp-stat"><div class="cp-stat-label">Earned with no SC</div><div class="cp-stat-value">${unclaimed.length}</div><div class="cp-stat-sub">${unclaimed.length ? cpEsc(unclaimed.slice(0, 3).map(s => getStudioName(s.id)).join(', ')) + (unclaimed.length > 3 ? '…' : '') : 'every earning studio has an SC'}</div></div>
+    </div>
+    <div class="users-table-wrap"><table class="users-table"><thead><tr>
+      <th>Studio</th><th>SC</th><th>Fridays</th><th>Parties</th><th>Team building</th><th>Flash</th>
+      <th>Would earn</th><th>Paid to SC</th><th>Running total</th></tr></thead><tbody>
+      ${rows.map(s => {
+        const m = s.month, sc = currentSC(s.id)
+        return `<tr${!sc ? ' style="background:#fffaf0"' : ''}>
+          <td style="font-size:13px;font-weight:500">${cpEsc(getStudioName(s.id))}</td>
+          <td style="font-size:12px">${sc ? cpEsc(sc) : '<span class="cp-pill cp-pill-off">No SC</span>'}</td>
+          <td>${cell(m.friday_pts, m.fridays_counted ? `${m.fridays_counted} Friday${m.fridays_counted === 1 ? '' : 's'}` : '')}</td>
+          <td>${cell(m.party_pts, m.party_pct != null ? `${Number(m.party_pct).toFixed(0)}% full` : '')}</td>
+          <td>${cell(m.team_pts, m.team_bookings ? `${m.team_bookings} booking${m.team_bookings === 1 ? '' : 's'}` : '')}</td>
+          <td>${cell(m.flash_pts)}</td>
+          <td style="font-weight:600">${cpFmt(m.would)}<div class="cp-muted" style="font-weight:400">≈ ${cpDollars(m.would)}</div></td>
+          <td>${m.awarded_pts ? cpFmt(m.awarded_pts) : (m.would && !sc ? '<span class="cp-muted">not paid — no SC</span>' : '<span class="cp-muted">0</span>')}</td>
+          <td style="font-weight:700">${cpFmt(s.runWould)}<div class="cp-muted" style="font-weight:400">${cpFmt(s.runPaid)} paid</div></td></tr>`
+      }).join('')}
+      <tr style="background:#f7f6f2;font-weight:700"><td colspan="6">All studios</td><td>${cpFmt(tot.would)}</td><td>${cpFmt(tot.paid)}</td><td>${cpFmt(tot.run)}</td></tr>
+    </tbody></table></div>
+    <div class="cp-muted" style="margin-top:6px">Mentoring and manual entries only exist once paid, so they appear under "Paid to SC". Waiting periods aren't applied here. ${cpWould.loadedAt ? 'Worked out at ' + cpWould.loadedAt.toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' }) : ''}</div>`
 }
 
 // ═══ ⚡ FLASH CHALLENGES ═══════════════════════════
