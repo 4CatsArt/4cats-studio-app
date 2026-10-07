@@ -12282,6 +12282,8 @@ async function frShowDay(studioId, day) {
 .cp-row-off td { opacity:0.5; }
 .cp-check { display:flex; align-items:center; gap:8px; font-size:13px; }
 .cp-check input { width:auto !important; }
+.cpw-link { color: inherit; text-decoration: none; display: inline-block; border-bottom: 1px dotted #b8b4a8; }
+.cpw-link:hover { color: #5b3fd6; border-bottom-color: #5b3fd6; }
 </style>
 
 <script>
@@ -13092,7 +13094,12 @@ function cpRenderStudioPoints() {
     .sort((a, b) => (b.runWould - a.runWould) || getStudioName(a.id).localeCompare(getStudioName(b.id)))
   const tot = rows.reduce((t, s) => ({ would: t.would + s.month.would, paid: t.paid + (s.month.awarded_pts || 0), run: t.run + s.runWould, runPaid: t.runPaid + s.runPaid }), { would: 0, paid: 0, run: 0, runPaid: 0 })
   const unclaimed = rows.filter(s => !currentSC(s.id) && s.runWould > 0)
-  const cell = (pts, sub) => pts ? `${cpFmt(pts)}${sub ? `<div class="cp-muted">${sub}</div>` : ''}` : '<span class="cp-muted">—</span>'
+  // Each number opens a quick breakdown (cpWouldDetail). Clickable whenever
+  // there's something to explain, even at 0 points (e.g. a Friday at 31%).
+  const cell = (pts, sub, studio, kind, show) => {
+    const body = pts ? `${cpFmt(pts)}${sub ? `<div class="cp-muted">${sub}</div>` : ''}` : (show ? `<span class="cp-muted">0${sub ? `<div>${sub}</div>` : ''}</span>` : '<span class="cp-muted">—</span>')
+    return (pts || show) ? `<a href="#" class="cpw-link" onclick="cpWouldDetail('${cpEsc(studio)}','${kind}');return false">${body}</a>` : body
+  }
 
   return `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:0.75rem">
@@ -13120,17 +13127,85 @@ function cpRenderStudioPoints() {
         return `<tr${!sc ? ' style="background:#fffaf0"' : ''}>
           <td style="font-size:13px;font-weight:500">${cpEsc(getStudioName(s.id))}</td>
           <td style="font-size:12px">${sc ? cpEsc(sc) : '<span class="cp-pill cp-pill-off">No SC</span>'}</td>
-          <td>${cell(m.friday_pts, m.fridays_counted ? `${m.fridays_counted} Friday${m.fridays_counted === 1 ? '' : 's'}` : '')}</td>
-          <td>${cell(m.party_pts, m.party_pct != null ? `${Number(m.party_pct).toFixed(0)}% full` : '')}</td>
-          <td>${cell(m.team_pts, m.team_bookings ? `${m.team_bookings} booking${m.team_bookings === 1 ? '' : 's'}` : '')}</td>
-          <td>${cell(m.flash_pts)}</td>
+          <td>${cell(m.friday_pts, m.fridays_counted ? `${m.fridays_counted} Friday${m.fridays_counted === 1 ? '' : 's'}` : '', s.id, 'fridays', m.fridays_counted > 0)}</td>
+          <td>${cell(m.party_pts, m.party_pct != null ? `${Number(m.party_pct).toFixed(0)}% full` : '', s.id, 'party', m.party_pct != null)}</td>
+          <td>${cell(m.team_pts, m.team_bookings ? `${m.team_bookings} booking${m.team_bookings === 1 ? '' : 's'}` : '', s.id, 'team', m.team_bookings > 0)}</td>
+          <td>${cell(m.flash_pts, '', s.id, 'flash', false)}</td>
           <td style="font-weight:600">${cpFmt(m.would)}<div class="cp-muted" style="font-weight:400">≈ ${cpDollars(m.would)}</div></td>
-          <td>${m.awarded_pts ? cpFmt(m.awarded_pts) : (m.would && !sc ? '<span class="cp-muted">not paid — no SC</span>' : '<span class="cp-muted">0</span>')}</td>
+          <td>${m.awarded_pts ? `<a href="#" class="cpw-link" onclick="cpWouldDetail('${cpEsc(s.id)}','paid');return false">${cpFmt(m.awarded_pts)}</a>` : (m.would && !sc ? '<span class="cp-muted">not paid — no SC</span>' : '<span class="cp-muted">0</span>')}</td>
           <td style="font-weight:700">${cpFmt(s.runWould)}<div class="cp-muted" style="font-weight:400">${cpFmt(s.runPaid)} paid</div></td></tr>`
       }).join('')}
       <tr style="background:#f7f6f2;font-weight:700"><td colspan="6">All studios</td><td>${cpFmt(tot.would)}</td><td>${cpFmt(tot.paid)}</td><td>${cpFmt(tot.run)}</td></tr>
     </tbody></table></div>
-    <div class="cp-muted" style="margin-top:6px">Mentoring and manual entries only exist once paid, so they appear under "Paid to SC". Waiting periods aren't applied here. ${cpWould.loadedAt ? 'Worked out at ' + cpWould.loadedAt.toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' }) : ''}</div>`
+    <div class="cp-muted" style="margin-top:6px">Click any number for the breakdown. Mentoring and manual entries only exist once paid, so they appear under "Paid to SC". Waiting periods aren't applied here. ${cpWould.loadedAt ? 'Worked out at ' + cpWould.loadedAt.toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' }) : ''}</div>`
+}
+
+// Quick breakdown behind a number on 📈 Studio Points (read-only pop-up).
+function cpInfoModal(title, sub, html) {
+  cpOpenModal(title, sub, html, null)
+  const save = document.getElementById('cp-modal-save'); if (save) save.style.display = 'none'
+  const cancel = document.querySelector('#cp-modal-root .modal-actions .btn:not(.btn-primary)'); if (cancel) cancel.textContent = 'Close'
+}
+function cpTierLabel(code, pct) {
+  const r = (cpData.rules || []).find(x => x.code === code)
+  const tiers = ((r && r.tiers) || []).slice().sort((a, b) => a.at - b.at)
+  let n = 0; tiers.forEach((t, i) => { if (pct >= t.at) n = i + 1 })
+  return { n, tiers }
+}
+function cpWouldDetail(studioId, kind) {
+  const row = (cpWould.rows || []).find(r => r.studio_id === studioId && String(r.month).slice(0, 10) === cpWouldMonth)
+  if (!row) return
+  const d = row.detail || {}
+  const name = getStudioName(studioId), month = cpMonthName(cpWouldMonth)
+  const day = x => new Date(String(x).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })
+  const line = (l, r, muted) => `<div style="display:flex;justify-content:space-between;gap:1rem;padding:6px 0;border-bottom:1px solid #f0f0ea;font-size:13px">
+      <span>${l}</span><span style="font-weight:600;${muted ? 'color:#999;font-weight:400' : ''}">${r}</span></div>`
+  let title = '', html = ''
+  if (kind === 'fridays') {
+    title = 'Friday fill'
+    const fr = d.fridays || []
+    html = fr.map(f => {
+      const t = cpTierLabel('friday_fill', Number(f.pct))
+      return line(`${day(f.date)} · <strong>${Number(f.pct).toFixed(0)}%</strong>${f.guests != null ? ` <span class="cp-muted">(${f.guests} / ${Math.round(f.full_night || 0)} guests)</span>` : ''}`,
+                  f.pts ? `Tier ${t.n} · ${cpFmt(f.pts)}` : `below ${t.tiers[0] ? t.tiers[0].at + '%' : 'tier 1'}`, !f.pts)
+    }).join('') || '<div class="cp-muted">No Fridays scored yet this month.</div>'
+    const t = cpTierLabel('friday_fill', 0).tiers
+    html += `<div class="cp-muted" style="margin-top:8px">Tiers: ${t.map((x, i) => `${x.at}% → ${i ? '+' : ''}${cpFmt(x.points)}`).join(' · ')}. Paid the Saturday after each Friday.</div>`
+  } else if (kind === 'party') {
+    title = 'Kids party fill'
+    const p = d.party || {}, pct = Number(p.pct || 0), t = cpTierLabel('party_fill', pct)
+    html = line('Party slots booked', p.slots != null ? `<strong>${p.booked ?? 0} of ${p.slots}</strong>` : 'no party schedule')
+      + line('Fill', `${pct.toFixed(0)}%`)
+      + line('Tier reached', t.n ? `Tier ${t.n} · ${cpFmt(row.party_pts)}` : 'none yet', !t.n)
+    const nxt = t.tiers[t.n]
+    if (nxt && p.slots) {
+      const need = Math.max(0, Math.ceil(p.slots * nxt.at / 100) - (p.booked || 0))
+      html += line(`To reach ${nxt.at}%`, `${need} more part${need === 1 ? 'y' : 'ies'}`)
+    }
+    html += `<div class="cp-muted" style="margin-top:8px">Counts parties dated this month, including ones booked for later in the month. Paid once the month is over (on the 2nd).</div>`
+  } else if (kind === 'team') {
+    title = 'Team building'
+    const r = (cpData.rules || []).find(x => x.code === 'team_building') || {}
+    const ppu = Number(r.points_per_unit || 0), cap = r.monthly_cap
+    let running = 0
+    html = (d.team || []).map(x => {
+      let pts = x.n * ppu
+      if (cap) pts = Math.max(0, Math.min(pts, cap - running))
+      running += pts
+      return line(`${day(x.date)} · ${x.n} booking${x.n === 1 ? '' : 's'}`, pts ? cpFmt(pts) : 'cap reached', !pts)
+    }).join('') || '<div class="cp-muted">No team building held yet this month.</div>'
+    html += `<div class="cp-muted" style="margin-top:8px">${cpFmt(ppu)} per booking${cap ? `, up to ${cpFmt(cap)} a month` : ''}. Paid the morning after each event.</div>`
+  } else if (kind === 'flash') {
+    title = 'Flash Challenges'
+    html = (d.flash || []).map(f => line(`⚡ ${cpEsc(f.title)} <span class="cp-muted">· ${day(f.date)}</span>`, `${cpFmt(f.pts)}${f.paid ? '' : ' · not paid (no SC)'}`)).join('')
+      || '<div class="cp-muted">None completed this month.</div>'
+  } else if (kind === 'paid') {
+    title = 'Paid to the SC'
+    const names = { friday_fill: 'Friday fill', party_fill: 'Kids party fill', team_building: 'Team building', flash_challenge: 'Flash Challenges', adjust: 'Adjustments' }
+    const ruleName = c => names[c] || ((cpData.rules || []).find(x => x.code === c) || {}).name || c
+    html = Object.entries(d.paid || {}).map(([k, v]) => line(cpEsc(ruleName(k)), cpFmt(v))).join('') || '<div class="cp-muted">Nothing paid yet.</div>'
+  }
+  cpInfoModal(`${title} — ${name}`, month, html)
 }
 
 // ═══ ⚡ FLASH CHALLENGES ═══════════════════════════
