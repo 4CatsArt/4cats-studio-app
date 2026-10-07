@@ -305,6 +305,15 @@ button.pill { cursor: pointer; }
       <button class="btn btn-primary" onclick="addTheme()">Add theme</button>
     </div>
     <div class="panel table-wrap" id="themes-body"><div class="loading">Loading…</div></div>
+
+    <!-- Special days: on that date, the community dashboard banner (and colours,
+         if set) come from here instead of the week's theme. -->
+    <div class="toolbar" style="margin-top:1.75rem">
+      <strong style="font-size:15px">🎃 Special days</strong>
+      <div class="muted small grow">For holidays like Halloween or Valentine's Day. On that date the dashboard banner (and any colours set here) replace the week's theme — for that day only. Tick <em>Every year</em> for fixed dates (Oct 31); leave it unticked for dates that move (Thanksgiving, Easter).</div>
+      <button class="btn btn-primary" onclick="addSpecialDay()">Add special day</button>
+    </div>
+    <div class="panel table-wrap" id="specialdays-body"><div class="loading">Loading…</div></div>
   </div>
 
   <!-- REVIEW -->
@@ -570,7 +579,7 @@ async function initApp(user) {
   }
   document.getElementById('login-screen').style.display = 'none'
   document.getElementById('app-screen').style.display = 'block'
-  await Promise.all([loadLibrary(), loadThemes(), loadSheets('base'), loadSheets('template')])
+  await Promise.all([loadLibrary(), loadThemes(), loadSheets('base'), loadSheets('template'), loadSpecialDays()])
   buildYearOptions()
   routeFromHash()
 }
@@ -1469,6 +1478,7 @@ async function runImport() {
    ============================================================ */
 let themeWeeks = null   // { theme_id: ['2026-09-28', …] } for the current year
 async function renderThemes() {
+  renderSpecialDays()
   const body = document.getElementById('themes-body')
   if (!themes.length) { body.innerHTML = '<div class="empty">No themes yet. Add one to start planning weeks.</div>'; return }
   if (!themeWeeks) await loadThemeWeeks()
@@ -1518,6 +1528,70 @@ function saveAnchor(id, el) {
   if (m && d && d > new Date(2024, m, 0).getDate()) { toast(MONTHS[m - 1] + ' doesn\'t have ' + d + ' days.', true); return }
   saveTheme(id, { anchor_month: m, anchor_day: d })
 }
+/* ---------- special days (dashboard_special_days) ---------- */
+let specialDays = [], specialDaysError = null
+async function loadSpecialDays() {
+  const { data, error } = await sb.from('dashboard_special_days').select('*').order('special_date')
+  if (error) { specialDaysError = /does not exist|relation/i.test(error.message || '') ? 'Run dashboard_special_days.sql first.' : friendlyError(error); specialDays = []; return }
+  specialDaysError = null
+  specialDays = data || []
+}
+function specialDayColorsHtml(d) {
+  const fields = [['accent_color', 'Accent'], ['accent_color_deep', 'Accent 2'], ['sidebar_color', 'Sidebar'], ['sidebar_color_deep', 'Sidebar 2']]
+  return '<div class="color-grid">' + fields.map(([key, label]) => {
+    const val = d[key] || ''
+    return '<div class="color-field"><label>' + label + '</label>' +
+      '<span class="color-swatch" style="background:' + esc(val || '#ffffff') + '"></span>' +
+      '<input type="text" placeholder="#hex" value="' + esc(val) + '" onchange="saveSpecialDay(\'' + d.id + '\',{' + key + ':this.value.trim()||null});this.previousElementSibling.style.background=this.value.trim()||\'#ffffff\'" aria-label="' + label + ' color"></div>'
+  }).join('') + '</div>'
+}
+function renderSpecialDays() {
+  const body = document.getElementById('specialdays-body')
+  if (!body) return
+  if (specialDaysError) { body.innerHTML = '<div class="empty">' + esc(specialDaysError) + '</div>'; return }
+  if (!specialDays.length) { body.innerHTML = '<div class="empty">No special days yet. Add Halloween, Valentine\'s Day… to give the dashboard a banner just for that day.</div>'; return }
+  const sorted = specialDays.slice().sort((a, b) => {
+    const k = d => d.repeats_yearly ? d.special_date.slice(5) : d.special_date.slice(5) + d.special_date.slice(0, 4)
+    return k(a).localeCompare(k(b))
+  })
+  body.innerHTML = '<table class="theme-table"><thead><tr><th style="width:22%">Name</th><th style="width:160px">Date</th><th style="width:90px">Every year</th>' +
+    '<th style="width:170px">Banner image<br><span style="font-weight:400">~1920×350px</span></th><th style="width:180px">Colors (optional)<br><span style="font-weight:400">blank = use the week\'s</span></th><th style="width:70px">Active</th><th style="width:70px"></th></tr></thead><tbody>' +
+    sorted.map(d => '<tr' + (d.is_active ? '' : ' style="opacity:.55"') + '>' +
+      '<td><input type="text" value="' + esc(d.name) + '" onchange="saveSpecialDay(\'' + d.id + '\',{name:this.value.trim()})" aria-label="Name" style="width:100%"></td>' +
+      '<td><input type="date" value="' + esc(d.special_date) + '" onchange="if(this.value)saveSpecialDay(\'' + d.id + '\',{special_date:this.value})" aria-label="Date"></td>' +
+      '<td style="text-align:center"><input type="checkbox" ' + (d.repeats_yearly ? 'checked' : '') + ' onchange="saveSpecialDay(\'' + d.id + '\',{repeats_yearly:this.checked})" aria-label="Every year"></td>' +
+      '<td><div class="banner-cell"><input type="url" placeholder="https://…" value="' + esc(d.banner_image_url || '') + '" onchange="saveSpecialDay(\'' + d.id + '\',{banner_image_url:this.value.trim()||null});this.nextElementSibling.outerHTML=bannerPreviewTag(this.value.trim())" aria-label="Banner image URL">' +
+        bannerPreviewTag(d.banner_image_url) + '</div></td>' +
+      '<td>' + specialDayColorsHtml(d) + '</td>' +
+      '<td style="text-align:center"><input type="checkbox" ' + (d.is_active ? 'checked' : '') + ' onchange="saveSpecialDay(\'' + d.id + '\',{is_active:this.checked},true)" aria-label="Active"></td>' +
+      '<td><button class="btn btn-small" onclick="deleteSpecialDay(\'' + d.id + '\')">Delete</button></td></tr>').join('') +
+    '</tbody></table>'
+}
+async function saveSpecialDay(id, patch, rerender) {
+  if (patch.name === '') { toast('A special day needs a name.', true); renderSpecialDays(); return }
+  const { data, error } = await sb.from('dashboard_special_days').update(patch).eq('id', id).select().single()
+  if (error) { toast(friendlyError(error), true); renderSpecialDays(); return }
+  const i = specialDays.findIndex(x => x.id === id); if (i >= 0) specialDays[i] = data
+  if (rerender || 'special_date' in patch || 'repeats_yearly' in patch) renderSpecialDays()
+  toast('Special day saved')
+}
+async function addSpecialDay() {
+  if (specialDaysError) { toast(specialDaysError, true); return }
+  const name = prompt('Special day name (for example "Halloween")')
+  if (!name || !name.trim()) return
+  const today = new Date(); today.setMinutes(today.getMinutes() - today.getTimezoneOffset())
+  const { data, error } = await sb.from('dashboard_special_days').insert({ name: name.trim(), special_date: today.toISOString().slice(0, 10) }).select().single()
+  if (error) { toast(friendlyError(error), true); return }
+  specialDays.push(data); renderSpecialDays(); toast('Added — now set its date and banner')
+}
+async function deleteSpecialDay(id) {
+  const d = specialDays.find(x => x.id === id)
+  if (!d || !confirm('Delete "' + d.name + '"?')) return
+  const { error } = await sb.from('dashboard_special_days').delete().eq('id', id)
+  if (error) { toast(friendlyError(error), true); return }
+  specialDays = specialDays.filter(x => x.id !== id); renderSpecialDays(); toast('Special day deleted')
+}
+
 async function addTheme() {
   const name = prompt('Theme name (for example "Ghosties Week")')
   if (!name || !name.trim()) return
