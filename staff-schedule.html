@@ -254,6 +254,7 @@ table.wk tr.wk-sched td { background: #f7f9fc; }
         <button class="btn bad" id="bd-delete" onclick="bdDeleteDrafts()" title="Delete the saved drafts for these studios this week (approved shifts stay)">Delete drafts</button>
         <button class="btn" id="bd-save" onclick="saveDraftSchedule()" disabled>Save as drafts</button>
         <button class="btn good" id="bd-approve" onclick="approveDrafts()">Approve saved drafts</button>
+        <button class="btn" id="bd-unapprove" onclick="unapproveWeek()" title="Turn this week's approved shifts back into drafts so they can be changed">Unpublish</button>
       </div>
       <div class="note info" style="margin-bottom:1rem">
         Builds shifts for one studio and week from what the studio needs (Coverage), who's available, home studios,
@@ -2286,6 +2287,31 @@ async function saveDraftSchedule() {
 function bdPersonAny(id) {
   for (const st of bdStudios) { const x = bdPlans[st]; const p = x && x.ctx && x.ctx.pool.find(q => q.id === id); if (p) return p.display_name }
   return (staffById[id] || {}).display_name || 'Someone'
+}
+
+// Unpublish: approved (and posted) shifts for the open studios this week go back to drafts, ready to change
+async function unapproveWeek() {
+  if (!bdStudios.length) { toast('Choose a studio first.', true); return }
+  if (bdAnyDirty() && !confirm('You have unsaved changes. They\'ll be replaced by the unpublished shifts. Continue?')) return
+  const to = addDays(bdWeek, 6), counts = {}
+  for (const st of bdStudios) {
+    const { data, error } = await sb.from('staff_shifts').select('status').eq('studio_id', st).in('status', ['approved', 'posted']).gte('shift_date', bdWeek).lte('shift_date', to)
+    if (error) { toast(error.message, true); return }
+    counts[st] = { n: data.length, posted: data.filter(r => r.status === 'posted').length }
+  }
+  const total = Object.values(counts).reduce((a, c) => a + c.n, 0)
+  if (!total) { toast('No approved shifts for these studios this week.', true); return }
+  const posted = Object.values(counts).reduce((a, c) => a + c.posted, 0)
+  if (!confirm('Unpublish this week?\n\n' + bdStudios.map(st => (STUDIO_NAMES[st] || st) + ': ' + counts[st].n + ' shifts').join('\n') +
+      '\n\nThey go back to drafts so you can change them, then approve again.' +
+      (posted ? '\n\n' + posted + ' of them were marked as posted to Sling. Sling still has them, so update Sling too.' : ''))) return
+  for (const st of bdStudios) {
+    if (!counts[st].n) continue
+    const up = await sb.from('staff_shifts').update({ status: 'draft', posted_at: null }).eq('studio_id', st).in('status', ['approved', 'posted']).gte('shift_date', bdWeek).lte('shift_date', to)
+    if (up.error) { toast(up.error.message, true); return }
+  }
+  toast('Unpublished ' + total + ' shifts: they\'re drafts again')
+  bdOpenWeek()
 }
 
 async function approveDrafts() {
