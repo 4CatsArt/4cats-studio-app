@@ -317,10 +317,10 @@ select:focus, input:focus { border-color: #888; }
         <button class="btn btn-warn" id="btn-zero" onclick="toggleHighlight('zero')">0 Reg</button>
         <button class="btn btn-full" id="btn-full-btn" onclick="toggleHighlight('full')">Full</button>
         <button class="btn btn-low" id="btn-low" onclick="toggleHighlight('low')">Low Inventory</button>
-        <button class="btn" id="btn-sync-week" onclick="syncWeekInventory()">Sync Shopify</button>
+
         <button class="btn" id="btn-mark-lineup" onclick="openMarkLineupModal()" style="background:#fff7ed;color:#9a3412;border-color:#fed7aa">🔗 Mark & Sync Lineup</button>
-        <button class="btn" id="btn-full-sync" onclick="runFullSync()" style="background:#1a4fa0;color:white;border-color:#1a4fa0">⟳ Full Sync</button>
-        <button class="btn" id="btn-ext-sync" onclick="runFullSync(true)" style="background:#4a3a8a;color:white;border-color:#4a3a8a">⟳ Sync 91–150d</button>
+        <button class="btn" id="btn-full-sync" onclick="openSyncDialog()" style="background:#1a4fa0;color:white;border-color:#1a4fa0">⟳ Sync Shopify…</button>
+        <span id="btn-sync-week" style="display:none"></span>
       </div>
       <div class="toolbar-group">
         <label>0 Reg before</label>
@@ -2064,16 +2064,52 @@ function shiftSchDay(n) {
 
 function shiftWeek(n) { shiftSchDay(n * 7) }
 
-async function runFullSync(extended = false) {
-  const btnId = extended ? 'btn-ext-sync' : 'btn-full-sync'
-  const btn = document.getElementById(btnId)
-  const origText = extended ? '⟳ Sync 91–150d' : '⟳ Full Sync'
-  const origBg = extended ? '#4a3a8a' : '#1a4fa0'
+// ── One Sync Shopify button: pick the dates, then it syncs those days one at a time ──
+function openSyncDialog() {
+  const today = dateStr(new Date())
+  const plus = n => { const d = new Date(today + 'T12:00:00'); d.setDate(d.getDate() + n); return dateStr(d) }
+  const old = document.getElementById('sync-dialog'); if (old) old.remove()
+  const shown = document.getElementById('sch-day') ? document.getElementById('sch-day').value : ''
+  const wrap = document.createElement('div')
+  wrap.id = 'sync-dialog'
+  wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:3000;padding:16px'
+  const inp = 'padding:6px 8px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px'
+  wrap.innerHTML = `<div style="background:white;border-radius:12px;padding:20px;max-width:420px;width:100%;font-size:13px">
+    <div style="font-size:15px;font-weight:600;margin-bottom:12px">Sync Shopify</div>
+    <div style="display:flex;gap:10px;align-items:end;flex-wrap:wrap">
+      <label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:#888">FROM<input type="date" id="sync-from" value="${shown || today}" style="${inp}"></label>
+      <label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:#888">TO<input type="date" id="sync-to" value="${shown || today}" style="${inp}"></label>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin:10px 0">
+      <button class="btn" style="font-size:11px" onclick="document.getElementById('sync-from').value='${shown || today}';document.getElementById('sync-to').value='${shown || today}'">Day shown</button>
+      <button class="btn" style="font-size:11px" onclick="document.getElementById('sync-from').value='${today}';document.getElementById('sync-to').value='${plus(13)}'">Next 2 weeks</button>
+      <button class="btn" style="font-size:11px" onclick="document.getElementById('sync-from').value='${today}';document.getElementById('sync-to').value='${plus(90)}'">Next 90 days</button>
+      <button class="btn" style="font-size:11px" onclick="document.getElementById('sync-from').value='${plus(91)}';document.getElementById('sync-to').value='${plus(150)}'">91–150 days</button>
+    </div>
+    <div style="font-size:11px;color:#888;line-height:1.5;margin-bottom:14px">Syncs one day at a time, so longer ranges take a while (about 90 days ≈ several minutes). Today or later only.</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn" onclick="document.getElementById('sync-dialog').remove()">Cancel</button>
+      <button class="btn btn-primary" onclick="startRangeSync()">Sync</button>
+    </div></div>`
+  document.body.appendChild(wrap)
+}
+function startRangeSync() {
+  const today = dateStr(new Date())
+  const f = document.getElementById('sync-from').value, t = document.getElementById('sync-to').value
+  if (!f || !t) { alert('Choose both dates.'); return }
+  if (t < f) { alert('The To date is before the From date.'); return }
+  if (t < today) { alert('Shopify sync works on today and later.'); return }
+  const off = d => Math.round((new Date(d + 'T12:00:00') - new Date(today + 'T12:00:00')) / 86400000)
+  document.getElementById('sync-dialog').remove()
+  runFullSync(Math.max(0, off(f)), off(t), f, t)
+}
+
+async function runFullSync(startDay = 0, endDay = 90, fromDate = null, toDate = null) {
+  const btn = document.getElementById('btn-full-sync')
+  const origText = '⟳ Sync Shopify…'
+  const origBg = '#1a4fa0'
 
   // 1-day chunks — keeps each invocation small and fast (~10-30 sec)
-  // Days much further out have less Shopify content so they're even faster
-  const startDay = extended ? 91 : 0
-  const endDay = extended ? 150 : 90
   const chunks = []
   for (let d = startDay; d <= endDay; d++) chunks.push([d, d])
 
@@ -2146,6 +2182,11 @@ async function runFullSync(extended = false) {
     console.log('Failed chunks (click Full Sync again to retry):', failedChunks)
   }
   if (totalNotFound > 0) console.log(`Total not found in Shopify: ${totalNotFound}`)
+  const shownDay = document.getElementById('sch-day') && document.getElementById('sch-day').value
+  if (shownDay && fromDate && toDate && shownDay >= fromDate && shownDay <= toDate && typeof scheduleData !== 'undefined' && scheduleData.length) {
+    btn.textContent = 'Updating the day shown…'
+    try { await syncWeekInventory() } catch (e) { console.log('Day refresh failed', e) }
+  }
   loadSchedule()
   if (document.getElementById('tab-studio').classList.contains('active')) loadStudioView()
   setTimeout(() => { btn.textContent = origText; btn.style.background = origBg; btn.style.borderColor = origBg; btn.disabled = false }, 8000)
@@ -2165,6 +2206,17 @@ async function syncWeekInventory() {
       await cacheVariants(item.shopifyTitle, data)
       const shopifyStatus = resolveShopifyStatus(data.status, data.published_scope)
       const info = sessionInfoFromShopifyTitle(item.shopifyTitle)
+      // A studio whose variant was removed from this product can't be booked: mark its session as having no spaces
+      // (only when nobody's booked), so the staff schedule treats the day as closed.
+      for (const s2 of scheduleData) {
+        if (s2.session_date !== item.session_date || s2.session_time !== item.session_time || isSeriesClass2Plus(s2.title)) continue
+        if (buildShopifyTitle(s2.session_date, s2.session_time || '00:00:00', s2.title) !== item.shopifyTitle) continue
+        const hasVariant = (data.variants || []).some(v => STUDIO_VARIANT_MAP[s2.studio_id] === v.variant_title)
+        if (!hasVariant && !(s2.reg > 0) && s2.spaces_left_cache !== 0) {
+          await sb.from('sessions').update({ spaces_left_cache: 0 }).eq('id', s2.id)
+          s2.spaces_left_cache = 0
+        }
+      }
       for (const v of data.variants) {
         const studioId = Object.keys(STUDIO_VARIANT_MAP).find(k => STUDIO_VARIANT_MAP[k] === v.variant_title); if (!studioId) continue
         const session = scheduleData.find(s => s.studio_id===studioId && s.session_date===item.session_date && s.session_time===item.session_time && buildShopifyTitle(s.session_date, s.session_time||'00:00:00', s.title)===item.shopifyTitle)
@@ -2221,7 +2273,7 @@ async function syncWeekInventory() {
     await syncGlazingHandle(notFound)
   }
 
-  btn.textContent = `Sync Shopify${notFound.length ? ` (${notFound.length} missing)` : ''}`; btn.disabled = false
+  btn.textContent = ''; btn.disabled = false
   if (notFound.length) showSyncErrors(notFound)
   renderSchedule()
 }
