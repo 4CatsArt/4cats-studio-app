@@ -111,6 +111,23 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .stat-chip-value { font-size: 22px; font-weight: 500; line-height: 1; }
 .stat-chip-label { font-size: 11px; color: #888; margin-top: 2px; }
 
+/* SORT / HIDE RESOLVED */
+.filter-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: #444; cursor: pointer; padding: 6px 10px; border: 0.5px solid #d0d0c8; border-radius: 7px; background: white; user-select: none; }
+.filter-toggle input { cursor: pointer; margin: 0; }
+.filter-spacer { flex: 1; }
+.filter-count { font-size: 12px; color: #aaa; }
+
+/* UNREAD / NEW REPLY */
+.new-reply-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; background: #c0392b; color: white; border-radius: 20px; padding: 2px 8px; margin-left: 6px; vertical-align: middle; }
+.new-reply-dot { width: 6px; height: 6px; border-radius: 50%; background: white; display: inline-block; }
+.nav-badge { display: inline-block; min-width: 18px; height: 18px; line-height: 18px; padding: 0 5px; border-radius: 9px; background: #c0392b; color: white; font-size: 11px; font-weight: 600; text-align: center; margin-left: 4px; vertical-align: 1px; }
+.stat-chip.clickable { cursor: pointer; }
+.stat-chip.clickable:hover { border-color: #888; }
+#ticket-toast-wrap { position: fixed; bottom: 20px; right: 20px; z-index: 3000; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+.ticket-toast { background: #1a1a1a; color: white; border-radius: 10px; padding: 12px 16px; font-size: 13px; box-shadow: 0 6px 24px rgba(0,0,0,0.25); cursor: pointer; max-width: 340px; display: flex; gap: 10px; align-items: flex-start; }
+.ticket-toast-close { background: none; border: none; color: #888; font-size: 16px; cursor: pointer; line-height: 1; padding: 0; }
+.ticket-toast strong { display: block; margin-bottom: 2px; }
+
 /* LOADING */
 .loading { color: #aaa; font-size: 14px; padding: 2rem; text-align: center; }
 
@@ -168,7 +185,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
       <span class="ho-logo">4Cats</span>
       <nav class="ho-nav">
         <a href="admin.html">Admin</a>
-        <a href="tickets.html" class="active">Tickets</a>
+        <a href="tickets.html" class="active">Tickets<span id="nav-unread-badge" class="nav-badge" style="display:none"></span></a>
         <a href="knowledge.html">Knowledge Base</a>
         <a href="moments.html">✨ Moments</a>
       </nav>
@@ -216,7 +233,19 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
         <option value="me">Assigned to me</option>
         <option value="unassigned">Unassigned</option>
       </select>
+      <select class="filter-select" id="f-sort" onchange="onSortOrToggleChange()">
+        <option value="recent">Sort: Recent activity</option>
+        <option value="unread">Sort: Unread first</option>
+        <option value="newest">Sort: Newest created</option>
+        <option value="oldest">Sort: Oldest created</option>
+        <option value="priority">Sort: Priority</option>
+        <option value="status">Sort: Status</option>
+        <option value="studio">Sort: Studio</option>
+      </select>
+      <label class="filter-toggle"><input type="checkbox" id="f-hide-resolved" checked onchange="onSortOrToggleChange()"> Hide resolved</label>
       <button class="filter-clear" onclick="clearFilters()">Clear filters</button>
+      <span class="filter-spacer"></span>
+      <span class="filter-count" id="f-count"></span>
     </div>
 
     <div id="ticket-list-container"><div class="loading">Loading tickets...</div></div>
@@ -389,7 +418,9 @@ function loadApp() {
       populateAssigneeFilter()
       populateNewTicketStudioDropdown()
       populateNewTicketAssigneeDropdown()
+      restoreListPrefs()
       fetchAllTickets()
+      startTicketPolling()
     })
   })
 }
@@ -455,7 +486,7 @@ function populateNewTicketAssigneeDropdown() {
 
 function fetchAllTickets() {
   sb.from('tickets')
-    .select('id, title, ticket_number, category, priority, status, created_at, updated_at, studio_id, customer_email, shopify_order_name, assigned_to_user_id, ticket_messages(id, created_at), ticket_tags(tag_id)')
+    .select('id, title, ticket_number, category, priority, status, created_at, updated_at, studio_id, customer_email, shopify_order_name, assigned_to_user_id, ticket_messages(id, created_at, author_user_id), ticket_tags(tag_id)')
     .order('updated_at', { ascending: false })
     .then(function(res) {
       allTickets = res.data || []
@@ -480,6 +511,7 @@ function loadReadReceipts() {
     .then(function(res) {
       _readMap = {}
       ;(res.data || []).forEach(function(r) { _readMap[r.ticket_id] = r.last_read_at })
+      checkForNewReplies()
       renderStats()
       applyFilters()
     })
@@ -495,7 +527,10 @@ function renderStats() {
   var emergency = allTickets.filter(function(t) { return t.priority === 'emergency' && t.status !== 'resolved' }).length
   var high = allTickets.filter(function(t) { return t.priority === 'high' && t.status !== 'resolved' }).length
   var mine = allTickets.filter(function(t) { return t.assigned_to_user_id === currentUser.id && t.status !== 'resolved' }).length
+  var unreadCount = allTickets.filter(function(t) { return t.status !== 'archived' && isUnread(t) }).length
+  updateUnreadIndicators(unreadCount)
   var chips = [
+    { label: 'New Replies', value: unreadCount, color: '#c0392b', sort: 'unread' },
     { label: 'Open', value: open, color: '#2e7d32' },
     { label: 'In Progress', value: inProg, color: '#7a5800' },
     { label: 'Waiting on Studio', value: waiting, color: '#6a1b9a' },
@@ -506,7 +541,8 @@ function renderStats() {
   ]
   var el = document.getElementById('stat-chips-row')
   el.innerHTML = chips.map(function(c) {
-    return '<div class="stat-chip"><div class="stat-chip-value" style="color:' + c.color + '">' + c.value + '</div><div class="stat-chip-label">' + c.label + '</div></div>'
+    var click = c.sort ? ' clickable" onclick="setSort(\'' + c.sort + '\')' : ''
+    return '<div class="stat-chip' + click + '"><div class="stat-chip-value" style="color:' + c.color + '">' + c.value + '</div><div class="stat-chip-label">' + c.label + '</div></div>'
   }).join('')
 }
 
@@ -519,9 +555,13 @@ function applyFilters() {
   var priority = document.getElementById('f-priority').value
   var category = document.getElementById('f-category').value
   var assignee = document.getElementById('f-assignee').value
+  var hideResolved = document.getElementById('f-hide-resolved').checked
+  var sortBy = document.getElementById('f-sort').value
 
   var filtered = allTickets.filter(function(t) {
     if (t.status === 'archived' && status !== 'archived') return false
+    // Hide resolved unless the status filter explicitly asks for resolved
+    if (hideResolved && t.status === 'resolved' && status !== 'resolved') return false
     if (studio && t.studio_id !== studio) return false
     if (status && t.status !== status) return false
     if (priority && t.priority !== priority) return false
@@ -535,7 +575,55 @@ function applyFilters() {
     }
     return true
   })
+  sortTickets(filtered, sortBy)
+  var countEl = document.getElementById('f-count')
+  if (countEl) countEl.textContent = filtered.length + ' ticket' + (filtered.length !== 1 ? 's' : '')
   renderList(filtered)
+}
+
+// ── SORT ─────────────────────────────────────────────────────
+
+var PRIORITY_RANK = { emergency: 0, high: 1, normal: 2, low: 3 }
+var STATUS_RANK = { open: 0, in_progress: 1, waiting_on_studio: 2, resolved: 3, archived: 4 }
+
+function tsOf(iso) { return iso ? new Date(iso).getTime() : 0 }
+
+function sortTickets(list, sortBy) {
+  var byRecent = function(a, b) { return tsOf(b.updated_at) - tsOf(a.updated_at) }
+  list.sort(function(a, b) {
+    var d = 0
+    if (sortBy === 'unread') d = (isUnread(b) ? 1 : 0) - (isUnread(a) ? 1 : 0)
+    else if (sortBy === 'newest') d = tsOf(b.created_at) - tsOf(a.created_at)
+    else if (sortBy === 'oldest') d = tsOf(a.created_at) - tsOf(b.created_at)
+    else if (sortBy === 'priority') d = (PRIORITY_RANK[a.priority] != null ? PRIORITY_RANK[a.priority] : 9) - (PRIORITY_RANK[b.priority] != null ? PRIORITY_RANK[b.priority] : 9)
+    else if (sortBy === 'status') d = (STATUS_RANK[a.status] != null ? STATUS_RANK[a.status] : 9) - (STATUS_RANK[b.status] != null ? STATUS_RANK[b.status] : 9)
+    else if (sortBy === 'studio') d = String(studioName(a.studio_id) || '').localeCompare(String(studioName(b.studio_id) || ''))
+    return d || byRecent(a, b)
+  })
+  return list
+}
+
+function setSort(val) {
+  document.getElementById('f-sort').value = val
+  onSortOrToggleChange()
+}
+
+// Remember sort + hide-resolved between visits (falls back silently if storage is blocked)
+function onSortOrToggleChange() {
+  try {
+    localStorage.setItem('tickets_sort', document.getElementById('f-sort').value)
+    localStorage.setItem('tickets_hide_resolved', document.getElementById('f-hide-resolved').checked ? '1' : '0')
+  } catch (e) {}
+  applyFilters()
+}
+
+function restoreListPrefs() {
+  try {
+    var s = localStorage.getItem('tickets_sort')
+    if (s && document.querySelector('#f-sort option[value="' + s + '"]')) document.getElementById('f-sort').value = s
+    var h = localStorage.getItem('tickets_hide_resolved')
+    if (h !== null) document.getElementById('f-hide-resolved').checked = h === '1'
+  } catch (e) {}
 }
 
 function clearFilters() {
@@ -577,10 +665,24 @@ function hoUserName(uid) {
   if (!u) return 'Unknown'
   return u.display_name || uid
 }
+// Unread = the newest message on the ticket was written by someone else
+// after you last opened it. Status/priority/assignee changes don't count,
+// and your own replies never mark a ticket unread.
+function latestOtherMessageAt(t) {
+  var latest = 0
+  ;(t.ticket_messages || []).forEach(function(m) {
+    if (m.author_user_id === currentUser.id) return
+    var ts = tsOf(m.created_at)
+    if (ts > latest) latest = ts
+  })
+  return latest
+}
 function isUnread(t) {
+  var latest = latestOtherMessageAt(t)
+  if (!latest) return false
   var lastRead = _readMap[t.id]
-  if (!lastRead) return t.ticket_messages && t.ticket_messages.length > 0
-  return new Date(t.updated_at) > new Date(lastRead)
+  if (!lastRead) return true
+  return latest > tsOf(lastRead)
 }
 
 function renderList(tickets) {
@@ -602,7 +704,7 @@ function renderList(tickets) {
     html += '<div class="ticket-row' + (unread ? ' unread' : '') + '" onclick="openThread(\'' + t.id + '\')" style="' + (isArchived ? 'opacity:0.5' : '') + '">'
       + '<div class="ticket-icon">' + icon + '</div>'
       + '<div class="ticket-main">'
-      + '<div class="ticket-title">' + tNumLabel + (unread ? '<strong>' : '') + escHtml(t.title) + (unread ? '</strong>' : '') + '</div>'
+      + '<div class="ticket-title">' + tNumLabel + (unread ? '<strong>' : '') + escHtml(t.title) + (unread ? '</strong><span class="new-reply-badge"><span class="new-reply-dot"></span>New reply</span>' : '') + '</div>'
       + '<div class="ticket-meta">'
       + '<span class="pill pill-studio">' + escHtml(studioName(t.studio_id)) + '</span>'
       + '<span class="pill" style="background:' + (PRIORITY_BG[t.priority]||'#f5f5f5') + ';color:' + (PRIORITY_COLORS[t.priority]||'#888') + '">' + capFirst(t.priority) + '</span>'
@@ -620,6 +722,65 @@ function renderList(tickets) {
   })
   html += '</div>'
   el.innerHTML = html
+}
+
+// ── NEW REPLY NOTIFICATIONS ───────────────────────────────────
+
+var _knownUnread = null   // ticketId -> latest other-message timestamp already seen as unread
+var _pollTimer = null
+var BASE_TITLE = document.title
+
+function updateUnreadIndicators(count) {
+  var badge = document.getElementById('nav-unread-badge')
+  if (badge) {
+    badge.textContent = count > 99 ? '99+' : String(count)
+    badge.style.display = count ? 'inline-block' : 'none'
+  }
+  document.title = (count ? '(' + count + ') ' : '') + BASE_TITLE
+}
+
+// Compare against the last refresh; pop a toast for any ticket that has a NEW reply since then.
+function checkForNewReplies() {
+  var now = {}
+  allTickets.forEach(function(t) {
+    if (t.status !== 'archived' && isUnread(t)) now[t.id] = latestOtherMessageAt(t)
+  })
+  if (_knownUnread !== null) {
+    allTickets.forEach(function(t) {
+      if (now[t.id] && (!_knownUnread[t.id] || now[t.id] > _knownUnread[t.id])) showReplyToast(t)
+    })
+  }
+  _knownUnread = now
+}
+
+function showReplyToast(t) {
+  var wrap = document.getElementById('ticket-toast-wrap')
+  if (!wrap) {
+    wrap = document.createElement('div')
+    wrap.id = 'ticket-toast-wrap'
+    document.body.appendChild(wrap)
+  }
+  var toast = document.createElement('div')
+  toast.className = 'ticket-toast'
+  var num = t.ticket_number ? '#' + String(t.ticket_number).padStart(4, '0') + ' ' : ''
+  toast.innerHTML = '<div style="flex:1"><strong>New reply &bull; ' + escHtml(studioName(t.studio_id)) + '</strong>' + num + escHtml(t.title) + '</div>'
+    + '<button class="ticket-toast-close" title="Dismiss">&times;</button>'
+  toast.querySelector('.ticket-toast-close').onclick = function(e) { e.stopPropagation(); toast.remove() }
+  toast.onclick = function() { toast.remove(); openThread(t.id) }
+  wrap.appendChild(toast)
+  setTimeout(function() { if (toast.parentNode) toast.remove() }, 15000)
+}
+
+function startTicketPolling() {
+  if (_pollTimer) return
+  _pollTimer = setInterval(function() {
+    if (document.hidden) return
+    fetchAllTickets()
+  }, 60000)
+  // Catch up immediately when the tab comes back into view
+  document.addEventListener('visibilitychange', function() {
+    if (!document.hidden && currentUser) fetchAllTickets()
+  })
 }
 
 // ── NEW TICKET ────────────────────────────────────────────────
@@ -974,10 +1135,13 @@ function submitReplyAndResolve() {
   var doReply = !!body
   if (doReply) {
     input.disabled = true
+    var _resolveAttachUrls = getAttachmentUrls('th-attach-bar')
     sb.from('ticket_messages').insert({
       ticket_id: openTicketData.id, author_user_id: currentUser.id,
-      body: body, created_at: new Date().toISOString()
+      body: body, attachments: _resolveAttachUrls.length ? _resolveAttachUrls : null,
+      created_at: new Date().toISOString()
     }).then(function() {
+      clearAttachments('th-attach-bar')
       changeStatus(openTicketData.id, 'resolved')
       markRead(openTicketData.id)
       fetchAllTickets()
@@ -1002,8 +1166,6 @@ var _attachInstances = {}
 // { containerId: { files: [File], urls: [string], uploading: false } }
 
 var SUPABASE_STORAGE_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co/storage/v1/object/public/ticket-attachments/'
-var SUPABASE_UPLOAD_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co/storage/v1/object/ticket-attachments/'
-var ATTACH_AUTH = 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA'
 var MAX_ATTACH = 5
 
 function initAttachments(containerId) {
@@ -1054,7 +1216,7 @@ function handleAttachFiles(containerId, input) {
     renderAttachBar(containerId)
   }).catch(function(e) {
     console.error('Upload error:', e)
-    alert('Upload failed. Please try again.')
+    alert('Upload failed: ' + ((e && (e.message || e.error)) || 'unknown error') + '\n\nIf this keeps happening, check the ticket-attachments storage policies.')
     renderAttachBar(containerId)
   })
 
@@ -1062,19 +1224,17 @@ function handleAttachFiles(containerId, input) {
   input.value = ''
 }
 
+// Uploads through the signed-in supabase-js client, so the request carries the
+// logged-in user's token (role = authenticated) instead of the bare anon key.
 function uploadAttachment(file) {
-  var ext = file.name.split('.').pop() || 'jpg'
+  var ext = (file.name.split('.').pop() || 'jpg').toLowerCase()
+  if (ext === file.name.toLowerCase()) ext = 'jpg'
   var path = 'tickets/' + Date.now() + '-' + Math.random().toString(36).slice(2, 7) + '.' + ext
-  return fetch(SUPABASE_UPLOAD_URL + path, {
-    method: 'POST',
-    headers: {
-      'Authorization': ATTACH_AUTH,
-      'Content-Type': file.type,
-      'x-upsert': 'true'
-    },
-    body: file
+  return sb.storage.from('ticket-attachments').upload(path, file, {
+    contentType: file.type || 'image/jpeg',
+    upsert: false
   }).then(function(res) {
-    if (!res.ok) return res.text().then(function(t) { throw new Error(t) })
+    if (res.error) throw res.error
     return SUPABASE_STORAGE_URL + path
   })
 }
@@ -1457,4 +1617,4 @@ function submitSaveToKB() {
 </div>
 
 </body>
-</html>
+</html> 
