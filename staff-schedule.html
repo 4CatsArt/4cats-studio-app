@@ -170,6 +170,8 @@ table.wk tr.wk-sched td { background: #f7f9fc; }
 .wk-del:hover { opacity: 1; background: rgba(0,0,0,.08); }
 .wk-chip .wk-time { padding-right: 14px; }
 .wk-risk-sum { padding: 8px 12px; font-size: 12px; }
+.wk-mins summary { padding: 8px 12px; cursor: pointer; font-size: 12px; color: var(--muted); }
+.wk-mins input.input { height: 28px; }
 .wk-dayrisk { margin-top: 4px; }
 .wk-dayrisk summary { cursor: pointer; color: var(--warn); font-weight: 600; }
 .wk-riskrow { display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 3px 0; border-bottom: 1px solid var(--line); }
@@ -900,6 +902,9 @@ async function bdLoad(studio) {
     if (error) dayScheduleError = error.message
     else daySessions[d] = data || []
   }))
+  const mins = await sb.from('studio_staffing_minimums').select('*').eq('studio_id', studio)
+  const minimums = mins.error ? [] : (mins.data || [])
+  const partyToClose = await bdPartySlotsDue(studio)
   const scr = await sb.rpc('list_studio_coordinators')
   const coordinators = scr.error ? [] : (scr.data || []).filter(r => r.studio_id === studio)
   const ct = await sb.from('class_teacher_assignments').select('*').eq('studio_id', studio).lte('effective_from', to)
@@ -928,7 +933,14 @@ async function bdLoad(studio) {
     pastShifts[p.id] = count || 0
   }))
   return { studio, from, to, sessions: need.data || [], ruleBadge, badgeLabel, opening: opening.data, ot: ot.data,
-           pool, badgesBy, notesBy, pastShifts, recentWeekends, classTeachers, coordinators, daySessions, dayScheduleError, unav: unav.data, toff: toff.data, shifts: shifts.data }
+           pool, badgesBy, notesBy, pastShifts, recentWeekends, classTeachers, coordinators, daySessions, dayScheduleError, minimums, partyToClose, unav: unav.data, toff: toff.data, shifts: shifts.data }
+}
+
+// Minimum people on for this studio at this weekday and time (studio_staffing_minimums), or 0
+function bdMinimumAt(ctx, date, t) {
+  const dow = parseYmd(date).getDay()
+  const m = (ctx.minimums || []).find(x => x.day_of_week === dow)
+  return m && t >= toMin(m.from_time) && t < toMin(m.to_time) ? m.min_people : 0
 }
 
 function bdClosesAt(ctx, date) {
@@ -974,7 +986,13 @@ function bdDayNeed(ctx, date) {
     })
     // Quiet studio during a class: the class teacher looks after the studio too (no separate floor person)
     const quiet = classOn && !partyOn && pooledBooked <= QUIET_BOOKED
-    let need = Math.max(1, dedicated + (quiet ? 0 : Math.ceil(pooled - 1e-9)))   // open day: always at least one person
+    const bookingNeed = dedicated + (quiet ? 0 : Math.ceil(pooled - 1e-9))
+    let need = Math.max(1, bookingNeed)   // open day: always at least one person
+    // Weekends: one extra person, free for walk-ins and to jump in, whenever bookings need someone
+    if (isWeekend(date) && bookingNeed >= 1) need = bookingNeed + 1
+    // The studio's minimum for this weekday and time (Staffing minimums)
+    const mn = bdMinimumAt(ctx, date, t)
+    if (mn) need = Math.max(need, mn)
     const have = ctx.shifts.filter(x => x.studio_id === ctx.studio && x.shift_date === date && x.status !== 'draft' &&
                                        x.start_time && x.end_time && toMin(x.start_time) < t + 15 && toMin(x.end_time) > t).length
     slots.push({ t, need: Math.max(0, need - have), badges, on, rawNeed: need, have })
@@ -1763,7 +1781,24 @@ function renderBuild(withLegend) {
   const riskHtml = risks.length ? '<div class="note warn wk-risk-sum">⚠ <b>' + risks.length + ' open session' + (risks.length === 1 ? '' : 's') +
     ' could leave you short</b> if booked, on ' + [...new Set(risks.map(x => parseYmd(x.r.session_date).toLocaleDateString('en-CA', { weekday: 'short' })))].join(', ') +
     '. Open <b>⚠</b> under each day to close them or add a second person.</div>' : ''
-  body.innerHTML = '<h2 class="wk-studio-title">' + esc(STUDIO_NAMES[ctx.studio] || ctx.studio) + '</h2>' + banner + top + riskHtml + (withLegend ? legend : '') + '<div class="panel wk-wrap"><table class="wk"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>'
+  const pq = ctx.partyToClose || []
+  const partyHtml = pq.length ? '<div class="note warn wk-risk-sum">🎈 <b>' + pq.length + ' unbooked party slot' + (pq.length === 1 ? '' : 's') + ' due to close</b> ' +
+    '(Kids and Splatter parties from 12 days out, Adult Get-Togethers from 2 days out). ' +
+    '<button class="btn small bad" onclick="bdCloseParties(\'' + ctx.studio + '\')">Close ' + (pq.length === 1 ? 'it' : 'all ' + pq.length) + ' in Shopify</button>' +
+    '<details style="margin-top:4px"><summary class="small" style="cursor:pointer">See which</summary>' +
+    pq.map(x => '<div class="small">' + fmtDate(x.session_date) + ' ' + fmtTime(x.session_time) + ' · ' + esc(x.title) + '</div>').join('') + '</details></div>' : ''
+  const mins = ctx.minimums || []
+  const minRow = d => { const m = mins.find(x => x.day_of_week === d) || {}
+    return '<tr><td>' + DAY_NAMES[d] + '</td><td><input class="input" data-n="' + d + '" type="number" min="1" max="12" value="' + (m.min_people || '') + '" placeholder="1" style="width:60px"></td>' +
+      '<td><input class="input" data-a="' + d + '" type="time" value="' + (m.from_time ? m.from_time.slice(0, 5) : (d === 0 || d === 6 ? '09:00' : '16:30')) + '"></td>' +
+      '<td><input class="input" data-z="' + d + '" type="time" value="' + (m.to_time ? m.to_time.slice(0, 5) : (d === 0 || d === 6 ? '16:30' : '21:30')) + '"></td></tr>' }
+  const minsHtml = '<details class="panel wk-mins" id="bd-mins-' + ctx.studio + '"><summary>Staffing minimums · ' +
+    ([0, 1, 2, 3, 4, 5, 6].map(d => { const m = mins.find(x => x.day_of_week === d); return DAY_SHORT[d] + ' ' + (m ? m.min_people : 1) }).join(' · ')) + '</summary>' +
+    '<div class="panel-body"><p class="small muted" style="margin-bottom:6px">Fewest people on at once during these hours, whatever the bookings. Weekends also get one extra (the floater) whenever bookings need someone. Blank or 1 = no minimum.</p>' +
+    '<table class="list" style="width:auto"><thead><tr><th>Day</th><th>At least</th><th>From</th><th>Until</th></tr></thead><tbody>' +
+    [0, 1, 2, 3, 4, 5, 6].map(minRow).join('') + '</tbody></table>' +
+    '<button class="btn primary" style="margin-top:8px" onclick="bdSaveMinimums(\'' + ctx.studio + '\')">Save minimums</button></div></details>'
+  body.innerHTML = '<h2 class="wk-studio-title">' + esc(STUDIO_NAMES[ctx.studio] || ctx.studio) + '</h2>' + banner + top + partyHtml + riskHtml + minsHtml + (withLegend ? legend : '') + '<div class="panel wk-wrap"><table class="wk"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>'
 }
 
 // ── Class teachers (whole term) ────────────────────────────────────────────
@@ -2010,22 +2045,14 @@ function bdDayRisksHtml(ctx, list) {
     '<div class="muted small" style="margin-top:3px">Click a line for details · Close stops new bookings · or add a second person</div></details>'
 }
 
-async function bdCloseSession(studio, sessionId) {
-  bdUse(studio)
-  const ctx = bdCtx
-  const r = ctx.sessions.find(x => x.session_id === sessionId)
-  if (!r) return
-  // the session's own start time (get_staffing_need's start includes any setup time)
-  const { data: srow } = await sb.from('sessions').select('session_time, title').eq('id', sessionId).maybeSingle()
-  const sTime = (srow && srow.session_time) || r.start_time, sTitle = (srow && srow.title) || r.title
-  const shopifyTitle = buildShopifyTitle(r.session_date, sTime, sTitle)
-  if (!shopifyTitle || shopifyTitle === 'OVERRIDE') { toast('No matching Shopify product for this session. Close it in admin.html instead.', true); return }
-  if (!confirm('Close "' + sTitle + '" on ' + fmtDate(r.session_date) + ' at ' + fmtTime(sTime) + ' at ' + (STUDIO_NAMES[studio] || studio) + '?\n\n' +
-               'This sets its LIVE Shopify inventory to 0, so customers can\'t book it. Existing bookings aren\'t affected.')) return
+// Close one session in Shopify (live inventory to 0). Returns null if it worked, else a message.
+async function bdCloseOne(studio, row) {
+  const shopifyTitle = buildShopifyTitle(row.session_date, row.session_time, row.title)
+  if (!shopifyTitle || shopifyTitle === 'OVERRIDE') return 'no matching Shopify product'
   const { data: v } = await sb.from('shopify_variants').select('inventory_item_id').eq('shopify_title', shopifyTitle).eq('studio_id', studio)
     .not('inventory_item_id', 'is', null).limit(1)
   const itemId = v && v[0] && v[0].inventory_item_id
-  if (!itemId) { toast('Couldn\'t find this studio\'s Shopify variant for "' + shopifyTitle + '".', true); return }
+  if (!itemId) return 'Shopify variant not found ("' + shopifyTitle + '")'
   const { data: { session } } = await sb.auth.getSession()
   try {
     const res = await fetch(SHOPIFY_INV_URL, {
@@ -2034,10 +2061,84 @@ async function bdCloseSession(studio, sessionId) {
       body: JSON.stringify({ action: 'set', inventory_item_id: itemId, quantity: 0 })
     })
     const data = await res.json()
-    if (!data.inventory_level) { toast('Shopify update failed. Nothing changed.', true); return }
-  } catch (e) { toast('Shopify update failed: ' + e.message, true); return }
+    if (!data.inventory_level) return 'Shopify update failed'
+  } catch (e) { return 'Shopify update failed: ' + e.message }
+  await sb.from('sessions').update({ spaces_left_cache: 0 }).eq('id', row.id)   // keep the cache in step (best effort)
+  return null
+}
+
+async function bdCloseSession(studio, sessionId) {
+  bdUse(studio)
+  const ctx = bdCtx
+  const { data: row } = await sb.from('sessions').select('id, session_date, session_time, title').eq('id', sessionId).maybeSingle()
+  if (!row) return
+  if (!confirm('Close "' + row.title + '" on ' + fmtDate(row.session_date) + ' at ' + fmtTime(row.session_time) + ' at ' + (STUDIO_NAMES[studio] || studio) + '?\n\n' +
+               'This sets its LIVE Shopify inventory to 0, so customers can\'t book it. Existing bookings aren\'t affected.')) return
+  const err = await bdCloseOne(studio, row)
+  if (err) { toast('Not closed: ' + err, true); return }
   ;(ctx.closedNow = ctx.closedNow || {})[sessionId] = true
-  toast('Closed in Shopify: ' + sTitle + ', ' + fmtDate(r.session_date))
+  toast('Closed in Shopify: ' + row.title + ', ' + fmtDate(row.session_date))
+  bdRefresh()
+}
+
+// Unbooked party slots due to close: Kids and Splatter parties from 12 days out, Adult Get-Togethers from 2 days out.
+// Field trips are custom-booked and left alone; party time slots aren't parties.
+const PARTY_CLOSE_RULES = [
+  { re: /kids? party|birthday|splatter/i, days: 12, label: 'Kids / Splatter party' },
+  { re: /get.?together/i, days: 2, label: 'Adult Get-Together' }
+]
+async function bdPartySlotsDue(studio) {
+  const today = todayStr()
+  const { data: slots, error } = await sb.from('sessions').select('id, session_date, session_time, title, capacity, spaces_left_cache')
+    .eq('studio_id', studio).eq('session_type', 'party').gte('session_date', today).lte('session_date', addDays(today, 12))
+    .gt('spaces_left_cache', 0)
+  if (error || !slots || !slots.length) return []
+  const due = slots.map(sl => {
+    if (/party time|field trip/i.test(sl.title)) return null
+    const rule = PARTY_CLOSE_RULES.find(r => r.re.test(sl.title))
+    return rule && daysBetween(today, sl.session_date) <= rule.days ? Object.assign({ rule: rule.label }, sl) : null
+  }).filter(Boolean)
+  if (!due.length) return []
+  const { data: bk } = await sb.from('bookings').select('session_id').in('session_id', due.map(x => x.id)).gt('qty', 0).is('returned_at', null)
+  const booked = new Set((bk || []).map(b => b.session_id))
+  return due.filter(x => !booked.has(x.id)).sort((a, b) => a.session_date.localeCompare(b.session_date) || a.session_time.localeCompare(b.session_time))
+}
+
+async function bdCloseParties(studio) {
+  bdUse(studio)
+  const ctx = bdCtx, list = (ctx.partyToClose || []).slice()
+  if (!list.length) return
+  if (!confirm('Close ' + list.length + ' unbooked party slot' + (list.length === 1 ? '' : 's') + ' at ' + (STUDIO_NAMES[studio] || studio) + ' in Shopify?\n\n' +
+               list.map(x => fmtDate(x.session_date) + ' ' + fmtTime(x.session_time) + ' ' + x.title).join('\n') +
+               '\n\nThis sets their LIVE inventory to 0. You can reopen one for a special request with ✏️ Adjust in finance.html.')) return
+  let ok = 0
+  const failed = []
+  for (const row of list) {
+    const err = await bdCloseOne(studio, row)
+    if (err) failed.push(fmtDate(row.session_date) + ' ' + row.title + ': ' + err)
+    else { ok++; ctx.partyToClose = ctx.partyToClose.filter(x => x.id !== row.id); (ctx.closedNow = ctx.closedNow || {})[row.id] = true }
+  }
+  toast('Closed ' + ok + ' party slot' + (ok === 1 ? '' : 's') + (failed.length ? '. Not closed: ' + failed.join('; ') : ''), !!failed.length)
+  bdRefresh()
+}
+
+// Save the minimums editor for one studio
+async function bdSaveMinimums(studio) {
+  bdUse(studio)
+  const ctx = bdCtx, box = document.getElementById('bd-mins-' + studio)
+  const rows = [], dels = []
+  for (let d = 0; d < 7; d++) {
+    const n = box.querySelector('[data-n="' + d + '"]').value.trim()
+    const a = box.querySelector('[data-a="' + d + '"]').value, z = box.querySelector('[data-z="' + d + '"]').value
+    if (n === '' || Number(n) <= 1) { dels.push(d); continue }
+    if (!a || !z || z <= a) { toast(DAY_NAMES[d] + ': set a from and until time.', true); return }
+    rows.push({ studio_id: studio, day_of_week: d, min_people: Number(n), from_time: a, to_time: z, updated_at: new Date().toISOString() })
+  }
+  if (dels.length) { const r = await sb.from('studio_staffing_minimums').delete().eq('studio_id', studio).in('day_of_week', dels); if (r.error) { toast(r.error.message, true); return } }
+  if (rows.length) { const r = await sb.from('studio_staffing_minimums').upsert(rows, { onConflict: 'studio_id,day_of_week' }); if (r.error) { toast(r.error.message, true); return } }
+  const { data } = await sb.from('studio_staffing_minimums').select('*').eq('studio_id', studio)
+  ctx.minimums = data || []
+  toast('Minimums saved for ' + (STUDIO_NAMES[studio] || studio) + '. Click Build draft to use them.')
   bdRefresh()
 }
 
