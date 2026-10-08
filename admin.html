@@ -1200,7 +1200,7 @@ function isSeriesClass2Plus(title) { return /\bclass\s+([2-9]|\d{2,})\s+of\s+\d+
 function getSeriesClass1Title(title) { return title.replace(/\s*-?\s*class\s+\d+\s+of\s+\d+/i, '').trim() }
 
 async function findClass1SessionId(studioId, sessionTime, seriesTitle) {
-  const { data: exact } = await sb.from('sessions').select('id').eq('studio_id', studioId).eq('session_time', sessionTime).eq('title', seriesTitle).single()
+  const { data: exact } = await sb.from('sessions').select('id').eq('studio_id', studioId).eq('session_time', sessionTime).eq('title', seriesTitle).limit(1).maybeSingle() // none found is normal — no 406 error
   if (exact) return exact.id
   const { data: sessions } = await sb.from('sessions').select('id, title').eq('studio_id', studioId).eq('session_time', sessionTime)
   if (!sessions) return null
@@ -12727,7 +12727,7 @@ function cpRuleMaxMonth(r) {
 // instagram_daily_metrics (posting + 28-day insights). Read-only.
 let igRows = null
 let igSort = { key: 'followers', dir: -1 }
-let igMonth = { cur: null, prev: null, curLabel: '', prevLabel: '' } // monthly growth (admin_instagram_monthly_growth)
+let igMonth = { cur: {}, prev: {}, curKey: null, prevKey: null, curLabel: '', prevLabel: '' } // monthly growth (admin_instagram_monthly_growth)
 
 // This month / last month in Pacific time (the sync runs at 6 am Pacific).
 function igMonthKeys() {
@@ -12737,7 +12737,7 @@ function igMonthKeys() {
   const pd = new Date(Date.UTC(y, m - 2, 1))
   const prev = pd.toISOString().slice(0, 10)
   const name = d => new Date(d + 'T12:00:00Z').toLocaleDateString('en-CA', { month: 'long', timeZone: 'UTC' })
-  return { cur, prev, curLabel: name(cur), prevLabel: name(prev) }
+  return { curKey: cur, prevKey: prev, curLabel: name(cur), prevLabel: name(prev) }
 }
 let igRegion = 'all'
 
@@ -12747,11 +12747,12 @@ async function igLoad() {
   const mk = igMonthKeys()
   const [{ data, error }, growth] = await Promise.all([
     sb.rpc('admin_instagram_overview'),
-    sb.rpc('admin_instagram_monthly_growth', { p_from: mk.prev, p_to: mk.cur }),
+    sb.rpc('admin_instagram_monthly_growth', { p_from: mk.prevKey, p_to: mk.curKey }),
   ])
   if (cpSub !== 'instagram') return
   // Monthly growth: optional (shows "—" until admin_instagram_monthly_growth.sql is run)
-  igMonth = Object.assign({ cur: {}, prev: {}, error: null }, mk)
+  // cur / prev hold each studio's numbers; the month dates are curKey / prevKey
+  igMonth = Object.assign({}, mk, { cur: {}, prev: {}, error: null })
   if (growth.error) {
     console.warn('Monthly follower growth unavailable:', growth.error.message)
     const m = growth.error.message || ''
@@ -12760,8 +12761,9 @@ async function igLoad() {
       : 'Monthly growth couldn\'t load: ' + m
   }
   ;(growth.data || []).forEach(g => {
-    if (g.month === mk.cur) igMonth.cur[g.studio_id] = g
-    if (g.month === mk.prev && g.complete) igMonth.prev[g.studio_id] = g
+    const m = String(g.month).slice(0, 10)
+    if (m === mk.curKey) igMonth.cur[g.studio_id] = g
+    if (m === mk.prevKey && g.complete) igMonth.prev[g.studio_id] = g
   })
   if (error) {
     const m = (error && error.message) || String(error)
