@@ -94,6 +94,8 @@ button, input, select { font: inherit; color: inherit; }
 
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 9px 16px; border-radius: 8px; font-size: 12px; z-index: 900; display: none; }
 #toast.err { background: var(--bad); }
+.yoy-up { color: #1b7f3b; font-weight: 600; }
+.yoy-down { color: #c0392b; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -173,6 +175,29 @@ const STUDIO_IDS = Object.keys(STUDIO_NAMES)
 let currentMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1) // first of this month
 let financeRows = {} // studio_id -> row from studio_monthly_finance (or {} if none yet)
 let progressRows = {} // studio_id -> { monthly_sales_goal, daily_sales_goal, this_month_total, pace_pct } from the RPC
+let lastYearRows = {} // studio_id -> same month last year's total (historical_monthly_totals, get_studio_month_last_year)
+
+// Same month last year, by average day: (MTD ÷ days so far) vs (last year's
+// month ÷ its days). Days so far = today's date this month, the whole month
+// for past months. Same maths as the coordinator dashboard's comparison.
+function yoyDaysSoFar() {
+  const now = new Date()
+  const thisMonth = new Date(now.getFullYear(), now.getMonth(), 1)
+  if (currentMonth.getTime() === thisMonth.getTime()) return now.getDate()
+  if (currentMonth > thisMonth) return null
+  return new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0).getDate()
+}
+function yoyPctFor(mtd, ly) {
+  const days = yoyDaysSoFar()
+  if (!days || !(Number(ly) > 0) || mtd == null) return null
+  const lyDays = new Date(currentMonth.getFullYear() - 1, currentMonth.getMonth() + 1, 0).getDate()
+  return ((Number(mtd) / days) / (Number(ly) / lyDays) - 1) * 100
+}
+function yoyCellHtml(v, title) {
+  if (v == null) return `<td class="muted" title="No same-month total on file for last year">—</td>`
+  const cls = v > 0 ? 'yoy-up' : v < 0 ? 'yoy-down' : ''
+  return `<td class="${cls}" title="${esc(title)}">${v > 0 ? '+' : ''}${v.toFixed(0)}%</td>`
+}
 let bucketTotals = {} // 'membership' | 'giftcard' | 'warehouse' -> this month's total for unattributed sales in that bucket
 let payPeriodRows = {} // studio_id -> { 1: amount, 2: amount, 3: amount }
 let prevMonthPayRows = {} // same shape, for the month before — used to estimate empty pay periods
@@ -463,6 +488,14 @@ async function loadMonth() {
     if (!error && data && data[0]) progressRows[studioId] = data[0]
   }))
 
+  // Same month last year per studio (admins only; dollars)
+  lastYearRows = {}
+  {
+    const { data: ly, error: lyErr } = await sb.rpc('get_studio_month_last_year', { p_month: monthText })
+    if (lyErr) console.warn('Same month last year unavailable (run finance_last_year_month.sql):', lyErr.message)
+    ;(ly || []).forEach(r => { if (r.total_sales != null) lastYearRows[r.studio_id] = Number(r.total_sales) })
+  }
+
   bucketTotals = {}
   await Promise.all(['membership', 'giftcard', 'warehouse'].map(async (bucket) => {
     const { data } = await sb.rpc('get_bucket_month_total', { p_bucket: bucket, p_month: monthText })
@@ -735,6 +768,8 @@ const SUMMARY_COLUMNS = [
   { key: 'daily',    label: 'Daily Goal',   cls: 'group-computed', get: id => currentDailyGoal(id) },
   { key: 'mtd',      label: 'MTD Sales',    cls: 'group-computed', get: id => (progressRows[id] || {}).this_month_total },
   { key: 'pace',     label: 'Pace %',       cls: 'group-computed', get: id => (progressRows[id] || {}).pace_pct },
+  { key: 'ly',       label: 'Same Month LY', cls: 'group-computed', get: id => lastYearRows[id] },
+  { key: 'yoy',      label: 'vs LY / day',  cls: 'group-computed', get: id => yoyPctFor((progressRows[id] || {}).this_month_total, lastYearRows[id]) },
   { key: 'labour',   label: 'Labour %',     cls: 'group-computed', get: id => computeLabourPct(id) },
   { key: 'profit',   label: 'Est. Profit',  cls: 'group-computed', get: id => computeProfit(id) },
   { key: 'profitpct', label: 'Profit %',    cls: 'group-computed', get: id => computeProfitPct(id) },
@@ -796,6 +831,8 @@ function summaryCell(key, studioId) {
     case 'daily': { const g = currentDailyGoal(studioId); return `<td title="Still needed per day from today to hit the monthly goal">${dailyGoalLabel(g) || estWrap(p._estimated, moneyShort(g))}</td>` }
     case 'mtd': return `<td>${moneyShort(p.this_month_total)}</td>`
     case 'pace': return `<td class="${paceClass(p.pace_pct)}">${p.pace_pct == null ? '—' : p.pace_pct + '%'}</td>`
+    case 'ly': return `<td>${lastYearRows[studioId] == null ? '<span class="muted">—</span>' : moneyShort(lastYearRows[studioId])}</td>`
+    case 'yoy': return yoyCellHtml(yoyPctFor(p.this_month_total, lastYearRows[studioId]), 'Sales per day so far vs the average day in the same month last year')
     case 'labour': { const v = computeLabourPct(studioId); return `<td class="${v != null && v > 45 ? 'pct-bad' : ''}">${v == null ? '—' : v.toFixed(1) + '%'}</td>` }
     case 'profit': { const v = computeProfit(studioId); return `<td class="${v != null && v < 0 ? 'profit-neg' : ''}">${moneyShort(v)}</td>` }
     case 'profitpct': { const v = computeProfitPct(studioId); return `<td class="${v != null && v < 0 ? 'profit-neg' : ''}">${v == null ? '—' : v.toFixed(1) + '%'}</td>` }
@@ -845,6 +882,14 @@ function summaryTotalsRowHtml(cols) {
       case 'daily': { const g = systemDailyGoalFor(goalReferenceDate()); return `<td>${g == null ? '…' : estWrap(anyGoalEst, moneyShort(g))}</td>` }
       case 'mtd': return `<td title="Studios + Membership + Gift Cards + Warehouse">${moneyShort(sales)}</td>`
       case 'pace': return `<td class="${paceClass(sys.systemPacePct == null ? null : Math.round(sys.systemPacePct))}">${sys.systemPacePct == null ? '—' : Math.round(sys.systemPacePct) + '%'}</td>`
+      case 'ly': return `<td title="Studios with a same-month total last year">${moneyShort(sumBy(id => lastYearRows[id]))}</td>`
+      case 'yoy': {
+        // Like for like: only studios that HAVE last year's month are compared.
+        const withLy = ids.filter(id => Number(lastYearRows[id]) > 0)
+        const v = withLy.length ? yoyPctFor(withLy.reduce((a, id) => a + num((progressRows[id] || {}).this_month_total), 0),
+                                              withLy.reduce((a, id) => a + num(lastYearRows[id]), 0)) : null
+        return yoyCellHtml(v, `All ${withLy.length} studios with a same-month total last year, per day`)
+      }
       case 'labour': return `<td class="${labourPct != null && labourPct > 45 ? 'pct-bad' : ''}">${labourPct == null ? '—' : labourPct.toFixed(1) + '%'}</td>`
       case 'profit': return `<td class="${profit < 0 ? 'profit-neg' : ''}" title="All sales minus all studio costs (before home office labour)">${moneyShort(profit)}</td>`
       case 'profitpct': return `<td class="${profitPct != null && profitPct < 0 ? 'profit-neg' : ''}" title="Before home office labour">${profitPct == null ? '—' : profitPct.toFixed(1) + '%'}</td>`
