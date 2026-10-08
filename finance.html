@@ -135,6 +135,7 @@ button, input, select { font: inherit; color: inherit; }
         <button class="btn" id="tab-summary-btn" onclick="switchView('summary')">Monthly Summary</button>
         <button class="btn" id="tab-daily-btn" onclick="switchView('daily')">Daily Grid</button>
         <button class="btn" id="tab-schedule-btn" onclick="switchView('schedule')">Schedule</button>
+        <button class="btn" id="tab-upsells-btn" onclick="switchView('upsells')">🍫 In-studio upsells</button>
         <button class="btn" id="tab-unattr-btn" onclick="switchView('unattr')">Unattributed <span id="unattr-badge" style="display:none;background:#c0392b;color:#fff;border-radius:9px;padding:1px 7px;font-size:11px;margin-left:4px"></span></button>
       </div>
       <div class="muted small" style="flex:1">
@@ -146,6 +147,7 @@ button, input, select { font: inherit; color: inherit; }
     <div class="panel" id="daily-body" style="display:none;margin-top:14px"></div>
     <div id="schedule-body" style="display:none;margin-top:14px"></div>
     <div class="panel" id="unattr-body" style="display:none;margin-top:14px"></div>
+    <div class="panel" id="upsells-body" style="display:none;margin-top:14px"></div>
   </div>
 </div>
 
@@ -568,6 +570,7 @@ async function loadUnattributed() {
   badge.textContent = needs
   badge.style.display = needs > 0 ? 'inline-block' : 'none'
   if (currentView === 'unattr') renderUnattributed()
+  if (currentView === 'upsells') loadUpsells()
 }
 
 function toggleUnattrShowAll() { unattrShowAll = !unattrShowAll; renderUnattributed() }
@@ -2303,7 +2306,7 @@ let dailyLoadedForMonth = null
 
 function switchView(view, skipLoad) {
   currentView = view
-  ;[['summary','tab-summary-btn'],['daily','tab-daily-btn'],['schedule','tab-schedule-btn'],['unattr','tab-unattr-btn']].forEach(([v, id]) => {
+  ;[['summary','tab-summary-btn'],['daily','tab-daily-btn'],['schedule','tab-schedule-btn'],['unattr','tab-unattr-btn'],['upsells','tab-upsells-btn']].forEach(([v, id]) => {
     const btn = document.getElementById(id)
     btn.style.background = view === v ? 'var(--ink)' : '#fff'
     btn.style.color = view === v ? '#fff' : 'var(--ink)'
@@ -2312,10 +2315,72 @@ function switchView(view, skipLoad) {
   document.getElementById('daily-body').style.display = view === 'daily' ? '' : 'none'
   document.getElementById('schedule-body').style.display = view === 'schedule' ? '' : 'none'
   document.getElementById('unattr-body').style.display = view === 'unattr' ? '' : 'none'
+  document.getElementById('upsells-body').style.display = view === 'upsells' ? '' : 'none'
   if (skipLoad) return
+  if (view === 'upsells') loadUpsells()
   if (view === 'unattr') renderUnattributed()
   if (view === 'daily') loadDailyGridIfNeeded()
   if (view === 'schedule') loadScheduleView()
+}
+
+// ---------- 🍫 In-studio upsells ----------
+// POS-only drinks, snacks, key chains and magnets per studio, per month
+// (get_instudio_upsells, instudio_upsells.sql). Online
+// party/booking add-ons are left out — this is what the studio sold at the counter.
+let upsellRows = null, upsellsMonth = null, upsellMode = 'qty'
+async function loadUpsells() {
+  const body = document.getElementById('upsells-body')
+  const monthText = monthToText(currentMonth)
+  if (upsellsMonth === monthText && upsellRows) { renderUpsells(); return }
+  body.innerHTML = '<div class="loading">Loading in-studio upsells…</div>'
+  const { data, error } = await sb.rpc('get_instudio_upsells', { p_month: monthText })
+  if (monthToText(currentMonth) !== monthText) return // month changed while loading
+  if (error) {
+    body.innerHTML = `<div class="muted" style="padding:14px">Couldn't load upsells: ${esc(error.message)}${/schema cache|Could not find/i.test(error.message) ? ' — run instudio_upsells.sql, then NOTIFY pgrst, \'reload schema\';' : ''}</div>`
+    return
+  }
+  upsellRows = data || []; upsellsMonth = monthText
+  renderUpsells()
+}
+function setUpsellMode(m) { upsellMode = m; renderUpsells() }
+function renderUpsells() {
+  const body = document.getElementById('upsells-body')
+  const rows = upsellRows || []
+  const val = r => upsellMode === 'qty' ? Number(r.qty) || 0 : Number(r.net) || 0
+  const fmt = v => upsellMode === 'qty' ? (v ? Number(v).toLocaleString('en-CA') : '—') : (v ? moneyShort(v) : '—')
+  // items: biggest sellers first (by quantity across the network)
+  const itemTotals = {}
+  rows.forEach(r => { itemTotals[r.item] = (itemTotals[r.item] || 0) + (Number(r.qty) || 0) })
+  const items = Object.keys(itemTotals).sort((a, b) => itemTotals[b] - itemTotals[a] || a.localeCompare(b))
+  const by = {}
+  rows.forEach(r => { (by[r.studio_id] = by[r.studio_id] || {})[r.item] = r })
+  const studioTotal = id => items.reduce((t, it) => t + (by[id] && by[id][it] ? val(by[id][it]) : 0), 0)
+  const studios = STUDIO_IDS.slice().sort((a, b) => studioTotal(b) - studioTotal(a) || STUDIO_NAMES[a].localeCompare(STUDIO_NAMES[b]))
+  const colTotal = it => rows.filter(r => r.item === it).reduce((t, r) => t + val(r), 0)
+  const grand = rows.reduce((t, r) => t + val(r), 0)
+  const head = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+      <div><strong>🍫 In-studio upsells — ${esc(monthLabel(currentMonth))}</strong>
+        <div class="muted small">Drinks, snacks, key chains and magnets rung through the POS — online party/booking add-ons aren't included. Biggest sellers first.</div></div>
+      <div style="display:flex;gap:6px">
+        <button class="btn" style="${upsellMode === 'qty' ? 'background:var(--ink);color:#fff' : ''}" onclick="setUpsellMode('qty')">How many</button>
+        <button class="btn" style="${upsellMode === 'net' ? 'background:var(--ink);color:#fff' : ''}" onclick="setUpsellMode('net')">Sales $</button>
+      </div>
+    </div>`
+  if (!items.length) { body.innerHTML = head + '<div class="muted" style="padding:14px">No in-studio upsells recorded for this month yet.</div>'; return }
+  body.innerHTML = head + `
+    <div style="overflow-x:auto"><table class="fin-table" style="min-width:${300 + items.length * 90}px">
+      <thead><tr><th style="text-align:left">Studio</th>${items.map(it => `<th style="text-align:right">${esc(it)}</th>`).join('')}<th style="text-align:right">Total</th></tr></thead>
+      <tbody>
+        ${studios.map(id => {
+          const t = studioTotal(id)
+          return `<tr${t ? '' : ' style="opacity:.55"'}><td class="studio-name">${esc(STUDIO_NAMES[id])}</td>
+            ${items.map(it => `<td style="text-align:right">${fmt(by[id] && by[id][it] ? val(by[id][it]) : 0)}</td>`).join('')}
+            <td style="text-align:right;font-weight:700">${fmt(t)}</td></tr>`
+        }).join('')}
+        <tr style="font-weight:700;background:var(--soft)"><td>All studios</td>${items.map(it => `<td style="text-align:right">${fmt(colTotal(it))}</td>`).join('')}<td style="text-align:right">${fmt(grand)}</td></tr>
+      </tbody></table></div>
+    <div class="muted small" style="margin-top:8px">Counted in each studio's own local month. A studio whose POS device isn't mapped to it won't show here (its sales sit under Unattributed).</div>`
 }
 
 async function loadDailyGridIfNeeded() {
