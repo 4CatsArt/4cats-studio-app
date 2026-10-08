@@ -4,7 +4,7 @@
 <link rel="icon" type="image/svg+xml" href="https://cdn.shopify.com/s/files/1/1451/3756/files/favicon_black_512x512_9c6dd2c0-fdcd-4575-887e-bf65538803af.png?v=1631720337">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>4Cats Home Office</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4"></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #f5f5f0; color: #1a1a1a; min-height: 100vh; font-size: 13px; }
@@ -58,7 +58,9 @@ body.ro-mode #staff-save-btn,
 body.ro-mode [onclick="openMassDueDateModal()"],
 body.ro-mode [onclick="openUnitModal()"],
 body.ro-mode [onclick="addLibraryName()"],
-body.ro-mode #lib-new-name { display: none !important; }
+body.ro-mode #lib-new-name,
+body.ro-mode #due-date-popup,
+body.ro-mode #mass-due-date-modal { display: none !important; }
 body.ro-mode td.st-edit { pointer-events: none; }
 body.ro-mode .st-ghost { display: none; }
 body.ro-mode #staff-modal input, body.ro-mode #staff-modal select, body.ro-mode #staff-modal textarea { pointer-events: none; background: #f7f7f3; }
@@ -860,6 +862,16 @@ window.fetch = function (input, init) {
 const { createClient } = supabase
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY, { global: { fetch: (...a) => window.fetch(...a) } })
 
+// ── Safe output ──────────────────────────────────────────────
+// Anything from the database that people outside home office can write (customer names,
+// party notes, reviews, staff nicknames…) must go through escText() before it is put into
+// HTML. Otherwise someone could type code as their name and have it run inside admin.
+function escText(v) {
+  return v == null ? '' : String(v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+}
+// For a value passed as an argument inside onclick="…": use as onclick="fn(${jsArg(x)})" (no extra quotes)
+function jsArg(v) { return escText(JSON.stringify(v == null ? '' : String(v))) }
+
 let currentUser = null, currentStudioId = null, allStudios = [], scheduleData = [], workshopData = [], highlightMode = null, gridStudios = []
 let studioViewVariantMap = {} // sessionId → inventory_item_id, populated by syncStudioInventory
 let scheduleNotesCache = {} // 'studioId|date' → note string
@@ -1416,7 +1428,7 @@ async function loadSpacesAdjustmentLog() {
   if (managersOnly) q = q.eq('made_by_role', 'manager')
 
   const { data, error } = await q
-  if (error) { container.innerHTML = `<div class="empty">Error loading log: ${error.message}</div>`; return }
+  if (error) { container.innerHTML = `<div class="empty">Error loading log: ${escText(error.message)}</div>`; return }
   if (!data || !data.length) { container.innerHTML = '<div class="empty">No spaces adjustments found for these filters.</div>'; return }
 
   let html = `<div class="users-table-wrap"><table class="users-table"><thead><tr>
@@ -1434,9 +1446,9 @@ async function loadSpacesAdjustmentLog() {
     html += `<tr>
       <td style="white-space:nowrap;color:#888;font-size:12px">${when}</td>
       <td>${getStudioName(r.studio_id)}</td>
-      <td>${r.session_title || '—'}</td>
+      <td>${escText(r.session_title || '—')}</td>
       <td style="white-space:nowrap">${sessDate}${sessTime ? ' · ' + sessTime : ''}</td>
-      <td>${r.staff_name || '—'}${roleTag}</td>
+      <td>${escText(r.staff_name || '—')}${roleTag}</td>
       <td style="text-align:center;white-space:nowrap">${r.old_spaces_left ?? '—'} → <strong>${r.new_spaces_left ?? '—'}</strong> <span style="color:${deltaColor};font-size:11px">(${delta > 0 ? '+' : ''}${delta})</span></td>
     </tr>`
   })
@@ -1674,11 +1686,11 @@ async function openEventModal(sessionId, studioId, date) {
   const { data: staffList } = await sb.from('staff_profiles').select('id,display_name,nickname,studio_ids').eq('is_active', true).order('display_name')
   const relevant = (staffList || []).filter(s => !s.studio_ids?.length || s.studio_ids.includes(studioId))
   const selectedIds = det.staff_ids || []
-  const staffCheckboxes = relevant.map(s => `<label style="display:flex;align-items:center;gap:6px;padding:3px 0;font-size:12px"><input type="checkbox" value="${s.id}" ${selectedIds.includes(s.id) ? 'checked' : ''} class="event-staff-cb"> ${s.display_name}${s.nickname ? ' (' + s.nickname + ')' : ''}</label>`).join('')
+  const staffCheckboxes = relevant.map(s => `<label style="display:flex;align-items:center;gap:6px;padding:3px 0;font-size:12px"><input type="checkbox" value="${s.id}" ${selectedIds.includes(s.id) ? 'checked' : ''} class="event-staff-cb"> ${escText(s.display_name)}${s.nickname ? ' (' + escText(s.nickname) + ')' : ''}</label>`).join('')
   let stampHtml = ''
   if (det.updated_by) {
     const atLabel = det.updated_at ? new Date(det.updated_at).toLocaleString('en-CA', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''
-    stampHtml = `<div style="font-size:11px;color:#aaa;margin-bottom:10px">Last edited by <strong>${det.updated_by}</strong>${atLabel ? ' · ' + atLabel : ''}</div>`
+    stampHtml = `<div style="font-size:11px;color:#aaa;margin-bottom:10px">Last edited by <strong>${escText(det.updated_by)}</strong>${atLabel ? ' · ' + atLabel : ''}</div>`
   }
   const el = document.createElement('div')
   el.className = 'note-modal-overlay'
@@ -1689,7 +1701,7 @@ async function openEventModal(sessionId, studioId, date) {
     ${stampHtml}
     <div style="margin-top:10px;margin-bottom:14px">
       <label style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.4px">Project</label><br>
-      <input type="text" id="event-modal-project" value="${(det.project || '').replace(/"/g, '&quot;')}" placeholder="e.g. Mini pumpkins" style="width:100%;box-sizing:border-box;border:0.5px solid #d0d0c8;border-radius:6px;padding:8px 10px;font-size:13px;margin-top:4px;outline:none">
+      <input type="text" id="event-modal-project" value="${escText(det.project)}" placeholder="e.g. Mini pumpkins" style="width:100%;box-sizing:border-box;border:0.5px solid #d0d0c8;border-radius:6px;padding:8px 10px;font-size:13px;margin-top:4px;outline:none">
     </div>
     <div style="margin-bottom:14px">
       <label style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.4px">Staff Assigned</label>
@@ -1699,7 +1711,7 @@ async function openEventModal(sessionId, studioId, date) {
     </div>
     <div>
       <label style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.4px">Day Plan</label>
-      <textarea id="event-modal-dayplan" placeholder="What's the plan for the day — setup time, what to bring, schedule...">${det.day_plan || ''}</textarea>
+      <textarea id="event-modal-dayplan" placeholder="What's the plan for the day — setup time, what to bring, schedule...">${escText(det.day_plan || '')}</textarea>
     </div>
     <div class="note-modal-actions">
       <button class="btn" onclick="closeEventModal()">Cancel</button>
@@ -1764,7 +1776,7 @@ async function renderSchedule() {
   await loadScheduleNotes(gridStudios.map(s => s.id), Object.keys(byDate))
   await loadFestivalData(scheduleData)
   let headHtml = '<tr><th class="session-col">Session</th><th class="total-col">Total</th>'
-  gridStudios.forEach(s => { headHtml += `<th title="${s.name}">${getStudioName(s.id)}</th>` })
+  gridStudios.forEach(s => { headHtml += `<th title="${escText(s.name)}">${getStudioName(s.id)}</th>` })
   headHtml += '</tr>'
   document.getElementById('grid-head').innerHTML = headHtml
   const PARTY_TYPES = new Set(['party'])
@@ -1853,7 +1865,7 @@ async function renderSchedule() {
       }
       bodyHtml += `<tr><td class="session-info">
         <div class="session-title-wrap">
-          <span class="session-title-cell">${row.title} <span class="badge ${badge}">${row.type}</span>${statusPill}</span>
+          <span class="session-title-cell">${escText(row.title)} <span class="badge ${badge}">${row.type}</span>${statusPill}</span>
           <button class="btn-edit-title" data-ctx="${editDataKey}" onclick="openEditTitleModalFromBtn(this)" title="Edit / Delete session">✎</button>
         </div>
         <div class="session-time-cell">${time} &nbsp;${shopifyBtn}${syncHtml}</div>
@@ -2041,7 +2053,7 @@ async function loadInventory() {
     <div class="stat-card"><div class="val">${total}</div><div class="lbl">Total Spaces Available</div></div>
     <div class="stat-card warn"><div class="val">${oversold}</div><div class="lbl">Oversold Studios</div></div>
     <div class="stat-card"><div class="val">${zero}</div><div class="lbl">Studios at Zero</div></div>
-  </div><div class="inv-grid"><div class="inv-product-title">${data.title}<span class="inv-product-sub">${data.variants.length} studios</span></div>`
+  </div><div class="inv-grid"><div class="inv-product-title">${escText(data.title)}<span class="inv-product-sub">${data.variants.length} studios</span></div>`
   allStudios.forEach(studio => {
     const varTitle = STUDIO_VARIANT_MAP[studio.id], v = varTitle ? variantMap[varTitle] : null
     const qty = v ? v.inventory_quantity : null
@@ -2107,7 +2119,7 @@ function renderWorkshopView() {
   sorted.forEach(g => {
     const total = g.studios.reduce((sum,s)=>sum+s.reg,0), time=g.time?fmtTime12(g.time):'', badge=getBadge(g.type)
     const isZeroWarn = zeroDate && g.date<=zeroDate && total===0
-    html += `<div class="workshop-block" style="${isZeroWarn?'border-color:#ffcc80':''}"><div class="workshop-block-header" style="${isZeroWarn?'background:#fff8f0':''}"><span class="badge ${badge}">${g.type}</span><div class="workshop-block-title">${g.title}</div><div class="workshop-block-date">${fmtDate(g.date)} at ${time}</div></div><div class="workshop-studios">`
+    html += `<div class="workshop-block" style="${isZeroWarn?'border-color:#ffcc80':''}"><div class="workshop-block-header" style="${isZeroWarn?'background:#fff8f0':''}"><span class="badge ${badge}">${g.type}</span><div class="workshop-block-title">${escText(g.title)}</div><div class="workshop-block-date">${fmtDate(g.date)} at ${time}</div></div><div class="workshop-studios">`
     g.studios.forEach(s => {
       const isFull=s.capacity>0&&s.reg>=s.capacity, regColor=s.reg===0?'#bbb':isFull?'#2e7d32':'#1a4fa0'
       html += `<div class="workshop-studio-cell"><div class="workshop-studio-name">${getStudioName(s.studio_id)}</div><div class="workshop-studio-reg" style="color:${regColor}">${s.reg}<span style="font-size:11px;font-weight:400;color:#bbb"> / ${s.capacity}</span></div></div>`
@@ -2183,7 +2195,7 @@ async function loadStudioView() {
     leftHtml += `<div style="padding:8px 16px;background:#f5f5f0;font-size:11px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.4px">${fmtDate(date)}</div>`
     Object.entries(byDate[date]).sort((a,b)=>a[0].localeCompare(b[0])).forEach(([key,info]) => {
       const isOffered=studioKeys.has(`${date}__${info.title}`), badge=getBadge(info.type), time=info.time?fmtTime12(info.time):''
-      leftHtml += `<div class="split-item${isOffered?'':' inactive'}"><div><div class="split-item-title">${info.title}</div><div class="split-item-sub">${time} · <span class="badge ${badge}">${info.type}</span> · ${info.studioCount} studio${info.studioCount!==1?'s':''}</div></div>${isOffered?'<span style="color:#2e7d32;font-size:11px;white-space:nowrap">● Offered</span>':'<span style="color:#bbb;font-size:11px;white-space:nowrap">○ Not offered</span>'}</div>`
+      leftHtml += `<div class="split-item${isOffered?'':' inactive'}"><div><div class="split-item-title">${escText(info.title)}</div><div class="split-item-sub">${time} · <span class="badge ${badge}">${info.type}</span> · ${info.studioCount} studio${info.studioCount!==1?'s':''}</div></div>${isOffered?'<span style="color:#2e7d32;font-size:11px;white-space:nowrap">● Offered</span>':'<span style="color:#bbb;font-size:11px;white-space:nowrap">○ Not offered</span>'}</div>`
     })
   })
   if (!leftHtml) leftHtml = '<div class="empty">No sessions in this date range.</div>'
@@ -2207,7 +2219,7 @@ async function loadStudioView() {
     const invEdit = invItemId
       ? `<div class="inv-edit" style="margin-left:4px"><input type="number" id="${invInputId}" value="${spacesLeft !== null ? spacesLeft : 0}" min="0" style="width:52px"><button class="inv-save-btn" data-sid="${studioId}" data-title="${s.title.replace(/"/g,'&quot;')}" data-session-id="${s.id}" onclick="setInventoryFromTab(${invItemId},'${invInputId}',this,this.dataset.sid,this.dataset.title,this.dataset.sessionId)">Set</button></div>`
       : ''
-    rightHtml += `<div class="split-item"><div><div class="split-item-title">${s.title}</div><div class="split-item-sub">${time}</div></div><div style="display:flex;align-items:center;gap:12px"><div style="text-align:center"><div style="font-size:16px;font-weight:600;color:${regColor}">${s.reg}</div><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.3px">Reg</div></div><div style="text-align:center"><div class="bs-left-val" style="font-size:16px;font-weight:600;color:${spacesColor}">${spacesLabel}</div><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.3px">Left</div></div>${invEdit}</div></div>`
+    rightHtml += `<div class="split-item"><div><div class="split-item-title">${escText(s.title)}</div><div class="split-item-sub">${time}</div></div><div style="display:flex;align-items:center;gap:12px"><div style="text-align:center"><div style="font-size:16px;font-weight:600;color:${regColor}">${s.reg}</div><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.3px">Reg</div></div><div style="text-align:center"><div class="bs-left-val" style="font-size:16px;font-weight:600;color:${spacesColor}">${spacesLabel}</div><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.3px">Left</div></div>${invEdit}</div></div>`
   })
   if (!rightHtml) rightHtml = '<div class="empty">No visible sessions in this date range.</div>'
   document.getElementById('studio-split-container').innerHTML = `<div class="studio-split"><div class="split-panel"><div class="split-panel-header">Network Catalogue <span style="font-weight:400;color:#888;font-size:11px">(dimmed = not offered by ${studioName})</span></div><div class="split-list">${leftHtml}</div></div><div class="split-panel"><div class="split-panel-header">Active Schedule — ${studioName}</div><div class="split-list">${rightHtml}</div></div></div>`
@@ -2353,7 +2365,6 @@ function daySelected() {
   loadSchedule()
 }
 
-function weekSelected() { daySelected() }
 
 function shiftSchDay(n) {
   const input = document.getElementById('sch-day'); if (!input.value) return
@@ -2363,7 +2374,6 @@ function shiftSchDay(n) {
   daySelected()
 }
 
-function shiftWeek(n) { shiftSchDay(n * 7) }
 
 // ── One Sync Shopify button: pick the dates, then it syncs those days one at a time ──
 function openSyncDialog() {
@@ -3395,7 +3405,7 @@ async function loadQualityReport() {
     html += `<tr>
       <td style="padding:10px 14px;color:#888;white-space:nowrap">${d}</td>
       <td style="padding:10px 14px"><span style="display:inline-block;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:500;background:${bgColor};color:${textColor}">${issue.label}</span></td>
-      <td style="padding:10px 14px;color:#444">${issue.detail}</td>
+      <td style="padding:10px 14px;color:#444">${escText(issue.detail)}</td>
       <td style="padding:10px 14px">${actionHtml}</td>
     </tr>`
   })
@@ -3475,7 +3485,7 @@ async function previewCloseStudio() {
     const timeLabel = m===0?`${hour}${ampm}`:`${hour}:${String(m).padStart(2,'0')}${ampm}`
     return `<tr>
       <td style="padding:6px 10px;font-size:12px">${timeLabel}</td>
-      <td style="padding:6px 10px;font-size:12px;font-weight:500">${s.title}</td>
+      <td style="padding:6px 10px;font-size:12px;font-weight:500">${escText(s.title)}</td>
       <td style="padding:6px 10px;font-size:12px;text-align:center;color:${reg>0?'#1a4fa0':'#bbb'}">${reg}</td>
       <td style="padding:6px 10px;font-size:12px;text-align:center;font-weight:600;color:${newInv<0?'#c0392b':'#888'}">${newInv}</td>
     </tr>`
@@ -3583,14 +3593,14 @@ async function loadSkipDatesList() {
   listEl.innerHTML = '<div class="loading">Loading...</div>'
   const today = dateStr(new Date())
   const { data, error } = await sb.from('class_series_skip_dates').select('*').order('skip_date')
-  if (error) { listEl.innerHTML = `<div class="empty" style="color:#c0392b">Error: ${error.message}</div>`; return }
+  if (error) { listEl.innerHTML = `<div class="empty" style="color:#c0392b">Error: ${escText(error.message)}</div>`; return }
   if (!data || !data.length) { listEl.innerHTML = '<div class="empty" style="padding:14px;font-size:12px;color:#aaa">No skip dates yet.</div>'; return }
   listEl.innerHTML = data.map(row => {
     const isPast = row.skip_date < today
     return `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:0.5px solid #f0f0e8;${isPast ? 'opacity:0.45' : ''}">
       <div>
         <div style="font-size:13px;font-weight:600">${new Date(row.skip_date + 'T12:00:00').toLocaleDateString('en-CA', { weekday:'short', year:'numeric', month:'short', day:'numeric' })}</div>
-        ${row.note ? `<div style="font-size:11px;color:#888">${row.note}</div>` : ''}
+        ${row.note ? `<div style="font-size:11px;color:#888">${escText(row.note)}</div>` : ''}
       </div>
       <button onclick="deleteSkipDate('${row.id}')" style="padding:5px 10px;border:0.5px solid #f5c6cb;border-radius:6px;background:white;font-size:11px;cursor:pointer;color:#c0392b">Delete</button>
     </div>`
@@ -4245,10 +4255,10 @@ function renderUsers() {
     const studioLabel = u.studio_name ? u.studio_name.replace(/4CATS Art Studios\s*-\s*/i,'').replace(/4Cats Art Studios\s*-\s*/i,'').replace(/4CATS\s*-\s*/i,'').trim() : (u.studio_id || '<span style="color:#bbb">—</span>')
     const statusPill = u.confirmed ? `<span style="font-size:11px;padding:2px 8px;border-radius:8px;background:#e8f5e9;color:#2e7d32">Active</span>` : `<span style="font-size:11px;padding:2px 8px;border-radius:8px;background:#fff3e0;color:#e65100">Invite pending</span>`
     const lastSeen = u.last_sign_in ? new Date(u.last_sign_in).toLocaleDateString('en-CA', { month:'short', day:'numeric', year:'numeric' }) : null
-    html += `<tr><td><div style="font-weight:500;font-size:13px">${u.display_name || '<span style="color:#bbb;font-weight:400;font-style:italic">No name</span>'}</div></td><td><div class="user-email">${u.email||'<span style="color:#bbb">unknown</span>'}</div>${lastSeen?`<div class="user-meta">Last seen ${lastSeen}</div>`:''}</td><td><span class="role-pill ${u.role}">${u.role}</span></td><td>${studioLabel}</td><td>${statusPill}</td><td style="white-space:nowrap">
-  <button class="btn" style="font-size:11px;color:#5b4fcf;border-color:#d5cff5;margin-right:4px" onclick="editDisplayName('${u.user_id}','${(u.display_name||'').replace(/'/g,"\\'")}','${(u.email||'').replace(/'/g,"\\'")}')">Edit name</button>
-  <button class="btn" style="font-size:11px;color:#1a4fa0;border-color:#c5cfe8;margin-right:4px" onclick="resetPassword('${(u.email||'').replace(/'/g,"\\'")}','${u.user_id}')">Set pw</button>
-  <button class="btn" style="font-size:11px;color:#c0392b;border-color:#f5c6cb" onclick="removeUser('${u.user_id}','${(u.email||'').replace(/'/g,"\\'")}')">Remove</button>
+    html += `<tr><td><div style="font-weight:500;font-size:13px">${escText(u.display_name) || '<span style="color:#bbb;font-weight:400;font-style:italic">No name</span>'}</div></td><td><div class="user-email">${escText(u.email) || '<span style="color:#bbb">unknown</span>'}</div>${lastSeen?`<div class="user-meta">Last seen ${lastSeen}</div>`:''}</td><td><span class="role-pill ${u.role}">${u.role}</span></td><td>${studioLabel}</td><td>${statusPill}</td><td style="white-space:nowrap">
+  <button class="btn" style="font-size:11px;color:#5b4fcf;border-color:#d5cff5;margin-right:4px" onclick="editDisplayName('${u.user_id}',${jsArg(u.display_name)},${jsArg(u.email)})">Edit name</button>
+  <button class="btn" style="font-size:11px;color:#1a4fa0;border-color:#c5cfe8;margin-right:4px" onclick="resetPassword(${jsArg(u.email)},'${u.user_id}')">Set pw</button>
+  <button class="btn" style="font-size:11px;color:#c0392b;border-color:#f5c6cb" onclick="removeUser('${u.user_id}',${jsArg(u.email)})">Remove</button>
 </td></tr>`
   })
   wrap.innerHTML = html + '</tbody></table>'
@@ -4358,36 +4368,8 @@ function getStudioPickerSelection(containerId) {
   return Array.from(document.querySelectorAll(`.${containerId}-studio-cb:checked`)).map(cb => cb.value)
 }
 
-function toggleAllStudios(allChecked) {
-  const list = document.getElementById('ann-studio-list')
-  list.style.display = allChecked ? 'none' : 'block'
-  if (allChecked) {
-    list.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = false)
-  }
-}
 
-function getSelectedStudios() {
-  const allChecked = document.getElementById('ann-studio-all').checked
-  if (allChecked) return []
-  return Array.from(document.getElementById('ann-studio-list').querySelectorAll('input:checked')).map(cb => cb.value)
-}
 
-function buildStudioCheckboxList(selectedIds = []) {
-  const list = document.getElementById('ann-studio-list')
-  list.innerHTML = Object.entries(STUDIO_VARIANT_MAP).map(([k, v]) =>
-    `<label style="display:flex;align-items:center;gap:8px;padding:5px 10px;cursor:pointer;font-size:12px;hover:background:#fafaf8">
-      <input type="checkbox" value="${k}" ${selectedIds.includes(k) ? 'checked' : ''}> ${v}
-    </label>`
-  ).join('')
-  const allCb = document.getElementById('ann-studio-all')
-  if (selectedIds.length > 0) {
-    allCb.checked = false
-    list.style.display = 'block'
-  } else {
-    allCb.checked = true
-    list.style.display = 'none'
-  }
-}
 
 async function loadAnnouncementsTab() {
   const container = document.getElementById('announcements-container')
@@ -4418,7 +4400,7 @@ async function loadAnnouncementsTab() {
       : `${ids.slice(0,2).map(studioName).join(', ')} +${ids.length-2} more`
     const dates = `${a.show_from}${a.show_until ? ' → ' + a.show_until : ' → ∞'}`
     return `<tr style="border-bottom:0.5px solid #f5f5f0" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
-      <td style="padding:10px 14px">${statusDot}<strong style="font-size:13px">${a.title}</strong>${a.body ? `<div style="font-size:11px;color:#888;margin-top:2px">${a.body.slice(0,80)}${a.body.length>80?'…':''}</div>` : ''}</td>
+      <td style="padding:10px 14px">${statusDot}<strong style="font-size:13px">${escText(a.title)}</strong>${a.body ? `<div style="font-size:11px;color:#888;margin-top:2px">${escText(a.body.slice(0,80))}${a.body.length>80?'…':''}</div>` : ''}</td>
       <td style="padding:10px 14px;font-size:12px">${target}</td>
       <td style="padding:10px 14px">${priorityBadge}</td>
       <td style="padding:10px 14px;font-size:11px;color:#888;white-space:nowrap">${dates}</td>
@@ -4545,7 +4527,7 @@ async function loadEmailTemplatesTab() {
       : `${ids.slice(0,2).map(studioName).join(', ')} +${ids.length-2} more`
     const catLabel = EMAIL_TEMPLATE_CATEGORY_LABELS[t.category] || t.category || 'General'
     return `<tr style="border-bottom:0.5px solid #f5f5f0" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
-      <td style="padding:10px 14px"><strong style="font-size:13px">${t.name}</strong><div style="font-size:11px;color:#888;margin-top:2px">${(t.subject||'').slice(0,80)}${(t.subject||'').length>80?'…':''}</div></td>
+      <td style="padding:10px 14px"><strong style="font-size:13px">${escText(t.name)}</strong><div style="font-size:11px;color:#888;margin-top:2px">${escText((t.subject||'').slice(0,80))}${(t.subject||'').length>80?'…':''}</div></td>
       <td style="padding:10px 14px"><span style="background:#e8e8f0;color:#5b4fcf;font-size:10px;padding:2px 6px;border-radius:4px">${catLabel}</span></td>
       <td style="padding:10px 14px;font-size:12px">${target}</td>
       <td style="padding:10px 14px;white-space:nowrap">
@@ -4730,7 +4712,7 @@ async function loadTasksTab() {
       : ''
 
     const titleCell = isNewTitle
-      ? `<td style="padding:8px 14px;font-size:12px;font-weight:600;background:${rowBg}">${r.title}${repeatTag}${sourceTag}${dateTag}${editBtn}</td>`
+      ? `<td style="padding:8px 14px;font-size:12px;font-weight:600;background:${rowBg}">${escText(r.title)}${repeatTag}${sourceTag}${dateTag}${editBtn}</td>`
       : `<td style="padding:8px 14px;font-size:12px;color:#888;background:${rowBg};padding-left:22px">↳ ${dateTag}${editBtn}</td>`
 
     const cells = visibleStudios.map(sid => {
@@ -4739,7 +4721,7 @@ async function loadTasksTab() {
       const done = t.status === 'complete'
       const cellBg = done ? '#f0faf0' : isMissed ? '#fff0f0' : rowBg
       const icon = done ? '✅' : isMissed ? '🔴' : '⬜'
-      const assignee = t.assignee_name ? `<div style="font-size:9px;color:#2e7d32;margin-top:1px">${t.assignee_name}</div>` : ''
+      const assignee = t.assignee_name ? `<div style="font-size:9px;color:#2e7d32;margin-top:1px">${escText(t.assignee_name)}</div>` : ''
       return `<td style="text-align:center;border-left:0.5px solid #f0f0e8;padding:6px 4px;background:${cellBg};cursor:pointer" onclick="openTaskEditPopup('${t.id}')">
         <span style="font-size:16px;line-height:1">${icon}</span>
         ${assignee}
@@ -4786,46 +4768,11 @@ async function loadTasksTab() {
 }
 
 
-async function adminToggleTask(id, newStatus) {
-  await sb.from('studio_tasks').update({
-    status: newStatus,
-    completed_at: newStatus === 'complete' ? new Date().toISOString() : null
-  }).eq('id', id)
-  loadTasksTab()
-}
 
 
-function toggleTaskModalRepeatDays() {
-  const val = document.getElementById('task-modal-repeat').value
-  document.getElementById('task-modal-days-row').style.display = val === 'weekly' ? 'block' : 'none'
-}
 
-function toggleAllTaskStudios(allChecked) {
-  const list = document.getElementById('task-studio-list')
-  list.style.display = allChecked ? 'none' : 'block'
-  if (allChecked) list.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = false)
-}
 
-function getSelectedTaskStudios() {
-  if (document.getElementById('task-studio-all').checked) return []
-  return Array.from(document.getElementById('task-studio-list').querySelectorAll('input:checked')).map(cb => cb.value)
-}
 
-function applyAdminTaskTemplate() {
-  const sel = document.getElementById('task-modal-template')
-  const opt = sel.options[sel.selectedIndex]
-  if (!opt.value) return
-  document.getElementById('task-modal-title').value = opt.dataset.title || ''
-  document.getElementById('task-modal-notes').value = opt.dataset.notes || ''
-  const repeat = opt.dataset.repeat || 'none'
-  document.getElementById('task-modal-repeat').value = repeat
-  document.getElementById('task-modal-days-row').style.display = repeat === 'weekly' ? 'block' : 'none'
-  if (repeat === 'weekly' && opt.dataset.days) {
-    const days = opt.dataset.days.split(',')
-    document.querySelectorAll('.task-modal-day-cb').forEach(cb => cb.checked = days.includes(cb.value))
-  }
-  sel.dataset.selectedId = opt.value
-}
 
 function openTaskModal() {
   const today = new Date().toISOString().slice(0, 10)
@@ -4842,7 +4789,7 @@ function openTaskModal() {
     sel.innerHTML = '<option value="">📋 Pick from template library (optional)...</option>' +
       (data||[]).map(t => {
         const repeatLabel = t.repeat !== 'none' ? ` (${t.repeat})` : ''
-        return `<option value="${t.id}" data-title="${t.title}" data-notes="${t.notes||''}" data-repeat="${t.repeat||'none'}" data-days="${(t.repeat_days||[]).join(',')}">${t.title}${repeatLabel}</option>`
+        return `<option value="${t.id}" data-title="${escText(t.title)}" data-notes="${escText(t.notes||'')}" data-repeat="${t.repeat||'none'}" data-days="${(t.repeat_days||[]).join(',')}">${escText(t.title)}${repeatLabel}</option>`
       }).join('')
   })
   buildStudioPicker('task-studio-picker', [])
@@ -4893,11 +4840,6 @@ async function saveTaskFromAdmin() {
   loadTasksTab()
 }
 
-async function adminDeleteTask(id) {
-  if (!confirm('Delete this task?')) return
-  await sb.from('studio_tasks').delete().eq('id', id)
-  loadTasksTab()
-}
 
 
 // ── Staff ────────────────────────────────────────────────────
@@ -5366,7 +5308,7 @@ async function populateStaffUnitList(selectedIds = [], dueDates = {}) {
     return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:0.5px solid #f5f5f0">
       <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;flex:1">
         <input type="checkbox" class="staff-unit-cb" value="${u.id}" ${checkedIds.includes(u.id) ? 'checked' : ''}>
-        ${u.name}
+        ${escText(u.name)}
         <span style="${tagStyle}">${tagLabel}</span>
       </label>
       <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
@@ -6299,8 +6241,8 @@ async function loadTemplatesTab() {
         : '<span style="background:#f5f5f0;color:#aaa;font-size:10px;padding:2px 6px;border-radius:4px">one-off</span>'
     const urlTag = t.url ? `<a href="${t.url}" target="_blank" style="font-size:11px;color:#5b4fcf;margin-top:2px;display:block">📎 Reference doc</a>` : ''
     return `<tr style="border-bottom:0.5px solid #f5f5f0" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
-      <td style="padding:10px 14px;font-size:13px;font-weight:500">${t.title}
-        ${t.notes ? `<div style="font-size:11px;color:#888;margin-top:2px">${t.notes}</div>` : ''}
+      <td style="padding:10px 14px;font-size:13px;font-weight:500">${escText(t.title)}
+        ${t.notes ? `<div style="font-size:11px;color:#888;margin-top:2px">${escText(t.notes)}</div>` : ''}
         ${urlTag}
       </td>
       <td style="padding:10px 14px;font-size:12px">${studioLabel}</td>
@@ -6444,13 +6386,14 @@ async function saveTaskEdit() {
 
   const editStudioIds = getStudioPickerSelection('task-edit-studio-picker')
   const studioId = editStudioIds.length ? editStudioIds[0] : null
-  await sb.from('studio_tasks').update({
+  const { error } = await sb.from('studio_tasks').update({
     status,
     assignee_name: assigneeName,
-    due_date: dueDate,
+    due_date: dueDate || null,
     studio_id: studioId,
     completed_at: status === 'complete' ? new Date().toISOString() : null
   }).eq('id', editingTaskPopupId)
+  if (error) { alert('Could not save the task: ' + error.message); return }
 
   closeTaskEditPopup()
   loadTasksTab()
@@ -6458,7 +6401,8 @@ async function saveTaskEdit() {
 
 async function deleteTaskFromEdit() {
   if (!confirm('Delete this task?')) return
-  await sb.from('studio_tasks').delete().eq('id', editingTaskPopupId)
+  const { error } = await sb.from('studio_tasks').delete().eq('id', editingTaskPopupId)
+  if (error) { alert('Could not delete the task: ' + error.message); return }
   closeTaskEditPopup()
   loadTasksTab()
 }
@@ -6506,7 +6450,7 @@ async function loadTrainingTab() {
   const unitSel = document.getElementById('training-filter-unit')
   if (unitSel) {
     unitSel.innerHTML = '<option value="">All units</option>' +
-      trainingUnitsCache.filter(u => !u.is_draft).map(u => `<option value="${u.id}">${u.name}</option>`).join('')
+      trainingUnitsCache.filter(u => !u.is_draft).map(u => `<option value="${u.id}">${escText(u.name)}</option>`).join('')
   }
   loadTrainingOverview()
 }
@@ -6566,7 +6510,7 @@ async function loadPendingSubmissions() {
       </div>`
     }).join('')
     return `<div style="background:white;border:0.5px solid #e0e0d8;border-radius:10px;padding:14px 16px;margin-bottom:10px">
-      <div style="font-size:13px;font-weight:600;margin-bottom:2px">${staff.display_name || 'Unknown staff'}</div>
+      <div style="font-size:13px;font-weight:600;margin-bottom:2px">${escText(staff.display_name || 'Unknown staff')}</div>
       <div style="font-size:11px;color:#888;margin-bottom:8px">${studioLabel}</div>
       ${ideaRows}
       ${extraNamesHtml(row)}
@@ -6702,7 +6646,7 @@ function renderLibraryList() {
   }
   container.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:8px">${filtered.map(n => `
     <div style="display:flex;align-items:center;gap:6px;background:white;border:0.5px solid #e0e0d8;border-radius:8px;padding:5px 6px 5px 12px;font-size:12px">
-      <span>${n.name}</span>
+      <span>${escText(n.name)}</span>
       <button onclick="deleteLibraryName('${n.id}')" style="border:none;background:none;color:#c0392b;cursor:pointer;font-size:13px;padding:2px 4px" title="Remove from library">✕</button>
     </div>
   `).join('')}</div>`
@@ -6744,7 +6688,7 @@ async function loadTrainingOverview() {
   const unitSel = document.getElementById('training-filter-unit')
   if (unitSel) {
     unitSel.innerHTML = '<option value="">All units</option>' +
-      trainingUnitsCache.filter(u => !u.is_draft).map(u => `<option value="${u.id}">${u.name}</option>`).join('')
+      trainingUnitsCache.filter(u => !u.is_draft).map(u => `<option value="${u.id}">${escText(u.name)}</option>`).join('')
   }
 
   let staffQuery = sb.from('staff_profiles').select(await staffCols()).eq('is_active', true).order('display_name')
@@ -6818,7 +6762,7 @@ async function loadTrainingOverview() {
       ? ` <span style="font-size:9px;background:#e8e8f0;color:#5b4fcf;padding:1px 4px;border-radius:3px">${unit.applies_to}</span>`
       : ''
     return `<th colspan="${count}" style="padding:6px 8px;text-align:center;font-size:11px;font-weight:600;background:#f0f0f8;border-left:2px solid #d0d0e8;border-bottom:0.5px solid #e0e0d8;white-space:nowrap">
-      ${unit.name}${appliesBadge}
+      ${escText(unit.name)}${appliesBadge}
     </th>`
   }).join('')
 
@@ -6828,8 +6772,8 @@ async function loadTrainingOverview() {
   const itemHeaderCells = visibleItems.map((item, idx) => {
     const isFirstInUnit = idx === 0 || visibleItems[idx-1].unit_id !== item.unit_id
     return `<th style="padding:4px 2px;text-align:center;min-width:36px;max-width:42px;border-left:${isFirstInUnit ? '2px solid #d0d0e8' : '0.5px solid #f0f0e8'};border-bottom:0.5px solid #e0e0d8;vertical-align:bottom">
-      <div style="writing-mode:vertical-rl;transform:rotate(180deg);font-size:10px;color:#666;font-weight:400;line-height:1.2;height:80px;overflow:hidden;cursor:default" title="${item.title}">
-        ${item.title}
+      <div style="writing-mode:vertical-rl;transform:rotate(180deg);font-size:10px;color:#666;font-weight:400;line-height:1.2;height:80px;overflow:hidden;cursor:default" title="${escText(item.title)}">
+        ${escText(item.title)}
       </div>
     </th>`
   }).join('')
@@ -6885,7 +6829,7 @@ async function loadTrainingOverview() {
           : ''
 
       return `<td style="text-align:center;${borderStyle};padding:4px 2px;background:${bg}">
-        <span style="font-size:14px;cursor:pointer;display:block;line-height:1" onclick="toggleTrainingItem('${s.id}','${item.id}',${!!done},'${s.user_id||''}')" title="${item.title}">${done ? '✅' : '⬜'}</span>
+        <span style="font-size:14px;cursor:pointer;display:block;line-height:1" onclick="toggleTrainingItem('${s.id}','${item.id}',${!!done},'${s.user_id||''}')" title="${escText(item.title)}">${done ? '✅' : '⬜'}</span>
         ${done && done.completed_at ? `<div style="font-size:9px;color:#2e7d32;margin-top:2px;line-height:1.2">${new Date(done.completed_at).toLocaleDateString('en-CA',{month:'short',day:'numeric'})}</div>` : ''}
         ${dueDateTag}
       </td>`
@@ -6894,7 +6838,7 @@ async function loadTrainingOverview() {
     return `<tr style="border-bottom:0.5px solid #f5f5f0" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
       <td style="padding:8px 14px;white-space:nowrap;position:sticky;left:0;background:white;z-index:1;border-right:0.5px solid #e0e0d8">
         <div style="display:flex;align-items:center;gap:0;flex-wrap:nowrap">
-          <strong style="font-size:12px">${s.display_name}</strong>${s.nickname ? `<span style="font-size:10px;color:#aaa;margin-left:4px">(${s.nickname})</span>` : ''}
+          <strong style="font-size:12px">${escText(s.display_name)}</strong>${s.nickname ? `<span style="font-size:10px;color:#aaa;margin-left:4px">(${escText(s.nickname)})</span>` : ''}
           ${pctBadge}
         </div>
         <div style="font-size:10px;color:#aaa">${studioLabel}</div>
@@ -6976,14 +6920,14 @@ async function loadTrainingManage() {
     const unitItems = trainingItemsCache.filter(i => i.unit_id === unit.id)
     const itemsHtml = unitItems.map(item => `
       <div style="display:flex;align-items:center;gap:10px;padding:8px 16px;border-bottom:0.5px solid #f5f5f0">
-        <span style="flex:1;font-size:13px">${item.title}${item.description ? `<span style="font-size:11px;color:#888;margin-left:6px">${item.description}</span>` : ''}</span>
+        <span style="flex:1;font-size:13px">${escText(item.title)}${item.description ? `<span style="font-size:11px;color:#888;margin-left:6px">${escText(item.description)}</span>` : ''}</span>
         <button class="btn" onclick="openItemModal('${unit.id}','${item.id}')" style="font-size:11px;padding:3px 8px">Edit</button>
       </div>`).join('')
     const emptyItems = !unitItems.length ? '<div style="padding:10px 16px;font-size:12px;color:#bbb">No items yet</div>' : ''
 
     return `<div style="background:white;border:0.5px solid #e0e0d8;border-radius:12px;overflow:hidden;margin-bottom:1rem">
       <div style="padding:12px 16px;background:#fafaf8;border-bottom:0.5px solid #e0e0d8;display:flex;align-items:center;gap:10px">
-        <strong style="font-size:13px;flex:1">${unit.name}</strong>
+        <strong style="font-size:13px;flex:1">${escText(unit.name)}</strong>
         ${unit.is_draft ? '<span style="font-size:10px;font-weight:600;color:#f0a500;background:#fff8e1;border:0.5px solid #ffe082;border-radius:4px;padding:2px 6px">DRAFT</span>' : ''}
         <span style="font-size:11px;color:#888">${appliesLabel[unit.applies_to] || unit.applies_to}</span>
         <button class="btn" onclick="openUnitModal('${unit.id}')" style="font-size:11px;padding:3px 8px">Edit unit</button>
@@ -7118,13 +7062,10 @@ function closeDueDatePopup() {
 async function saveDueDateFromPopup() {
   const date = document.getElementById('due-date-input').value
   if (!_ddUserId || !_ddUnitId) return
-  if (date) {
-    await sb.from('staff_training_due_dates').upsert({
-      user_id: _ddUserId, unit_id: _ddUnitId, due_date: date
-    }, { onConflict: 'user_id,unit_id' })
-  } else {
-    await sb.from('staff_training_due_dates').delete().eq('user_id', _ddUserId).eq('unit_id', _ddUnitId)
-  }
+  const { error } = date
+    ? await sb.from('staff_training_due_dates').upsert({ user_id: _ddUserId, unit_id: _ddUnitId, due_date: date }, { onConflict: 'user_id,unit_id' })
+    : await sb.from('staff_training_due_dates').delete().eq('user_id', _ddUserId).eq('unit_id', _ddUnitId)
+  if (error) { alert('Could not save the due date: ' + error.message); return }
   closeDueDatePopup()
   loadTrainingOverview()
 }
@@ -7158,7 +7099,7 @@ async function openMassDueDateModal() {
   const staffSel = document.getElementById('mass-individual-staff')
   staffSel.innerHTML = '<option value="">Select staff member...</option>' +
     (staffList || []).filter(s => s.user_id).map(s =>
-      `<option value="${s.user_id}">${s.display_name}${s.nickname ? ' (' + s.nickname + ')' : ''}</option>`
+      `<option value="${s.user_id}">${escText(s.display_name)}${s.nickname ? ' (' + escText(s.nickname) + ')' : ''}</option>`
     ).join('')
 
   // Build unit date rows
@@ -7170,7 +7111,7 @@ async function openMassDueDateModal() {
     <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:0.5px solid #f5f5f0">
       <label style="display:flex;align-items:center;gap:6px;flex:1;font-size:12px;cursor:pointer">
         <input type="checkbox" class="mass-unit-cb" value="${u.id}" checked>
-        ${u.name}
+        ${escText(u.name)}
       </label>
       <input type="date" class="mass-unit-date" data-unit-id="${u.id}"
         style="padding:5px 8px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:12px;outline:none">
@@ -7234,7 +7175,8 @@ async function applyMassDueDates() {
   }
 
   if (upserts.length) {
-    await sb.from('staff_training_due_dates').upsert(upserts, { onConflict: 'user_id,unit_id' })
+    const { error } = await sb.from('staff_training_due_dates').upsert(upserts, { onConflict: 'user_id,unit_id' })
+    if (error) { alert('Could not save due dates: ' + error.message); btn.textContent = 'Apply'; btn.disabled = false; return }
   }
 
   btn.textContent = 'Apply'; btn.disabled = false
@@ -7367,7 +7309,7 @@ async function loadPartySlotScheduleGrid() {
   panel.innerHTML = '<div class="loading">Loading...</div>'
 
   const { data, error } = await sb.from('party_slot_schedule').select('studio_id, day_of_week, time_slot, slots')
-  if (error) { panel.innerHTML = `<div style="color:#c0392b;font-size:12px">Failed to load: ${error.message}</div>`; return }
+  if (error) { panel.innerHTML = `<div style="color:#c0392b;font-size:12px">Failed to load: ${escText(error.message)}</div>`; return }
 
   const slotsByStudio = {} // studio_id -> "dow-time" -> slots
   ;(data || []).forEach(r => {
@@ -7468,7 +7410,7 @@ async function loadPartyBirdsEye() {
       .gt('qty', 0)
       .gte('event_date', rangeStartStr)
       .range(from, from + pageSize - 1)
-    if (error) { console.error('Birds-eye load error:', error); container.innerHTML = `<div style="padding:1rem;color:#c0392b;font-size:12px">Failed to load overview: ${error.message}</div>`; return }
+    if (error) { console.error('Birds-eye load error:', error); container.innerHTML = `<div style="padding:1rem;color:#c0392b;font-size:12px">Failed to load overview: ${escText(error.message)}</div>`; return }
     if (!data || data.length === 0) break
     allBookings = allBookings.concat(data)
     if (data.length < pageSize) break
@@ -7719,12 +7661,12 @@ async function loadPartyReport() {
       <td style="padding:10px 14px;font-size:12px;white-space:nowrap">${r.booking.event_date}</td>
       <td style="padding:10px 14px;font-size:12px;white-space:nowrap">${r.studioName}</td>
       <td style="padding:10px 14px;font-size:12px">
-        <strong>${r.booking.customer_name || '—'}</strong>
+        <strong>${escText(r.booking.customer_name || '—')}</strong>
         <div style="font-size:11px;color:#888">${r.booking.shopify_order_name || ''}</div>
       </td>
       <td style="padding:10px 14px;font-size:12px;white-space:nowrap">${partyTypeLabel(r.partyType)}</td>
       <td style="padding:10px 14px">${r.statusHtml}</td>
-      <td style="padding:10px 14px;font-size:11px;color:#888;max-width:200px">${r.pd?.notes || ''}</td>
+      <td style="padding:10px 14px;font-size:11px;color:#888;max-width:200px">${escText(r.pd?.notes || '')}</td>
     </tr>`).join('')
 
   container.innerHTML = `
@@ -7786,7 +7728,7 @@ function openTransferModal() {
   document.getElementById('tr-lookup-status').textContent = ''
   // Populate studio dropdown
   const studioSel = document.getElementById('tr-studio')
-  studioSel.innerHTML = allStudios.map(s => `<option value="${s.id}">${s.name}</option>`).join('')
+  studioSel.innerHTML = allStudios.map(s => `<option value="${s.id}">${escText(s.name)}</option>`).join('')
   document.getElementById('tr-step-bookings').style.display = 'none'
   document.getElementById('tr-step-preview').style.display = 'none'
   document.getElementById('tr-status').textContent = ''
@@ -7844,14 +7786,14 @@ function trRenderBookings() {
   const list = tr.bookings.map(b => {
     const s = tr.sessionMap[b.session_id]
     const sessionLabel = s
-      ? `<span style="color:#1a4fa0">${s.title}</span> · ${fmtDate(s.session_date)} · ${fmtTime12(s.session_time)} · ${getStudioName(s.studio_id)}`
+      ? `<span style="color:#1a4fa0">${escText(s.title)}</span> · ${fmtDate(s.session_date)} · ${fmtTime12(s.session_time)} · ${getStudioName(s.studio_id)}`
       : `<span style="color:#c0392b">Unlinked</span>`
     const checked = tr.selectedIds.has(b.id) ? 'checked' : ''
     return `<label style="display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:0.5px solid #f0f0e8;cursor:pointer">
       <input type="checkbox" ${checked} onchange="trToggle('${b.id}',this.checked)"
         style="margin-top:2px;width:14px;height:14px;accent-color:#1a1a1a;flex-shrink:0">
       <div>
-        <div style="font-size:12px;font-weight:500">${b.customer_name || '—'} <span style="font-weight:400;color:#888">${b.customer_email||''}</span></div>
+        <div style="font-size:12px;font-weight:500">${escText(b.customer_name || '—')} <span style="font-weight:400;color:#888">${escText(b.customer_email||'')}</span></div>
         <div style="font-size:11px;color:#555;margin-top:2px">${sessionLabel} · <b>${b.qty}</b> spot${b.qty!==1?'s':''}</div>
       </div>
     </label>`
@@ -7951,7 +7893,7 @@ function trRenderPreview(newDate) {
           : `<div style="font-size:11px;color:#e65100;margin-top:3px">⚠ Shopify product not found — inventory won’t be adjusted</div>`)
       : `<div style="font-size:11px;color:#888;margin-top:3px">Supabase only (no Shopify inventory)</div>`
     html += `<div style="padding:9px 12px;border:0.5px solid #e0e0d8;border-radius:7px;margin-bottom:6px">
-      <div style="font-size:12px;font-weight:500">${cur.title}${tag}</div>
+      <div style="font-size:12px;font-weight:500">${escText(cur.title)}${tag}</div>
       <div style="font-size:12px;color:#444;margin-top:3px">${fmtDate(cur.session_date)} → <b>${fmtDate(newDate)}</b> · ${booking.qty} spot${booking.qty!==1?'s':''} · ${getStudioName(cur.studio_id)}${tgt.studio_id !== cur.studio_id ? ` → <b>${getStudioName(tgt.studio_id)}</b>` : ''}</div>
       ${shopifyLine}
     </div>`
@@ -8041,7 +7983,7 @@ function getClayStage(key) { return CLAY_STAGES.find(s => s.key === key) || CLAY
 
 function clayStageChip(key) {
   const s = getClayStage(key)
-  return `<span style="display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;background:${s.color};color:${s.text}">${s.label}</span>`
+  return `<span style="display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;background:${s.color};color:${escText(s.text)}">${s.label}</span>`
 }
 
 async function loadClayTab() {
@@ -8071,14 +8013,14 @@ async function loadClayTab() {
   if (stageFilter)  q = q.eq('stage', stageFilter)
 
   const { data, error } = await q
-  if (error) { list.innerHTML = `<div style="color:#c0392b;padding:20px">Error loading clay tickets: ${error.message}</div>`; return }
+  if (error) { list.innerHTML = `<div style="color:#c0392b;padding:20px">Error loading clay tickets: ${escText(error.message)}</div>`; return }
   if (!data?.length) { list.innerHTML = '<div style="color:#aaa;font-size:14px;padding:40px;text-align:center">No clay tickets found.</div>'; return }
 
   list.innerHTML = data.map(t => {
     const stage = getClayStage(t.stage)
     const contacts = (t.signin_entries || [])
     const contactHtml = contacts.length
-      ? contacts.map(c => `<span style="font-size:12px;color:#555;background:#f5f5f0;border-radius:12px;padding:2px 8px;display:inline-block;margin:2px">${c.name}${c.email ? ` <span style="color:#aaa">${c.email}</span>` : ''}${c.phone ? ` <span style="color:#aaa">${c.phone}</span>` : ''}</span>`).join('')
+      ? contacts.map(c => `<span style="font-size:12px;color:#555;background:#f5f5f0;border-radius:12px;padding:2px 8px;display:inline-block;margin:2px">${escText(c.name)}${c.email ? ` <span style="color:#aaa">${escText(c.email)}</span>` : ''}${c.phone ? ` <span style="color:#aaa">${escText(c.phone)}</span>` : ''}</span>`).join('')
       : '<span style="font-size:12px;color:#aaa">No contacts</span>'
 
     const nextBtn = stage.next
@@ -8096,8 +8038,8 @@ async function loadClayTab() {
       </div>
       <div style="flex:1;min-width:200px">
         ${clayStageChip(t.stage)}
-        ${t.description ? `<div style="font-size:13px;color:#333;margin-top:6px">${t.description}</div>` : ''}
-        ${t.notes ? `<div style="font-size:12px;color:#888;margin-top:4px">📝 ${t.notes}</div>` : ''}
+        ${t.description ? `<div style="font-size:13px;color:#333;margin-top:6px">${escText(t.description)}</div>` : ''}
+        ${t.notes ? `<div style="font-size:12px;color:#888;margin-top:4px">📝 ${escText(t.notes)}</div>` : ''}
         <div style="margin-top:8px">${contactHtml}</div>
       </div>
       <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
@@ -8168,7 +8110,7 @@ async function loadPartyFollowup() {
   if (studioFilter) sessQ = sessQ.eq('studio_id', studioFilter)
 
   const { data: sessions, error: sessErr } = await sessQ
-  if (sessErr) { container.innerHTML = `<div style="color:#c0392b;padding:16px">Error: ${sessErr.message}</div>`; return }
+  if (sessErr) { container.innerHTML = `<div style="color:#c0392b;padding:16px">Error: ${escText(sessErr.message)}</div>`; return }
   if (!sessions?.length) { container.innerHTML = '<div style="color:#aaa;padding:16px;text-align:center">No past parties in this range.</div>'; return }
 
   const sessionIds = sessions.map(s => s.id)
@@ -8248,8 +8190,8 @@ async function loadPartyFollowup() {
         <td style="padding:9px 14px;white-space:nowrap;color:#555">${fmtDate}</td>
         <td style="padding:9px 14px;color:#555">${bi === 0 ? getStudioName(s.studio_id) : ''}</td>
         <td style="padding:9px 14px">
-          <div style="font-weight:500;color:#1a1a1a">${b.customer_name || '—'}</div>
-          ${b.customer_email ? `<div style="font-size:11px;color:#aaa">${b.customer_email}</div>` : ''}
+          <div style="font-weight:500;color:#1a1a1a">${escText(b.customer_name || '—')}</div>
+          ${b.customer_email ? `<div style="font-size:11px;color:#aaa">${escText(b.customer_email)}</div>` : ''}
         </td>
         <td style="padding:9px 14px;color:#555">${partyType}</td>
         <td style="padding:9px 14px;text-align:center">
@@ -8289,7 +8231,7 @@ async function loadReviewsList() {
   if (studioFilter) q = q.eq('studio_id', studioFilter)
 
   const { data, error } = await q
-  if (error) { list.innerHTML = `<div style="color:#c0392b;padding:20px">Error: ${error.message}</div>`; return }
+  if (error) { list.innerHTML = `<div style="color:#c0392b;padding:20px">Error: ${escText(error.message)}</div>`; return }
   if (!data?.length) { list.innerHTML = '<div style="color:#aaa;padding:20px;text-align:center">No reviews found.</div>'; return }
 
   list.innerHTML = data.map(r => {
@@ -8312,8 +8254,8 @@ async function loadReviewsList() {
           <span style="font-size:11px;color:#aaa">${date}</span>
         </div>
       </div>
-      ${r.customer_name ? `<div style="font-size:12px;color:#888;margin-bottom:6px">— ${r.customer_name}</div>` : ''}
-      ${r.comment ? `<div style="font-size:14px;color:#333;line-height:1.6;margin-bottom:12px">"${r.comment}"</div>` : '<div style="font-size:13px;color:#aaa;margin-bottom:12px"><em>No comment left</em></div>'}
+      ${r.customer_name ? `<div style="font-size:12px;color:#888;margin-bottom:6px">— ${escText(r.customer_name)}</div>` : ''}
+      ${r.comment ? `<div style="font-size:14px;color:#333;line-height:1.6;margin-bottom:12px">"${escText(r.comment)}"</div>` : '<div style="font-size:13px;color:#aaa;margin-bottom:12px"><em>No comment left</em></div>'}
       ${r.status === 'pending' ? `
         <div style="display:flex;gap:8px">
           <button onclick="setReviewStatus('${r.id}','approved')" style="padding:6px 16px;background:#2e7d32;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer">✓ Approve for Studio</button>
@@ -8419,20 +8361,20 @@ async function openClayDetail(ticketId) {
       </div>
       <div>
         <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Description</div>
-        <input type="text" id="clay-edit-desc-${ticketId}" value="${t.description || ''}" placeholder="e.g. 3 mugs + 1 bowl" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none">
+        <input type="text" id="clay-edit-desc-${ticketId}" value="${escText(t.description || '')}" placeholder="e.g. 3 mugs + 1 bowl" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none">
       </div>
       <div>
         <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Notes</div>
-        <input type="text" id="clay-edit-notes-${ticketId}" value="${t.notes || ''}" placeholder="Any special instructions..." style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none">
+        <input type="text" id="clay-edit-notes-${ticketId}" value="${escText(t.notes || '')}" placeholder="Any special instructions..." style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none">
       </div>
       <div>
         <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Contacts (${contacts.length})</div>
         ${contacts.length ? contacts.map(c => `
           <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:#f8f8f5;border-radius:6px;margin-bottom:4px">
             <div>
-              <span style="font-size:13px;font-weight:600">${c.name}</span>
-              ${c.email ? `<span style="font-size:12px;color:#888;margin-left:8px">${c.email}</span>` : ''}
-              ${c.phone ? `<span style="font-size:12px;color:#888;margin-left:8px">${c.phone}</span>` : ''}
+              <span style="font-size:13px;font-weight:600">${escText(c.name)}</span>
+              ${c.email ? `<span style="font-size:12px;color:#888;margin-left:8px">${escText(c.email)}</span>` : ''}
+              ${c.phone ? `<span style="font-size:12px;color:#888;margin-left:8px">${escText(c.phone)}</span>` : ''}
             </div>
           </div>`).join('') : '<div style="font-size:13px;color:#aaa">No contacts on this ticket.</div>'}
         <div style="margin-top:8px">
@@ -8486,6 +8428,98 @@ function showAdminToast(msg, duration = 2500) {
 }
 </script>
 
+
+<!-- ═══ Popups rebuilt Oct 2026 (their JavaScript existed, the HTML had been lost) ═══ -->
+
+<!-- Announcement modal: openAnnouncementModal / saveAnnouncement -->
+<div id="announcement-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem" onclick="if(event.target===this)closeAnnouncementModal()">
+  <div style="background:white;border-radius:14px;padding:24px;width:520px;max-width:95vw;max-height:90vh;overflow-y:auto">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+      <div id="ann-modal-title" style="font-size:16px;font-weight:700">New Announcement</div>
+      <button onclick="closeAnnouncementModal()" style="background:none;border:none;font-size:22px;color:#aaa;cursor:pointer;line-height:1">&#215;</button>
+    </div>
+    <div style="display:grid;gap:14px">
+      <div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Title *</div><input type="text" id="ann-title" placeholder="e.g. Holiday hours reminder" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box;background:white"></div>
+      <div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Message</div><textarea id="ann-body" rows="4" placeholder="What studios need to know..." style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box;background:white;resize:vertical;font-family:inherit"></textarea></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+        <div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Priority</div><select id="ann-priority" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box;background:white"><option value="normal">Normal</option><option value="urgent">Urgent</option></select></div>
+        <div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Show from</div><input type="date" id="ann-from" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box;background:white"></div>
+        <div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Show until</div><input type="date" id="ann-until" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box;background:white"></div>
+      </div>
+      <div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Studios</div><div id="ann-studio-picker"></div></div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px">
+      <button class="btn" onclick="closeAnnouncementModal()">Cancel</button>
+      <button id="ann-save-btn" class="btn btn-primary" onclick="saveAnnouncement()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Training: set one due date (click a due date in the Birds-eye View) -->
+<div id="due-date-popup" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem" onclick="if(event.target===this)closeDueDatePopup()">
+  <div style="background:white;border-radius:14px;padding:24px;width:520px;max-width:95vw;max-height:90vh;overflow-y:auto;width:340px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+      <div style="font-size:16px;font-weight:700">Training due date</div>
+      <button onclick="closeDueDatePopup()" style="background:none;border:none;font-size:22px;color:#aaa;cursor:pointer;line-height:1">&#215;</button>
+    </div>
+    <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Due date</div>
+    <input type="date" id="due-date-input" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box;background:white">
+    <div style="font-size:11px;color:#aaa;margin-top:6px">Clear the date and save to remove it.</div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="btn" onclick="closeDueDatePopup()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveDueDateFromPopup()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Training: set due dates for many people at once ("Set Due Dates") -->
+<div id="mass-due-date-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem" onclick="if(event.target===this)closeMassDueDateModal()">
+  <div style="background:white;border-radius:14px;padding:24px;width:520px;max-width:95vw;max-height:90vh;overflow-y:auto;width:560px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+      <div style="font-size:16px;font-weight:700">Set training due dates</div>
+      <button onclick="closeMassDueDateModal()" style="background:none;border:none;font-size:22px;color:#aaa;cursor:pointer;line-height:1">&#215;</button>
+    </div>
+    <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Who</div>
+    <div style="display:flex;gap:6px;margin-bottom:12px">
+      <button id="mass-target-all" onclick="massSetTarget('all')" style="padding:7px 14px;border:1px solid #d0d0c8;border-radius:8px;font-size:12px;cursor:pointer;background:white;color:#555">All active staff</button>
+      <button id="mass-target-studio" onclick="massSetTarget('studio')" style="padding:7px 14px;border:1px solid #d0d0c8;border-radius:8px;font-size:12px;cursor:pointer;background:white;color:#555">By studio</button>
+      <button id="mass-target-individual" onclick="massSetTarget('individual')" style="padding:7px 14px;border:1px solid #d0d0c8;border-radius:8px;font-size:12px;cursor:pointer;background:white;color:#555">One person</button>
+    </div>
+    <div id="mass-studio-picker-wrap" style="display:none;margin-bottom:12px"><div id="mass-studio-picker"></div></div>
+    <div id="mass-individual-picker-wrap" style="display:none;margin-bottom:12px"><select id="mass-individual-staff" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box;background:white"></select></div>
+    <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px;margin-top:4px">Units and due dates</div>
+    <div style="font-size:11px;color:#aaa;margin-bottom:6px">Tick the units and give each a date. Units someone has already finished are skipped for them.</div>
+    <div id="mass-unit-dates" style="max-height:300px;overflow-y:auto"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="btn" onclick="closeMassDueDateModal()">Cancel</button>
+      <button id="mass-due-save-btn" class="btn btn-primary" onclick="applyMassDueDates()">Apply</button>
+    </div>
+  </div>
+</div>
+
+<!-- Tasks: edit one task (click a cell in the Tasks grid) -->
+<div id="task-edit-popup" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:white;border-radius:14px;padding:24px;width:520px;max-width:95vw;max-height:90vh;overflow-y:auto">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+      <div id="task-edit-title" style="font-size:16px;font-weight:700"></div>
+      <button onclick="closeTaskEditPopup()" style="background:none;border:none;font-size:22px;color:#aaa;cursor:pointer;line-height:1">&#215;</button>
+    </div>
+    <div id="task-edit-notes" style="display:none;font-size:13px;color:#555;background:#fafaf8;border-radius:8px;padding:10px 12px;margin-bottom:12px;white-space:pre-wrap"></div>
+    <div id="task-edit-url-row" style="display:none;margin-bottom:12px"><a id="task-edit-link" href="#" target="_blank" rel="noopener" style="font-size:13px">Open link ↗</a></div>
+    <div style="display:grid;gap:14px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Status</div><select id="task-edit-status" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box;background:white"><option value="pending">Pending</option><option value="complete">Complete</option></select></div>
+        <div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Due date</div><input type="date" id="task-edit-date" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box;background:white"></div>
+      </div>
+      <div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Assigned to</div><input type="text" id="task-edit-assignee" placeholder="Name" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box;background:white"></div>
+      <div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Studio</div><div id="task-edit-studio-picker"></div></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;gap:8px;margin-top:20px">
+      <button class="btn" style="color:#c0392b;border-color:#f5c6cb" onclick="deleteTaskFromEdit()">Delete</button>
+      <div style="display:flex;gap:8px"><button class="btn" onclick="closeTaskEditPopup()">Cancel</button><button class="btn btn-primary" onclick="saveTaskEdit()">Save</button></div>
+    </div>
+  </div>
+</div>
 
 <!-- Access Tab (owners only) -->
 <div class="tab-content" id="tab-access" style="max-width:1100px">
@@ -10149,7 +10183,7 @@ async function loadCampFormsTab() {
       .gt('qty', 0)
       .order('event_date', { ascending: true })
       .range(cfFrom, cfFrom + cfBatchSize - 1)
-    if (batchError) { container.innerHTML = '<div class="empty">Error loading bookings: ' + batchError.message + '</div>'; return }
+    if (batchError) { container.innerHTML = '<div class="empty">Error loading bookings: ' + escText(batchError.message) + '</div>'; return }
     if (batch?.length) bookings.push(...batch)
     if (!batch || batch.length < cfBatchSize) break
     cfFrom += cfBatchSize
@@ -10464,7 +10498,7 @@ async function loadReferrals() {
 
   const { data, error } = await query
 
-  if (error) { wrap.innerHTML = '<div class="empty">Error: ' + error.message + '</div>'; return }
+  if (error) { wrap.innerHTML = '<div class="empty">Error: ' + escText(error.message) + '</div>'; return }
   if (!data?.length) { wrap.innerHTML = '<div class="empty">No referral data found for this period.</div>'; return }
 
   // Tally
@@ -10759,7 +10793,7 @@ async function loadTablesTab() {
     tblData = Array.isArray(json) ? json : []
     renderTablesList()
   } catch(e) {
-    listEl.innerHTML = '<div style="color:#c00;font-size:13px;padding:1rem 0">Error loading tables: ' + e.message + '</div>'
+    listEl.innerHTML = '<div style="color:#c00;font-size:13px;padding:1rem 0">Error loading tables: ' + escText(e.message) + '</div>'
   }
 }
 
@@ -11097,7 +11131,7 @@ function renderTableGroups() {
     html += '<div style="display:flex;align-items:center;gap:12px;padding:10px 14px;border:1px solid #e0e0d8;border-radius:8px;background:#fff">'
     html += '<div style="width:28px;height:28px;border-radius:50%;background:#f0f0e8;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#888;flex-shrink:0">' + priority + '</div>'
     html += '<div style="flex:1">'
-    html += '<div style="font-weight:600;font-size:14px;color:#222">' + g.name + '</div>'
+    html += '<div style="font-weight:600;font-size:14px;color:#222">' + escText(g.name) + '</div>'
     html += '<div style="font-size:12px;color:#888;margin-top:2px">' + tableNums + ' &nbsp;·&nbsp; ' + count + ' tables &nbsp;·&nbsp; up to ' + maxGuests + ' guests</div>'
     html += '</div>'
     html += '<button class="btn" style="font-size:12px;padding:3px 10px" onclick="openEditGroupModal(\'' + g.id + '\')">Edit</button>'
@@ -11306,11 +11340,6 @@ let dragSourceCell = null  // {x, y, roomName}
 let cellFeatures = []  // all features for current studio
 
 // Table visual dimensions in cells (each cell = CELL_W x CELL_H)
-function getTableDims(t) {
-  if (t.shape === 'round' || t.shape === 'square') return { w: 1, h: 1 }
-  if (t.orientation === 'portrait') return { w: 1, h: 1 }  // tall = 1 wide, spans full cell height
-  return { w: 2, h: 1 }  // landscape = 2 wide, 1 tall
-}
 
 async function loadRooms() {
   if (!tablesStudioId) return
@@ -11369,7 +11398,7 @@ function renderRoomEditor() {
 
     // Room header
     html += '<div style="background:#f5f5f0;padding:10px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid #e0e0d8">'
-    html += '<span style="font-weight:600;font-size:14px">🏠 ' + room.name + '</span>'
+    html += '<span style="font-weight:600;font-size:14px">🏠 ' + escText(room.name) + '</span>'
     html += '<span style="font-size:12px;color:#aaa">' + roomTables.length + ' table' + (roomTables.length !== 1 ? 's' : '') + '</span>'
     html += '<div style="margin-left:auto;display:flex;gap:6px;align-items:center">'
     html += '<button class="btn" style="font-size:11px;padding:2px 8px" onclick="expandRoom(\'' + room.id + '\',\'col\')">+ Col</button>'
@@ -12258,7 +12287,7 @@ async function loadAgeExceptionsTab() {
     ageExceptionsCache = data.exceptions || []
     renderAgeExceptionsTable()
   } catch (e) {
-    wrap.innerHTML = `<div class="empty" style="color:#c0392b">Failed to load: ${e.message}</div>`
+    wrap.innerHTML = `<div class="empty" style="color:#c0392b">Failed to load: ${escText(e.message)}</div>`
   }
 }
 
@@ -12274,13 +12303,13 @@ function renderAgeExceptionsTable() {
       ? new Date(row.expires_at + 'T00:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' })
       : '<span style="color:#bbb">Never</span>'
     html += `<tr>
-      <td><div style="font-weight:500;font-size:13px">${row.participant_name}</div></td>
-      <td><div class="user-email">${row.customer_email}</div></td>
-      <td>${row.approved_by || '<span style="color:#bbb">—</span>'}</td>
-      <td style="color:#888;font-size:12px">${row.note || ''}</td>
+      <td><div style="font-weight:500;font-size:13px">${escText(row.participant_name)}</div></td>
+      <td><div class="user-email">${escText(row.customer_email)}</div></td>
+      <td>${escText(row.approved_by) || '<span style="color:#bbb">—</span>'}</td>
+      <td style="color:#888;font-size:12px">${escText(row.note || '')}</td>
       <td>${expires}</td>
       <td style="white-space:nowrap">
-        <button class="btn" style="font-size:11px;color:#c0392b;border-color:#f5c6cb" onclick="removeAgeException('${row.id}','${row.participant_name.replace(/'/g,"\\'")}')">Remove</button>
+        <button class="btn" style="font-size:11px;color:#c0392b;border-color:#f5c6cb" onclick="removeAgeException('${row.id}',${jsArg(row.participant_name)})">Remove</button>
       </td>
     </tr>`
   })
@@ -12684,7 +12713,6 @@ function cpEsc(s) {
   return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
 }
 function cpFmt(n) { return (n == null ? 0 : Number(n)).toLocaleString('en-CA') }
-function cpMonthLabel(m) { return m ? new Date(m + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', year: 'numeric' }) : '' }
 function cpDateLabel(ts) { return ts ? new Date(ts).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' }) : '' }
 
 async function cpRequest(action, payload) {
