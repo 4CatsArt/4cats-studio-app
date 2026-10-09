@@ -4538,10 +4538,68 @@ async function deleteAnnouncement(id) {
 // ── Email Templates (Admin) ──────────────────────────────────
 
 let editingEmailTemplateId = null
+let editingEmailTemplateKey = null   // set when editing a system template
 
 const EMAIL_TEMPLATE_CATEGORY_LABELS = {
   general: 'General', camp: 'Camp', party: 'Party', closure: 'Closure / Weather',
-  reminder: 'Reminder', promo: 'Promo / Announcement', other: 'Other'
+  reminder: 'Reminder', promo: 'Promo / Announcement', marketing_seasonal: 'Seasonal Marketing', other: 'Other'
+}
+
+// Where a template can be offered. 'live: false' = the sending side isn't
+// switched over yet, so the template is saved but nothing uses it yet.
+const EMAIL_TEMPLATE_CONTEXTS = [
+  { id: 'blast',       label: 'Staff email tool',                 live: true  },
+  { id: 'community',   label: 'Community dashboard (marketing)',  live: true  },
+  { id: 'kiln_clay',   label: 'Kiln: clay tickets',               live: false },
+  { id: 'kiln_party',  label: 'Kiln: party tickets',              live: false },
+  { id: 'camp_pickup', label: 'Camp artwork pickup',              live: false },
+]
+
+// Tokens each context can fill in. Shown under the message box.
+const EMAIL_TEMPLATE_TOKENS = {
+  _all:        ['first_name', 'studio_name'],
+  blast:       ['class_name', 'date', 'calendar_link'],
+  community:   ['calendar_link'],
+  kiln_clay:   ['ticket_number', 'description', 'ticket_box'],
+  kiln_party:  ['ticket_number', 'session_title', 'ticket_box'],
+  camp_pickup: ['calendar_link'],
+}
+
+function etContextLabel(id) {
+  const c = EMAIL_TEMPLATE_CONTEXTS.find(c => c.id === id)
+  return c ? c.label : id
+}
+
+function etRenderContexts(selected) {
+  const sel = selected || []
+  document.getElementById('et-contexts').innerHTML = EMAIL_TEMPLATE_CONTEXTS.map(c => `
+    <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+      <input type="checkbox" class="et-context-cb" value="${c.id}" ${sel.includes(c.id) ? 'checked' : ''} onchange="etUpdateTokenHelp()">
+      ${escText(c.label)}${c.live ? '' : ' <span style="font-size:10px;color:#b8860b">(coming soon)</span>'}
+    </label>`).join('')
+  etUpdateTokenHelp()
+}
+
+function etSelectedContexts() {
+  return Array.from(document.querySelectorAll('.et-context-cb:checked')).map(cb => cb.value)
+}
+
+function etUpdateTokenHelp() {
+  const ctx = etSelectedContexts()
+  // A token is listed only if EVERY selected context can fill it in,
+  // so nobody writes a template that breaks in one of its places.
+  let tokens = EMAIL_TEMPLATE_TOKENS._all.slice()
+  if (ctx.length) {
+    const sets = ctx.map(c => EMAIL_TEMPLATE_TOKENS[c] || [])
+    const shared = sets[0].filter(t => sets.every(set => set.includes(t)))
+    tokens = tokens.concat(shared)
+  }
+  const tokenHtml = tokens.map(t => `<code>{{${t}}}</code>`).join(', ')
+  const notLive = ctx.filter(c => !(EMAIL_TEMPLATE_CONTEXTS.find(x => x.id === c) || {}).live)
+  document.getElementById('et-token-help').innerHTML =
+    `Blank lines become paragraph breaks. <code>**text**</code> makes it bold. <code>[Label](https://…)</code> makes a link. ` +
+    `Tokens: ${tokenHtml}.` +
+    (notLive.length ? `<div style="color:#b8860b;margin-top:4px">${notLive.map(etContextLabel).join(', ')} won't use templates until that screen is switched over.</div>` : '')
 }
 
 async function loadEmailTemplatesTab() {
@@ -4561,12 +4619,20 @@ async function loadEmailTemplatesTab() {
     const ids = t.studio_ids || []
     const target = ids.length === 0
       ? '<em style="color:#888">All studios</em>'
-      : ids.length <= 2 ? ids.map(studioName).join(', ')
-      : `${ids.slice(0,2).map(studioName).join(', ')} +${ids.length-2} more`
+      : ids.length <= 2 ? ids.map(studioName).map(escText).join(', ')
+      : `${ids.slice(0,2).map(studioName).map(escText).join(', ')} +${ids.length-2} more`
     const catLabel = EMAIL_TEMPLATE_CATEGORY_LABELS[t.category] || t.category || 'General'
+    const usedIn = (t.available_in || ['blast']).map(c =>
+      `<span style="background:#eef3ea;color:#2e7d32;font-size:10px;padding:2px 6px;border-radius:4px;margin:0 3px 3px 0;display:inline-block">${escText(etContextLabel(c))}</span>`).join('')
+    const kindBadge = t.kind === 'marketing'
+      ? '<span style="background:#fde8e4;color:#c0392b;font-size:10px;padding:2px 6px;border-radius:4px">Marketing</span>'
+      : '<span style="background:#eef0f5;color:#555;font-size:10px;padding:2px 6px;border-radius:4px">Transactional</span>'
+    const lock = t.template_key ? ' <span title="System template: sent automatically, can\'t be deleted">🔒</span>' : ''
     return `<tr style="border-bottom:0.5px solid #f5f5f0" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
-      <td style="padding:10px 14px"><strong style="font-size:13px">${escText(t.name)}</strong><div style="font-size:11px;color:#888;margin-top:2px">${escText((t.subject||'').slice(0,80))}${(t.subject||'').length>80?'…':''}</div></td>
-      <td style="padding:10px 14px"><span style="background:#e8e8f0;color:#5b4fcf;font-size:10px;padding:2px 6px;border-radius:4px">${catLabel}</span></td>
+      <td style="padding:10px 14px"><strong style="font-size:13px">${escText(t.name)}</strong>${lock}<div style="font-size:11px;color:#888;margin-top:2px">${escText((t.subject||'').slice(0,80))}${(t.subject||'').length>80?'…':''}</div></td>
+      <td style="padding:10px 14px"><span style="background:#e8e8f0;color:#5b4fcf;font-size:10px;padding:2px 6px;border-radius:4px">${escText(catLabel)}</span></td>
+      <td style="padding:10px 14px">${usedIn}</td>
+      <td style="padding:10px 14px">${kindBadge}</td>
       <td style="padding:10px 14px;font-size:12px">${target}</td>
       <td style="padding:10px 14px;white-space:nowrap">
         <button class="btn" onclick="openEmailTemplateModal('${t.id}')" style="font-size:11px;padding:4px 10px">Edit</button>
@@ -4579,7 +4645,9 @@ async function loadEmailTemplatesTab() {
       <thead><tr style="background:#fafaf8;border-bottom:0.5px solid #e0e0d8">
         <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Template</th>
         <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Category</th>
-        <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Available To</th>
+        <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Used In</th>
+        <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Type</th>
+        <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Studios</th>
         <th style="padding:10px 14px"></th>
       </tr></thead>
       <tbody>${rows}</tbody>
@@ -4589,26 +4657,41 @@ async function loadEmailTemplatesTab() {
 
 async function openEmailTemplateModal(id = null) {
   editingEmailTemplateId = id
+  editingEmailTemplateKey = null
   const modal = document.getElementById('email-template-modal')
+  const badge = document.getElementById('et-system-badge')
+  badge.style.display = 'none'
 
   if (id) {
     document.getElementById('et-modal-title').textContent = 'Edit Email Template'
-    document.getElementById('et-delete-wrap').style.display = 'block'
     const { data } = await sb.from('email_templates').select('*').eq('id', id).single()
     if (data) {
+      editingEmailTemplateKey = data.template_key || null
       document.getElementById('et-name').value = data.name || ''
       document.getElementById('et-category').value = data.category || 'general'
+      document.getElementById('et-kind').value = data.kind || 'transactional'
+      document.getElementById('et-layout').value = data.layout || 'plain'
       document.getElementById('et-subject').value = data.subject || ''
       document.getElementById('et-body').value = data.body || ''
+      etRenderContexts(data.available_in || ['blast'])
       buildStudioPicker('et-studio-picker', data.studio_ids || [])
+      if (data.template_key) {
+        badge.innerHTML = `🔒 <strong>System template</strong> (<code>${escText(data.template_key)}</code>). It's sent automatically, so it can't be deleted, but you can edit the wording.`
+        badge.style.display = 'block'
+      }
     }
+    // System templates can't be deleted (the database refuses too)
+    document.getElementById('et-delete-wrap').style.display = editingEmailTemplateKey ? 'none' : 'block'
   } else {
     document.getElementById('et-modal-title').textContent = 'New Email Template'
     document.getElementById('et-delete-wrap').style.display = 'none'
     document.getElementById('et-name').value = ''
     document.getElementById('et-category').value = 'general'
+    document.getElementById('et-kind').value = 'transactional'
+    document.getElementById('et-layout').value = 'plain'
     document.getElementById('et-subject').value = ''
     document.getElementById('et-body').value = ''
+    etRenderContexts(['blast'])
     buildStudioPicker('et-studio-picker', [])
   }
 
@@ -4618,6 +4701,7 @@ async function openEmailTemplateModal(id = null) {
 function closeEmailTemplateModal() {
   document.getElementById('email-template-modal').style.display = 'none'
   editingEmailTemplateId = null
+  editingEmailTemplateKey = null
 }
 
 async function saveEmailTemplate() {
@@ -4625,15 +4709,21 @@ async function saveEmailTemplate() {
   const name = document.getElementById('et-name').value.trim()
   const subject = document.getElementById('et-subject').value.trim()
   const body = document.getElementById('et-body').value.trim()
+  const contexts = etSelectedContexts()
   if (!name) { alert('Please enter a template name.'); return }
+  if (!contexts.length) { alert('Please choose at least one place this template can be used.'); return }
   if (!subject) { alert('Please enter a subject.'); return }
   if (!body) { alert('Please enter a message.'); return }
 
   const studioIds = getStudioPickerSelection('et-studio-picker')
 
+  // template_key is never sent from here: it's only set by SQL for system templates.
   const payload = {
     name,
     category: document.getElementById('et-category').value,
+    available_in: contexts,
+    kind: document.getElementById('et-kind').value,
+    layout: document.getElementById('et-layout').value,
     subject,
     body,
     studio_ids: studioIds,
@@ -4657,8 +4747,10 @@ async function saveEmailTemplate() {
 
 async function deleteEmailTemplate() {
   if (!editingEmailTemplateId) return
+  if (editingEmailTemplateKey) { alert("System templates can't be deleted."); return }
   if (!confirm('Delete this email template? Studios will no longer see it in their template list.')) return
-  await sb.from('email_templates').delete().eq('id', editingEmailTemplateId)
+  const { error } = await sb.from('email_templates').delete().eq('id', editingEmailTemplateId)
+  if (error) { alert('Could not delete: ' + error.message); return }
   closeEmailTemplateModal()
   loadEmailTemplatesTab()
 }
@@ -8742,6 +8834,7 @@ function showAdminToast(msg, duration = 2500) {
       <div id="et-modal-title" style="font-size:16px;font-weight:700">New Email Template</div>
       <button onclick="closeEmailTemplateModal()" style="background:none;border:none;font-size:22px;color:#aaa;cursor:pointer;line-height:1">&#215;</button>
     </div>
+    <div id="et-system-badge" style="display:none;margin:-8px 0 14px;padding:8px 12px;background:#fff8e1;border:1px solid #ffe082;border-radius:8px;font-size:12px;color:#795548"></div>
     <div style="display:grid;gap:14px">
 
       <div>
@@ -8758,9 +8851,33 @@ function showAdminToast(msg, duration = 2500) {
           <option value="closure">Closure / Weather</option>
           <option value="reminder">Reminder</option>
           <option value="promo">Promo / Announcement</option>
+          <option value="marketing_seasonal">Seasonal Marketing</option>
           <option value="other">Other</option>
         </select>
       </div>
+
+      <div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Where it can be used *</div>
+        <div id="et-contexts" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;border:0.5px solid #e0e0d8;border-radius:7px;padding:10px"></div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div>
+          <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Type</div>
+          <select id="et-kind" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:13px;outline:none;background:white">
+            <option value="transactional">Transactional (about something they booked)</option>
+            <option value="marketing">Marketing (promo, win-back, announcement)</option>
+          </select>
+        </div>
+        <div>
+          <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Layout</div>
+          <select id="et-layout" style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:13px;outline:none;background:white">
+            <option value="plain">Plain (personal note)</option>
+            <option value="branded">Branded (logo header + footer)</option>
+          </select>
+        </div>
+      </div>
+      <div style="font-size:11px;color:#aaa;margin-top:-8px">Marketing emails only go to customers who've opted in, and always include an unsubscribe link. Anything with a promotion in it counts as marketing.</div>
 
       <div>
         <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Subject *</div>
@@ -8770,11 +8887,11 @@ function showAdminToast(msg, duration = 2500) {
       <div>
         <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Message *</div>
         <textarea id="et-body" placeholder="Hi {{first_name}},..." style="width:100%;padding:9px 10px;border:1px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none;resize:vertical;min-height:200px;font-family:inherit"></textarea>
-        <div style="font-size:11px;color:#aaa;margin-top:4px">Blank lines become paragraph breaks. <code>**text**</code> makes it bold. Tokens: <code>{{first_name}}</code>, <code>{{studio_name}}</code>, <code>{{class_name}}</code>, <code>{{date}}</code>, <code>{{calendar_link}}</code>.</div>
+        <div id="et-token-help" style="font-size:11px;color:#aaa;margin-top:4px"></div>
       </div>
 
       <div>
-        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Available to</div>
+        <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Studios</div>
         <div id="et-studio-picker"></div>
       </div>
 
