@@ -590,6 +590,7 @@ let sortDir = 'desc'
 let selectedIds = new Set()
 let pendingAdvance = null
 let pendingEmailTimeout = null
+let pendingClayLastChanceIds = new Set()  // clay tickets currently sending a last-chance email
 let pendingEmailInterval = null
 let pendingDelayTimeout = null
 let pendingDelayInterval = null
@@ -641,7 +642,7 @@ async function loadTickets() {
 
   let q = sb.from('clay_tickets')
     .select(`id, ticket_number, studio_id, stage, is_party, description, clay_type, created_at, glazed_on, picked_up_on,
-             kiln_delay_sent_at, bisque_email_sent_at, pickup_email_sent_at,
+             kiln_delay_sent_at, bisque_email_sent_at, pickup_email_sent_at, last_chance_email_sent_at,
              bisque_expiry_date, pickup_expiry_date, session_id,
              signin_entries(name, email),
              sessions(title, session_date, session_time, session_type)`)
@@ -692,7 +693,7 @@ async function searchTicketServerSide(search) {
 
   const { data, error } = await sb.from('clay_tickets')
     .select(`id, ticket_number, studio_id, stage, is_party, description, clay_type, created_at, glazed_on, picked_up_on,
-             kiln_delay_sent_at, bisque_email_sent_at, pickup_email_sent_at,
+             kiln_delay_sent_at, bisque_email_sent_at, pickup_email_sent_at, last_chance_email_sent_at,
              bisque_expiry_date, pickup_expiry_date, session_id,
              signin_entries(name, email),
              sessions(title, session_date, session_time, session_type)`)
@@ -789,6 +790,7 @@ function renderTable() {
         { ts: t.bisque_email_sent_at,  label: 'Ready to Glaze', color: '#2e7d32' },
         { ts: t.pickup_email_sent_at,  label: 'Ready for Pickup', color: '#1565c0' },
         { ts: t.kiln_delay_sent_at,    label: 'Kiln Delay', color: '#e67e22' },
+        { ts: t.last_chance_email_sent_at, label: 'Last Chance', color: '#e67e22' },
       ].filter(c => c.ts)
       if (!candidates.length) return `<span style="color:#ccc;font-size:11px">—</span>`
       const latest = candidates.sort((a, b) => new Date(b.ts) - new Date(a.ts))[0]
@@ -814,6 +816,16 @@ function renderTable() {
     const relevantExpiry = t.stage === 'bisque_ready' ? t.bisque_expiry_date : t.stage === 'ready_pickup' ? t.pickup_expiry_date : null
     const rowExpired = relevantExpiry && relevantExpiry <= today
 
+    // Last chance email: piece is ready for pickup and past its pickup deadline
+    const hasEmail = (t.signin_entries||[]).some(c => c.email)
+    const clayLcSending = pendingClayLastChanceIds.has(t.id)
+    const lastChanceBtn = (t.stage === 'ready_pickup' && rowExpired)
+      ? `<button class="advance-btn" style="background:${t.last_chance_email_sent_at ? '#888' : '#e67e22'}"
+           onclick="sendClayLastChanceEmail('${t.id}')" ${!hasEmail ? 'disabled title="No email on file"' : ''} ${clayLcSending ? 'disabled' : ''}>
+           ⏰ ${clayLcSending ? 'Sending…' : (t.last_chance_email_sent_at ? 'Resend last chance' : 'Send last chance email')}
+         </button>`
+      : ''
+
     // ── Action column ─────────────────────────────────────────
     // OBC (oven-bake clay) skips bisque — only show direct-to-pickup at drying stage
     const isDrying = t.stage === 'drying' || t.stage === 'submitted'
@@ -835,7 +847,7 @@ function renderTable() {
         ? `<div style="display:flex;flex-direction:column;gap:4px">
              <button class="advance-btn" onclick="promptAdvance('${t.id}','${t.ticket_number}','${stage.next}','${(stage.nextLabel||'').replace(/'/g,"\\'")}')">
                ${stage.nextLabel}
-             </button>${['bisque_ready','ready_pickup'].includes(t.stage) ? `<button class="advance-btn discard-btn" onclick="promptAdvance('${t.id}','${t.ticket_number}','discarded','🗑 Discarded — past pickup deadline (no email sent)')">🗑 Discard</button>` : ''}${stage.next !== 'picked_up' ? `<button class="advance-btn picked-btn" onclick="promptAdvance('${t.id}','${t.ticket_number}','picked_up','✓ Picked Up (no email sent)')">✓ Picked Up</button>` : ''}
+             </button>${lastChanceBtn}${['bisque_ready','ready_pickup'].includes(t.stage) ? `<button class="advance-btn discard-btn" onclick="promptAdvance('${t.id}','${t.ticket_number}','discarded','🗑 Discarded — past pickup deadline (no email sent)')">🗑 Discard</button>` : ''}${stage.next !== 'picked_up' ? `<button class="advance-btn picked-btn" onclick="promptAdvance('${t.id}','${t.ticket_number}','picked_up','✓ Picked Up (no email sent)')">✓ Picked Up</button>` : ''}
              <button class="advance-btn" style="background:#fff;color:#999;border:1px solid #ddd" onclick="promptRevert('${t.id}','${t.ticket_number}','${t.stage}')">↩ Revert stage…</button>
            </div>`
         : `<div style="display:flex;flex-direction:column;gap:4px">
@@ -1113,6 +1125,7 @@ async function confirmRevert() {
   if (targetStage === 'drying' || targetStage === 'bisque_ready') {
     patch.pickup_expiry_date = null
     patch.pickup_email_sent_at = null
+    patch.last_chance_email_sent_at = null
     patch.picked_up_on = null
   }
 
@@ -1797,7 +1810,7 @@ function promptPartyBulk(to) {
   document.getElementById('confirm-num').textContent = `${sel.length} party ticket${sel.length > 1 ? 's' : ''}`
   document.getElementById('confirm-sub').textContent = '#' + sel.map(t => t.ticket_number).join(', ')
   document.getElementById('confirm-stage').textContent = to === 'ready'
-    ? '→ Ready for Pickup 🎉 (pickup emails send after 15 seconds)'
+    ? '→ Ready for Pickup 🎉 (pickup emails send after 5 seconds)'
     : to === 'discarded'
     ? '🗑 Discarded — removed from studio, past pickup deadline (no email sent)'
     : '✓ Picked Up (no email sent)'
@@ -1897,35 +1910,17 @@ let pendingPartyEmailInterval = null
 // Actually sends the pickup email and ONLY stamps pickup_email_sent_at if the
 // send genuinely succeeded. Returns true/false so callers can react.
 async function sendPartyPickupEmailNow(t) {
-  let res, ok = false
-  try {
-    res = await fetch(`${SUPABASE_URL}/functions/v1/send-party-pickup-email`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-      },
-      body: JSON.stringify({
-        email:        t.customer_email,
-        customerName: t.customer_name,
-        ticketNumber: t.ticket_number,
-        studioId:     t.studio_id,
-        sessionTitle: t.session_title,
-      }),
-    })
-    ok = res.ok
-    if (!ok) console.error('Party pickup email failed:', res.status, await res.text().catch(()=>'')) 
-  } catch (err) {
-    console.error('Party pickup email error:', err)
-  }
+  // Sent through the shared sender (template: kiln_party_ready_pickup, editable
+  // in admin). The function saves pickup_email_sent_at itself, only on success.
+  const result = await sendArtworkEmail('party', [t.id], 'kiln_party_ready_pickup')
+  const tr = (result.tickets || [])[0]
+  const ok = !!(result.success && tr && (tr.status === 'sent' || tr.status === 'partial'))
 
   if (ok) {
-    const now = new Date().toISOString()
-    await sb.from('party_tickets').update({ pickup_email_sent_at: now }).eq('id', t.id)
-    t.pickup_email_sent_at = now
+    t.pickup_email_sent_at = result.stamped_at || new Date().toISOString()
     showToast(`📧 Pickup email sent to ${t.customer_email}`)
   } else {
-    showToast(`⚠ Pickup email failed to send for ${t.ticket_number} — check the send-party-pickup-email function`, 4000)
+    showToast(`⚠ Pickup email failed to send for ${t.ticket_number}${result.error ? ' — ' + result.error : ''}`, 4000)
   }
   pendingPartyEmailIds.delete(t.id)
   renderPartyTable()
@@ -1976,6 +1971,28 @@ async function sendArtworkEmail(ticketType, ticketIds, templateKey) {
   }
 }
 
+// Workshop (clay) "last chance" email — piece is ready for pickup and past its
+// pickup deadline. Template: kiln_clay_last_chance (editable in admin).
+async function sendClayLastChanceEmail(id) {
+  const t = allTickets.find(t => t.id === id)
+  if (!t || !(t.signin_entries||[]).some(c => c.email)) return
+  pendingClayLastChanceIds.add(id)
+  renderTable()
+
+  const result = await sendArtworkEmail('clay', [id], 'kiln_clay_last_chance')
+  const tr = (result.tickets || [])[0]
+  const ok = result.success && tr && (tr.status === 'sent' || tr.status === 'partial')
+
+  if (ok) {
+    t.last_chance_email_sent_at = result.stamped_at || new Date().toISOString()
+    showToast(`⏰ Last chance email sent for #${t.ticket_number}` + (tr.sent > 1 ? ` (${tr.sent} addresses)` : ''))
+  } else {
+    showToast(`⚠ Last chance email failed to send for #${t.ticket_number}${result.error ? ' — ' + result.error : ''}`, 4000)
+  }
+  pendingClayLastChanceIds.delete(id)
+  renderTable()
+}
+
 // "Last chance" email — for pieces that have sat ready-for-pickup 60+ days.
 // Now sent through the shared sender (template: kiln_party_last_chance).
 async function sendLastChanceEmail(id) {
@@ -2000,7 +2017,7 @@ async function sendLastChanceEmail(id) {
 }
 
 // Override confirmAdvance to handle party tickets too (single row or bulk)
-let pendingPartyBatch = null   // { ids } waiting on the 15-second email countdown
+let pendingPartyBatch = null   // { ids } waiting on the 5-second email countdown
 const _originalConfirmAdvance = confirmAdvance
 window.confirmAdvance = async function() {
   if (!pendingPartyAdvance) { _originalConfirmAdvance(); return }
@@ -2028,7 +2045,7 @@ window.confirmAdvance = async function() {
   renderPartyTable(); updatePartyBulkBar()
   showToast(`${who} → Ready for Pickup 🎉`)
 
-  // 15-second countdown, then send pickup emails (one undo covers the whole batch)
+  // 5-second countdown, then send pickup emails (one undo covers the whole batch)
   const toEmail = tickets.filter(t => t.customer_email)
   if (!toEmail.length) return
 
@@ -2043,7 +2060,7 @@ window.confirmAdvance = async function() {
   pendingPartyBatch = { ids: toEmail.map(t => t.id) }
   toEmail.forEach(t => pendingPartyEmailIds.add(t.id))
   const b = document.getElementById('party-email-banner')
-  let secondsLeft = 15
+  let secondsLeft = 5
   b.style.display = 'block'
   const label = toEmail.length === 1 ? 'Pickup email' : `${toEmail.length} pickup emails`
   const updatePartyBanner = () => {
@@ -2062,7 +2079,7 @@ window.confirmAdvance = async function() {
     const batch = pendingPartyBatch
     pendingPartyEmailTimeout = null; pendingPartyEmailInterval = null; pendingPartyBatch = null
     if (batch) sendPartyBatchEmails(batch.ids)
-  }, 15000)
+  }, 5000)
 }
 
 async function sendPartyBatchEmails(ids) {
