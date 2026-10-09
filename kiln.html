@@ -1205,7 +1205,6 @@ async function confirmAdvance() {
 
     const b = document.getElementById('email-banner')
     let secondsLeft = 5
-    const fnName = nextStage === 'bisque_ready' ? 'send-bisque-email' : 'send-pickup-email'
 
     function updateBanner() {
       b.innerHTML = `📧 Email sending in <strong>0:${String(secondsLeft).padStart(2,'0')}</strong> &nbsp; <button onclick="undoEmailSend()" style="padding:3px 10px;border:1px solid #2e7d32;border-radius:5px;background:white;color:#2e7d32;font-size:12px;font-weight:600;cursor:pointer;">✕ Undo</button>`
@@ -1219,30 +1218,15 @@ async function confirmAdvance() {
       updateBanner()
     }, 1000)
 
-    const sendNow = () => {
-      for (const t of affected) {
-        const ticketEmails = (t.signin_entries||[]).filter(c=>c.email).map(c=>c.email)
-        if (!ticketEmails.length) continue
-        fetch(`https://snxibhbhhchjthfmjtaj.supabase.co/functions/v1/${fnName}`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA'
-          },
-          body: JSON.stringify({
-            emails: ticketEmails,
-            ticketNumber: t.ticket_number,
-            studioId: studioId,
-            description: t.description || ''
-          })
-        }).catch(err => console.error('Email send error:', err))
-
-        const tsCol = nextStage === 'bisque_ready' ? 'bisque_email_sent_at' : 'pickup_email_sent_at'
-        const now   = new Date().toISOString()
-        sb.from('clay_tickets').update({ [tsCol]: now }).eq('id', t.id)
-          .then(() => { t[tsCol] = now })
-      }
+    const sendNow = async () => {
+      const templateKey = nextStage === 'bisque_ready' ? 'kiln_clay_bisque_ready' : 'kiln_clay_ready_pickup'
+      const r = await sendClayBatch(affected, templateKey, nextStage === 'bisque_ready' ? 'bisque_email_sent_at' : 'pickup_email_sent_at')
       renderTable()
+      if (r.failedTickets.length || r.error) {
+        showToast(`⚠ ${r.sentTickets} ticket${r.sentTickets === 1 ? '' : 's'} emailed, ${r.failedTickets.length} failed${r.failedTickets.length ? ' (' + r.failedTickets.slice(0, 5).join(', ') + (r.failedTickets.length > 5 ? '…' : '') + ')' : ''}${r.error ? ' — ' + r.error : ''}`, 6000)
+      } else if (r.sentTickets) {
+        showToast(`📧 Email sent for ${r.sentTickets} ticket${r.sentTickets === 1 ? '' : 's'}`)
+      }
     }
     window._pendingEmailSend = sendNow
 
@@ -1342,35 +1326,13 @@ function promptKilnDelay() {
   }, 1000)
 
   const sendDelayNow = async () => {
-    const now = new Date().toISOString()
-
-    for (const t of eligible) {
-      const ticketEmails = (t.signin_entries||[]).filter(c=>c.email).map(c=>c.email)
-      if (!ticketEmails.length) continue
-
-      fetch('https://snxibhbhhchjthfmjtaj.supabase.co/functions/v1/send-kiln-delay-email', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA'
-        },
-        body: JSON.stringify({
-          emails: ticketEmails,
-          ticketNumber: t.ticket_number,
-          studioId: studioId,
-          description: t.description || ''
-        })
-      }).catch(err => console.error('Delay email error:', err))
-
-      await sb.from('clay_tickets')
-        .update({ kiln_delay_sent_at: now })
-        .eq('id', t.id)
-
-      t.kiln_delay_sent_at = now
-    }
-
+    const r = await sendClayBatch(eligible, 'kiln_clay_delay', 'kiln_delay_sent_at')
     renderTable()
-    showToast(`🔥 Kiln delay email sent to ${eligible.length} ticket${eligible.length > 1 ? 's' : ''}`)
+    if (r.failedTickets.length || r.error) {
+      showToast(`⚠ Kiln delay: ${r.sentTickets} sent, ${r.failedTickets.length} failed${r.failedTickets.length ? ' (' + r.failedTickets.slice(0, 5).join(', ') + (r.failedTickets.length > 5 ? '…' : '') + ')' : ''}${r.error ? ' — ' + r.error : ''}`, 6000)
+    } else {
+      showToast(`🔥 Kiln delay email sent to ${r.sentTickets} ticket${r.sentTickets === 1 ? '' : 's'}`)
+    }
   }
   window._pendingDelaySend = sendDelayNow
 
@@ -2036,6 +1998,34 @@ async function sendArtworkEmail(ticketType, ticketIds, templateKey) {
     console.error('Artwork email error:', err)
     return { success: false, error: String(err) }
   }
+}
+
+// Sends one workshop template to many tickets (in groups of 100, the
+// function's limit). Tickets with no email on their sign-in are skipped.
+// The function stamps stampCol itself; this mirrors it on the loaded rows.
+async function sendClayBatch(tickets, templateKey, stampCol) {
+  const withEmail = tickets.filter(t => (t.signin_entries || []).some(c => c.email))
+  const out = { sentTickets: 0, failedTickets: [], error: '' }
+  for (let i = 0; i < withEmail.length; i += 100) {
+    const chunk = withEmail.slice(i, i + 100)
+    const result = await sendArtworkEmail('clay', chunk.map(t => t.id), templateKey)
+    if (!result.success) {
+      out.error = result.error || 'send failed'
+      chunk.forEach(t => out.failedTickets.push('#' + t.ticket_number))
+      continue
+    }
+    const stamped = new Set(result.stamped_ticket_ids || [])
+    for (const tr of result.tickets || []) {
+      const t = chunk.find(x => x.id === tr.ticket_id)
+      if (tr.status === 'sent' || tr.status === 'partial') {
+        out.sentTickets++
+        if (t && stamped.has(String(t.id))) t[stampCol] = result.stamped_at
+      } else if (tr.status === 'failed') {
+        out.failedTickets.push('#' + tr.ticket_number)
+      }
+    }
+  }
+  return out
 }
 
 // Workshop (clay) "last chance" email — piece is ready for pickup and past its
