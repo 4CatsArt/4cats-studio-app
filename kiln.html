@@ -471,6 +471,24 @@
   </div>
 </div>
 
+<!-- REVERT PARTY STAGE -->
+<div class="overlay" id="party-revert-overlay">
+  <div class="confirm-card">
+    <div style="font-size:15px;font-weight:700;margin-bottom:8px">Revert Party Ticket?</div>
+    <div class="confirm-ticket" id="party-revert-num"></div>
+    <div style="font-size:13px;color:#666;margin:10px 0 4px">Revert to:</div>
+    <select id="party-revert-select" style="width:100%;padding:8px 10px;border:1.5px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none;font-family:inherit;margin-bottom:10px">
+      <option value="processing">Processing 🪴</option>
+      <option value="ready">🎉 Ready for Pickup</option>
+    </select>
+    <div style="font-size:12px;color:#aaa;margin-bottom:8px">This will not send any email. Going back to Processing also clears the pickup and last chance email dates, so the pickup email sends again when you next mark it Ready.</div>
+    <div class="confirm-btns">
+      <button class="confirm-no" onclick="closePartyRevert()">Cancel</button>
+      <button class="confirm-yes" id="party-revert-yes" onclick="confirmPartyRevert()">Revert</button>
+    </div>
+  </div>
+</div>
+
 <!-- REVERT STAGE -->
 <div class="overlay" id="revert-overlay">
   <div class="confirm-card">
@@ -1687,7 +1705,7 @@ function renderPartyTable() {
     let action = (t.status === 'picked_up' || t.status === 'discarded')
       ? `${t.status === 'discarded' ? '<span class="stage-chip stage-discarded">🗑 Discarded</span>' : '<span class="done-badge">✓ Picked Up</span>'}<br>
          <button class="advance-btn" style="background:#fff;color:#999;border:1px solid #ddd;margin-top:4px;font-size:10px;padding:3px 8px"
-           onclick="partyUndoPickedUp('${t.id}')">↩ Back to Ready</button>`
+           onclick="promptPartyRevert('${t.id}')">↩ Revert stage…</button>`
       : t.status === 'ready'
       ? (t.pickup_email_sent_at
           ? `<span class="done-badge">✓ Ready for Pickup</span><br>
@@ -1698,7 +1716,7 @@ function renderPartyTable() {
           : `<button class="advance-btn" style="background:${emailFailed ? '#c0392b' : '#888'}"
                onclick="resendPartyPickupEmail('${t.id}')" ${!t.customer_email ? 'disabled title="No email on file"' : ''} ${isSending ? 'disabled' : ''}>
                📧 ${isSending ? 'Sending…' : (emailFailed ? 'Email failed — Resend' : 'Send Pickup Email')}
-             </button>`) + `<br>${pickedBtn}<br>${discardBtn}`
+             </button>`) + `<br>${pickedBtn}<br>${discardBtn}<br><button class="advance-btn" style="background:#fff;color:#999;border:1px solid #ddd;margin-top:4px;font-size:10px;padding:3px 8px" onclick="promptPartyRevert('${t.id}')">↩ Revert stage…</button>`
       : `<button class="advance-btn" style="background:#2e7d32"
            onclick="promptPartyAdvance('${t.id}','${t.ticket_number}')">
            → Ready for Pickup
@@ -1902,6 +1920,55 @@ async function partyUndoPickedUp(id) {
   if (t) t.status = 'ready'
   renderPartyTable(); updatePartyBulkBar()
   showToast(`↩ ${t ? t.ticket_number : 'Ticket'} back to Ready for Pickup`)
+}
+
+// ── Revert a party ticket back a stage (no email is sent) ──
+let pendingPartyRevert = null
+
+function promptPartyRevert(id) {
+  const t = allPartyTickets.find(t => t.id === id)
+  if (!t) return
+  pendingPartyRevert = { id }
+  document.getElementById('party-revert-num').textContent = t.ticket_number
+  const sel = document.getElementById('party-revert-select')
+  // Ready → Processing; Picked Up / Discarded → Ready by default
+  sel.value = t.status === 'ready' ? 'processing' : 'ready'
+  Array.from(sel.options).forEach(o => { o.style.display = o.value === t.status ? 'none' : '' })
+  document.getElementById('party-revert-overlay').classList.add('show')
+}
+
+function closePartyRevert() {
+  document.getElementById('party-revert-overlay').classList.remove('show')
+  pendingPartyRevert = null
+}
+
+async function confirmPartyRevert() {
+  if (!pendingPartyRevert) return
+  const { id } = pendingPartyRevert
+  const to  = document.getElementById('party-revert-select').value
+  const btn = document.getElementById('party-revert-yes')
+  btn.disabled = true; btn.textContent = '...'
+
+  const patch = { status: to }
+  if (to === 'processing') {
+    // Back before pickup: clear the email dates so the pickup email goes out
+    // again (and the "days waiting" count resets) next time it's marked Ready.
+    patch.pickup_email_sent_at = null
+    patch.last_chance_email_sent_at = null
+  }
+
+  const { error } = await sb.from('party_tickets').update(patch).eq('id', id)
+  btn.disabled = false; btn.textContent = 'Revert'
+  closePartyRevert()
+  if (error) { showToast('Error — try again'); console.error(error); return }
+
+  const t = allPartyTickets.find(t => t.id === id)
+  if (t) Object.assign(t, patch)
+  // If it was waiting in the 5-second pickup countdown, it won't send now
+  // (the batch only emails tickets still marked Ready), so drop the "sending" state.
+  pendingPartyEmailIds.delete(id)
+  renderPartyTable(); updatePartyBulkBar()
+  showToast(`↩ ${t ? t.ticket_number : 'Ticket'} reverted to ${to === 'ready' ? 'Ready for Pickup' : 'Processing'} — no email sent`)
 }
 
 let pendingPartyEmailTimeout  = null
