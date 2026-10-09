@@ -288,6 +288,7 @@
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button class="bulk-clear-btn" onclick="clearSelection()">✕ Clear</button>
       <button class="bulk-delay-btn" id="bulk-delay-btn" onclick="promptKilnDelay()">🔥 Kiln Delay Email</button>
+      <button class="bulk-delay-btn" id="bulk-lastchance-btn" onclick="promptBulkLastChance()" style="display:none">⏰ Last Chance Email</button>
       <button class="bulk-skip-btn" id="bulk-skip-btn" onclick="promptBulkSkipToPickup()">⏩ Skip to Pickup →</button>
       <button class="bulk-discard-btn" id="bulk-discard-btn" onclick="promptBulkDiscard()" style="display:none">🗑 Discard</button>
       <button class="bulk-picked-btn" id="bulk-picked-btn" onclick="promptBulkPickedUp()" style="display:none">✓ Picked Up</button>
@@ -297,6 +298,7 @@
 
   <div class="email-banner" id="email-banner"></div>
   <div class="delay-banner" id="delay-banner"></div>
+  <div class="delay-banner" id="lastchance-banner"></div>
   <div class="email-banner" id="party-email-banner" style="display:none"></div>
 
   <div class="tbl-wrap">
@@ -991,6 +993,11 @@ function updateBulkBar() {
   const discardBtn = document.getElementById('bulk-discard-btn')
   discardBtn.style.display = notYetPicked ? 'inline-block' : 'none'
   discardBtn.textContent = `🗑 Discard (${notYetPicked})`
+  // Last chance: works on a mixed selection — only Ready for Pickup pieces with an email get it
+  const lcBtn = document.getElementById('bulk-lastchance-btn')
+  const lcEligible = bulkLastChanceEligible(selected)
+  lcBtn.style.display = lcEligible.length ? 'inline-block' : 'none'
+  lcBtn.textContent = `⏰ Last Chance Email (${lcEligible.length})`
   const stages   = [...new Set(selected.map(t => t.stage))]
 
   if (stages.length > 1) {
@@ -1326,6 +1333,85 @@ async function undoEmailSend() {
 }
 
 // ── KILN DELAY ────────────────────────────
+// ── Bulk last chance email (Workshop tab) ──
+// Eligible: Ready for Pickup, at least one email on the sign-in, and no last
+// chance email sent yet (use the row's own button to resend to one ticket).
+let pendingLastChanceTimeout = null
+let pendingLastChanceInterval = null
+
+function bulkLastChanceEligible(selected) {
+  return selected.filter(t =>
+    t.stage === 'ready_pickup' &&
+    !t.last_chance_email_sent_at &&
+    (t.signin_entries || []).some(c => c.email)
+  )
+}
+
+function promptBulkLastChance() {
+  const selected = [...selectedIds].map(id => allTickets.find(t => t.id === id)).filter(Boolean)
+  const eligible = bulkLastChanceEligible(selected)
+  if (!eligible.length) {
+    showToast('No eligible tickets — last chance only goes to Ready for Pickup pieces that haven\'t had one yet', 4000)
+    return
+  }
+  const skipped = selected.length - eligible.length
+  const skippedNote = skipped > 0 ? ` (${skipped} skipped — not ready for pickup, already sent, or no email)` : ''
+
+  // A previous batch still counting down gets sent now rather than dropped
+  if (pendingLastChanceTimeout && window._pendingLastChanceSend) {
+    clearTimeout(pendingLastChanceTimeout); clearInterval(pendingLastChanceInterval)
+    pendingLastChanceTimeout = null; pendingLastChanceInterval = null
+    const flush = window._pendingLastChanceSend
+    window._pendingLastChanceSend = null
+    flush()
+  }
+
+  const b = document.getElementById('lastchance-banner')
+  let secondsLeft = 5
+  function updateLcBanner() {
+    b.innerHTML = `⏰ Last chance email sending to ${eligible.length} ticket${eligible.length > 1 ? 's' : ''}${skippedNote} in <strong>0:${String(secondsLeft).padStart(2,'0')}</strong> &nbsp; <button onclick="undoBulkLastChance()" style="padding:3px 10px;border:1px solid #b7700a;border-radius:5px;background:white;color:#b7700a;font-size:12px;font-weight:600;cursor:pointer;">✕ Undo</button>`
+  }
+  updateLcBanner()
+  b.classList.add('show')
+  pendingLastChanceInterval = setInterval(() => {
+    secondsLeft--
+    if (secondsLeft <= 0) { clearInterval(pendingLastChanceInterval); return }
+    updateLcBanner()
+  }, 1000)
+
+  const sendNow = async () => {
+    eligible.forEach(t => pendingClayLastChanceIds.add(t.id))
+    renderTable()
+    const r = await sendClayBatch(eligible, 'kiln_clay_last_chance', 'last_chance_email_sent_at')
+    eligible.forEach(t => pendingClayLastChanceIds.delete(t.id))
+    renderTable(); updateBulkBar()
+    if (r.failedTickets.length || r.error) {
+      showToast(`⚠ Last chance: ${r.sentTickets} sent, ${r.failedTickets.length} failed${r.failedTickets.length ? ' (' + r.failedTickets.slice(0, 5).join(', ') + (r.failedTickets.length > 5 ? '…' : '') + ')' : ''}${r.error ? ' — ' + r.error : ''}`, 6000)
+    } else {
+      showToast(`⏰ Last chance email sent to ${r.sentTickets} ticket${r.sentTickets === 1 ? '' : 's'}`)
+    }
+  }
+  window._pendingLastChanceSend = sendNow
+  pendingLastChanceTimeout = setTimeout(() => {
+    clearInterval(pendingLastChanceInterval)
+    b.classList.remove('show')
+    pendingLastChanceTimeout = null; pendingLastChanceInterval = null
+    window._pendingLastChanceSend = null
+    sendNow()
+  }, 5000)
+  clearSelection()
+}
+
+function undoBulkLastChance() {
+  if (pendingLastChanceTimeout) {
+    clearTimeout(pendingLastChanceTimeout); clearInterval(pendingLastChanceInterval)
+    pendingLastChanceTimeout = null; pendingLastChanceInterval = null
+  }
+  window._pendingLastChanceSend = null
+  document.getElementById('lastchance-banner').classList.remove('show')
+  showToast('↩ Last chance email cancelled')
+}
+
 function promptKilnDelay() {
   const selected = [...selectedIds].map(id => allTickets.find(t => t.id === id)).filter(Boolean)
 
