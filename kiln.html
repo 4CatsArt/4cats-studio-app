@@ -1942,42 +1942,58 @@ async function resendPartyPickupEmail(id) {
   await sendPartyPickupEmailNow(t)
 }
 
+// ── Shared artwork email sender (email system, Oct 2026) ──
+// Calls send-email-blast in "artwork_ticket" mode. The function looks up the
+// recipients from the tickets itself, renders the template from
+// email_templates (editable in admin), logs to artwork_email_log, and stamps
+// the ticket's *_sent_at column itself — only for tickets where at least one
+// email actually went out. Returns the function's JSON, or { success:false }.
+async function sendArtworkEmail(ticketType, ticketIds, templateKey) {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/send-email-blast`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${SUPABASE_KEY}`,   // swapped for the signed-in login by the fetch wrapper above
+      },
+      body: JSON.stringify({
+        recipient_type: 'artwork_ticket',
+        ticket_type:    ticketType,
+        ticket_ids:     ticketIds,
+        template_key:   templateKey,
+      }),
+    })
+    const json = await res.json().catch(() => ({}))
+    if (!res.ok || !json.success) {
+      console.error('Artwork email failed:', res.status, json)
+      return { success: false, error: json.error || ('HTTP ' + res.status) }
+    }
+    if (json.errors && json.errors.length) console.warn('Artwork email warnings:', json.errors)
+    return json
+  } catch (err) {
+    console.error('Artwork email error:', err)
+    return { success: false, error: String(err) }
+  }
+}
+
 // "Last chance" email — for pieces that have sat ready-for-pickup 60+ days.
+// Now sent through the shared sender (template: kiln_party_last_chance).
 async function sendLastChanceEmail(id) {
   const t = allPartyTickets.find(t => t.id === id)
   if (!t || !t.customer_email) return
   pendingLastChanceIds.add(id)
   renderPartyTable()
 
-  let res, ok = false
-  try {
-    res = await fetch(`${SUPABASE_URL}/functions/v1/send-party-last-chance-email`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-      },
-      body: JSON.stringify({
-        email:        t.customer_email,
-        customerName: t.customer_name,
-        ticketNumber: t.ticket_number,
-        studioId:     t.studio_id,
-        sessionTitle: t.session_title,
-      }),
-    })
-    ok = res.ok
-    if (!ok) console.error('Last chance email failed:', res.status, await res.text().catch(()=>''))
-  } catch (err) {
-    console.error('Last chance email error:', err)
-  }
+  const result = await sendArtworkEmail('party', [id], 'kiln_party_last_chance')
+  const tr = (result.tickets || [])[0]
+  const ok = result.success && tr && (tr.status === 'sent' || tr.status === 'partial')
 
   if (ok) {
-    const now = new Date().toISOString()
-    await sb.from('party_tickets').update({ last_chance_email_sent_at: now }).eq('id', id)
-    t.last_chance_email_sent_at = now
+    // The function already saved last_chance_email_sent_at; mirror it locally.
+    t.last_chance_email_sent_at = result.stamped_at || new Date().toISOString()
     showToast(`⏰ Last chance email sent to ${t.customer_email}`)
   } else {
-    showToast(`⚠ Last chance email failed to send for ${t.ticket_number} — check the send-party-last-chance-email function`, 4000)
+    showToast(`⚠ Last chance email failed to send for ${t.ticket_number}${result.error ? ' — ' + result.error : ''}`, 4000)
   }
   pendingLastChanceIds.delete(id)
   renderPartyTable()
