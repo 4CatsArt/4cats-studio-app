@@ -2219,9 +2219,22 @@ async function bdCompleteDaySessions(studio, from, to, daySessions) {
   if (!seriesRows.length) return
   const se = await sb.rpc('get_series_enrolment', { p_session_ids: seriesRows.map(r => r.session_id) })
   if (se.error) { console.warn('get_series_enrolment unavailable:', se.error.message); return }
-  const enr = {}
-  ;(se.data || []).forEach(e => { if (e.class1_session_id) enr[e.session_id] = Number(e.enrolled) || 0 })
-  seriesRows.forEach(r => { if (enr[r.session_id] != null) { r.booking_count = enr[r.session_id]; r.seriesEnrolled = true } })
+  const enr = {}, c1Of = {}
+  ;(se.data || []).forEach(e => { if (e.class1_session_id) { enr[e.session_id] = Number(e.enrolled) || 0; c1Of[e.session_id] = e.class1_session_id } })
+  // Later weeks have capacity 0 (they aren't sold on their own), so they'd drop out of the
+  // day's fill rate. Use the series' first-week capacity instead, so enrolled / capacity counts.
+  const c1Ids = [...new Set(Object.values(c1Of))]
+  const c1Cap = {}
+  if (c1Ids.length) {
+    const { data: caps } = await sb.from('sessions').select('id, capacity').in('id', c1Ids)
+    ;(caps || []).forEach(c => { c1Cap[c.id] = c.capacity })
+  }
+  seriesRows.forEach(r => {
+    if (enr[r.session_id] == null) return
+    r.booking_count = enr[r.session_id]; r.seriesEnrolled = true
+    const cap = c1Cap[c1Of[r.session_id]]
+    if (!(r.capacity > 0) && cap > 0) r.capacity = Math.max(cap, r.booking_count)
+  })
 }
 
 // The day's session list: open ones first, closed ones underneath (greyed). Click any line to adjust it.
