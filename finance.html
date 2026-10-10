@@ -71,6 +71,14 @@ button, input, select { font: inherit; color: inherit; }
 .pct-bad { color: var(--bad); font-weight: 600; }
 .pct-warn { color: var(--warn); font-weight: 600; }
 .profit-neg { color: var(--bad); }
+.profit-pos { color: var(--good); }
+.fin-table input.plan-changed { background: #e3edfb; border-color: #4a7fd4; color: #0d3a80; font-weight: 600; }
+.plan-banner { background: #e3edfb; border: 1px solid #b8cff0; color: #0d3a80; border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; font-size: 12.5px; }
+.plan-tools { display: flex; align-items: flex-end; gap: 22px; padding: 14px 18px; margin-bottom: 14px; flex-wrap: wrap; }
+.plan-tools label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; }
+.plan-tools input[type="number"] { width: 70px; padding: 5px 6px; border: 0.5px solid var(--line-2); border-radius: 5px; font-size: 12px; text-align: right; }
+.plan-tools select { padding: 5px 6px; border: 0.5px solid var(--line-2); border-radius: 5px; font-size: 12px; background: #fff; }
+.plan-tools .btn { height: 28px; padding: 4px 10px; }
 .save-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-left: 4px; }
 .save-dot.saved { background: var(--good); }
 .save-dot.saving { background: var(--warn); }
@@ -146,6 +154,7 @@ button, input, select { font: inherit; color: inherit; }
         <button class="btn" id="tab-summary-btn" onclick="switchView('summary')">Monthly Summary</button>
         <button class="btn" id="tab-daily-btn" onclick="switchView('daily')">Daily Grid</button>
         <button class="btn" id="tab-schedule-btn" onclick="switchView('schedule')">Schedule</button>
+        <button class="btn" id="tab-plan-btn" onclick="switchView('plan')">🧮 Planning</button>
         <button class="btn" id="tab-upsells-btn" onclick="switchView('upsells')">🍫 In-studio upsells</button>
         <button class="btn" id="tab-unattr-btn" onclick="switchView('unattr')">Unattributed <span id="unattr-badge" style="display:none;background:#c0392b;color:#fff;border-radius:9px;padding:1px 7px;font-size:11px;margin-left:4px"></span></button>
       </div>
@@ -159,6 +168,7 @@ button, input, select { font: inherit; color: inherit; }
     <div id="schedule-body" style="display:none;margin-top:14px"></div>
     <div class="panel" id="unattr-body" style="display:none;margin-top:14px"></div>
     <div class="panel" id="upsells-body" style="display:none;margin-top:14px"></div>
+    <div id="plan-body" style="display:none;margin-top:14px"></div>
   </div>
 </div>
 
@@ -563,6 +573,7 @@ async function loadMonth() {
   const loadingMonth = monthText
   loadDailyGridIfNeeded().then(() => { if (currentView === 'summary' && monthToText(currentMonth) === loadingMonth) renderTable() })
   loadUnattributed() // not awaited — fills the Unattributed tab + its badge in the background
+  if (currentView === 'plan') renderPlanning()
 }
 
 /* ---------- Unattributed sales (line items with no studio) ---------- */
@@ -2405,7 +2416,7 @@ let dailyLoadedForMonth = null
 
 function switchView(view, skipLoad) {
   currentView = view
-  ;[['summary','tab-summary-btn'],['daily','tab-daily-btn'],['schedule','tab-schedule-btn'],['unattr','tab-unattr-btn'],['upsells','tab-upsells-btn']].forEach(([v, id]) => {
+  ;[['summary','tab-summary-btn'],['daily','tab-daily-btn'],['schedule','tab-schedule-btn'],['unattr','tab-unattr-btn'],['upsells','tab-upsells-btn'],['plan','tab-plan-btn']].forEach(([v, id]) => {
     const btn = document.getElementById(id)
     btn.style.background = view === v ? 'var(--ink)' : '#fff'
     btn.style.color = view === v ? '#fff' : 'var(--ink)'
@@ -2415,11 +2426,307 @@ function switchView(view, skipLoad) {
   document.getElementById('schedule-body').style.display = view === 'schedule' ? '' : 'none'
   document.getElementById('unattr-body').style.display = view === 'unattr' ? '' : 'none'
   document.getElementById('upsells-body').style.display = view === 'upsells' ? '' : 'none'
+  document.getElementById('plan-body').style.display = view === 'plan' ? '' : 'none'
   if (skipLoad) return
+  if (view === 'plan') renderPlanning()
   if (view === 'upsells') loadUpsells()
   if (view === 'unattr') renderUnattributed()
   if (view === 'daily') loadDailyGridIfNeeded()
   if (view === 'schedule') loadScheduleView()
+}
+
+
+// ---------- 🧮 Planning (what-if sandbox) ----------
+// Starts from this month's real numbers (same sources as Monthly Summary) and
+// lets you change any of them to see what profit would be. NOTHING here is
+// written to Supabase or read by any other page: changes live only in this
+// browser (localStorage), per month, until you reset them.
+const PLAN_STORE_KEY = 'finance-planning-v1'
+let planState = (function () {
+  try { const s = JSON.parse(localStorage.getItem(PLAN_STORE_KEY) || 'null'); if (s && s.months) return s } catch (e) {}
+  return { basis: 'projected', months: {} }
+})()
+let planSort = { key: null, dir: 'desc' }
+function savePlanState() { try { localStorage.setItem(PLAN_STORE_KEY, JSON.stringify(planState)) } catch (e) {} }
+function planMonth() { const k = monthToText(currentMonth); return planState.months[k] || (planState.months[k] = {}) }
+
+const PLAN_BUCKETS = [
+  { id: '__membership', bucket: 'membership', label: 'Membership', lyId: '__MEMBERSHIP__' },
+  { id: '__giftcard', bucket: 'giftcard', label: 'Gift Cards (online)', lyId: null },
+  { id: '__warehouse', bucket: 'warehouse', label: 'Warehouse', lyId: '__WAREHOUSE__' },
+]
+const PLAN_COST_FIELDS = ['rent', 'supplies', 'util', 'wages']
+function isPlanBucket(id) { return id.startsWith('__') }
+
+// Days of this month that are done, in Pacific time like the rest of the page
+function planElapsedDays() {
+  const dim = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0).getDate()
+  const pt = new Date().toLocaleDateString('en-CA', { timeZone: 'Etc/GMT+7' }).split('-').map(Number)
+  const y = currentMonth.getFullYear(), m = currentMonth.getMonth() + 1
+  if (pt[0] > y || (pt[0] === y && pt[1] > m)) return { elapsed: dim, dim }
+  if (pt[0] === y && pt[1] === m) return { elapsed: pt[2], dim }
+  return { elapsed: 0, dim } // future month
+}
+
+// Starting revenue for a row, by the chosen basis
+function planRevenueBase(id) {
+  const b = PLAN_BUCKETS.find(x => x.id === id)
+  const mtd = b ? bucketTotals[b.bucket] : (progressRows[id] || {}).this_month_total
+  if (planState.basis === 'ly') { const ly = b ? (b.lyId ? lastYearRows[b.lyId] : null) : lastYearRows[id]; return ly == null ? 0 : Number(ly) }
+  if (planState.basis === 'mtd') return Number(mtd) || 0
+  const { elapsed, dim } = planElapsedDays()
+  return elapsed > 0 ? (Number(mtd) || 0) / elapsed * dim : 0
+}
+
+// The real ("actual") value for each editable field
+function planBase(id, field) {
+  if (field === 'revenue') return planRevenueBase(id)
+  if (field === 'extra') return 0
+  if (isPlanBucket(id)) return 0
+  const f = financeRows[id] || {}
+  if (field === 'rent') return Number(f.rent) || 0
+  if (field === 'supplies') return Number(f.art_supplies_budget) || 0
+  if (field === 'util') return Number(f.utilities_estimate) || 0
+  if (field === 'wages') return wagesTotal(id) // actual + grey estimates, same as Monthly Summary
+  return 0
+}
+function planOverride(id, field) { const r = planMonth()[id]; return r && r[field] != null ? r[field] : null }
+function planVal(id, field) { const o = planOverride(id, field); return o != null ? o : planBase(id, field) }
+function planHoBase() { return homeOfficeLabourTotal() || 0 }
+function planHoVal() { const o = planMonth().__ho; return o != null ? o : planHoBase() }
+
+function planRow(id) {
+  const rent = planVal(id, 'rent'), supplies = planVal(id, 'supplies'), util = planVal(id, 'util'), wages = planVal(id, 'wages')
+  const revenue = planVal(id, 'revenue'), extra = planVal(id, 'extra')
+  const costs = rent + supplies + util + wages
+  const total = revenue + extra
+  const profit = total - costs
+  const actualCosts = PLAN_COST_FIELDS.reduce((a, f) => a + planBase(id, f), 0)
+  const actualProfit = planBase(id, 'revenue') - actualCosts
+  return {
+    rent, supplies, util, wages, revenue, extra, costs, total, profit,
+    goal: isPlanBucket(id) ? null : Math.ceil(costs / 500) * 500,
+    labour: total && !isPlanBucket(id) ? wages / total * 100 : null,
+    profitPct: total ? profit / total * 100 : null,
+    delta: profit - actualProfit
+  }
+}
+function planTotals() {
+  const ids = STUDIO_IDS.concat(PLAN_BUCKETS.map(b => b.id))
+  const t = { rent: 0, supplies: 0, util: 0, wages: 0, revenue: 0, extra: 0, costs: 0, total: 0, profit: 0, goal: 0, delta: 0 }
+  ids.forEach(id => { const r = planRow(id); Object.keys(t).forEach(k => { t[k] += Number(r[k]) || 0 }) })
+  t.labour = t.total ? t.wages / t.total * 100 : null
+  t.profitPct = t.total ? t.profit / t.total * 100 : null
+  const ho = planHoVal()
+  t.sysProfit = t.profit - ho
+  t.sysProfitPct = t.total ? t.sysProfit / t.total * 100 : null
+  t.sysDelta = t.delta - (ho - planHoBase())
+  return t
+}
+
+const PLAN_COLUMNS = [
+  { key: 'studio',    label: 'Studio',            cls: 'studio-name' },
+  { key: 'goal',      label: 'Breakeven Goal',    cls: 'group-computed' },
+  { key: 'rent',      label: 'Rent',              cls: 'group-editable', edit: true },
+  { key: 'supplies',  label: 'Art Supplies',      cls: 'group-editable', edit: true },
+  { key: 'util',      label: 'Utilities',         cls: 'group-editable', edit: true },
+  { key: 'wages',     label: 'Wages',             cls: 'group-editable', edit: true },
+  { key: 'revenue',   label: 'Revenue',           cls: 'group-editable', edit: true, rev: true },
+  { key: 'extra',     label: '+ Extra Revenue',   cls: 'group-editable', edit: true, rev: true },
+  { key: 'total',     label: 'Total Revenue',     cls: 'group-computed' },
+  { key: 'labour',    label: 'Labour %',          cls: 'group-computed' },
+  { key: 'profit',    label: 'Est. Profit',       cls: 'group-computed' },
+  { key: 'profitPct', label: 'Profit %',          cls: 'group-computed' },
+  { key: 'delta',     label: 'vs Actual',         cls: 'group-computed' },
+]
+
+function planCellText(key, r) {
+  switch (key) {
+    case 'goal': return r.goal == null ? '—' : moneyShort(r.goal)
+    case 'total': return moneyShort(r.total)
+    case 'labour': return r.labour == null ? '—' : r.labour.toFixed(1) + '%'
+    case 'profit': return moneyShort(r.profit)
+    case 'profitPct': return r.profitPct == null ? '—' : r.profitPct.toFixed(1) + '%'
+    case 'delta': return Math.round(r.delta) === 0 ? '<span class="muted">—</span>' : (r.delta > 0 ? '+' : '') + moneyShort(r.delta)
+  }
+  return '—'
+}
+function planCellClass(key, r) {
+  if (key === 'labour') return r.labour != null && r.labour > 45 ? 'pct-bad' : ''
+  if (key === 'profit' || key === 'profitPct') return (r[key] != null && r[key] < 0) ? 'profit-neg' : ''
+  if (key === 'delta') return Math.round(r.delta) === 0 ? '' : r.delta < 0 ? 'profit-neg' : 'profit-pos'
+  return ''
+}
+
+function planInput(id, field) {
+  const o = planOverride(id, field), base = planBase(id, field)
+  const shown = o != null ? o : Math.round(base * 100) / 100
+  return `<td><input type="number" step="0.01" class="${o != null ? 'plan-changed' : ''}" value="${shown || shown === 0 ? shown : ''}"
+    title="Actual: ${esc(money(base))}${o != null ? ' · clear the box to go back to it' : ''}"
+    onchange="setPlanValue('${id}','${field}',this)" aria-label="${field}"></td>`
+}
+
+function planRowHtml(id) {
+  const r = planRow(id), bucket = PLAN_BUCKETS.find(b => b.id === id)
+  return `<tr data-plan="${id}"${bucket ? ' style="background:var(--soft)"' : ''}>${PLAN_COLUMNS.map(c => {
+    if (c.key === 'studio') return bucket
+      ? `<td class="studio-name"><em>${esc(bucket.label)}</em> <span class="muted small">(unattributed)</span></td>`
+      : `<td class="studio-name">${esc(STUDIO_NAMES[id])}</td>`
+    if (c.edit) return (bucket && !c.rev) ? '<td>—</td>' : planInput(id, c.key)
+    return `<td id="plan-${c.key}-${id}" class="${planCellClass(c.key, r)}">${planCellText(c.key, r)}</td>`
+  }).join('')}</tr>`
+}
+
+function planTotalsRowHtml() {
+  const t = planTotals()
+  return `<tr class="totals-row">${PLAN_COLUMNS.map(c => {
+    if (c.key === 'studio') return '<td class="studio-name">Total <span class="muted small">(all studios)</span></td>'
+    if (c.edit) return `<td id="plan-t-${c.key}">${moneyShort(t[c.key])}</td>`
+    return `<td id="plan-t-${c.key}" class="${planCellClass(c.key, t)}">${planCellText(c.key, t)}</td>`
+  }).join('')}</tr>`
+}
+
+function planSystemHtml() {
+  const t = planTotals()
+  const big = (v, txt) => `<div class="${v != null && v < 0 ? 'profit-neg' : ''}" style="font-size:20px;font-weight:700">${txt}</div>`
+  return `<div><div class="muted small">System-Wide Profit</div>${big(t.sysProfit, money(t.sysProfit))}</div>
+    <div><div class="muted small">System-Wide Profit %</div>${big(t.sysProfitPct, t.sysProfitPct == null ? '—' : t.sysProfitPct.toFixed(1) + '%')}</div>
+    <div><div class="muted small">vs Actual</div><div class="${Math.round(t.sysDelta) === 0 ? 'muted' : t.sysDelta < 0 ? 'profit-neg' : 'profit-pos'}" style="font-size:20px;font-weight:700">${Math.round(t.sysDelta) === 0 ? 'No changes' : (t.sysDelta > 0 ? '+' : '') + money(t.sysDelta)}</div></div>`
+}
+
+function planSortedIds() {
+  if (!planSort.key) return STUDIO_IDS
+  const mult = planSort.dir === 'asc' ? 1 : -1
+  const get = id => planSort.key === 'studio' ? STUDIO_NAMES[id] : planSort.key === 'rent' || planSort.key === 'supplies' || planSort.key === 'util' || planSort.key === 'wages' || planSort.key === 'revenue' || planSort.key === 'extra' ? planVal(id, planSort.key) : planRow(id)[planSort.key]
+  return STUDIO_IDS.slice().sort((a, b) => {
+    const va = get(a), vb = get(b)
+    if (va == null && vb == null) return 0
+    if (va == null) return 1
+    if (vb == null) return -1
+    return (planSort.key === 'studio' ? String(va).localeCompare(String(vb)) : Number(va) - Number(vb)) * mult
+  })
+}
+function setPlanSort(key) {
+  if (planSort.key === key) {
+    if (planSort.dir === (key === 'studio' ? 'asc' : 'desc')) planSort.dir = planSort.dir === 'asc' ? 'desc' : 'asc'
+    else planSort = { key: null, dir: 'desc' }
+  } else planSort = { key, dir: key === 'studio' ? 'asc' : 'desc' }
+  renderPlanning()
+}
+
+function renderPlanning() {
+  const body = document.getElementById('plan-body')
+  if (!body) return
+  if (!Object.keys(progressRows).length) { body.innerHTML = '<div class="panel"><div class="loading">Loading…</div></div>'; return }
+  applyWageEstimates()
+  const changed = Object.keys(planMonth()).length
+  const { elapsed, dim } = planElapsedDays()
+  const basisNote = planState.basis === 'projected'
+    ? (elapsed === 0 ? 'This month hasn\'t started, so there\'s no pace yet: pick Same month last year, or type revenue in.' : elapsed >= dim ? 'Month is over, so this is the full month\'s actual sales.' : `MTD ÷ ${elapsed} days × ${dim} days.`)
+    : planState.basis === 'mtd' ? 'Sales so far this month only.' : 'Last year\'s total for the same month (studios open all of it).'
+  const head = PLAN_COLUMNS.map(c => {
+    const active = planSort.key === c.key
+    const arrow = active ? (planSort.dir === 'asc' ? ' ▲' : ' ▼') : ' <span style="opacity:0.35">↕</span>'
+    return `<th class="${c.cls}" onclick="setPlanSort('${c.key}')" style="cursor:pointer;user-select:none">${esc(c.label)}${arrow}</th>`
+  }).join('')
+
+  body.innerHTML = `
+    <div class="plan-banner">🧮 <b>Planning sandbox.</b> Starts from ${esc(monthLabel(currentMonth))}'s real numbers. Change anything to see what profit would be.
+      Nothing here is saved to the database or shown anywhere else; changes stay in this browser until you reset them. <span style="background:#fff;border:1px solid #4a7fd4;border-radius:4px;padding:0 5px;font-weight:600">Blue</span> = changed from actual.</div>
+    <div class="panel plan-tools">
+      <label><span class="muted small">Revenue starting point</span>
+        <select onchange="setPlanBasis(this.value)">
+          <option value="projected"${planState.basis === 'projected' ? ' selected' : ''}>Projected full month (current pace)</option>
+          <option value="mtd"${planState.basis === 'mtd' ? ' selected' : ''}>MTD sales so far</option>
+          <option value="ly"${planState.basis === 'ly' ? ' selected' : ''}>Same month last year</option>
+        </select>
+        <span class="muted small" style="max-width:240px">${esc(basisNote)}</span>
+      </label>
+      <label><span class="muted small">Wages: change every studio by</span>
+        <span style="display:flex;gap:6px;align-items:center"><input type="number" id="plan-wage-pct" step="0.5" placeholder="0">% <button class="btn" onclick="planApplyPct('wages')">Apply</button></span>
+      </label>
+      <label><span class="muted small">Revenue: add to every studio</span>
+        <span style="display:flex;gap:6px;align-items:center"><input type="number" id="plan-rev-pct" step="0.5" placeholder="0">% <button class="btn" onclick="planApplyPct('extra')">Apply</button></span>
+      </label>
+      <label><span class="muted small">Home Office Labour (month)</span>
+        <input type="number" step="0.01" style="width:110px" class="${planMonth().__ho != null ? 'plan-changed' : ''}" value="${Math.round(planHoVal() * 100) / 100}"
+          title="Actual: ${esc(money(planHoBase()))}" onchange="setPlanHo(this)">
+      </label>
+      <div id="plan-system" style="display:flex;gap:24px">${planSystemHtml()}</div>
+      <div style="margin-left:auto"><button class="btn" onclick="resetPlanning()"${changed ? '' : ' disabled'}>↺ Reset to actuals</button></div>
+    </div>
+    <div class="panel"><table class="fin-table">
+      <thead><tr>${head}</tr></thead>
+      <tbody>${planTotalsRowHtml()}${planSortedIds().map(planRowHtml).join('')}${PLAN_BUCKETS.map(b => planRowHtml(b.id)).join('')}</tbody>
+    </table></div>`
+}
+
+// Update only the computed cells, so tabbing between boxes keeps your place
+function refreshPlanComputed() {
+  STUDIO_IDS.concat(PLAN_BUCKETS.map(b => b.id)).forEach(id => {
+    const r = planRow(id)
+    PLAN_COLUMNS.forEach(c => {
+      if (c.edit || c.key === 'studio') return
+      const el = document.getElementById('plan-' + c.key + '-' + id)
+      if (el) { el.innerHTML = planCellText(c.key, r); el.className = planCellClass(c.key, r) }
+    })
+  })
+  const t = planTotals()
+  PLAN_COLUMNS.forEach(c => {
+    const el = document.getElementById('plan-t-' + c.key)
+    if (!el) return
+    if (c.edit) el.textContent = moneyShort(t[c.key])
+    else { el.innerHTML = planCellText(c.key, t); el.className = planCellClass(c.key, t) }
+  })
+  const sys = document.getElementById('plan-system')
+  if (sys) sys.innerHTML = planSystemHtml()
+}
+
+function setPlanValue(id, field, el) {
+  const m = planMonth()
+  const raw = el.value.trim()
+  const base = Math.round(planBase(id, field) * 100) / 100
+  if (raw === '' || Number(raw) === base) {
+    if (m[id]) { delete m[id][field]; if (!Object.keys(m[id]).length) delete m[id] }
+    el.value = base; el.classList.remove('plan-changed')
+  } else {
+    const v = Number(raw)
+    if (isNaN(v)) { toast('Enter a number.', true); return }
+    ;(m[id] = m[id] || {})[field] = v
+    el.classList.add('plan-changed')
+  }
+  savePlanState()
+  refreshPlanComputed()
+}
+function setPlanHo(el) {
+  const m = planMonth(), raw = el.value.trim(), base = Math.round(planHoBase() * 100) / 100
+  if (raw === '' || Number(raw) === base) { delete m.__ho; el.value = base; el.classList.remove('plan-changed') }
+  else { m.__ho = Number(raw); el.classList.add('plan-changed') }
+  savePlanState()
+  refreshPlanComputed()
+}
+function setPlanBasis(v) { planState.basis = v; savePlanState(); renderPlanning() }
+
+// Wages: every studio's wages × (1 + pct). Revenue: adds pct of each studio's revenue to + Extra Revenue.
+function planApplyPct(field) {
+  const pct = Number(document.getElementById(field === 'wages' ? 'plan-wage-pct' : 'plan-rev-pct').value)
+  if (!pct) { toast('Enter a percentage first.', true); return }
+  const m = planMonth()
+  STUDIO_IDS.forEach(id => {
+    const v = field === 'wages'
+      ? planVal(id, 'wages') * (1 + pct / 100)
+      : planVal(id, 'extra') + planVal(id, 'revenue') * pct / 100
+    ;(m[id] = m[id] || {})[field] = Math.round(v * 100) / 100
+  })
+  savePlanState()
+  renderPlanning()
+  toast((field === 'wages' ? 'Wages ' : 'Revenue ') + (pct > 0 ? '+' : '') + pct + '% applied to every studio')
+}
+function resetPlanning() {
+  if (!confirm('Throw away every change on the Planning tab for ' + monthLabel(currentMonth) + ' and go back to the actual numbers?')) return
+  delete planState.months[monthToText(currentMonth)]
+  savePlanState()
+  renderPlanning()
 }
 
 // ---------- 🍫 In-studio upsells ----------
