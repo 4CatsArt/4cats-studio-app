@@ -1800,6 +1800,29 @@ async function findClass1SessionId(studioId, sessionTime, seriesTitle) {
   return bookings?.length ? bookings[0].session_id : candidates[0].id
 }
 
+// get_day_session_codes drops sessions with 0 bookings and 0 capacity. Series
+// Class 2+ sessions (e.g. Wheel "Class 3 of 6") are exactly that in the database:
+// their bookings sit on Class 1 and admin's Shopify sync never sets their capacity.
+// So they never reach the series fix below. This reads the day's sessions directly,
+// the way admin.html does, and adds any the RPC left out (code from classCodeFor).
+async function addSessionsMissingFromRpc(studioId, dateStr, sessionRows) {
+  const { data: all, error } = await sb.from('sessions')
+    .select('id, title, session_time, session_type, capacity, spaces_left_cache, show')
+    .eq('studio_id', studioId).eq('session_date', dateStr)
+  if (error || !all) return
+  const have = new Set(sessionRows.map(r => r.session_id))
+  const missing = all.filter(s => s.show && !have.has(s.id) && s.session_type !== 'festival')
+  if (!missing.length) return
+  const counts = {}
+  const { data: bk } = await sb.from('bookings').select('session_id, qty').in('session_id', missing.map(s => s.id))
+  ;(bk || []).forEach(b => { counts[b.session_id] = (counts[b.session_id] || 0) + (b.qty || 0) })
+  missing.forEach(s => sessionRows.push({
+    session_id: s.id, title: s.title, session_time: s.session_time, session_type: s.session_type,
+    capacity: s.capacity, booking_count: counts[s.id] || 0, code: classCodeFor(s.title),
+    _backfilled: true, _spacesLeft: s.spaces_left_cache
+  }))
+}
+
 // Same rule as admin.html's loadStudioView: a Class 2+ row with no bookings of
 // its own takes Class 1's booking count. Mutates sessionRows in place.
 async function inheritSeriesBookingCounts(studioId, sessionRows) {
@@ -1835,7 +1858,12 @@ async function renderCarousel(studioId) {
     const { data, error } = await sb.rpc('get_day_session_codes', { p_studio_id: studioId, p_date: dateStr })
     if (error) { document.getElementById('carousel-content-' + studioId).textContent = 'Couldn\'t load: ' + error.message; return }
     sessionRows = data || []
+    await addSessionsMissingFromRpc(studioId, dateStr, sessionRows)
     await inheritSeriesBookingCounts(studioId, sessionRows)
+    // Backfilled rows that are truly dead (no bookings, nothing left) stay hidden,
+    // same idea as admin.html's "dead zero" rule
+    sessionRows = sessionRows.filter(r => !r._backfilled || r.booking_count > 0 || !(r._spacesLeft === 0 || (r._spacesLeft == null && !r.capacity)))
+    sessionRows.sort((a, b) => (a.session_time || '').localeCompare(b.session_time || ''))
     carouselCache[cacheKey] = sessionRows
   }
 
