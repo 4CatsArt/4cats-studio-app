@@ -1781,6 +1781,37 @@ async function setSessionInventory(inventoryItemId, inputId, containerId, sessio
   }
 }
 
+// ── Multi-week series (e.g. "Halloween Mini Session | Class 2 of 4") ──
+// Customers book the whole series against Class 1, so Class 2+ sessions have no
+// booking rows of their own. Copied verbatim from admin.html (isSeriesClass2Plus,
+// getSeriesClass1Title, findClass1SessionId) so both tools agree on the count.
+function isSeriesClass2Plus(title) { return /\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(title) }
+function getSeriesClass1Title(title) { return title.replace(/\s*-?\s*class\s+\d+\s+of\s+\d+/i, '').trim() }
+
+async function findClass1SessionId(studioId, sessionTime, seriesTitle) {
+  const { data: exact } = await sb.from('sessions').select('id').eq('studio_id', studioId).eq('session_time', sessionTime).eq('title', seriesTitle).limit(1).maybeSingle()
+  if (exact) return exact.id
+  const { data: sessions } = await sb.from('sessions').select('id, title').eq('studio_id', studioId).eq('session_time', sessionTime)
+  if (!sessions) return null
+  const candidates = sessions.filter(s => !isSeriesClass2Plus(s.title) && s.title.toLowerCase().includes(seriesTitle.toLowerCase().split('|')[0].trim().substring(0, 10)))
+  if (!candidates.length) return null
+  if (candidates.length === 1) return candidates[0].id
+  const { data: bookings } = await sb.from('bookings').select('session_id').in('session_id', candidates.map(s => s.id)).gt('qty', 0).limit(1)
+  return bookings?.length ? bookings[0].session_id : candidates[0].id
+}
+
+// Same rule as admin.html's loadStudioView: a Class 2+ row with no bookings of
+// its own takes Class 1's booking count. Mutates sessionRows in place.
+async function inheritSeriesBookingCounts(studioId, sessionRows) {
+  for (const r of sessionRows) {
+    if (!r.title || !isSeriesClass2Plus(r.title) || r.booking_count) continue
+    const class1Id = await findClass1SessionId(studioId, r.session_time, getSeriesClass1Title(r.title))
+    if (!class1Id) continue
+    const { data: c1b } = await sb.from('bookings').select('qty').eq('session_id', class1Id).gt('qty', 0)
+    if (c1b) r.booking_count = c1b.reduce((sum, b) => sum + (b.qty || 0), 0)
+  }
+}
+
 async function renderCarousel(studioId) {
   const el = document.getElementById('carousel-' + studioId)
   if (!el) return
@@ -1804,6 +1835,7 @@ async function renderCarousel(studioId) {
     const { data, error } = await sb.rpc('get_day_session_codes', { p_studio_id: studioId, p_date: dateStr })
     if (error) { document.getElementById('carousel-content-' + studioId).textContent = 'Couldn\'t load: ' + error.message; return }
     sessionRows = data || []
+    await inheritSeriesBookingCounts(studioId, sessionRows)
     carouselCache[cacheKey] = sessionRows
   }
 
