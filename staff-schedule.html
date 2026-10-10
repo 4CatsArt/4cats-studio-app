@@ -152,7 +152,14 @@ table.wk tr.wk-sched td { background: #f7f9fc; }
 .wk-sessions summary { cursor: pointer; color: var(--muted); margin-top: 3px; }
 .wk-sess { padding: 2px 0; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wk-sess.empty { color: var(--muted); }
-.wk-sess.closed { color: #bbb; text-decoration: line-through; }
+.wk-sess.closed { color: #bbb; }
+.wk-sess.closed .wk-sess-n { text-decoration: line-through; }
+.wk-sess { cursor: pointer; }
+.wk-sess:hover { background: rgba(0,0,0,.04); }
+.wk-sess-left { color: var(--muted); font-size: 10.5px; }
+.wk-inv { padding: 5px 4px 7px; border-bottom: 1px solid var(--line); background: #f3f7fd; white-space: normal; font-size: 11px; }
+.wk-inv input { width: 46px; font: inherit; padding: 2px 4px; text-align: center; border: 1px solid var(--line-2); border-radius: 4px; }
+.wk-inv .btn.small { margin-left: 3px; }
 .wk-code { display: inline-block; border: 1px solid var(--line-2); border-radius: 4px; padding: 0 4px; font-weight: 700; font-size: 10px; background: #fff; }
 .wk-chip.class { background: #fff4d6; color: #7a5a00; border-left: 3px solid #e0a800; }
 .wk-time { cursor: text; border-radius: 3px; }
@@ -944,6 +951,7 @@ async function bdLoad(studio) {
     if (error) dayScheduleError = error.message
     else daySessions[d] = data || []
   }))
+  await bdCompleteDaySessions(studio, from, to, daySessions)
   const mins = await sb.from('studio_staffing_minimums').select('*').eq('studio_id', studio)
   const minimums = mins.error ? [] : (mins.data || [])
   const partyToClose = await bdPartySlotsDue(studio)
@@ -1682,14 +1690,24 @@ function renderBuild(withLegend) {
   }))
   const risksAll = bdRisks(ctx, plan)
   days.forEach(d => {
-    const rows = (ctx.daySessions[d] || []).map(r => classSeats[r.session_id] != null ? Object.assign({}, r, { booking_count: classSeats[r.session_id], isClass: ctx.sessions.some(x => x.session_id === r.session_id && x.rule_kind === 'one_per_session') }) : r)
-      .map(r => closedIds.has(r.session_id) ? Object.assign({}, r, { closed: true }) : r)
-      .filter(r => r.session_type !== 'festival' && ((r.capacity || 0) > 0 || (r.booking_count || 0) > 0))
+    const invNow = ctx.invNow || {}
+    const allRows = (ctx.daySessions[d] || []).map(r => classSeats[r.session_id] != null ? Object.assign({}, r, { booking_count: classSeats[r.session_id], isClass: ctx.sessions.some(x => x.session_id === r.session_id && x.rule_kind === 'one_per_session') }) : r)
+      .map(r => invNow[r.session_id] != null ? Object.assign({}, r, { spaces_left: invNow[r.session_id] }) : r)
+      .map(r => {
+        // closed = planning data says so, or 0 spaces left with nobody booked; a reopen done here wins
+        const reopened = invNow[r.session_id] > 0
+        const shut = !reopened && (closedIds.has(r.session_id) || (ctx.closedNow || {})[r.session_id] || (r.spaces_left === 0 && !((r.booking_count || 0) > 0)))
+        return shut ? Object.assign({}, r, { closed: true }) : r
+      })
+      .filter(r => r.session_type !== 'festival')
+    // closed sessions are listed (so they can be reopened) but never count toward the fill rate
+    const rows = allRows.filter(r => r.closed || (r.capacity || 0) > 0 || (r.booking_count || 0) > 0 || (r.spaces_left || 0) > 0)
     const events = (ctx.daySessions[d] || []).filter(r => r.session_type === 'festival')
     if (!rows.length && !events.length) { schedRow += '<td class="muted small">' + (ctx.daySessions[d] ? 'Nothing open' : '') + '</td>'; return }
     // fill rate only over sessions with a capacity (later class weeks are often closed to new sign-ups: capacity 0)
     const openRows = rows.filter(r => !r.closed), closedN = rows.length - openRows.length
-    if (!openRows.length && !events.length) { schedRow += '<td><div class="wk-fill">Closed</div><div class="muted small">nothing open to book</div></td>'; return }
+    const sessList = bdSessListHtml(ctx, d, rows, tShort)
+    if (!openRows.length && !events.length) { schedRow += '<td><div class="wk-fill">Closed</div><div class="muted small">nothing open to book</div>' + sessList + '</td>'; return }
     const withCap = openRows.filter(r => (r.capacity || 0) > 0)
     const cap = withCap.reduce((t, r) => t + r.capacity, 0), bk = withCap.reduce((t, r) => t + Math.min(r.booking_count || 0, r.capacity), 0)
     const pct = cap ? Math.round(bk / cap * 100) : null
@@ -1697,11 +1715,7 @@ function renderBuild(withLegend) {
     schedRow += '<td><div class="wk-fill ' + tone + '">' + (pct == null ? (openRows.length ? '—' : 'Closed') : pct + '% full') + '</div><div class="muted small">' +
       (cap ? bk + ' / ' + cap + ' booked' : 'nothing open to book') + '</div>' +
       events.map(e => '<div class="wk-ev">🎪 ' + esc(e.title) + '</div>').join('') +
-      '<details class="wk-sessions"><summary>' + openRows.length + ' session' + (openRows.length === 1 ? '' : 's') + '</summary>' +
-      openRows.sort((a, b) => a.session_time.localeCompare(b.session_time)).map(r =>
-        '<div class="wk-sess' + ((r.booking_count || 0) === 0 ? ' empty' : '') + (r.closed ? ' closed' : '') + '" title="' + esc(r.title) + (r.closed ? ' (closed: no spaces left in Shopify)' : '') + '"><b>' + tShort(r.session_time) + '</b> <span class="wk-code">' + esc(r.code || '') + '</span> ' +
-        (r.closed ? 'closed' : (r.booking_count || 0) + ((r.capacity || 0) > 0 ? '/' + r.capacity : (r.isClass ? ' enrolled' : ''))) + '</div>').join('') +
-      '</details>' + bdDayRisksHtml(ctx, risksAll.filter(x => x.r.session_date === d)) + '</td>'
+      sessList + bdDayRisksHtml(ctx, risksAll.filter(x => x.r.session_date === d)) + '</td>'
   })
   schedRow += '</tr>'
 
@@ -2104,26 +2118,140 @@ function bdDayRisksHtml(ctx, list) {
     '<div class="muted small" style="margin-top:3px">Click a line for details · Close stops new bookings · or add a second person</div></details>'
 }
 
-// Close one session in Shopify (live inventory to 0). Returns null if it worked, else a message.
-async function bdCloseOne(studio, row) {
+// Shopify variant for one session row ({ session_date, session_time, title }) at a studio
+async function bdInvItemId(studio, row) {
   const shopifyTitle = buildShopifyTitle(row.session_date, row.session_time, row.title)
-  if (!shopifyTitle || shopifyTitle === 'OVERRIDE') return 'no matching Shopify product'
+  if (!shopifyTitle || shopifyTitle === 'OVERRIDE') return { err: 'no matching Shopify product' }
   const { data: v } = await sb.from('shopify_variants').select('inventory_item_id').eq('shopify_title', shopifyTitle).eq('studio_id', studio)
     .not('inventory_item_id', 'is', null).limit(1)
   const itemId = v && v[0] && v[0].inventory_item_id
-  if (!itemId) return 'Shopify variant not found ("' + shopifyTitle + '")'
+  if (!itemId) return { err: 'Shopify variant not found ("' + shopifyTitle + '")' }
+  return { itemId, shopifyTitle }
+}
+async function bdInvCall(body) {
   const { data: { session } } = await sb.auth.getSession()
+  const res = await fetch(SHOPIFY_INV_URL, {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + (session ? session.access_token : SUPABASE_KEY), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  return res.json()
+}
+
+// Set one session's LIVE Shopify inventory. Returns null if it worked, else a message.
+async function bdSetInventory(studio, row, qty) {
+  const v = await bdInvItemId(studio, row)
+  if (v.err) return v.err
   try {
-    const res = await fetch(SHOPIFY_INV_URL, {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + (session ? session.access_token : SUPABASE_KEY), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'set', inventory_item_id: itemId, quantity: 0 })
-    })
-    const data = await res.json()
+    const data = await bdInvCall({ action: 'set', inventory_item_id: v.itemId, quantity: qty })
     if (!data.inventory_level) return 'Shopify update failed'
   } catch (e) { return 'Shopify update failed: ' + e.message }
-  await sb.from('sessions').update({ spaces_left_cache: 0 }).eq('id', row.id)   // keep the cache in step (best effort)
+  await sb.from('sessions').update({ spaces_left_cache: qty }).eq('id', row.id)   // keep the cache in step (same as admin.html)
   return null
+}
+// Close one session in Shopify (live inventory to 0)
+async function bdCloseOne(studio, row) { return bdSetInventory(studio, row, 0) }
+
+// get_day_session_codes leaves out sessions with 0 bookings and 0 capacity (a closed
+// Wheel Workshop, later weeks of a series...). Add every visible session it skipped,
+// read straight from sessions the way admin.html does, and attach spaces_left_cache to all.
+async function bdCompleteDaySessions(studio, from, to, daySessions) {
+  const { data: all, error } = await sb.from('sessions')
+    .select('id, title, session_date, session_time, session_type, capacity, spaces_left_cache, show')
+    .eq('studio_id', studio).gte('session_date', from).lte('session_date', to)
+  if (error || !all) return
+  let codes = []
+  const sc = await sb.from('session_type_codes').select('keyword, code').order('sort_order')
+  if (!sc.error) codes = sc.data || []
+  const codeFor = t => { const l = (t || '').toLowerCase(); const c = codes.find(x => l.includes(String(x.keyword).toLowerCase())); return c ? c.code : (t || '').slice(0, 4).toUpperCase() }
+  const byId = {}; all.forEach(x => { byId[x.id] = x })
+  const missing = []
+  Object.keys(daySessions).forEach(d => {
+    const list = daySessions[d]
+    list.forEach(r => { const x = byId[r.session_id]; if (x) r.spaces_left = x.spaces_left_cache })
+    const have = new Set(list.map(r => r.session_id))
+    all.filter(x => x.session_date === d && x.show && x.session_type !== 'festival' && !have.has(x.id)).forEach(x => missing.push(x))
+  })
+  if (!missing.length) return
+  const counts = {}
+  const { data: bk } = await sb.from('bookings').select('session_id, qty').in('session_id', missing.map(x => x.id))
+  ;(bk || []).forEach(b => { counts[b.session_id] = (counts[b.session_id] || 0) + (b.qty || 0) })
+  missing.forEach(x => {
+    if (!daySessions[x.session_date]) return
+    daySessions[x.session_date].push({ session_id: x.id, title: x.title, session_time: x.session_time, session_type: x.session_type,
+      capacity: x.capacity, booking_count: counts[x.id] || 0, code: codeFor(x.title), spaces_left: x.spaces_left_cache })
+  })
+}
+
+// The day's session list: open ones first, closed ones underneath (greyed). Click any line to adjust it.
+function bdSessListHtml(ctx, d, rows, tShort) {
+  if (!rows.length) return ''
+  const open = rows.filter(r => !r.closed), shut = rows.filter(r => r.closed)
+  const byTime = (a, b) => a.session_time.localeCompare(b.session_time)
+  const isOpen = (ctx.openDays || {})[d]
+  const line = r => {
+    const n = r.closed ? 'closed' : (r.booking_count || 0) + ((r.capacity || 0) > 0 ? '/' + r.capacity : (r.isClass ? ' enrolled' : ''))
+    const left = !r.closed && r.spaces_left != null ? ' <span class="wk-sess-left">· ' + r.spaces_left + ' left</span>' : ''
+    return '<div class="wk-sess' + ((r.booking_count || 0) === 0 ? ' empty' : '') + (r.closed ? ' closed' : '') + '" id="wk-sess-' + r.session_id + '"' +
+      ' title="' + esc(r.title) + ' · click to change spaces left or close"' +
+      ' onclick="bdToggleInv(\'' + ctx.studio + '\',\'' + r.session_id + '\')"><b>' + tShort(r.session_time) + '</b> <span class="wk-code">' + esc(r.code || '') + '</span> <span class="wk-sess-n">' + n + '</span>' + left + '</div>'
+  }
+  return '<details class="wk-sessions"' + (isOpen ? ' open' : '') + ' ontoggle="bdDayToggle(\'' + ctx.studio + '\',\'' + d + '\',this.open)"><summary>' +
+    open.length + ' open' + (shut.length ? ' · ' + shut.length + ' closed' : '') + '</summary>' +
+    open.sort(byTime).map(line).join('') + shut.sort(byTime).map(line).join('') + '</details>'
+}
+function bdDayToggle(studio, d, isOpen) {
+  const x = bdPlans[studio]; if (!x || !x.ctx) return
+  ;(x.ctx.openDays = x.ctx.openDays || {})[d] = isOpen
+}
+
+// Inline editor under a session line: live Shopify spaces left, Set, Close
+async function bdToggleInv(studio, sessionId) {
+  const line = document.getElementById('wk-sess-' + sessionId)
+  if (!line) return
+  const next = line.nextElementSibling
+  if (next && next.classList.contains('wk-inv')) { next.remove(); return }
+  const box = document.createElement('div')
+  box.className = 'wk-inv'
+  box.textContent = 'Loading live Shopify quantity…'
+  line.after(box)
+  const { data: row } = await sb.from('sessions').select('id, session_date, session_time, title').eq('id', sessionId).maybeSingle()
+  if (!row) { box.textContent = 'Session not found.'; return }
+  const v = await bdInvItemId(studio, row)
+  if (v.err) { box.textContent = 'Can\'t adjust: ' + v.err; return }
+  let qty = null
+  try {
+    const data = await bdInvCall({ action: 'get_all', product_title: v.shopifyTitle })
+    const variant = (data.variants || []).find(x => x.inventory_item_id === v.itemId)
+    if (variant) qty = variant.inventory_quantity
+  } catch (e) {}
+  const inputId = 'wk-inv-q-' + sessionId
+  box.innerHTML = '<div style="margin-bottom:3px"><b>' + esc(row.title) + '</b></div>' +
+    'Spaces left: <input type="number" min="0" id="' + inputId + '" value="' + (qty == null ? '' : qty) + '">' +
+    '<button class="btn small" onclick="bdSetInvFromBox(\'' + studio + '\',\'' + sessionId + '\',\'' + inputId + '\')">Set</button>' +
+    (qty === 0 ? '' : '<button class="btn small bad" onclick="bdSetInvFromBox(\'' + studio + '\',\'' + sessionId + '\',null)">Close</button>') +
+    '<div class="muted small" style="margin-top:3px">' + (qty == null ? 'Couldn\'t read the live number. ' : 'Live in Shopify now: ' + qty + '. ') + 'Changes what customers can book.</div>'
+}
+
+async function bdSetInvFromBox(studio, sessionId, inputId) {
+  const qty = inputId ? parseInt(document.getElementById(inputId).value, 10) : 0
+  if (isNaN(qty) || qty < 0) { toast('Enter 0 or more.', true); return }
+  const { data: row } = await sb.from('sessions').select('id, session_date, session_time, title').eq('id', sessionId).maybeSingle()
+  if (!row) return
+  if (!confirm((qty === 0 ? 'Close' : 'Set spaces left to ' + qty + ' for') + ' "' + row.title + '" on ' + fmtDate(row.session_date) + ' at ' + fmtTime(row.session_time) + '?\n\n' +
+               'This changes LIVE Shopify inventory. Existing bookings aren\'t affected.')) return
+  const err = await bdSetInventory(studio, row, qty)
+  if (err) { toast('Not changed: ' + err, true); return }
+  const x = bdPlans[studio]
+  if (x && x.ctx) {
+    ;(x.ctx.invNow = x.ctx.invNow || {})[sessionId] = qty
+    x.ctx.closedNow = x.ctx.closedNow || {}
+    if (qty === 0) x.ctx.closedNow[sessionId] = true; else delete x.ctx.closedNow[sessionId]
+    ;(x.ctx.openDays = x.ctx.openDays || {})[row.session_date] = true
+  }
+  // Staffing needs come from the database; reload the week when it's safe to, otherwise just redraw
+  if (!bdAnyDirty()) { toast((qty === 0 ? 'Closed: ' : 'Set to ' + qty + ': ') + row.title + '. Updating staffing needs…'); await bdOpenWeek() }
+  else { toast((qty === 0 ? 'Closed: ' : 'Set to ' + qty + ': ') + row.title + '. Save your changes, then reopen the week to update staffing needs.'); bdRefresh() }
 }
 
 async function bdCloseSession(studio, sessionId) {
