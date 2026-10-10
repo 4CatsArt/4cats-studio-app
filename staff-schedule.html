@@ -169,6 +169,10 @@ table.wk tr.wk-sched td { background: #f7f9fc; }
 .wk-del { position: absolute; top: 2px; right: 2px; border: none; background: transparent; color: inherit; opacity: .45; cursor: pointer; font-size: 11px; line-height: 1; padding: 2px 3px; border-radius: 3px; }
 .wk-del:hover { opacity: 1; background: rgba(0,0,0,.08); }
 .wk-chip .wk-time { padding-right: 14px; }
+.wk-approved-ctrls { display: flex; gap: 4px; margin-top: 3px; }
+.wk-mini { font: inherit; font-size: 10.5px; font-weight: 600; padding: 1px 6px; border-radius: 4px; border: 1px solid currentColor; background: #fff; color: var(--good); cursor: pointer; opacity: .8; }
+.wk-mini:hover { opacity: 1; }
+.wk-mini.bad { color: var(--bad); }
 .wk-risk-sum { padding: 8px 12px; font-size: 12px; }
 .wk-mins summary { padding: 8px 12px; cursor: pointer; font-size: 12px; color: var(--muted); }
 .wk-mins input.input { height: 28px; }
@@ -1766,8 +1770,17 @@ function renderBuild(withLegend) {
       let cell = ''
       // already-approved shifts (this or another studio)
       ctx.shifts.filter(x => x.staff_id === p.id && x.shift_date === d && x.status !== 'draft' && x.start_time).forEach(x => {
-        cell += '<div class="wk-chip ' + (x.studio_id !== ctx.studio ? 'elsewhere' : 'done') + '"><b>' + fmtRange(x.start_time, x.end_time) + '</b><div>' + esc(x.status) +
-          (x.studio_id !== ctx.studio ? ' · at ' + esc(STUDIO_NAMES[x.studio_id] || x.studio_id) : '') + '</div></div>'
+        // Approved/posted shifts at THIS studio get per-shift controls: back to draft, or delete
+        const own = x.studio_id === ctx.studio
+        const args = '\'' + x.studio_id + '\',\'' + x.staff_id + '\',\'' + x.shift_date + '\''
+        const ctrls = own
+          ? '<div class="wk-approved-ctrls">' +
+              '<button class="wk-mini" title="Back to draft so you can change it" onclick="event.stopPropagation();unapproveShift(' + args + ')">↩ Draft</button>' +
+              '<button class="wk-mini bad" title="Delete this shift" onclick="event.stopPropagation();deleteApprovedShift(' + args + ')">✕ Delete</button>' +
+            '</div>'
+          : ''
+        cell += '<div class="wk-chip ' + (own ? 'done' : 'elsewhere') + '"><b>' + fmtRange(x.start_time, x.end_time) + '</b><div>' + esc(x.status) +
+          (own ? '' : ' · at ' + esc(STUDIO_NAMES[x.studio_id] || x.studio_id)) + '</div>' + ctrls + '</div>'
       })
       // drafts at OTHER studios count toward their week
       ctx.shifts.filter(x => x.staff_id === p.id && x.shift_date === d && x.status === 'draft' && x.studio_id !== ctx.studio && !bdStudios.includes(x.studio_id) && x.start_time)
@@ -2354,6 +2367,61 @@ async function unapproveWeek() {
   }
   toast('Unpublished ' + total + ' shifts: they\'re drafts again')
   bdOpenWeek()
+}
+
+// ── Per-shift controls on approved/posted shifts ──
+// One row per (staff_id, studio_id, shift_date), the same key the finance Schedule tab
+// upserts on. Both update the in-memory week too instead of reloading, so any unsaved
+// draft changes on screen are kept.
+function bdFindApproved(studio, staffId, date) {
+  for (const st of Object.keys(bdPlans)) {
+    const x = bdPlans[st] && bdPlans[st].ctx
+    const hit = x && x.shifts.find(s => s.studio_id === studio && s.staff_id === staffId && s.shift_date === date && s.status !== 'draft')
+    if (hit) return hit
+  }
+  return null
+}
+function bdForEachShiftCopy(studio, staffId, date, fn) {
+  Object.keys(bdPlans).forEach(st => {
+    const x = bdPlans[st] && bdPlans[st].ctx
+    if (x) x.shifts = x.shifts.filter(s => !(s.studio_id === studio && s.staff_id === staffId && s.shift_date === date && s.status !== 'draft') || fn(s) !== false)
+  })
+}
+
+async function unapproveShift(studio, staffId, date) {
+  const sh = bdFindApproved(studio, staffId, date)
+  if (!sh) { toast('Couldn\'t find that shift. Try reloading the week.', true); return }
+  const who = staffName(staffId), when = fmtDate(date) + ' ' + fmtRange(sh.start_time, sh.end_time)
+  if (!confirm('Move ' + who + ' (' + when + ') back to draft?' +
+      (sh.status === 'posted' ? '\n\nThis shift was marked as posted to Sling. Sling still has it, so update Sling too.' : ''))) return
+  const { error } = await sb.from('staff_shifts').update({ status: 'draft', posted_at: null })
+    .eq('studio_id', studio).eq('staff_id', staffId).eq('shift_date', date).in('status', ['approved', 'posted'])
+  if (error) { toast(error.message, true); return }
+  // Every open studio's copy of this shift becomes a draft
+  bdForEachShiftCopy(studio, staffId, date, s => { s.status = 'draft' })
+  // and it shows up as an editable saved draft in that studio's plan
+  const p = bdPlans[studio] && bdPlans[studio].plan
+  if (p) {
+    p.blocks.push({ date, start: toMin(sh.start_time), end: toMin(sh.end_time), layer: 1, badges: [], staffId, saved: true })
+    p.saved = true
+  }
+  toast(who + ' is a draft again. Change it, save, then approve.')
+  bdRefresh()
+}
+
+async function deleteApprovedShift(studio, staffId, date) {
+  const sh = bdFindApproved(studio, staffId, date)
+  if (!sh) { toast('Couldn\'t find that shift. Try reloading the week.', true); return }
+  const who = staffName(staffId), when = fmtDate(date) + ' ' + fmtRange(sh.start_time, sh.end_time)
+  if (!confirm('Delete ' + who + '\'s ' + sh.status + ' shift (' + when + ' at ' + (STUDIO_NAMES[studio] || studio) + ')?' +
+      (sh.status === 'posted' ? '\n\nThis shift was marked as posted to Sling. Sling still has it, so remove it there too.' : '') +
+      '\n\nThis can\'t be undone.')) return
+  const { error } = await sb.from('staff_shifts').delete()
+    .eq('studio_id', studio).eq('staff_id', staffId).eq('shift_date', date).in('status', ['approved', 'posted'])
+  if (error) { toast(error.message, true); return }
+  bdForEachShiftCopy(studio, staffId, date, () => false)
+  toast('Shift deleted')
+  bdRefresh()
 }
 
 async function approveDrafts() {
