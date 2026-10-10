@@ -2237,13 +2237,52 @@ function bdSessListHtml(ctx, d, rows, tShort) {
       ' title="' + esc(r.title) + ' · click to change spaces left or close"' +
       ' onclick="bdToggleInv(\'' + ctx.studio + '\',\'' + r.session_id + '\')"><b>' + tShort(r.session_time) + '</b> <span class="wk-code">' + esc(r.code || '') + '</span> <span class="wk-sess-n">' + n + '</span>' + left + '</div>'
   }
+  // Open sessions nobody has booked (later weeks of a series are left alone: they're sold through week 1)
+  const empty = open.filter(r => !((r.booking_count || 0) > 0) && !/\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(r.title || ''))
+  ;(ctx.emptyOpen = ctx.emptyOpen || {})[d] = empty.map(r => r.session_id)
+  const closeAll = empty.length
+    ? '<button class="btn small bad" style="margin:5px 0 3px;width:100%" title="Set live Shopify inventory to 0 for every open session on this day with no bookings" onclick="bdCloseDayEmpty(\'' + ctx.studio + '\',\'' + d + '\')">Close all without bookings (' + empty.length + ')</button>'
+    : ''
   return '<details class="wk-sessions"' + (isOpen ? ' open' : '') + ' ontoggle="bdDayToggle(\'' + ctx.studio + '\',\'' + d + '\',this.open)"><summary>' +
     open.length + ' open' + (shut.length ? ' · ' + shut.length + ' closed' : '') + '</summary>' +
-    open.sort(byTime).map(line).join('') + shut.sort(byTime).map(line).join('') + '</details>'
+    open.sort(byTime).map(line).join('') + closeAll + shut.sort(byTime).map(line).join('') + '</details>'
 }
 function bdDayToggle(studio, d, isOpen) {
   const x = bdPlans[studio]; if (!x || !x.ctx) return
   ;(x.ctx.openDays = x.ctx.openDays || {})[d] = isOpen
+}
+
+// Close every open session on one day at one studio that has no bookings (live Shopify to 0).
+// Each one is re-checked against bookings right before closing, so a booking that came in
+// since the page loaded is never closed.
+async function bdCloseDayEmpty(studio, date) {
+  const x = bdPlans[studio]
+  const ids = (x && x.ctx && x.ctx.emptyOpen && x.ctx.emptyOpen[date]) || []
+  if (!ids.length) { toast('Nothing open without bookings on ' + fmtDate(date) + '.', true); return }
+  const { data: rows, error } = await sb.from('sessions').select('id, session_date, session_time, title').in('id', ids).order('session_time')
+  if (error || !rows || !rows.length) { toast(error ? error.message : 'Sessions not found.', true); return }
+  if (!confirm('Close ' + rows.length + ' session' + (rows.length === 1 ? '' : 's') + ' with no bookings at ' + (STUDIO_NAMES[studio] || studio) + ' on ' + fmtDate(date) + '?\n\n' +
+               rows.map(r => fmtTime(r.session_time) + '  ' + r.title).join('\n') +
+               '\n\nThis sets their LIVE Shopify inventory to 0 so customers can\'t book them. Anything booked since the page loaded is skipped.')) return
+  toast('Closing ' + rows.length + '…')
+  let ok = 0
+  const skipped = [], failed = []
+  for (const row of rows) {
+    if (await bdBookedCount(row.id) > 0) { skipped.push(fmtTime(row.session_time) + ' ' + row.title); continue }
+    const err = await bdSetInventory(studio, row, 0, 0)
+    if (err) { failed.push(fmtTime(row.session_time) + ' ' + row.title + ': ' + err); continue }
+    ok++
+    if (x && x.ctx) {
+      ;(x.ctx.invNow = x.ctx.invNow || {})[row.id] = 0
+      ;(x.ctx.closedNow = x.ctx.closedNow || {})[row.id] = true
+    }
+  }
+  if (x && x.ctx) (x.ctx.openDays = x.ctx.openDays || {})[date] = true
+  const msg = 'Closed ' + ok + ' on ' + fmtDate(date) +
+    (skipped.length ? '. Skipped (booked since loading): ' + skipped.join('; ') : '') +
+    (failed.length ? '. Not closed: ' + failed.join('; ') : '')
+  if (!bdAnyDirty()) { toast(msg + '. Updating staffing needs…', !!failed.length); await bdOpenWeek() }
+  else { toast(msg + '. Save your changes, then reopen the week to update staffing needs.', !!failed.length); bdRefresh() }
 }
 
 // Inline editor under a session line: live Shopify spaces left, Set, Close
