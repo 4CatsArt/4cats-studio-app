@@ -437,6 +437,12 @@ body:not(.sc-mode) .sc-only { display: none !important; }
 .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .card-head .title { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 700; }
 
+/* coordinator birthday confetti */
+.confetti-layer { position: fixed; top: 0; right: 0; bottom: 0; left: 0; pointer-events: none; overflow: hidden; z-index: 9999; }
+.confetti-layer span { position: absolute; top: -14px; width: 9px; height: 13px; border-radius: 2px; opacity: .95;
+  animation-name: confetti-fall; animation-timing-function: cubic-bezier(.25,.6,.45,1); animation-fill-mode: forwards; }
+@keyframes confetti-fall { to { transform: translate(var(--drift), 105vh) rotate(var(--spin)); opacity: .85; } }
+
 /* greeting hero — distinct gradient treatment marks this as the "assistant" section.
    Sept 2026 styling pass: bigger, softer card. No extra dark overlay — the theme
    loader already adds its own light tint when a banner photo is set, and the
@@ -1010,7 +1016,7 @@ function formatSessionTime(t) {
 let _specialGreeting = null;
 let _lastHeroData = null;
 function heroGreetingHtml(name) {
-  const g = (_specialGreeting || '').trim();
+  const g = (_birthdayGreeting || _specialGreeting || '').trim();
   const m = g.match(/^([\s\S]*?)([\s\p{Extended_Pictographic}\u200D\uFE0F]*)$/u);
   const text = m ? m[1].replace(/[\s!.,]+$/, '') : '';
   const emoji = m ? m[2].trim() : '';
@@ -2805,6 +2811,7 @@ async function submitCoordinatorPin() {
   // been looking at a different one).
   const studioChanged = data.studioId !== _sessionStudioId;
   _sessionStudioId = data.studioId;
+  startBirthdayLook(data); // 🎂 only if it's this coordinator's birthday today
   renderViewBar();
   renderAdminStudioSwitcher(data); // admin PIN → all studios; SC PIN → no switcher
   renderFridayFillRateBody(data); // Friday numbers only come back with a PIN
@@ -2823,6 +2830,7 @@ async function submitCoordinatorPin() {
 function endCoordinatorView(reload = true) {
   const wasUnlocked = !!_sessionPin;
   _sessionPin = null;
+  endBirthdayLook(); // back to today's theme
   if (_studioViewStarted) _viewLevel = 'studio';
   document.body.classList.remove('sc-mode', 'preview-mode');
   if (_inactivityTimer) { clearTimeout(_inactivityTimer); _inactivityTimer = null; }
@@ -2919,6 +2927,102 @@ async function initDashboard(fridayData) {
 // Falls back to the default purple gradient if no theme is active yet or
 // the fetch fails, so this can never block/break the rest of the page.
 
+// ---------- theme look: colours + hero banner (shared by the day's theme
+// and the coordinator birthday theme) ----------
+const THEME_VARS = ['--accent', '--accent-deep', '--sidebar-bg', '--sidebar-bg-2'];
+const THEME_VAR_KEYS = { accent_color: '--accent', accent_color_deep: '--accent-deep', sidebar_color: '--sidebar-bg', sidebar_color_deep: '--sidebar-bg-2' };
+let _baseLook = null;          // { vars, bannerUrl } — today's theme, set by loadDashboardTheme
+let _heroBannerUrl = null;
+let _heroObserver = null;
+function captureThemeVars() {
+  const o = {};
+  THEME_VARS.forEach(v => { o[v] = document.documentElement.style.getPropertyValue(v); });
+  return o;
+}
+function applyThemeVars(vars) {
+  THEME_VARS.forEach(v => {
+    if (vars[v]) document.documentElement.style.setProperty(v, vars[v]);
+    else document.documentElement.style.removeProperty(v); // back to the built-in purple
+  });
+}
+function paintHeroBanner() {
+  const hero = document.getElementById('card-daily-hero');
+  if (!hero) return;
+  hero.style.backgroundImage = _heroBannerUrl
+    ? `linear-gradient(135deg, rgba(0,0,0,0.35), rgba(0,0,0,0.15)), url('${_heroBannerUrl}')`
+    : '';
+}
+function setHeroBanner(url) {
+  _heroBannerUrl = url || null;
+  paintHeroBanner();
+  if (!_heroObserver) {
+    const heroEl = document.getElementById('card-daily-hero');
+    if (heroEl) {
+      _heroObserver = new MutationObserver(paintHeroBanner); // hero re-renders keep the banner
+      _heroObserver.observe(heroEl, { childList: true });
+    }
+  }
+}
+
+// ---------- coordinator birthday ----------
+// community-dashboard-data sends `birthday` + `birthdayTheme` with a PIN
+// unlock when it's (about) that person's birthday. The final check uses the
+// iPad's own date. The birthday look lasts until the coordinator view locks.
+// Set it up in projects.html → Themes → Coordinator birthday.
+let _birthdayActive = false;
+let _birthdayGreeting = null;
+function isBirthdayToday(b) {
+  if (!b || !b.month || !b.day) return false;
+  const t = new Date(), m = t.getMonth() + 1, d = t.getDate();
+  if (Number(b.month) === m && Number(b.day) === d) return true;
+  if (Number(b.month) === 2 && Number(b.day) === 29 && m === 2 && d === 28) {
+    const y = t.getFullYear();
+    return !((y % 4 === 0 && y % 100 !== 0) || y % 400 === 0); // Feb 29 birthday, not a leap year
+  }
+  return false;
+}
+function startBirthdayLook(data) {
+  endBirthdayLook(false);
+  if (!data || !isBirthdayToday(data.birthday)) return;
+  const bt = data.birthdayTheme || {};
+  if (!_baseLook) _baseLook = { vars: captureThemeVars(), bannerUrl: _heroBannerUrl };
+  const vars = Object.assign({}, _baseLook.vars);
+  Object.keys(THEME_VAR_KEYS).forEach(k => { if (bt[k]) vars[THEME_VAR_KEYS[k]] = bt[k]; });
+  applyThemeVars(vars);
+  setHeroBanner(bt.banner_image_url || _baseLook.bannerUrl);
+  _birthdayGreeting = (bt.greeting || '').trim() || 'Happy Birthday 🎂';
+  _birthdayActive = true;
+  launchConfetti();
+}
+function endBirthdayLook(rerender = true) {
+  if (!_birthdayActive) return;
+  _birthdayActive = false;
+  _birthdayGreeting = null;
+  if (_baseLook) { applyThemeVars(_baseLook.vars); setHeroBanner(_baseLook.bannerUrl); }
+  if (rerender && _lastHeroData) renderDailyHero(_lastHeroData);
+}
+// A short confetti burst. Skipped for anyone with reduced motion turned on.
+function launchConfetti() {
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const layer = document.createElement('div');
+  layer.className = 'confetti-layer';
+  const cs = getComputedStyle(document.documentElement);
+  const colors = [cs.getPropertyValue('--accent').trim() || '#6d4aeb', cs.getPropertyValue('--accent-deep').trim() || '#5636c9', '#f5a623', '#16a34a', '#be185d', '#1d4ed8'];
+  for (let i = 0; i < 70; i++) {
+    const c = document.createElement('span');
+    c.style.left = (Math.random() * 100) + 'vw';
+    c.style.background = colors[i % colors.length];
+    c.style.animationDelay = (Math.random() * 0.8) + 's';
+    c.style.animationDuration = (2.2 + Math.random() * 1.6) + 's';
+    c.style.setProperty('--drift', (Math.random() * 160 - 80) + 'px');
+    c.style.setProperty('--spin', (Math.random() * 720 - 360) + 'deg');
+    if (i % 3 === 0) c.style.borderRadius = '50%';
+    layer.appendChild(c);
+  }
+  document.body.appendChild(layer);
+  setTimeout(() => layer.remove(), 4800);
+}
+
 async function loadDashboardTheme() {
   try {
     const res = await fetch(
@@ -2982,19 +3086,9 @@ async function loadDashboardTheme() {
       console.error('Special day load failed, keeping the week\'s theme:', e);
     }
 
-    if (bannerUrl) {
-      const applyBanner = () => {
-        const hero = document.getElementById('card-daily-hero');
-        if (hero) {
-          hero.style.backgroundImage =
-            `linear-gradient(135deg, rgba(0,0,0,0.35), rgba(0,0,0,0.15)), url('${bannerUrl}')`;
-        }
-      };
-      applyBanner();
-      const heroObserver = new MutationObserver(applyBanner);
-      const heroEl = document.getElementById('card-daily-hero');
-      if (heroEl) heroObserver.observe(heroEl, { childList: true });
-    }
+    // Remember today's look so a birthday unlock can go back to it on lock.
+    _baseLook = { vars: captureThemeVars(), bannerUrl: bannerUrl || null };
+    if (!_birthdayActive) setHeroBanner(bannerUrl || null);
   } catch (e) {
     console.error('Dashboard theme load failed:', e);
     // Fail silently — default styling still works fine.
