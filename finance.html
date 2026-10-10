@@ -1841,11 +1841,22 @@ async function addSessionsMissingFromRpc(studioId, dateStr, sessionRows) {
   }))
 }
 
-// Same rule as admin.html's loadStudioView: a Class 2+ row with no bookings of
-// its own takes Class 1's booking count. Mutates sessionRows in place.
+// A Class 2+ row with no bookings of its own takes the enrolment of its series' first
+// session, from get_series_enrolment (shared database rule: same weekday, time, title and
+// age group). Falls back to the older admin.html-style match only if that function isn't
+// installed yet. Mutates sessionRows in place.
 async function inheritSeriesBookingCounts(studioId, sessionRows) {
-  for (const r of sessionRows) {
-    if (!r.title || !isSeriesClass2Plus(r.title) || r.booking_count) continue
+  const todo = sessionRows.filter(r => r.title && isSeriesClass2Plus(r.title) && !r.booking_count)
+  if (!todo.length) return
+  const { data, error } = await sb.rpc('get_series_enrolment', { p_session_ids: todo.map(r => r.session_id) })
+  if (!error) {
+    const by = {}
+    ;(data || []).forEach(e => { by[e.session_id] = e })
+    todo.forEach(r => { const e = by[r.session_id]; if (e && e.class1_session_id) r.booking_count = Number(e.enrolled) || 0 })
+    return
+  }
+  console.warn('get_series_enrolment unavailable, using the old match:', error.message)
+  for (const r of todo) {
     const class1Id = await findClass1SessionId(studioId, r.session_time, getSeriesClass1Title(r.title))
     if (!class1Id) continue
     const { data: c1b } = await sb.from('bookings').select('qty').eq('session_id', class1Id).gt('qty', 0)
