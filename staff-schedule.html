@@ -164,6 +164,9 @@ table.wk tr.wk-sched td { background: #f7f9fc; }
 .wk-chip.class { background: #fff4d6; color: #7a5a00; border-left: 3px solid #e0a800; }
 .wk-time { cursor: text; border-radius: 3px; }
 .wk-time:hover { background: rgba(255,255,255,.7); text-decoration: underline dotted; }
+td[data-date]:not(.drop-ok) { cursor: cell; }
+td[data-date] .wk-chip:not([draggable="true"]) { cursor: default; }
+.wk-add-input { margin-top: 4px; }
 .wk-time-input { width: 100%; box-sizing: border-box; font: inherit; font-weight: 600; padding: 2px 4px; border: 1px solid #4a7fd4; border-radius: 4px; }
 .wk-studio-chips { display: inline-flex; flex-wrap: wrap; gap: 6px; }
 .wk-studio-chip { display: inline-flex; align-items: center; gap: 4px; background: var(--ink); color: #fff; border-radius: 14px; padding: 4px 6px 4px 12px; font-size: 12px; }
@@ -1637,6 +1640,7 @@ function renderBuild(withLegend) {
       opts.map(o => '<option value="' + o.p.id + '"' + (o.p.id === b.staffId ? ' selected' : '') + '>' + esc(o.p.display_name) + (onCall(o.p, b.date) ? ' · on call' : '') + (o.why ? ' (' + o.why + ')' : '') + '</option>').join('') + '</select>'
   }
   const whyText = b => {
+    if (b.manual) return 'Added by hand'
     if (b.training) return 'Training: shadowing the person scheduled'
     if (b.topUp) return b.weekend ? 'Extra: everyone works the weekend' : b.friday ? 'Extra: manager / SC work Friday event night' : 'Extra: hours for a manager or someone under their minimum'
     if (!b.peak) return ''
@@ -1656,6 +1660,7 @@ function renderBuild(withLegend) {
       const p = bdPerson(b.staffId)
       tags.push('Training ' + (bdTrainingDone(ctx, p, plan.blocks, b.date) + 1) + '/' + TRAINING_SHIFTS_NEEDED + (b.withId ? ' · with ' + esc(bdPerson(b.withId).display_name) : ''))
     }
+    if (b.manual) tags.push('Added by hand')
     if (b.topUp) tags.push(b.weekend ? 'Weekend · closing' : b.friday ? 'Friday event night · closing' : 'Extra hours · closing')
     ;(b.classes || []).forEach(l => tags.push('✓ Teaching ' + esc(l)))
     if (b.staffId && onCall(bdPerson(b.staffId), b.date)) tags.push('On call: nobody else could take this')
@@ -2390,7 +2395,7 @@ function bdEditTime(ev, idx) {
 // or onto the Unfilled row to take it off someone. Approved shifts don't move.
 let bdDragIdx = null, bdDragStudio = null
 function bdDropAttrs(staffId, date) {
-  return 'data-studio="' + bdCtx.studio + '" data-staff="' + staffId + '" data-date="' + date + '" ondragover="bdDragOver(event)" ondragleave="this.classList.remove(\'drop-ok\')" ondrop="bdDrop(event)"'
+  return 'data-studio="' + bdCtx.studio + '" data-staff="' + staffId + '" data-date="' + date + '" ondragover="bdDragOver(event)" ondragleave="this.classList.remove(\'drop-ok\')" ondrop="bdDrop(event)" onclick="bdCellClick(event)"'
 }
 function bdDragStart(ev, idx, studio) {
   bdDragIdx = idx
@@ -2431,6 +2436,58 @@ function bdDrop(ev) {
   b.date = date
   bdPlan.dirty = true
   bdRefresh()
+}
+
+// ── Add a shift by hand: click an empty spot in someone's day (or the Unfilled row) ──
+// Type a time like 9:30a-5p, Enter to add, Esc to cancel. Same checks as editing a time
+// and dragging: one shift a day, unavailability/time off, length, overtime, opening hours.
+function bdCellClick(ev) {
+  const td = ev.currentTarget
+  if (ev.target !== td) return                       // clicked a chip, button or the time box
+  if (td.querySelector('.wk-add-input')) return
+  const studio = td.dataset.studio, date = td.dataset.date, staffId = td.dataset.staff || null
+  bdUse(studio)
+  if (!bdPlan || !bdCtx) return
+  const w = bdCtx.dayWindow[date]
+  const input = document.createElement('input')
+  input.className = 'wk-time-input wk-add-input'
+  input.placeholder = 'e.g. 9:30a-5p'
+  input.value = w ? bdFmtShort(w.open) + '-' + bdFmtShort(w.close) : ''
+  input.title = 'New shift' + (staffId ? ' for ' + bdPerson(staffId).display_name : ' (unfilled)') + ' on ' + fmtDate(date) + ' · Enter to add, Esc to cancel'
+  td.appendChild(input)
+  input.focus(); input.select()
+  let done = false
+  const cancel = () => { if (!done) { done = true; input.remove() } }
+  const add = () => {
+    if (done) return
+    if (!input.value.trim()) { cancel(); return }
+    done = true
+    bdUse(studio)
+    const r = bdParseRange(input.value)
+    if (!r) { toast('Use a time like 8:30a-5p, with a or p on both times.', true); input.remove(); return }
+    const blk = { date, start: r.start, end: r.end, layer: 1, badges: [], staffId, manual: true }
+    if (staffId) {
+      const p = bdPerson(staffId), state = bdState(bdCtx, bdPlan.blocks)
+      if (state.daysOf(staffId).has(date)) { toast(p.display_name + ' already has a shift on ' + fmtDate(date) + '. Change that one instead.', true); input.remove(); return }
+      const why = bdBlocked(bdCtx, p, blk, state)
+      if (why && !confirm(p.display_name + ': ' + why + ' on ' + fmtDate(date) + '. Add this shift anyway?')) { input.remove(); return }
+    }
+    const paid = paidMins(bdCtx.studio, r.start, r.end), warns = []
+    if (r.end - r.start < 180) warns.push('shorter than 3 hours')
+    if (paid > MAX_PAID) warns.push('more than 8 paid hours (overtime in BC and AB)')
+    if (!w) warns.push('on a day with nothing open')
+    else if (r.start < w.open || r.end > w.close) warns.push('outside opening hours (' + bdFmtShort(w.open) + '–' + bdFmtShort(w.close) + ')')
+    if (warns.length && !confirm('This shift would be ' + warns.join(', ') + '. Add it anyway?')) { input.remove(); return }
+    bdPlan.blocks.push(blk)
+    bdPlan.dirty = true
+    bdRefresh()
+  }
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') add(); else if (e.key === 'Escape') cancel() })
+  // Clicking away only adds if you actually typed a time; an untouched suggestion is just dropped
+  const suggested = input.value
+  input.addEventListener('blur', () => { if (!done && input.value.trim() && input.value !== suggested) add(); else cancel() })
+  input.addEventListener('mousedown', e => e.stopPropagation())
+  input.addEventListener('click', e => e.stopPropagation())
 }
 
 function bdDeleteShift(ev, idx) {
