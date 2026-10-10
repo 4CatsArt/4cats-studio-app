@@ -357,6 +357,15 @@ button.pill { cursor: pointer; }
       <button class="btn btn-primary" onclick="addSpecialDay()">Add special day</button>
     </div>
     <div class="panel table-wrap" id="specialdays-body"><div class="loading">Loading…</div></div>
+
+    <!-- Coordinator birthday: one look, shown only to a coordinator who unlocks
+         the community dashboard with her PIN on her birthday. -->
+    <div class="toolbar" style="margin-top:1.75rem">
+      <strong style="font-size:15px">🎂 Coordinator birthday</strong>
+      <div class="muted small grow">When a coordinator unlocks the dashboard with her PIN on her birthday, she gets this look, with confetti, until she locks it again. Everyone else sees the normal dashboard. Birthdays (month and day) are set on each staff profile. Leave the banner or colours blank to keep that day's.</div>
+      <button class="btn" onclick="openBirthdayPreview()">👁 Preview</button>
+    </div>
+    <div class="panel table-wrap" id="birthday-body"><div class="loading">Loading…</div></div>
   </div>
 
   <!-- REVIEW -->
@@ -638,7 +647,7 @@ async function initApp(user) {
   }
   document.getElementById('login-screen').style.display = 'none'
   document.getElementById('app-screen').style.display = 'block'
-  await Promise.all([loadLibrary(), loadThemes(), loadSheets('base'), loadSheets('template'), loadSpecialDays()])
+  await Promise.all([loadLibrary(), loadThemes(), loadSheets('base'), loadSheets('template'), loadSpecialDays(), loadBirthdayTheme()])
   buildYearOptions()
   routeFromHash()
 }
@@ -1538,6 +1547,7 @@ async function runImport() {
 let themeWeeks = null   // { theme_id: ['2026-09-28', …] } for the current year
 async function renderThemes() {
   renderSpecialDays()
+  renderBirthdayTheme()
   const body = document.getElementById('themes-body')
   if (!themes.length) { body.innerHTML = '<div class="empty">No themes yet. Add one to start planning weeks.</div>'; return }
   if (!themeWeeks) await loadThemeWeeks()
@@ -1678,6 +1688,49 @@ function openThemePreview(themeId) {
 // Opens the week preview on this special day's next occurrence (yearly days
 // roll to next year once this year's date has passed), so it shows the
 // special day on top of that week's actual theme.
+/* ---------- coordinator birthday theme (dashboard_birthday_theme, one row) ---------- */
+let birthdayTheme = null, birthdayThemeError = null
+async function loadBirthdayTheme() {
+  const { data, error } = await sb.from('dashboard_birthday_theme').select('*').eq('id', 1).maybeSingle()
+  if (error) { birthdayThemeError = /does not exist|relation/i.test(error.message || '') ? 'Run coordinator_birthdays.sql first.' : friendlyError(error); birthdayTheme = null; return }
+  birthdayThemeError = null
+  birthdayTheme = data || null
+}
+function renderBirthdayTheme() {
+  const body = document.getElementById('birthday-body')
+  if (!body) return
+  if (birthdayThemeError) { body.innerHTML = '<div class="empty">' + esc(birthdayThemeError) + '</div>'; return }
+  if (!birthdayTheme) { body.innerHTML = '<div class="empty">Birthday theme row is missing. Run coordinator_birthdays.sql again.</div>'; return }
+  const b = birthdayTheme
+  const fields = [['accent_color', 'Accent'], ['accent_color_deep', 'Accent 2'], ['sidebar_color', 'Sidebar'], ['sidebar_color_deep', 'Sidebar 2']]
+  const colors = '<div class="color-grid">' + fields.map(([key, label]) => {
+    const val = b[key] || ''
+    return '<div class="color-field"><label>' + label + '</label>' +
+      '<span class="color-swatch" style="background:' + esc(val || '#ffffff') + '"></span>' +
+      '<input type="text" placeholder="#hex" value="' + esc(val) + '" onchange="saveBirthdayTheme({' + key + ':this.value.trim()||null});this.previousElementSibling.style.background=this.value.trim()||\'#ffffff\'" aria-label="' + label + ' color"></div>'
+  }).join('') + '</div>'
+  body.innerHTML = '<table class="theme-table"><thead><tr><th style="width:26%">Greeting<br><span style="font-weight:400">the name is added for you</span></th>' +
+    '<th style="width:170px">Banner image<br><span style="font-weight:400">~1920×350px</span></th><th>Colors (optional)<br><span style="font-weight:400">blank = keep that day\'s</span></th></tr></thead><tbody><tr>' +
+    '<td><input type="text" placeholder="Happy Birthday 🎂" value="' + esc(b.greeting || '') + '" onchange="saveBirthdayTheme({greeting:this.value.trim()||null})" aria-label="Birthday greeting" style="width:100%"></td>' +
+    '<td><div class="banner-cell"><input type="url" placeholder="https://…" value="' + esc(b.banner_image_url || '') + '" onchange="saveBirthdayTheme({banner_image_url:this.value.trim()||null});this.nextElementSibling.outerHTML=bannerPreviewTag(this.value.trim())" aria-label="Birthday banner image URL">' +
+      bannerPreviewTag(b.banner_image_url) + '</div></td>' +
+    '<td>' + colors + '</td></tr></tbody></table>'
+}
+async function saveBirthdayTheme(patch) {
+  patch.updated_at = new Date().toISOString()
+  const { data, error } = await sb.from('dashboard_birthday_theme').update(patch).eq('id', 1).select().single()
+  if (error) { toast(friendlyError(error), true); renderBirthdayTheme(); return }
+  birthdayTheme = data
+  toast('Birthday theme saved')
+}
+// Week preview for today, with the birthday look on top.
+function openBirthdayPreview() {
+  if (birthdayThemeError) { toast(birthdayThemeError, true); return }
+  const today = new Date()
+  pv = { mode: 'week', weekStart: fd(mondayOf(today)), day: fd(today), birthday: true }
+  pvSeasonLoaded = false
+  openModal('preview-modal'); renderThemePreview()
+}
 function openSpecialDayPreview(id) {
   const d = specialDays.find(x => x.id === id)
   if (!d || !d.special_date) return
@@ -1692,8 +1745,8 @@ function openSpecialDayPreview(id) {
   openModal('preview-modal'); renderThemePreview()
   if (!d.is_active) toast('This special day is switched off, so the preview won\'t show it until it\'s Active.', true)
 }
-function pvShiftWeek(n) { const s = addDays(pd(pv.weekStart), 7 * n); pv = { mode: 'week', weekStart: fd(s), day: fd(s) }; renderThemePreview() }
-function pvGoTo(dateStr) { if (!dateStr) return; const d = pd(dateStr); pv = { mode: 'week', weekStart: fd(mondayOf(d)), day: fd(d) }; renderThemePreview() }
+function pvShiftWeek(n) { const s = addDays(pd(pv.weekStart), 7 * n); pv = { mode: 'week', weekStart: fd(s), day: fd(s), birthday: !!pv.birthday }; renderThemePreview() }
+function pvGoTo(dateStr) { if (!dateStr) return; const d = pd(dateStr); pv = { mode: 'week', weekStart: fd(mondayOf(d)), day: fd(d), birthday: !!pv.birthday }; renderThemePreview() }
 function pvPickDay(dateStr) { pv.day = dateStr; renderThemePreview() }
 // Same rule as community-dashboard.html's heroGreetingHtml(): emoji typed at
 // the end of the greeting move after the name.
@@ -1724,7 +1777,7 @@ async function renderThemePreview() {
     controls = '<div class="pv-controls"><span class="muted small grow">Showing this theme on its own, as it would look in any week it\'s used (special days not included).</span>' +
       '<button class="btn" onclick="openThemePreview()">Preview by week instead</button></div>'
   } else {
-    document.getElementById('pv-title').textContent = 'Dashboard preview'
+    document.getElementById('pv-title').textContent = pv.birthday ? '🎂 Birthday preview' : 'Dashboard preview'
     wk = await weekThemeFor(pv.weekStart)
     special = specialDayOn(pv.day)
     const start = pd(pv.weekStart)
@@ -1736,7 +1789,7 @@ async function renderThemePreview() {
     controls = '<div class="pv-controls"><div class="week-nav"><button class="btn" onclick="pvShiftWeek(-1)" aria-label="Previous week">‹</button>' +
       '<div class="week-label">Week ' + isoWeek(start).week + '<small>' + esc(rangeLabel(pv.weekStart)) + '</small></div>' +
       '<button class="btn" onclick="pvShiftWeek(1)" aria-label="Next week">›</button></div>' +
-      '<button class="btn" onclick="openThemePreview()">This week</button>' +
+      '<button class="btn" onclick="pvGoTo(fd(new Date()))">This week</button>' +
       '<label class="inline muted small">Jump to <input type="date" value="' + esc(pv.day) + '" onchange="pvGoTo(this.value)"></label></div>' +
       '<div class="pv-controls"><div class="pv-days">' + days + '</div></div>'
   }
@@ -1744,7 +1797,8 @@ async function renderThemePreview() {
   // Resolve colours + banner level by level, remembering where each came from.
   const vars = {}, from = {}
   let banner = null, bannerFrom = 'built-in gradient'
-  const layers = [[pvSeason, 'season default'], [wk && wk.theme, 'week theme'], [special, 'special day']]
+  const bdayLayer = pv.mode === 'week' && pv.birthday ? birthdayTheme : null
+  const layers = [[pvSeason, 'season default'], [wk && wk.theme, 'week theme'], [special, 'special day'], [bdayLayer, 'birthday theme']]
   layers.forEach(([src, label]) => {
     if (!src) return
     PV_COLOR_KEYS.forEach(([k, v]) => { if (src[k]) { vars[v] = src[k]; from[v] = label } })
@@ -1755,7 +1809,9 @@ async function renderThemePreview() {
   const themeName = wk ? themeLabel(wk.theme.name, wk.detail) : ''
   const summary = pv.mode === 'week'
     ? '<div class="pv-summary">' + (wk ? 'Week theme: <strong>' + esc(themeName) + '</strong>' : '<strong>No theme planned for this week</strong> — the dashboard shows the season default.') +
-      (special ? ' · <strong>' + esc(special.name) + '</strong> overrides it on ' + esc(shortDate(pd(pv.day))) + (special.banner_image_url ? '' : ' (no banner of its own)') : '') + '</div>'
+      (special ? ' · <strong>' + esc(special.name) + '</strong> overrides it on ' + esc(shortDate(pd(pv.day))) + (special.banner_image_url ? '' : ' (no banner of its own)') : '') +
+      (bdayLayer ? ' · <strong>🎂 Birthday theme</strong> on top, as a coordinator would see it after unlocking on her birthday' +
+        (pv.birthday ? ' · <button class="link-btn" onclick="pv.birthday=false;renderThemePreview()">turn off</button>' : '') : '') + '</div>'
     : ''
   const card = (lbl, pct) => '<div class="dm-card"><div class="lbl">' + lbl + '</div><div class="dm-skel"></div>' +
     (pct ? '<div class="dm-bar"><span style="width:' + pct + '%"></span></div>' : '<div class="dm-skel sm"></div>') + '</div>'
@@ -1770,7 +1826,7 @@ async function renderThemePreview() {
       [['◈', 'Dashboard'], ['📅', 'Calendar'], ['⭐', 'My Points'], ['📷', 'Instagram'], ['📊', 'Fill Rates']].map((n, i) =>
         '<div class="dm-nav' + (i === 0 ? ' on' : '') + '"><span>' + n[0] + '</span>' + n[1] + '</div>').join('') + '</aside>' +
     '<div class="dm-main">' +
-      '<div class="dm-hero" style="' + heroBg + '"><div class="dm-greet">' + pvGreetingHtml(special && special.greeting) + '</div><div class="dm-sub">Here\'s what\'s happening at the studio today</div></div>' +
+      '<div class="dm-hero" style="' + heroBg + '"><div class="dm-greet">' + pvGreetingHtml(bdayLayer ? ((bdayLayer.greeting || '').trim() || 'Happy Birthday 🎂') : (special && special.greeting)) + '</div><div class="dm-sub">Here\'s what\'s happening at the studio today</div></div>' +
       (weekParts.length ? '<div class="dm-week">' + weekParts.join(' <span class="sep">·</span> ') + '</div>' : '') +
       '<div class="dm-cards">' + card('Friday fill rate', 64) + card('Sales today', 0) + card('Month to date', 48) + card('Participants', 0) + '</div>' +
       '<div class="dm-btn">Example button</div></div></div>'
