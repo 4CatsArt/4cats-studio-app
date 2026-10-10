@@ -167,6 +167,14 @@ table.wk tr.wk-sched td { background: #f7f9fc; }
 td[data-date]:not(.drop-ok) { cursor: cell; }
 td[data-date] .wk-chip:not([draggable="true"]) { cursor: default; }
 .wk-add-input { margin-top: 4px; }
+.pp-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 2000; display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow: auto; }
+.pp-box { background: #fff; border-radius: 12px; max-width: 980px; width: 100%; padding: 18px 20px; box-shadow: 0 10px 40px rgba(0,0,0,.2); }
+.pp-table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 10px; }
+.pp-table th { text-align: left; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; padding: 6px 8px; border-bottom: 1px solid var(--line-2); }
+.pp-table td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.pp-table td.num, .pp-table th.num { text-align: right; white-space: nowrap; }
+.pp-note { font-size: 11px; color: var(--warn); }
+.pp-lock { font-size: 11px; color: #1b6b2e; }
 .wk-wage { font-size: 11px; color: #1b6b2e; font-weight: 600; margin-top: 1px; }
 .wk-wage-stat b { color: #1b6b2e; }
 .wk-time-input { width: 100%; box-sizing: border-box; font: inherit; font-weight: 600; padding: 2px 4px; border: 1px solid #4a7fd4; border-radius: 4px; }
@@ -180,7 +188,9 @@ td[data-date] .wk-chip:not([draggable="true"]) { cursor: default; }
 .wk-chip { position: relative; }
 .wk-del { position: absolute; top: 2px; right: 2px; border: none; background: transparent; color: inherit; opacity: .45; cursor: pointer; font-size: 11px; line-height: 1; padding: 2px 3px; border-radius: 3px; }
 .wk-del:hover { opacity: 1; background: rgba(0,0,0,.08); }
-.wk-chip .wk-time { padding-right: 14px; }
+.wk-chip .wk-time { padding-right: 30px; }
+.wk-sh { position: absolute; top: 2px; right: 17px; border: none; background: transparent; opacity: .45; cursor: pointer; font-size: 10px; line-height: 1; padding: 2px 3px; border-radius: 3px; }
+.wk-sh:hover { opacity: 1; background: rgba(0,0,0,.08); }
 .wk-approved-ctrls { display: flex; gap: 4px; margin-top: 3px; }
 .wk-mini { font: inherit; font-size: 10.5px; font-weight: 600; padding: 1px 6px; border-radius: 4px; border: 1px solid currentColor; background: #fff; color: var(--good); cursor: pointer; opacity: .8; }
 .wk-mini:hover { opacity: 1; }
@@ -273,6 +283,7 @@ td[data-date] .wk-chip:not([draggable="true"]) { cursor: default; }
         <span id="bd-autosave-status" class="muted small"></span>
         <button class="btn good" id="bd-approve" onclick="approveDrafts()">Approve saved drafts</button>
         <button class="btn" id="bd-unapprove" onclick="unapproveWeek()" title="Turn this week's approved shifts back into drafts so they can be changed">Unpublish</button>
+        <button class="btn" id="bd-post-pay" style="display:none" onclick="openPostPay()" title="Send approved shifts' wages to the pay period in finance.html (Monthly Summary)">💰 Post to pay period</button>
       </div>
       <div class="note info" style="margin-bottom:1rem">
         Builds shifts for one studio and week from what the studio needs (Coverage), who's available, home studios,
@@ -502,6 +513,7 @@ async function initApp(user) {
   }
   currentUser = user
   { const fa = await sb.rpc('has_finance_access'); bdWageAccess = !fa.error && fa.data === true }
+  if (bdWageAccess) document.getElementById('bd-post-pay').style.display = ''
   document.getElementById('login-screen').style.display = 'none'
   document.getElementById('app-screen').style.display = 'block'
   await loadStaff()
@@ -877,6 +889,13 @@ function paidMins(studioId, start, end) {
   const span = end - start, br = bdBreak(studioId)
   return span > br.over ? span - br.dur : span
 }
+// Paid minutes that count as studio labour: the shift's studio_hours if set (capped at the
+// paid length), else all paid minutes. Hours, coverage and conflicts always use the full shift.
+function bdStudioMins(studioId, start, end, studioHours) {
+  const paid = paidMins(studioId, start, end)
+  return studioHours != null && studioHours !== '' ? Math.min(paid, Math.round(Number(studioHours) * 60)) : paid
+}
+const bdFmtH = m => { const h = m / 60; return (Math.round(h * 100) / 100).toString() }
 function maxSpan(studioId) { const br = bdBreak(studioId); return MAX_PAID + (MAX_PAID > br.over ? br.dur : 0) }
 let bdWeek = sundayOf(todayStr())
 let bdCtx = null      // the studio being worked on right now (see bdUse)
@@ -950,7 +969,7 @@ async function bdLoad(studio) {
     sb.from('staff_schedule_prefs').select('staff_id, notes'),
     sb.from('staff_unavailability').select('staff_id, day_of_week, start_time, end_time, effective_from, effective_to'),
     sb.from('staff_time_off').select('staff_id, start_date, end_date, start_time, end_time, status').in('status', ['approved', 'pending']).lte('start_date', to).gte('end_date', from),
-    sb.from('staff_shifts').select('staff_id, studio_id, shift_date, start_time, end_time, status').gte('shift_date', from).lte('shift_date', to)
+    sb.from('staff_shifts').select('*').gte('shift_date', from).lte('shift_date', to)
   ])
   for (const r of [need, rules, opening, ot, people, badges, notes, unav, toff, shifts]) if (r.error) throw new Error(r.error.message)
   bdBreakRules = breaks.error ? [] : (breaks.data || [])
@@ -1225,7 +1244,7 @@ async function bdOpenStudios(list) {
       if (week !== bdWeek || !bdStudios.includes(st)) return   // switched again while loading
       bdPrepareDays(ctx)
       const saved = ctx.shifts.filter(x => x.studio_id === st && x.status === 'draft' && x.start_time && x.end_time)
-        .map(x => ({ date: x.shift_date, start: toMin(x.start_time), end: toMin(x.end_time), layer: 1, badges: [], staffId: x.staff_id, saved: true }))
+        .map(x => ({ date: x.shift_date, start: toMin(x.start_time), end: toMin(x.end_time), layer: 1, badges: [], staffId: x.staff_id, saved: true, studioHours: x.studio_hours != null ? Number(x.studio_hours) : null }))
       bdPlans[st] = { ctx, plan: { blocks: saved, teacherNotes: [], saved: saved.length > 0, dirty: false } }
     } catch (e) { bdPlans[st] = { error: e.message } }
   }))
@@ -1680,6 +1699,7 @@ function renderBuild(withLegend) {
       tags.push('Training ' + (bdTrainingDone(ctx, p, plan.blocks, b.date) + 1) + '/' + TRAINING_SHIFTS_NEEDED + (b.withId ? ' · with ' + esc(bdPerson(b.withId).display_name) : ''))
     }
     if (b.manual) tags.push('Added by hand')
+    if (bdWageAccess && b.studioHours != null) tags.push('🏢 ' + bdFmtH(bdStudioMins(ctx.studio, b.start, b.end, b.studioHours)) + 'h of ' + bdFmtH(paidMins(ctx.studio, b.start, b.end)) + 'h to studio labour')
     if (b.topUp) tags.push(b.weekend ? 'Weekend · closing' : b.friday ? 'Friday event night · closing' : 'Extra hours · closing')
     ;(b.classes || []).forEach(l => tags.push('✓ Teaching ' + esc(l)))
     if (b.staffId && onCall(bdPerson(b.staffId), b.date)) tags.push('On call: nobody else could take this')
@@ -1688,7 +1708,7 @@ function renderBuild(withLegend) {
       tags.push((ok ? '✓ ' : '⚠ Needs ') + esc(ctx.badgeLabel[bc] || bc))
       if (!ok) warn.push(fmtDate(b.date) + ' ' + blkLabel(b) + ': needs ' + (ctx.badgeLabel[bc] || bc))
     })
-    return '<div class="wk-chip ' + kind + '" draggable="true" ondragstart="bdDragStart(event, ' + idx + ', \'' + ctx.studio + '\')" ondragend="bdDragEnd()" title="' + esc(whyText(b) + '\n\nClick the time to change it · drag to another person or day') + '"><button class="wk-del" title="Delete this shift" onclick="' + U + 'bdDeleteShift(event, ' + idx + ')">✕</button><b class="wk-time" onclick="' + U + 'bdEditTime(event, ' + idx + ')">' + blkLabel(b) + ' ✎</b>' + (tags.length ? '<div>' + tags.join(' · ') + '</div>' : '') + picker(b, idx) + '</div>'
+    return '<div class="wk-chip ' + kind + '" draggable="true" ondragstart="bdDragStart(event, ' + idx + ', \'' + ctx.studio + '\')" ondragend="bdDragEnd()" title="' + esc(whyText(b) + '\n\nClick the time to change it · drag to another person or day') + '"><button class="wk-del" title="Delete this shift" onclick="' + U + 'bdDeleteShift(event, ' + idx + ')">✕</button>' + (bdWageAccess ? '<button class="wk-sh" title="Studio labour hours (rest is home office work)" onclick="' + U + 'bdStudioHours(event, ' + idx + ')">🏢</button>' : '') + '<b class="wk-time" onclick="' + U + 'bdEditTime(event, ' + idx + ')">' + blkLabel(b) + ' ✎</b>' + (tags.length ? '<div>' + tags.join(' · ') + '</div>' : '') + picker(b, idx) + '</div>'
   }
 
   let head = '<tr><th class="wk-name">Staff</th>' + days.map(d => '<th>' + parseYmd(d).toLocaleDateString('en-CA', { weekday: 'short' }).toUpperCase() + ' ' + parseYmd(d).getDate() +
@@ -1827,10 +1847,13 @@ function renderBuild(withLegend) {
           ? '<div class="wk-approved-ctrls">' +
               '<button class="wk-mini" title="Back to draft so you can change it" onclick="event.stopPropagation();unapproveShift(' + args + ')">↩ Draft</button>' +
               '<button class="wk-mini bad" title="Delete this shift" onclick="event.stopPropagation();deleteApprovedShift(' + args + ')">✕ Delete</button>' +
+              (bdWageAccess ? '<button class="wk-mini" title="Studio labour hours (rest is home office work)" onclick="event.stopPropagation();bdApprovedStudioHours(' + args + ')">🏢</button>' : '') +
             '</div>'
           : ''
+        const shTag = bdWageAccess && x.studio_hours != null
+          ? '<div>🏢 ' + bdFmtH(bdStudioMins(x.studio_id, toMin(x.start_time), toMin(x.end_time), x.studio_hours)) + 'h of ' + bdFmtH(paidMins(x.studio_id, toMin(x.start_time), toMin(x.end_time))) + 'h to studio</div>' : ''
         cell += '<div class="wk-chip ' + (own ? 'done' : 'elsewhere') + '"><b>' + fmtRange(x.start_time, x.end_time) + '</b><div>' + esc(x.status) +
-          (own ? '' : ' · at ' + esc(STUDIO_NAMES[x.studio_id] || x.studio_id)) + '</div>' + ctrls + '</div>'
+          (own ? '' : ' · at ' + esc(STUDIO_NAMES[x.studio_id] || x.studio_id)) + '</div>' + shTag + ctrls + '</div>'
       })
       // drafts at OTHER studios count toward their week
       ctx.shifts.filter(x => x.staff_id === p.id && x.shift_date === d && x.status === 'draft' && x.studio_id !== ctx.studio && !bdStudios.includes(x.studio_id) && x.start_time)
@@ -1860,9 +1883,9 @@ function renderBuild(withLegend) {
   const W = ctx.wages, noWage = new Set()
   const dayWages = d => {
     if (!W) return 0
-    const parts = plan.blocks.filter(b => b.staffId && b.date === d).map(b => ({ id: b.staffId, m: paidMins(ctx.studio, b.start, b.end) }))
+    const parts = plan.blocks.filter(b => b.staffId && b.date === d).map(b => ({ id: b.staffId, m: bdStudioMins(ctx.studio, b.start, b.end, b.studioHours) }))
       .concat(ctx.shifts.filter(x => x.studio_id === ctx.studio && x.shift_date === d && x.status !== 'draft' && x.start_time)
-        .map(x => ({ id: x.staff_id, m: paidMins(x.studio_id, toMin(x.start_time), toMin(x.end_time)) })))
+        .map(x => ({ id: x.staff_id, m: bdStudioMins(x.studio_id, toMin(x.start_time), toMin(x.end_time), x.studio_hours) })))
     return parts.reduce((t, x) => { if (W[x.id] == null) { noWage.add(bdPerson(x.id).display_name); return t } return t + x.m / 60 * W[x.id] }, 0)
   }
   const wageFmt = v => '$' + Math.round(v).toLocaleString('en-CA')
@@ -2602,6 +2625,42 @@ function bdCellClick(ev) {
   input.addEventListener('click', e => e.stopPropagation())
 }
 
+// ── 🏢 Studio labour hours on a shift (finance access only) ──
+function bdAskStudioHours(paidM, current) {
+  const paidH = bdFmtH(paidM)
+  const v = prompt('How many of the ' + paidH + ' paid hours count as STUDIO labour?\n\n' +
+                   'The rest (e.g. home office computer work) won\'t be charged to the studio. The shift keeps its full time on the schedule.\n\n' +
+                   'Leave blank for all ' + paidH + 'h.', current != null ? String(current) : '')
+  if (v === null) return undefined                 // cancelled
+  if (v.trim() === '') return null                 // back to all hours
+  const h = Number(v)
+  if (isNaN(h) || h < 0) { toast('Enter a number of hours, 0 or more.', true); return undefined }
+  if (h * 60 > paidM) { toast('That\'s more than the ' + paidH + ' paid hours on this shift.', true); return undefined }
+  return Math.round(h * 100) / 100
+}
+function bdStudioHours(ev, idx) {
+  ev.stopPropagation(); ev.preventDefault()
+  const b = bdPlan.blocks[idx]
+  if (!b) return
+  const h = bdAskStudioHours(paidMins(bdCtx.studio, b.start, b.end), b.studioHours)
+  if (h === undefined) return
+  b.studioHours = h
+  bdPlan.dirty = true
+  bdRefresh()
+}
+async function bdApprovedStudioHours(studio, staffId, date) {
+  const sh = bdFindApproved(studio, staffId, date)
+  if (!sh) return
+  const h = bdAskStudioHours(paidMins(studio, toMin(sh.start_time), toMin(sh.end_time)), sh.studio_hours)
+  if (h === undefined) return
+  const { error } = await sb.from('staff_shifts').update({ studio_hours: h })
+    .eq('studio_id', studio).eq('staff_id', staffId).eq('shift_date', date).in('status', ['approved', 'posted'])
+  if (error) { toast(/studio_hours/i.test(error.message) ? 'Run staff_shifts_studio_hours.sql in Supabase first.' : error.message, true); return }
+  bdForEachShiftCopy(studio, staffId, date, s => { s.studio_hours = h })
+  toast(h == null ? 'All hours count for the studio again' : h + 'h now count as studio labour')
+  bdRefresh()
+}
+
 function bdDeleteShift(ev, idx) {
   ev.stopPropagation(); ev.preventDefault()
   const b = bdPlan.blocks[idx]
@@ -2620,7 +2679,8 @@ function bdDraftRows(st) {
   const plan = bdPlans[st].plan
   return plan.blocks.filter(b => b.staffId).map(b => ({
     staff_id: b.staffId, studio_id: st, shift_date: b.date,
-    start_time: fromMin(b.start), end_time: fromMin(b.end), status: 'draft'
+    start_time: fromMin(b.start), end_time: fromMin(b.end), status: 'draft',
+    studio_hours: b.studioHours != null ? b.studioHours : null
   }))
 }
 // One shift per person per day across every open studio. Returns a message, or null if fine.
@@ -2639,7 +2699,11 @@ async function bdWriteDrafts(st, rows) {
   const del = await sb.from('staff_shifts').delete().eq('studio_id', st).eq('status', 'draft').gte('shift_date', ctx.from).lte('shift_date', ctx.to)
   if (del.error) return del.error.message
   if (rows.length) {
-    const ins = await sb.from('staff_shifts').insert(rows)
+    let ins = await sb.from('staff_shifts').insert(rows)
+    if (ins.error && /studio_hours/i.test(ins.error.message)) {
+      if (rows.some(r => r.studio_hours != null)) toast('Studio hours weren\'t saved: run staff_shifts_studio_hours.sql in Supabase first.', true)
+      ins = await sb.from('staff_shifts').insert(rows.map(r => { const c = Object.assign({}, r); delete c.studio_hours; return c }))
+    }
     if (ins.error) return 'Drafts not saved for ' + (STUDIO_NAMES[st] || st) + ': ' + ins.error.message
   }
   return null
@@ -2794,7 +2858,7 @@ async function unapproveShift(studio, staffId, date) {
   // and it shows up as an editable saved draft in that studio's plan
   const p = bdPlans[studio] && bdPlans[studio].plan
   if (p) {
-    p.blocks.push({ date, start: toMin(sh.start_time), end: toMin(sh.end_time), layer: 1, badges: [], staffId, saved: true })
+    p.blocks.push({ date, start: toMin(sh.start_time), end: toMin(sh.end_time), layer: 1, badges: [], staffId, saved: true, studioHours: sh.studio_hours != null ? Number(sh.studio_hours) : null })
     p.saved = true
   }
   toast(who + ' is a draft again. Change it, save, then approve.')
@@ -2814,6 +2878,194 @@ async function deleteApprovedShift(studio, staffId, date) {
   bdForEachShiftCopy(studio, staffId, date, () => false)
   toast('Shift deleted')
   bdRefresh()
+}
+
+// ═══ 💰 Post to pay period (finance access only) ═══════════════════════════
+// Takes over finance.html's Schedule tab "Post all studios to pay period": works out the
+// pay period from the Pay Schedule (pay_schedule_settings), adds up APPROVED/POSTED shifts
+// at each studio for that whole period (paid hours × hourly wage, same maths as finance:
+// province break rule by the person's province, no rule = no deduction), and writes the
+// Pay 1/2/3 amount in studio_pay_periods as a 📅 schedule estimate.
+// Payroll uploads (🔒) are never replaced; typed amounts (✎) only if you tick them.
+let ppAnchor = null, ppBreak = {}, ppState = null
+const ppD = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d) }
+const ppS = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
+const ppAdd = (d, n) => { const r = new Date(d); r.setDate(r.getDate() + n); return r }
+const ppShort = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+const ppMoney = n => '$' + Number(n || 0).toLocaleString('en-CA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+function ppPayDatesInMonth(monthStart) {
+  const interval = ppAnchor.interval_days || 14, anchor = ppD(ppAnchor.anchor_pay_date)
+  const monthEnd = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0)
+  const k = Math.floor(Math.round((monthStart - anchor) / 86400000) / interval) - 2
+  const cur = ppAdd(anchor, k * interval), out = []
+  while (cur <= monthEnd) { if (cur >= monthStart) out.push(new Date(cur)); cur.setDate(cur.getDate() + interval) }
+  return out
+}
+// The pay period covering a work date: { payDate, start, end, monthStart, periodNumber }
+function ppPeriodFor(workDateStr) {
+  const lag = ppAnchor.lag_days != null ? ppAnchor.lag_days : 6, interval = ppAnchor.interval_days || 14
+  const anchor = ppD(ppAnchor.anchor_pay_date), t = ppD(workDateStr)
+  const rk = Math.round((t - anchor) / 86400000 / interval)
+  for (let k = rk - 2; k <= rk + 2; k++) {
+    const payDate = ppAdd(anchor, k * interval), end = ppAdd(payDate, -lag), start = ppAdd(end, -(interval - 1))
+    if (t >= start && t <= end) {
+      const monthStart = new Date(payDate.getFullYear(), payDate.getMonth(), 1)
+      const idx = ppPayDatesInMonth(monthStart).findIndex(d => ppS(d) === ppS(payDate))
+      return idx === -1 ? null : { payDate, start, end, monthStart, periodNumber: idx + 1, key: ppS(payDate) }
+    }
+  }
+  return null
+}
+function ppPaidHours(st, et, prov) {
+  const [sh, sm] = st.split(':').map(Number), [eh, em] = et.split(':').map(Number)
+  const raw = (eh + em / 60) - (sh + sm / 60)
+  if (raw <= 0) return 0
+  const r = ppBreak[prov]
+  return r && raw > Number(r.break_threshold_hours) ? raw - Number(r.break_duration_hours) : raw
+}
+
+async function openPostPay() {
+  if (!bdWageAccess) return
+  if (bdAnyDirty()) { toast('Save your changes first (or let autosave finish), then post.', true); return }
+  const [sched, br] = await Promise.all([
+    sb.from('pay_schedule_settings').select('*').eq('id', 1).maybeSingle(),
+    sb.from('province_break_rules').select('*')
+  ])
+  if (!sched.data) { alert('Set up the Pay Schedule first (⚙ Pay Schedule in finance.html).'); return }
+  ppAnchor = sched.data
+  ppBreak = {}; (br.data || []).forEach(r => { ppBreak[r.province_code] = r })
+  // the pay periods this week touches (a week can straddle two)
+  const periods = []
+  for (let i = 0; i < 7; i++) {
+    const p = ppPeriodFor(addDays(bdWeek, i))
+    if (p && !periods.some(x => x.key === p.key)) periods.push(p)
+  }
+  if (!periods.length) { alert('Couldn\'t match this week to a pay period. Check the Pay Schedule in finance.html.'); return }
+  ppState = { periods, idx: Math.min(periods.length - 1, periods.findIndex(p => p.key === (ppPeriodFor(addDays(bdWeek, 3)) || {}).key) ), rows: null, allStudios: false }
+  if (ppState.idx < 0) ppState.idx = 0
+  let ov = document.getElementById('pp-overlay')
+  if (!ov) { ov = document.createElement('div'); ov.id = 'pp-overlay'; ov.className = 'pp-overlay'; ov.onclick = e => { if (e.target === ov) closePostPay() }; document.body.appendChild(ov) }
+  ov.style.display = 'flex'
+  await ppLoad()
+}
+function closePostPay() { const ov = document.getElementById('pp-overlay'); if (ov) ov.style.display = 'none'; ppState = null }
+async function ppPick(i) { ppState.idx = i; await ppLoad() }
+async function ppToggleAll(on) { ppState.allStudios = on; ppRender() }
+
+async function ppLoad() {
+  const ov = document.getElementById('pp-overlay'), per = ppState.periods[ppState.idx]
+  ov.innerHTML = '<div class="pp-box"><div class="loading">Adding up approved shifts…</div></div>'
+  const from = ppS(per.start), to = ppS(per.end), monthDate = ppS(per.monthStart)
+  const [shifts, existing, upload] = await Promise.all([
+    sb.from('staff_shifts').select('*').gte('shift_date', from).lte('shift_date', to).not('start_time', 'is', null),
+    sb.from('studio_pay_periods').select('*').eq('month', monthDate).eq('period_number', per.periodNumber),
+    sb.from('payroll_uploads').select('period_number').eq('month', monthDate).eq('period_number', per.periodNumber).maybeSingle()
+  ])
+  if (shifts.error) { ov.innerHTML = '<div class="pp-box">Couldn\'t load shifts: ' + esc(shifts.error.message) + '</div>'; return }
+  const exBy = {}; (existing.data || []).forEach(r => { exBy[r.studio_id] = r })
+  const byStudio = {}
+  ;(shifts.data || []).forEach(x => { (byStudio[x.studio_id] = byStudio[x.studio_id] || []).push(x) })
+  const ids = Object.keys(STUDIO_NAMES).filter(id => byStudio[id] || exBy[id])
+  const rows = await Promise.all(ids.map(async st => {
+    const list = byStudio[st] || []
+    const real = list.filter(x => x.status === 'approved' || x.status === 'posted')
+    const drafts = list.filter(x => x.status === 'draft').length
+    const w = await sb.rpc('get_studio_staff_for_wages_range', { p_studio_id: st, p_from: from, p_to: to })
+    const staff = {}; (w.data || []).forEach(x => { staff[x.staff_id] = x })
+    let total = 0; const noWage = new Set(), days = new Set()
+    real.forEach(x => {
+      days.add(x.shift_date)
+      const ps = staff[x.staff_id]
+      if (!ps || ps.hourly_wage == null) { noWage.add(ps ? ps.display_name : bdPersonAny(x.staff_id)); return }
+      const paidH = ppPaidHours(x.start_time, x.end_time, ps.province_code)
+      const hrs = x.studio_hours != null ? Math.min(paidH, Number(x.studio_hours)) : paidH   // 🏢 studio share only
+      total += hrs * Number(ps.hourly_wage)
+    })
+    total = Math.round(total * 100) / 100
+    const emptyWeeks = []
+    for (let k = 0; k < 14; k += 7) {
+      let any = false
+      for (let d = 0; d < 7; d++) if (days.has(ppS(ppAdd(per.start, k + d)))) { any = true; break }
+      if (!any) emptyWeeks.push(ppShort(ppAdd(per.start, k)) + '–' + ppShort(ppAdd(per.start, k + 6)))
+    }
+    const ex = exBy[st] || null
+    const hasAmt = ex && ex.amount != null
+    const source = !hasAmt ? null : ex.source || (ex.is_manual_override === false ? 'schedule' : upload.data ? 'payroll' : 'manual')
+    return { st, shifts: real.length, drafts, total, noWage: [...noWage], emptyWeeks, ex, source, err: w.error ? w.error.message : null }
+  }))
+  rows.sort((a, b) => (STUDIO_NAMES[a.st] || a.st).localeCompare(STUDIO_NAMES[b.st] || b.st))
+  ppState.rows = rows
+  ppState.ticked = {}
+  rows.forEach(r => { ppState.ticked[r.st] = r.source !== 'payroll' && r.source !== 'manual' && r.shifts > 0 && (!r.ex || Math.abs((Number(r.ex.amount) || 0) - r.total) >= 0.01) })
+  ppRender()
+}
+
+function ppRender() {
+  const ov = document.getElementById('pp-overlay'); if (!ov || !ppState) return
+  const per = ppState.periods[ppState.idx]
+  const open = new Set(bdStudios)
+  const rows = ppState.rows.filter(r => ppState.allStudios || open.has(r.st))
+  const periodPick = ppState.periods.length > 1
+    ? '<div style="margin:8px 0">This week falls in two pay periods: ' + ppState.periods.map((p, i) =>
+        '<button class="btn small' + (i === ppState.idx ? ' primary' : '') + '" onclick="ppPick(' + i + ')">Pay date ' + ppShort(p.payDate) + '</button>').join(' ') + '</div>'
+    : ''
+  const body = rows.map(r => {
+    const cur = r.ex && r.ex.amount != null ? ppMoney(r.ex.amount) : '—'
+    const notes = []
+    if (r.source === 'payroll') notes.push('<span class="pp-lock">🔒 From payroll upload: locked</span>')
+    if (r.source === 'manual') notes.push('<span class="pp-note">✎ Typed in by hand: tick to replace</span>')
+    if (!r.shifts) notes.push('<span class="pp-note">No approved shifts here this period</span>')
+    if (r.drafts) notes.push('<span class="pp-note">' + r.drafts + ' draft shift' + (r.drafts === 1 ? '' : 's') + ' not counted (approve them first)</span>')
+    if (r.emptyWeeks.length && r.shifts) notes.push('<span class="pp-note">Partial: nothing approved ' + esc(r.emptyWeeks.join(', ')) + '</span>')
+    if (r.noWage.length) notes.push('<span class="pp-note">No wage on file ($0): ' + esc(r.noWage.join(', ')) + '</span>')
+    if (r.err) notes.push('<span class="pp-note">' + esc(r.err) + '</span>')
+    const locked = r.source === 'payroll' || !r.shifts
+    return '<tr><td><input type="checkbox" ' + (ppState.ticked[r.st] ? 'checked ' : '') + (locked ? 'disabled ' : '') + 'onchange="ppState.ticked[\'' + r.st + '\']=this.checked; ppSummary()"></td>' +
+      '<td><b>' + esc(STUDIO_NAMES[r.st] || r.st) + '</b></td><td class="num">' + r.shifts + '</td><td class="num"><b>' + ppMoney(r.total) + '</b></td>' +
+      '<td class="num">' + cur + (r.source ? ' ' + ({ payroll: '🔒', manual: '✎', schedule: '📅' }[r.source]) : '') + '</td><td>' + notes.join('<br>') + '</td></tr>'
+  }).join('')
+  ov.innerHTML = '<div class="pp-box">' +
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px"><div>' +
+      '<h3 style="margin:0">💰 Post to pay period</h3>' +
+      '<div class="muted small" style="margin-top:3px">Pay ' + per.periodNumber + ' (pay date ' + ppShort(per.payDate) + '), ' +
+        per.monthStart.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) + ' · work dates ' + ppShort(per.start) + ' – ' + ppShort(per.end) + '</div></div>' +
+      '<button class="btn" onclick="closePostPay()">Close</button></div>' + periodPick +
+    '<div class="muted small" style="margin-top:6px">Approved and posted shifts only, for the whole pay period. Paid hours × hourly wage (straight time, before overtime and stat pay); shifts with 🏢 studio hours count only those hours. ' +
+      'Goes into finance.html\'s Monthly Summary as a 📅 schedule estimate; a payroll upload later replaces it.</div>' +
+    '<label class="small" style="display:inline-flex;gap:5px;align-items:center;margin-top:8px"><input type="checkbox" ' + (ppState.allStudios ? 'checked' : '') + ' onchange="ppToggleAll(this.checked)"> Show all studios (not just the ones open here)</label>' +
+    (rows.length ? '<table class="pp-table"><thead><tr><th></th><th>Studio</th><th class="num">Shifts</th><th class="num">Wages</th><th class="num">In finance now</th><th>Notes</th></tr></thead><tbody>' + body + '</tbody></table>'
+                 : '<div class="muted" style="padding:14px 0">No approved shifts for ' + (ppState.allStudios ? 'any studio' : 'these studios') + ' in this pay period.</div>') +
+    '<div style="display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-top:12px"><span id="pp-sum" class="small"></span>' +
+      '<button class="btn primary" id="pp-go" onclick="ppPost()">Post selected</button></div></div>'
+  ppSummary()
+}
+function ppSel() {
+  const open = new Set(bdStudios)
+  return (ppState.rows || []).filter(r => (ppState.allStudios || open.has(r.st)) && ppState.ticked[r.st] && r.source !== 'payroll' && r.shifts > 0)
+}
+function ppSummary() {
+  const sel = ppSel(), el = document.getElementById('pp-sum')
+  if (el) el.textContent = sel.length ? sel.length + ' studio' + (sel.length === 1 ? '' : 's') + ' · ' + ppMoney(sel.reduce((t, r) => t + r.total, 0)) : 'Nothing selected'
+  const go = document.getElementById('pp-go'); if (go) go.disabled = !sel.length
+}
+async function ppPost() {
+  const sel = ppSel(), per = ppState.periods[ppState.idx]
+  if (!sel.length) return
+  const manual = sel.filter(r => r.source === 'manual').length
+  if (!confirm('Post ' + ppMoney(sel.reduce((t, r) => t + r.total, 0)) + ' across ' + sel.length + ' studio' + (sel.length === 1 ? '' : 's') + ' to Pay ' + per.periodNumber +
+               ' (pay date ' + ppShort(per.payDate) + ')?' + (manual ? '\n\n⚠ ' + manual + ' of these will REPLACE an amount typed in by hand.' : ''))) return
+  const go = document.getElementById('pp-go'); if (go) { go.disabled = true; go.textContent = 'Posting…' }
+  const monthDate = ppS(per.monthStart), fails = []
+  for (const r of sel) {
+    const row = { studio_id: r.st, month: monthDate, period_number: per.periodNumber, amount: r.total, is_manual_override: false, source: 'schedule' }
+    let res = await sb.from('studio_pay_periods').upsert(row, { onConflict: 'studio_id,month,period_number' })
+    if (res.error && /source/i.test(res.error.message)) { delete row.source; res = await sb.from('studio_pay_periods').upsert(row, { onConflict: 'studio_id,month,period_number' }) }
+    if (res.error) fails.push((STUDIO_NAMES[r.st] || r.st) + ': ' + res.error.message)
+  }
+  if (fails.length) alert('Posted ' + (sel.length - fails.length) + ' of ' + sel.length + '. These failed:\n\n' + fails.join('\n'))
+  else toast('Posted to Pay ' + per.periodNumber + ' (' + ppShort(per.payDate) + ') for ' + sel.length + ' studio' + (sel.length === 1 ? '' : 's'))
+  await ppLoad()
 }
 
 async function approveDrafts() {
