@@ -72,6 +72,13 @@ button, input, select { font: inherit; color: inherit; }
 .pct-warn { color: var(--warn); font-weight: 600; }
 .profit-neg { color: var(--bad); }
 .profit-pos { color: var(--good); }
+/* Pay period boxes: where the amount came from */
+.pay-cell { display: inline-flex; align-items: center; gap: 3px; }
+.pay-src-icon { font-size: 10px; width: 12px; text-align: center; opacity: .8; }
+.fin-table input.pay-src-payroll, input.pay-src-payroll { background: #e3f4e6; border-color: #9fd3ab; color: #1b6b2e; cursor: pointer; }
+.fin-table input.pay-src-manual, input.pay-src-manual { background: #fff; }
+.fin-table input.pay-src-schedule, input.pay-src-schedule { background: #e3edfb; border-color: #b8cff0; color: #0d3a80; }
+.pay-key { display: inline-block; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line-2); margin: 2px 2px 0 0; white-space: nowrap; }
 .fin-table input.plan-changed { background: #e3edfb; border-color: #4a7fd4; color: #0d3a80; font-weight: 600; }
 .plan-banner { background: #e3edfb; border: 1px solid #b8cff0; color: #0d3a80; border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; font-size: 12.5px; }
 .plan-tools { display: flex; align-items: flex-end; gap: 22px; padding: 14px 18px; margin-bottom: 14px; flex-wrap: wrap; }
@@ -274,6 +281,7 @@ function yoyCellHtml(v, title, isNew) {
 }
 let bucketTotals = {} // 'membership' | 'giftcard' | 'warehouse' -> this month's total for unattributed sales in that bucket
 let payPeriodRows = {} // studio_id -> { 1: amount, 2: amount, 3: amount }
+let payPeriodMeta = {} // studio_id -> { 1: { source, manual }, ... } — where each amount came from
 let prevMonthPayRows = {} // same shape, for the month before — used to estimate empty pay periods
 
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])) }
@@ -457,12 +465,13 @@ async function confirmPayrollUpload() {
   const hoRow = allRows.find(r => r.studioId === '__HOME_OFFICE__')
 
   for (const row of studioRows) {
-    const { error } = await sb.from('studio_pay_periods')
-      .upsert({ studio_id: row.studioId, month: monthDate, period_number: target.periodNumber, amount: row.amount, is_manual_override: true },
-        { onConflict: 'studio_id,month,period_number' })
+    const { error } = await upsertPayPeriod({ studio_id: row.studioId, month: monthDate, period_number: target.periodNumber, amount: row.amount, is_manual_override: true, source: 'payroll' })
     if (error) { toast(error.message, true); return }
-    if (!payPeriodRows[row.studioId]) payPeriodRows[row.studioId] = {}
-    payPeriodRows[row.studioId][target.periodNumber] = row.amount
+    if (monthToText(currentMonth) === monthToText(target.monthDate)) {
+      if (!payPeriodRows[row.studioId]) payPeriodRows[row.studioId] = {}
+      payPeriodRows[row.studioId][target.periodNumber] = row.amount
+      setPayMeta(row.studioId, target.periodNumber, 'payroll', true)
+    }
   }
 
   if (hoRow) {
@@ -540,9 +549,11 @@ async function loadMonth() {
   const { data: payData, error: payErr } = await sb.from('studio_pay_periods').select('*').eq('month', monthDate)
   if (payErr) { toast(payErr.message, true); return }
   payPeriodRows = {}
+  payPeriodMeta = {}
   ;(payData || []).forEach(r => {
     if (!payPeriodRows[r.studio_id]) payPeriodRows[r.studio_id] = {}
     payPeriodRows[r.studio_id][r.period_number] = r.amount
+    ;(payPeriodMeta[r.studio_id] = payPeriodMeta[r.studio_id] || {})[r.period_number] = { source: r.source || null, manual: r.is_manual_override }
   })
 
   const prevMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1)
@@ -785,12 +796,53 @@ function editableCell(studioId, field, value) {
     onchange="saveField('${studioId}','${field}',this)" aria-label="${field}"></td>`
 }
 
+// Where a pay-period amount came from: 'payroll' (Payworks upload, locked), 'manual'
+// (typed in), 'schedule' (hours × wage from the Schedule tab), or null (empty).
+// Uses the source column when it exists (pay_period_source.sql); otherwise works it out
+// from is_manual_override + whether that period has a payroll upload on record.
+function paySource(studioId, n) {
+  if (!hasAmount((payPeriodRows[studioId] || {})[n])) return null
+  const m = (payPeriodMeta[studioId] || {})[n] || {}
+  if (m.source) return m.source
+  if (m.manual === false) return 'schedule'
+  return payrollUploads[n] ? 'payroll' : 'manual'
+}
+function setPayMeta(studioId, n, source, manual) {
+  ;(payPeriodMeta[studioId] = payPeriodMeta[studioId] || {})[n] = { source, manual }
+}
+// Upsert a pay period with its source. If the source column hasn't been added yet,
+// retry without it so nothing breaks before pay_period_source.sql is run.
+async function upsertPayPeriod(row) {
+  let r = await sb.from('studio_pay_periods').upsert(row, { onConflict: 'studio_id,month,period_number' })
+  if (r.error && /source/i.test(r.error.message)) {
+    const copy = Object.assign({}, row); delete copy.source
+    r = await sb.from('studio_pay_periods').upsert(copy, { onConflict: 'studio_id,month,period_number' })
+  }
+  return r
+}
+const PAY_SOURCE_UI = {
+  payroll:  { cls: 'pay-src-payroll',  icon: '🔒', tip: 'From the Payworks payroll upload. Locked: click to edit anyway.' },
+  manual:   { cls: 'pay-src-manual',   icon: '✎',  tip: 'Typed in by hand.' },
+  schedule: { cls: 'pay-src-schedule', icon: '📅', tip: 'Estimated from the staff schedule (hours × wage). Type to replace it.' },
+}
+function unlockPayInput(el, what) {
+  if (!el.readOnly) return
+  if (!confirm((what || 'This amount') + ' came from the payroll upload.\n\nEdit it by hand anyway? It will then be marked as typed in, not uploaded.')) { el.blur(); return }
+  el.readOnly = false
+  el.classList.remove('pay-src-payroll')
+  el.focus(); el.select()
+}
+
 function payPeriodCell(studioId, periodNumber) {
   const value = (payPeriodRows[studioId] || {})[periodNumber]
   const est = estimatedPeriodAmount(studioId, periodNumber)
-  const ph = est != null ? ` placeholder="${esc(est.toFixed(2))}" title="Estimate (from the previous pay period) — type to enter the real amount"` : ''
-  return `<td><input type="number" step="0.01" value="${value == null ? '' : esc(value)}"${ph}
-    onchange="savePayPeriod('${studioId}',${periodNumber},this)" aria-label="Pay period ${periodNumber}"></td>`
+  const src = paySource(studioId, periodNumber), ui = src ? PAY_SOURCE_UI[src] : null
+  const ph = est != null ? ` placeholder="${esc(est.toFixed(2))}"` : ''
+  const tip = ui ? ui.tip : est != null ? 'Estimate (from the previous pay period) — type to enter the real amount' : ''
+  const locked = src === 'payroll'
+  return `<td><span class="pay-cell"><span class="pay-src-icon" aria-hidden="true">${ui ? ui.icon : ''}</span><input type="number" step="0.01" value="${value == null ? '' : esc(value)}"${ph}
+    class="${ui ? ui.cls : ''}"${tip ? ` title="${esc(tip)}"` : ''}${locked ? ` readonly onclick="unlockPayInput(this,'${esc(STUDIO_NAMES[studioId]).replace(/'/g, "\\'")}\\'s ${esc(payPeriodHeaderLabel(periodNumber))}')"` : ''}
+    onchange="savePayPeriod('${studioId}',${periodNumber},this)" aria-label="Pay period ${periodNumber}"></span></td>`
 }
 
 function homeOfficeLabourTotal() {
@@ -1013,9 +1065,12 @@ function renderTable() {
 
   const systemProfit = computeSystemProfit()
   const systemProfitPct = computeSystemProfitPct()
+  // Home office amount still equal to what the payroll upload wrote = locked, like the studio cells
+  const hoLocked = n => { const u = payrollUploads[n]; return !!(u && u.home_office_amount != null && hasAmount(homeOfficeLabourPeriods[n]) && Number(homeOfficeLabourPeriods[n]) === Number(u.home_office_amount)) }
   const hoPeriodInput = n => `<label style="display:flex;flex-direction:column;gap:2px;font-size:11px">
-    <span class="muted small">${esc(payPeriodHeaderLabel(n))}</span>
+    <span class="muted small">${esc(payPeriodHeaderLabel(n))}${hoLocked(n) ? ' 🔒' : ''}</span>
     <input type="number" step="0.01" value="${homeOfficeLabourPeriods[n] == null ? '' : homeOfficeLabourPeriods[n]}" style="width:100px"
+      ${hoLocked(n) ? `class="pay-src-payroll" readonly title="${esc(PAY_SOURCE_UI.payroll.tip)}" onclick="unlockPayInput(this,'Home office ${esc(payPeriodHeaderLabel(n))}')"` : ''}
       onchange="saveHomeOfficeLabour(${n},this.value)" aria-label="Home office labour pay period ${n}">
   </label>`
   const hoPanel = `<div class="panel" style="display:flex;align-items:flex-end;gap:24px;padding:14px 18px;margin-bottom:14px;flex-wrap:wrap">
@@ -1024,7 +1079,8 @@ function renderTable() {
     </div>
     <div><div class="muted small">System-Wide Profit</div><div class="${systemProfit != null && systemProfit < 0 ? 'profit-neg' : ''}" style="font-size:20px;font-weight:700">${systemProfit == null ? '<span class="muted">Enter home office labour to compute</span>' : money(systemProfit)}</div></div>
     <div><div class="muted small">System-Wide Profit %</div><div class="${systemProfitPct != null && systemProfitPct < 0 ? 'profit-neg' : ''}" style="font-size:20px;font-weight:700">${systemProfitPct == null ? '<span class="muted">—</span>' : systemProfitPct.toFixed(1) + '%'}</div></div>
-    <div class="muted small" style="max-width:260px;line-height:1.35"><span class="est">~grey</span> = includes estimated pay periods (copied from the previous pay period until the real amount is entered)</div>
+    <div class="muted small" style="max-width:300px;line-height:1.45"><span class="est">~grey</span> = includes estimated pay periods (copied from the previous pay period until the real amount is entered)<br>
+      Pay boxes: <span class="pay-key pay-src-payroll">🔒 payroll upload</span> <span class="pay-key pay-src-manual">✎ typed in</span> <span class="pay-key pay-src-schedule">📅 from schedule</span></div>
     <div style="margin-left:auto"><button onclick="togglePayPeriods()" style="padding:6px 12px;border:0.5px solid var(--line-2);border-radius:6px;background:var(--panel);cursor:pointer;font-size:12px">${showPayPeriods ? '◂ Hide pay periods' : '▸ Show pay periods'}</button></div>
   </div>`
 
@@ -1088,8 +1144,7 @@ async function savePayPeriod(studioId, periodNumber, el) {
   if (dot) dot.className = 'save-dot saving'
 
   const monthDate = monthToDate(currentMonth)
-  const { error } = await sb.from('studio_pay_periods')
-    .upsert({ studio_id: studioId, month: monthDate, period_number: periodNumber, amount: value, is_manual_override: true }, { onConflict: 'studio_id,month,period_number' })
+  const { error } = await upsertPayPeriod({ studio_id: studioId, month: monthDate, period_number: periodNumber, amount: value, is_manual_override: true, source: 'manual' })
 
   if (error) {
     toast(error.message, true)
@@ -1099,6 +1154,7 @@ async function savePayPeriod(studioId, periodNumber, el) {
 
   if (!payPeriodRows[studioId]) payPeriodRows[studioId] = {}
   payPeriodRows[studioId][periodNumber] = value
+  setPayMeta(studioId, periodNumber, 'manual', true)
   if (dot) dot.className = 'save-dot saved'
 
   // Wages changing affects the goal (breakeven costs), so recompute pace too.
@@ -2117,17 +2173,25 @@ async function computeStudioPayPeriod(studioId, ctx, preloadedShifts) {
     if (!any) emptyWeeks.push(ctx.fmtShort(wStart) + '–' + ctx.fmtShort(wEnd))
   }
 
-  const { data: existing } = await sb.from('studio_pay_periods').select('is_manual_override, amount')
+  const { data: existing } = await sb.from('studio_pay_periods').select('*')
     .eq('studio_id', studioId).eq('month', ctx.monthDate).eq('period_number', ctx.target.periodNumber).maybeSingle()
+  // Uploaded from payroll = locked: the schedule estimate never replaces it
+  let locked = false
+  if (existing && hasAmount(existing.amount)) {
+    if (existing.source) locked = existing.source === 'payroll'
+    else if (existing.is_manual_override) {
+      const { data: up } = await sb.from('payroll_uploads').select('period_number').eq('month', ctx.monthDate).eq('period_number', ctx.target.periodNumber).maybeSingle()
+      locked = !!up
+    }
+  }
 
-  return { total, shiftCount, noWage: [...noWage], emptyWeeks, existing: existing || null }
+  return { total, shiftCount, noWage: [...noWage], emptyWeeks, existing: existing || null, locked }
 }
 
 async function writeStudioPayPeriod(studioId, ctx, total) {
-  const { error } = await sb.from('studio_pay_periods')
-    .upsert({ studio_id: studioId, month: ctx.monthDate, period_number: ctx.target.periodNumber, amount: total, is_manual_override: false },
-            { onConflict: 'studio_id,month,period_number' })
+  const { error } = await upsertPayPeriod({ studio_id: studioId, month: ctx.monthDate, period_number: ctx.target.periodNumber, amount: total, is_manual_override: false, source: 'schedule' })
   if (error) return error.message
+  if (monthToText(currentMonth) === monthToText(ctx.target.monthDate)) setPayMeta(studioId, ctx.target.periodNumber, 'schedule', false)
   const { data: updatedFin } = await sb.from('studio_monthly_finance').select('*').eq('studio_id', studioId).eq('month', ctx.monthDate).maybeSingle()
   if (updatedFin) financeRows[studioId] = updatedFin
   const { data: prog } = await sb.rpc('get_studio_sales_goal_progress', { p_studio_id: studioId, p_month: monthToText(ctx.target.monthDate) })
@@ -2145,6 +2209,10 @@ async function postScheduleToPayPeriod(studioId) {
   if (r.emptyWeeks.length) notes += `\n⚠ No shifts entered yet for ${r.emptyWeeks.join(', ')} — this total is partial.`
   if (r.noWage.length) notes += `\n⚠ No hourly wage on file (counted as $0): ${r.noWage.join(', ')}.`
 
+  if (r.locked) {
+    alert(`${STUDIO_NAMES[studioId]}: ${ctx.targetLabel} is from the payroll upload (${money(r.existing.amount)}), so it's locked.\n\nThe schedule estimate (${money(r.total)}) wasn't posted. To change it, edit the amount on the Monthly Summary.`)
+    return
+  }
   if (r.existing && r.existing.is_manual_override) {
     const overwrite = confirm(
       `${STUDIO_NAMES[studioId]}: ${ctx.targetLabel} already has a manually-confirmed amount (${money(r.existing.amount)}).\n\n` +
@@ -2213,14 +2281,15 @@ function renderPostAllPanel() {
       return `<tr><td style="text-align:center">—</td><td class="studio-name" style="text-align:left">${esc(STUDIO_NAMES[r.studioId])}</td>
         <td colspan="4" style="text-align:left;color:var(--bad)">Couldn't calculate: ${esc(r.error)}</td></tr>`
     }
-    const isManual = r.existing && r.existing.is_manual_override
+    const isManual = r.existing && r.existing.is_manual_override && !r.locked
     const warnings = []
+    if (r.locked) warnings.push(`🔒 From payroll upload ${money(r.existing.amount)}, locked`)
     if (isManual) warnings.push(`Manually entered ${money(r.existing.amount)} — tick to replace`)
     if (r.emptyWeeks.length) warnings.push(`Partial: no shifts ${r.emptyWeeks.join(', ')}`)
     if (r.noWage.length) warnings.push(`No wage ($0): ${r.noWage.join(', ')}`)
-    const current = r.existing ? money(r.existing.amount) + (isManual ? ' (manual)' : '') : '—'
+    const current = r.existing ? money(r.existing.amount) + (r.locked ? ' (payroll)' : isManual ? ' (manual)' : '') : '—'
     return `<tr>
-      <td style="text-align:center"><input type="checkbox" id="post-all-cb-${i}" ${isManual ? '' : 'checked'} onchange="updatePostAllSummary()"></td>
+      <td style="text-align:center"><input type="checkbox" id="post-all-cb-${i}" ${isManual || r.locked ? '' : 'checked'}${r.locked ? ' disabled title="From the payroll upload: locked"' : ''} onchange="updatePostAllSummary()"></td>
       <td class="studio-name" style="text-align:left">${esc(STUDIO_NAMES[r.studioId])}</td>
       <td>${r.shiftCount}</td>
       <td>${current}</td>
@@ -2258,7 +2327,7 @@ function selectedPostAllRows() {
   if (!postAllPreview) return []
   return postAllPreview.rows.filter((r, i) => {
     const cb = document.getElementById('post-all-cb-' + i)
-    return !r.error && cb && cb.checked
+    return !r.error && !r.locked && cb && cb.checked
   })
 }
 
@@ -2416,15 +2485,14 @@ async function refreshEstimate(studioId, periodNumber) {
   const { data: existing } = await sb.from('studio_pay_periods').select('is_manual_override')
     .eq('studio_id', studioId).eq('month', monthDate).eq('period_number', periodNumber).maybeSingle()
 
-  if (existing && existing.is_manual_override) return // don't clobber a real entered number
+  if (existing && existing.is_manual_override) return // don't clobber a real entered number (typed or uploaded)
 
-  const { error } = await sb.from('studio_pay_periods')
-    .upsert({ studio_id: studioId, month: monthDate, period_number: periodNumber, amount: estimate, is_manual_override: false },
-            { onConflict: 'studio_id,month,period_number' })
+  const { error } = await upsertPayPeriod({ studio_id: studioId, month: monthDate, period_number: periodNumber, amount: estimate, is_manual_override: false, source: 'schedule' })
   if (error) { toast(error.message, true); return }
 
   if (!payPeriodRows[studioId]) payPeriodRows[studioId] = {}
   payPeriodRows[studioId][periodNumber] = estimate
+  setPayMeta(studioId, periodNumber, 'schedule', false)
 
   const { data: prog } = await sb.rpc('get_studio_sales_goal_progress', { p_studio_id: studioId, p_month: monthToText(currentMonth) })
   if (prog && prog[0]) progressRows[studioId] = prog[0]
