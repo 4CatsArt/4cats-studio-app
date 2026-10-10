@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+=<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -1052,8 +1052,17 @@ function bdDayNeed(ctx, date) {
                                      (r.is_open || r.booked > 0 || r.teachers > 0))
   if (!ss.length) return null
   let lo = Math.min(...ss.map(r => toMin(r.start_time))), hi = Math.max(...ss.map(r => toMin(r.end_time))) + 30
-  const opens = bdOpensAt(ctx, date)
-  if (opens != null) lo = Math.min(lo, opens)
+  // Staff day starts 30 minutes before the FIRST BOOKING (a session with people booked, or a class
+  // with a teacher). Setup time from the staffing rule counts inside those 30 minutes. Days with
+  // nothing booked yet fall back to the studio's opening time / first open session.
+  const bookedSs = ss.filter(r => (r.booked || 0) > 0 || (r.teachers || 0) > 0)
+  if (bookedSs.length) {
+    const realStart = r => { const m = (ctx.daySessions[date] || []).find(x => x.session_id === r.session_id); return m && m.session_time ? toMin(m.session_time) : toMin(r.start_time) }
+    lo = Math.min(...bookedSs.map(r => Math.min(realStart(r) - 30, toMin(r.start_time))))
+  } else {
+    const opens = bdOpensAt(ctx, date)
+    if (opens != null) lo = Math.min(lo, opens)
+  }
   const closes = bdClosesAt(ctx, date)
   if (closes != null) hi = Math.min(hi, closes)   // staff leave at closing time, even if a seat hold runs later
   lo = Math.floor(lo / 15) * 15; hi = Math.ceil(hi / 15) * 15
@@ -1892,6 +1901,14 @@ function renderBuild(withLegend) {
   rows += '<tr class="wk-total"><td class="wk-name"><b>Scheduled</b><div class="muted small">hours · people' + (W ? ' · est. wages' : '') + '</div></td>' +
     days.map(d => '<td><b>' + hrs(dayMins(d)) + 'h</b> · ' + dayPeople(d) + (W ? '<div class="wk-wage">' + wageFmt(dayWages(d)) + '</div>' : '') + '</td>').join('') + '</tr>'
 
+  // Open-for-booking sessions that start before staff arrive (30 min before the first booking)
+  days.forEach(d => {
+    const w = ctx.dayWindow[d]
+    if (!w) return
+    ctx.sessions.filter(r => r.session_date === d && r.is_open && !(r.booked > 0) && r.start_time && !(ctx.closedNow || {})[r.session_id] &&
+                             r.rule_kind !== 'none' && toMin(r.start_time) < w.open)
+      .forEach(r => warn.push(fmtDate(d) + ' ' + fmtTime(r.start_time) + ' ' + r.title + ': open for booking before staff arrive (' + bdFmtShort(w.open) + '). Close it, or start a shift earlier'))
+  })
   const cover = plan.blocks.filter(b => !b.training && !b.topUp)
   const filled = cover.filter(b => b.staffId).length
   const totalMins = days.reduce((t, d) => t + dayMins(d), 0)
