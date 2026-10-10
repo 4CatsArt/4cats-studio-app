@@ -1747,8 +1747,20 @@ function renderBuild(withLegend) {
         if (active && isSubRow(active)) status = '<div style="font-weight:600">Substitute this week</div>'
         else if (tid) {
           const tp = ctx.pool.find(x => x.id === tid)
-          const why = tp ? bdBlocked(ctx, tp, { date: c.date, start: c.start, end: c.end, badges: [] }, bdState(ctx, plan.blocks.filter(b => b.staffId !== tid || b.date !== c.date))) : 'not on this studio'
+          // Working at THIS studio that day is expected (that's the shift they teach in), so leave
+          // their shifts here out of the check: plan blocks and approved/draft shifts alike.
+          // Shifts at other studios that day still count, and so do time off and unavailability.
+          const hereBlocks = plan.blocks.filter(b => b.staffId === tid && b.date === c.date)
+          const hereShifts = ctx.shifts.filter(x => x.staff_id === tid && x.shift_date === c.date && x.studio_id === ctx.studio && x.start_time && x.end_time)
+          const ctxNoHere = Object.assign({}, ctx, { shifts: ctx.shifts.filter(x => hereShifts.indexOf(x) === -1) })
+          const why = tp ? bdBlocked(ctxNoHere, tp, { date: c.date, start: c.start, end: c.end, badges: [] }, bdState(ctxNoHere, plan.blocks.filter(b => hereBlocks.indexOf(b) === -1))) : 'not on this studio'
           if (why) status = '<div style="color:var(--bad);font-weight:600">⚠ ' + esc(bdPerson(tid).display_name) + ' ' + esc(why) + ': choose a substitute</div>'
+          else {
+            // On shift here that day, but does a shift actually cover the class?
+            const ranges = hereBlocks.map(b => [b.start, b.end]).concat(hereShifts.map(x => [toMin(x.start_time), toMin(x.end_time)]))
+            if (ranges.length && !ranges.some(r => r[0] <= c.start && r[1] >= c.end))
+              status = '<div style="color:var(--warn);font-weight:600">⚠ ' + esc(bdPerson(tid).display_name) + '\'s shift that day doesn\'t cover ' + bdFmtShort(c.start) + '–' + bdFmtShort(c.end) + '</div>'
+          }
         }
         return '<div class="wk-chip class"><b>' + fmtTime(c.time) + ' ' + esc(c.label) + '</b><div>' + c.booked + ' enrolled' +
           (c.badge ? ' · needs ' + esc(ctx.badgeLabel[c.badge] || c.badge) : '') + '</div>' + status +
@@ -2144,18 +2156,29 @@ async function bdInvCall(body) {
 }
 
 // Set one session's LIVE Shopify inventory. Returns null if it worked, else a message.
-async function bdSetInventory(studio, row, qty) {
+// cacheQty: what spaces_left_cache should say (defaults to qty; closing passes 0).
+async function bdSetInventory(studio, row, qty, cacheQty) {
   const v = await bdInvItemId(studio, row)
   if (v.err) return v.err
   try {
     const data = await bdInvCall({ action: 'set', inventory_item_id: v.itemId, quantity: qty })
     if (!data.inventory_level) return 'Shopify update failed'
   } catch (e) { return 'Shopify update failed: ' + e.message }
-  await sb.from('sessions').update({ spaces_left_cache: qty }).eq('id', row.id)   // keep the cache in step (same as admin.html)
+  await sb.from('sessions').update({ spaces_left_cache: cacheQty != null ? cacheQty : qty }).eq('id', row.id)   // keep the cache in step (same as admin.html)
   return null
 }
-// Close one session in Shopify (live inventory to 0)
-async function bdCloseOne(studio, row) { return bdSetInventory(studio, row, 0) }
+// Close one session in Shopify. With bookings, inventory goes to MINUS the number booked
+// (2 booked → −2), same as admin.html's Close Studio Day: if one of them cancels and the
+// refund restocks, it climbs back toward 0 instead of reopening a space. spaces_left_cache
+// is set to 0 either way (nothing left to sell).
+async function bdBookedCount(sessionId) {
+  const { data } = await sb.from('bookings').select('qty').eq('session_id', sessionId).gt('qty', 0).is('returned_at', null)
+  return (data || []).reduce((t, b) => t + (b.qty || 0), 0)
+}
+async function bdCloseOne(studio, row) {
+  const booked = await bdBookedCount(row.id)
+  return bdSetInventory(studio, row, booked > 0 ? -booked : 0, 0)
+}
 
 // get_day_session_codes leaves out sessions with 0 bookings and 0 capacity (a closed
 // Wheel Workshop, later weeks of a series...). Add every visible session it skipped,
@@ -2247,7 +2270,7 @@ async function bdToggleInv(studio, sessionId) {
   box.innerHTML = '<div style="margin-bottom:3px"><b>' + esc(row.title) + '</b></div>' +
     'Spaces left: <input type="number" min="0" id="' + inputId + '" value="' + (qty == null ? '' : qty) + '">' +
     '<button class="btn small" onclick="bdSetInvFromBox(\'' + studio + '\',\'' + sessionId + '\',\'' + inputId + '\')">Set</button>' +
-    (qty === 0 ? '' : '<button class="btn small bad" onclick="bdSetInvFromBox(\'' + studio + '\',\'' + sessionId + '\',null)">Close</button>') +
+    (qty != null && qty < 0 ? '' : '<button class="btn small bad" onclick="bdSetInvFromBox(\'' + studio + '\',\'' + sessionId + '\',null)">Close</button>') +
     '<div class="muted small" style="margin-top:3px">' + (qty == null ? 'Couldn\'t read the live number. ' : 'Live in Shopify now: ' + qty + '. ') + 'Changes what customers can book.</div>'
 }
 
@@ -2256,9 +2279,12 @@ async function bdSetInvFromBox(studio, sessionId, inputId) {
   if (isNaN(qty) || qty < 0) { toast('Enter 0 or more.', true); return }
   const { data: row } = await sb.from('sessions').select('id, session_date, session_time, title').eq('id', sessionId).maybeSingle()
   if (!row) return
-  if (!confirm((qty === 0 ? 'Close' : 'Set spaces left to ' + qty + ' for') + ' "' + row.title + '" on ' + fmtDate(row.session_date) + ' at ' + fmtTime(row.session_time) + '?\n\n' +
-               'This changes LIVE Shopify inventory. Existing bookings aren\'t affected.')) return
-  const err = await bdSetInventory(studio, row, qty)
+  const closing = !inputId
+  const booked = closing ? await bdBookedCount(sessionId) : 0
+  if (!confirm((closing ? 'Close' : 'Set spaces left to ' + qty + ' for') + ' "' + row.title + '" on ' + fmtDate(row.session_date) + ' at ' + fmtTime(row.session_time) + '?\n\n' +
+               'This changes LIVE Shopify inventory. Existing bookings aren\'t affected.' +
+               (closing && booked ? '\n\n' + booked + ' booked, so inventory goes to −' + booked + ': if someone cancels, the space won\'t reopen.' : ''))) return
+  const err = closing ? await bdCloseOne(studio, row) : await bdSetInventory(studio, row, qty)
   if (err) { toast('Not changed: ' + err, true); return }
   const x = bdPlans[studio]
   if (x && x.ctx) {
@@ -2278,7 +2304,7 @@ async function bdCloseSession(studio, sessionId) {
   const { data: row } = await sb.from('sessions').select('id, session_date, session_time, title').eq('id', sessionId).maybeSingle()
   if (!row) return
   if (!confirm('Close "' + row.title + '" on ' + fmtDate(row.session_date) + ' at ' + fmtTime(row.session_time) + ' at ' + (STUDIO_NAMES[studio] || studio) + '?\n\n' +
-               'This sets its LIVE Shopify inventory to 0, so customers can\'t book it. Existing bookings aren\'t affected.')) return
+               'This sets its LIVE Shopify inventory to 0 (or minus the number booked, so a cancellation doesn\'t reopen it), so customers can\'t book it. Existing bookings aren\'t affected.')) return
   const err = await bdCloseOne(studio, row)
   if (err) { toast('Not closed: ' + err, true); return }
   ;(ctx.closedNow = ctx.closedNow || {})[sessionId] = true
