@@ -167,6 +167,8 @@ table.wk tr.wk-sched td { background: #f7f9fc; }
 td[data-date]:not(.drop-ok) { cursor: cell; }
 td[data-date] .wk-chip:not([draggable="true"]) { cursor: default; }
 .wk-add-input { margin-top: 4px; }
+.wk-wage { font-size: 11px; color: #1b6b2e; font-weight: 600; margin-top: 1px; }
+.wk-wage-stat b { color: #1b6b2e; }
 .wk-time-input { width: 100%; box-sizing: border-box; font: inherit; font-weight: 600; padding: 2px 4px; border: 1px solid #4a7fd4; border-radius: 4px; }
 .wk-studio-chips { display: inline-flex; flex-wrap: wrap; gap: 6px; }
 .wk-studio-chip { display: inline-flex; align-items: center; gap: 4px; background: var(--ink); color: #fff; border-radius: 14px; padding: 4px 6px 4px 12px; font-size: 12px; }
@@ -411,6 +413,10 @@ const DAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MONTHS = { Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6, Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12 }
 
 let currentUser = null
+// Estimated wages show only for logins on the finance access list (has_finance_access,
+// same as finance.html). Wages come from get_studio_staff_for_wages_range, which the
+// database also limits to that list, so nobody else can read them from this page.
+let bdWageAccess = false
 let staff = []          // active staff: {id, display_name, nickname, studio_ids, province_code}
 let staffById = {}
 let timeOffRows = []
@@ -493,6 +499,7 @@ async function initApp(user) {
     return
   }
   currentUser = user
+  { const fa = await sb.rpc('has_finance_access'); bdWageAccess = !fa.error && fa.data === true }
   document.getElementById('login-screen').style.display = 'none'
   document.getElementById('app-screen').style.display = 'block'
   await loadStaff()
@@ -955,6 +962,12 @@ async function bdLoad(studio) {
     else daySessions[d] = data || []
   }))
   await bdCompleteDaySessions(studio, from, to, daySessions)
+  // Hourly wages for the estimate (finance access only; see bdWageAccess)
+  let wages = null
+  if (bdWageAccess) {
+    const wr = await sb.rpc('get_studio_staff_for_wages_range', { p_studio_id: studio, p_from: from, p_to: to })
+    if (!wr.error) { wages = {}; (wr.data || []).forEach(w => { if (w.hourly_wage != null) wages[w.staff_id] = Number(w.hourly_wage) }) }
+  }
   const mins = await sb.from('studio_staffing_minimums').select('*').eq('studio_id', studio)
   const minimums = mins.error ? [] : (mins.data || [])
   const partyToClose = await bdPartySlotsDue(studio)
@@ -986,7 +999,7 @@ async function bdLoad(studio) {
     pastShifts[p.id] = count || 0
   }))
   return { studio, from, to, sessions: need.data || [], ruleBadge, badgeLabel, opening: opening.data, ot: ot.data,
-           pool, badgesBy, notesBy, pastShifts, recentWeekends, classTeachers, coordinators, daySessions, dayScheduleError, minimums, partyToClose, unav: unav.data, toff: toff.data, shifts: shifts.data }
+           pool, badgesBy, notesBy, pastShifts, recentWeekends, classTeachers, coordinators, daySessions, dayScheduleError, minimums, partyToClose, wages, unav: unav.data, toff: toff.data, shifts: shifts.data }
 }
 
 // Minimum people on for this studio at this weekday and time (studio_staffing_minimums), or 0
@@ -1836,14 +1849,28 @@ function renderBuild(withLegend) {
     ctx.shifts.filter(x => x.studio_id === ctx.studio && x.shift_date === d && x.status !== 'draft' && x.start_time).reduce((t, x) => t + paidMins(x.studio_id, toMin(x.start_time), toMin(x.end_time)), 0)
   const dayPeople = d => new Set(plan.blocks.filter(b => b.staffId && b.date === d).map(b => b.staffId)
     .concat(ctx.shifts.filter(x => x.studio_id === ctx.studio && x.shift_date === d && x.status !== 'draft' && x.start_time).map(x => x.staff_id))).size
-  rows += '<tr class="wk-total"><td class="wk-name"><b>Scheduled</b><div class="muted small">hours · people</div></td>' +
-    days.map(d => '<td><b>' + hrs(dayMins(d)) + 'h</b> · ' + dayPeople(d) + '</td>').join('') + '</tr>'
+  // Estimated wages (finance access only): paid hours (unpaid breaks taken off) × hourly wage,
+  // for everyone on at this studio: this plan's assigned shifts + approved/posted shifts here
+  const W = ctx.wages, noWage = new Set()
+  const dayWages = d => {
+    if (!W) return 0
+    const parts = plan.blocks.filter(b => b.staffId && b.date === d).map(b => ({ id: b.staffId, m: paidMins(ctx.studio, b.start, b.end) }))
+      .concat(ctx.shifts.filter(x => x.studio_id === ctx.studio && x.shift_date === d && x.status !== 'draft' && x.start_time)
+        .map(x => ({ id: x.staff_id, m: paidMins(x.studio_id, toMin(x.start_time), toMin(x.end_time)) })))
+    return parts.reduce((t, x) => { if (W[x.id] == null) { noWage.add(bdPerson(x.id).display_name); return t } return t + x.m / 60 * W[x.id] }, 0)
+  }
+  const wageFmt = v => '$' + Math.round(v).toLocaleString('en-CA')
+  rows += '<tr class="wk-total"><td class="wk-name"><b>Scheduled</b><div class="muted small">hours · people' + (W ? ' · est. wages' : '') + '</div></td>' +
+    days.map(d => '<td><b>' + hrs(dayMins(d)) + 'h</b> · ' + dayPeople(d) + (W ? '<div class="wk-wage">' + wageFmt(dayWages(d)) + '</div>' : '') + '</td>').join('') + '</tr>'
 
   const cover = plan.blocks.filter(b => !b.training && !b.topUp)
   const filled = cover.filter(b => b.staffId).length
   const totalMins = days.reduce((t, d) => t + dayMins(d), 0)
+  const weekWages = W ? days.reduce((t, d) => t + dayWages(d), 0) : null
   const top = '<div class="panel"><div class="summary">' +
     '<div><b>' + hrs(totalMins) + 'h</b>scheduled</div>' +
+    (W ? '<div class="wk-wage-stat" title="Paid hours × hourly wage for every shift here this week (this plan + approved). Straight time: before overtime, stat pay and vacation pay.' +
+         (noWage.size ? ' No wage on file (counted as $0): ' + esc([...noWage].join(', ')) : '') + '"><b>' + wageFmt(weekWages) + (noWage.size ? ' <span style="color:var(--warn)">⚠</span>' : '') + '</b>est. wages 🔒</div>' : '') +
     '<div><b>' + filled + ' / ' + cover.length + '</b>needed shifts filled</div>' +
     '<div><b>' + plan.blocks.filter(b => b.weekend).length + '</b>extra weekend shifts</div>' +
     '<div><b>' + plan.blocks.filter(b => b.topUp && !b.weekend).length + '</b>extra-hours shifts</div>' +
