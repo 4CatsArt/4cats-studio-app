@@ -2172,7 +2172,7 @@ async function bdCompleteDaySessions(studio, from, to, daySessions) {
     const have = new Set(list.map(r => r.session_id))
     all.filter(x => x.session_date === d && x.show && x.session_type !== 'festival' && !have.has(x.id)).forEach(x => missing.push(x))
   })
-  if (!missing.length) return
+  if (missing.length) {
   const counts = {}
   const { data: bk } = await sb.from('bookings').select('session_id, qty').in('session_id', missing.map(x => x.id))
   ;(bk || []).forEach(b => { counts[b.session_id] = (counts[b.session_id] || 0) + (b.qty || 0) })
@@ -2181,6 +2181,19 @@ async function bdCompleteDaySessions(studio, from, to, daySessions) {
     daySessions[x.session_date].push({ session_id: x.id, title: x.title, session_time: x.session_time, session_type: x.session_type,
       capacity: x.capacity, booking_count: counts[x.id] || 0, code: codeFor(x.title), spaces_left: x.spaces_left_cache })
   })
+  }
+  // Later weeks of a series ("Class N of M", N >= 2): enrolment lives on the first session.
+  // get_series_enrolment matches it by weekday, time, title and age group (shared rule).
+  const seriesRows = []
+  Object.values(daySessions).forEach(list => list.forEach(r => {
+    if (/\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(r.title || '') && !(r.booking_count > 0)) seriesRows.push(r)
+  }))
+  if (!seriesRows.length) return
+  const se = await sb.rpc('get_series_enrolment', { p_session_ids: seriesRows.map(r => r.session_id) })
+  if (se.error) { console.warn('get_series_enrolment unavailable:', se.error.message); return }
+  const enr = {}
+  ;(se.data || []).forEach(e => { if (e.class1_session_id) enr[e.session_id] = Number(e.enrolled) || 0 })
+  seriesRows.forEach(r => { if (enr[r.session_id] != null) { r.booking_count = enr[r.session_id]; r.seriesEnrolled = true } })
 }
 
 // The day's session list: open ones first, closed ones underneath (greyed). Click any line to adjust it.
@@ -2190,7 +2203,7 @@ function bdSessListHtml(ctx, d, rows, tShort) {
   const byTime = (a, b) => a.session_time.localeCompare(b.session_time)
   const isOpen = (ctx.openDays || {})[d]
   const line = r => {
-    const n = r.closed ? 'closed' : (r.booking_count || 0) + ((r.capacity || 0) > 0 ? '/' + r.capacity : (r.isClass ? ' enrolled' : ''))
+    const n = r.closed ? 'closed' : (r.booking_count || 0) + ((r.capacity || 0) > 0 ? '/' + r.capacity : (r.isClass || r.seriesEnrolled ? ' enrolled' : ''))
     const left = !r.closed && r.spaces_left != null ? ' <span class="wk-sess-left">· ' + r.spaces_left + ' left</span>' : ''
     return '<div class="wk-sess' + ((r.booking_count || 0) === 0 ? ' empty' : '') + (r.closed ? ' closed' : '') + '" id="wk-sess-' + r.session_id + '"' +
       ' title="' + esc(r.title) + ' · click to change spaces left or close"' +
