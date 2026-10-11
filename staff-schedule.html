@@ -232,6 +232,12 @@ td[data-date] .wk-chip:not([draggable="true"]) { cursor: default; }
 .pl-dayhead b { font-size: 13px; }
 .pl-dayhead .muted { display: block; font-size: 11px; }
 .pl-dayhead.closed { color: var(--muted); }
+.pl-dayhead { cursor: pointer; border-radius: 6px 6px 0 0; }
+.pl-dayhead:hover { background: var(--soft); }
+.pl-dayhead.isclosed { background: var(--bad-bg); color: var(--bad); }
+.pl-dayhead.isclosed .muted { color: var(--bad); }
+.pl-off { font-size: 10px; font-weight: 600; background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 1px 6px; }
+.pl-daybody.isclosed { background-color: #fbf3f2; background-image: repeating-linear-gradient(45deg, transparent 0 8px, rgba(192,57,43,.06) 8px 16px); }
 .pl-sub { display: grid; grid-template-columns: 1fr 1fr 1fr 26px; font-size: 10px; color: var(--muted); border-left: 0.5px solid var(--line); text-align: center; padding-bottom: 2px; }
 .pl-axis { position: relative; }
 .pl-axis div { position: absolute; right: 6px; font-size: 10px; color: var(--muted); transform: translateY(-6px); }
@@ -3664,7 +3670,7 @@ function plDefaults() {
     }
   }
 }
-function plEmptyData() { return { removed: {}, edits: {}, adds: [], shifts: {}, extraStaff: [], openRows: 2 } }
+function plEmptyData() { return { removed: {}, edits: {}, adds: [], shifts: {}, extraStaff: [], openRows: 2, closed: {} } }
 function plMerge(def, got) {
   if (got === undefined || got === null) return def
   if (def === null || typeof def !== 'object' || Array.isArray(def)) return got
@@ -3892,17 +3898,86 @@ function plItems(date) {
     const e = d.edits[it.id] || {}, k = s.k[it.kind]
     Object.assign(it, { date, label: PL_KINDS[it.kind].label, staff: e.staff ?? k.staff, people: e.people ?? k.people, price: e.price ?? k.price, col: e.col ?? it.col })
     const by = PL_KINDS[it.kind].dropin && adds.find(a => a.replace && it.start >= a.start && it.start < a.start + a.dur)
-    it.state = d.removed[it.id] ? 'removed' : by ? 'replaced' : 'on'
-    if (by) it.by = plAddLabel(by)
+    const closed = d.closed[date]
+    it.state = d.removed[it.id] ? 'removed' : closed ? 'closed' : by ? 'replaced' : 'on'
+    if (closed) it.by = plClosedText(closed)
+    else if (by) it.by = plAddLabel(by)
     return it
   })
   adds.forEach(a => {
-    const ds = a.dates.slice().sort()
-    items.push({ id: 'A|' + a.id + '|' + date, addId: a.id, date, kind: a.kind, start: a.start, dur: a.dur, col: a.col, src: 'add', state: 'on',
+    const ds = a.dates.slice().sort(), closed = d.closed[date]
+    items.push({ id: 'A|' + a.id + '|' + date, addId: a.id, date, kind: a.kind, start: a.start, dur: a.dur, col: a.col, src: 'add', state: closed ? 'closed' : 'on', by: closed ? plClosedText(closed) : '',
       label: plAddLabel(a), staff: a.staff, people: a.people, price: a.price, nth: ds.indexOf(date) + 1, of: ds.length })
   })
   return items
 }
+/* ---------- closing a day (stat holiday, short staffed, …) ---------- */
+// data.closed[date] = { reason, note, shifted: [{ id, added }], shifts }
+//   shifted: sessions that skipped this date and got a week added on the end (undone on reopen)
+//   shifts:  planned staff cleared when the day closed (put back on reopen)
+const PL_CLOSE_REASONS = ['Stat holiday', 'Short staffed', 'Other']
+function plClosedText(c) { return 'Closed: ' + (c.reason || 'closed') + (c.note ? ' (' + c.note + ')' : '') }
+// Next week after a session's last class that isn't a closed day; null if past 12 weeks
+function plNextWeek(a, after) {
+  const cap = addDays(pl.plan.week_start, 12 * 7 - 1), closed = pl.plan.data.closed || {}
+  let next = addDays(a.dates.length ? a.dates.slice().sort().pop() : after, 7)
+  while (next <= after || closed[next] || a.dates.includes(next)) next = addDays(next, 7)
+  return next <= cap ? next : null
+}
+function plGrowTo(date) {
+  if (date > plLastDate()) { pl.plan.weeks = Math.min(12, Math.floor(daysBetween(pl.plan.week_start, date) / 7) + 1); toast('Plan is now ' + pl.plan.weeks + ' weeks') }
+}
+function plOffOn(date) {
+  return pl.pool.filter(p => timeOffRows.some(r => r.staff_id === p.id && ['approved', 'pending'].includes(r.status) && r.start_date <= date && r.end_date >= date))
+}
+function plDayClick(ev, date) {
+  ev.stopPropagation()
+  const c = pl.plan.data.closed[date], off = plOffOn(date)
+  let h = '<div class="pl-menu-h"><b>' + DAY_NAMES[plDow(date)] + ' ' + plShortDate(date) + '</b>' +
+    (off.length ? off.length + ' off: ' + esc(off.map(p => p.display_name).join(', ')) : 'Nobody has time off') + '</div>'
+  if (c) {
+    h += '<div class="row small">' + esc(plClosedText(c)) + '</div>' +
+      (c.shifted.length ? '<div class="row muted small">Reopening puts ' + c.shifted.length + ' session class' + (c.shifted.length > 1 ? 'es' : '') + ' back on this date and takes off the week added on the end.</div>' : '') +
+      '<button onclick="plReopenDay(\'' + date + '\')">Reopen this day</button>'
+  } else {
+    const series = pl.plan.data.adds.filter(a => PL_KINDS[a.kind].series && a.dates.includes(date)).length
+    h += '<div class="row">' + PL_CLOSE_REASONS.map((r, i) => '<label style="flex-direction:row;align-items:center;gap:4px;color:var(--ink);font-size:12px"><input type="radio" name="pl-close-why" value="' + r + '"' +
+      ((off.length ? r === 'Short staffed' : i === 0) ? ' checked' : '') + '>' + r + '</label>').join('') + '</div>' +
+      '<div class="row"><input class="input" id="pl-close-note" placeholder="Note (optional), e.g. Remembrance Day" style="width:100%"></div>' +
+      '<div class="row"><label style="flex-direction:row;align-items:center;gap:4px;color:var(--ink);font-size:12px"><input type="checkbox" id="pl-close-staff" checked> Clear planned staff that day</label></div>' +
+      (series ? '<div class="row muted small">' + series + ' session class' + (series > 1 ? 'es skip' : ' skips') + ' this date and get' + (series > 1 ? '' : 's') + ' a week added on the end.</div>' : '') +
+      '<div class="row"><button class="btn small bad" onclick="plCloseDay(\'' + date + '\')">Close this day</button></div>'
+  }
+  plShowMenu(ev, h)
+}
+function plCloseDay(date) {
+  const d = pl.plan.data, why = document.querySelector('input[name="pl-close-why"]:checked')
+  const rec = { reason: why ? why.value : 'Closed', note: document.getElementById('pl-close-note').value.trim(), shifted: [], shifts: null }
+  d.closed[date] = rec   // first, so plNextWeek skips this date
+  d.adds.filter(a => PL_KINDS[a.kind].series && a.dates.includes(date)).forEach(a => {
+    a.dates = a.dates.filter(x => x !== date)
+    const next = plNextWeek(a, date)
+    if (next) { a.dates.push(next); plGrowTo(next) }
+    else toast(plAddLabel(a) + ': no room for another week inside 12 weeks', true)
+    rec.shifted.push({ id: a.id, added: next })
+  })
+  if (document.getElementById('pl-close-staff').checked && d.shifts[date] && Object.keys(d.shifts[date]).length) { rec.shifts = d.shifts[date]; delete d.shifts[date] }
+  plCloseMenu(); plTouch()
+}
+function plReopenDay(date) {
+  const d = pl.plan.data, rec = d.closed[date]
+  if (!rec) return
+  rec.shifted.forEach(x => {
+    const a = d.adds.find(y => y.id === x.id)
+    if (!a) return
+    if (x.added) a.dates = a.dates.filter(y => y !== x.added)
+    if (!a.dates.includes(date)) a.dates.push(date)
+  })
+  if (rec.shifts && !(d.shifts[date] && Object.keys(d.shifts[date]).length)) d.shifts[date] = rec.shifts
+  delete d.closed[date]
+  plCloseMenu(); plTouch()
+}
+
 function plRevenue(it) {
   if (it.state !== 'on') return 0
   const per = PL_KINDS[it.kind].series ? (Number(it.price) || 0) / (it.of || 1) : Number(it.price) || 0
@@ -3997,9 +4072,10 @@ function plRender() {
   // offerings grid
   html += '<div class="panel pl-wrap"><div class="pl-grid"><div></div>'
   dates.forEach(d => {
-    const st = stats[d], open = st.items.some(i => i.state === 'on')
-    html += '<div class="pl-dayhead' + (open ? '' : ' closed') + '"><b>' + plDayLabel(d) + '</b><span class="muted">' +
-      (open ? plMoney(st.rev) + ' est., ' + plH(st.needMin) + 'h needed' : 'Nothing on') + '</span></div>'
+    const st = stats[d], open = st.items.some(i => i.state === 'on'), c = p.data.closed[d], off = plOffOn(d)
+    html += '<div class="pl-dayhead' + (c ? ' isclosed' : open ? '' : ' closed') + '" onclick="plDayClick(event,\'' + d + '\')" title="Click to close or reopen this day">' +
+      '<b>' + plDayLabel(d) + '</b>' + (off.length ? ' <span class="pl-off" title="' + esc(off.map(x => x.display_name).join(', ')) + '">' + off.length + ' off</span>' : '') +
+      '<span class="muted">' + (c ? esc(plClosedText(c)) : open ? plMoney(st.rev) + ' est., ' + plH(st.needMin) + 'h needed' : 'Nothing on') + '</span></div>'
   })
   html += '<div></div>' + dates.map(() => '<div class="pl-sub"><span>1</span><span>2</span><span>3</span><span title="Planned / needed">👤</span></div>').join('')
   html += '<div class="pl-axis" style="height:' + height + 'px">'
@@ -4007,7 +4083,7 @@ function plRender() {
   html += '</div>'
   dates.forEach(d => {
     const st = stats[d]
-    html += '<div class="pl-daybody" style="height:' + height + 'px">'
+    html += '<div class="pl-daybody' + (p.data.closed[d] ? ' isclosed' : '') + '" style="height:' + height + 'px">'
     for (let c = 0; c < 3; c++) html += '<div class="pl-col" data-date="' + d + '" data-col="' + c + '" onclick="plColClick(event)">' + plColItems(st.items.filter(i => i.col === c), lo) + '</div>'
     html += '<div class="pl-cov">'
     for (let t = lo; t < hi; t += 15) {
@@ -4048,7 +4124,7 @@ function plColItems(items, lo) {
     const w = ghost ? 100 : 100 / i.lanes, left = ghost ? 0 : i.lane * w
     const long = i.dur >= 45
     const tip = i.label + ', ' + bdFmtShort(i.start) + '–' + bdFmtShort(i.start + i.dur) +
-      (i.state === 'replaced' ? ' (replaced by ' + i.by + ')' : i.state === 'removed' ? ' (taken out)' : '') + (i.of ? ', ' + i.nth + ' of ' + i.of : '')
+      (i.state === 'closed' ? ' (' + i.by + ')' : i.state === 'replaced' ? ' (replaced by ' + i.by + ')' : i.state === 'removed' ? ' (taken out)' : '') + (i.of ? ', ' + i.nth + ' of ' + i.of : '')
     const meta = long && !ghost ? '<span class="meta">' + bdFmtShort(i.start) + '–' + bdFmtShort(i.start + i.dur) + (i.staff ? ', ' + i.staff + ' staff' : '') + (i.of > 1 ? ', ' + i.nth + '/' + i.of : '') + '</span>' : ''
     return '<div class="pl-it' + (long ? ' long' : '') + (ghost ? ' ghost' : '') + '" style="top:' + top + 'px;height:' + h + 'px;left:calc(' + left + '% + 1px);width:calc(' + w + '% - 2px);background:' +
       K.bg + ';border-left-color:' + K.ink + ';color:' + K.ink + '" title="' + esc(tip) + '" onclick="plItemClick(event,\'' + i.id + '\',\'' + i.date + '\')">' +
@@ -4183,7 +4259,9 @@ function plItemClick(ev, id, date) {
   const range = bdFmtShort(it.start) + '–' + bdFmtShort(it.start + it.dur)
   const every = 'every ' + DAY_NAMES[plDow(date)] + ' at ' + bdFmtShort(it.start)
   let h = '<div class="pl-menu-h"><b>' + esc(it.label) + '</b>' + plDayLabel(date) + ', ' + range + (it.of ? ' (' + it.nth + ' of ' + it.of + ')' : '') + '</div>'
-  if (it.state === 'replaced') {
+  if (it.state === 'closed') {
+    h += '<div class="row muted small">' + esc(it.by) + '. Click the day heading to reopen it.</div>'
+  } else if (it.state === 'replaced') {
     h += '<div class="row muted small">Replaced by ' + esc(it.by) + '. Change or remove that to bring this back.</div>'
   } else if (it.state === 'removed') {
     h += '<button onclick="plRestore(\'' + id + '\',false)">Put back on this date</button>' +
@@ -4231,14 +4309,10 @@ function plItemDelete(id, all) {
     else {
       a.dates = a.dates.filter(x => x !== date)
       if (PL_KINDS[a.kind].series) {
-        // keep the same number of classes: add the next free week after the last class
-        const cap = addDays(pl.plan.week_start, 12 * 7 - 1)
-        let next = addDays(a.dates.length ? a.dates.slice().sort().pop() : date, 7)
-        while (next <= date) next = addDays(next, 7)
-        if (next <= cap) {
-          a.dates.push(next)
-          if (next > plLastDate()) { pl.plan.weeks = Math.min(12, Math.floor(daysBetween(pl.plan.week_start, next) / 7) + 1); toast('Plan is now ' + pl.plan.weeks + ' weeks') }
-        } else toast('No room for another week inside 12 weeks: this session is now ' + a.dates.length + ' classes', true)
+        // keep the same number of classes: add the next open week after the last class
+        const next = plNextWeek(a, date)
+        if (next) { a.dates.push(next); plGrowTo(next) }
+        else toast('No room for another week inside 12 weeks: this session is now ' + a.dates.length + ' classes', true)
       }
     }
   } else (all ? plSameDowIds(id) : [id]).forEach(x => { d.removed[x] = true })
@@ -4265,7 +4339,7 @@ function plStartAdd(kind, date, t, col) {
   plCloseMenu()
   const K = PL_KINDS[kind], def = pl.plan.settings.k[kind]
   const weeksLeft = Math.floor(daysBetween(date, plLastDate()) / 7) + 1
-  plForm = { kind, date, col, skip: {} }
+  plForm = { kind, date, col, skip: Object.assign({}, ...Object.keys(pl.plan.data.closed).map(x => ({ [x]: true }))) }
   const radios = (name, list, checked) => '<div class="opts">' + list.map(v => '<label><input type="radio" name="' + name + '" value="' + v + '"' + (v === checked ? ' checked' : '') + ' onchange="plFormUpdate()"> ' + v + '</label>').join('') + '</div>'
   let times = ''
   for (let m = 480; m <= 1260; m += 15) times += '<option value="' + m + '"' + (m === t ? ' selected' : '') + '>' + bdFmtShort(m) + '</option>'
@@ -4428,7 +4502,8 @@ async function plResolve(list) {
 function plAdditions() {
   const out = []
   pl.plan.data.adds.forEach(a => {
-    const dates = a.dates.slice().sort(), name = plAddLabel(a)
+    const dates = a.dates.filter(x => !pl.plan.data.closed[x]).sort(), name = plAddLabel(a)
+    if (!dates.length) return
     const repl = a.replace ? 'Yes' : 'No'
     if (PL_KINDS[a.kind].series) out.push({ title: plShopTitle(dates[0], a.start, name) + ' | ' + dates.length + ' Week Session', dates, a, repl })
     else dates.forEach(d => out.push({ title: plShopTitle(d, a.start, name), dates: [d], a, repl }))
@@ -4441,7 +4516,7 @@ async function plOpenSet() {
   plModal('<h2>Set plan</h2><div class="loading">Checking sessions, Shopify and bookings…</div>', true)
   const list = []
   plDates().forEach(date => plItems(date).filter(i => i.src !== 'add' && i.state !== 'on').forEach(i =>
-    list.push({ date, time: plHM(i.start), kind: i.kind, slot: i.slot || 0, label: PL_KINDS[i.kind].label, why: i.state === 'replaced' ? 'Replaced by ' + i.by : 'Taken out' })))
+    list.push({ date, time: plHM(i.start), kind: i.kind, slot: i.slot || 0, label: PL_KINDS[i.kind].label, why: i.state === 'closed' ? i.by : i.state === 'replaced' ? 'Replaced by ' + i.by : 'Taken out' })))
   let rows, prev
   try {
     rows = await plResolve(list)
