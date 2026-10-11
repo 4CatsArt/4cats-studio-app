@@ -4201,7 +4201,7 @@ function plItemClick(ev, id, date) {
     }
     h += '<div class="row"><span class="muted small">Column</span>' + [0, 1, 2].map(c => '<button class="btn small' + (c === it.col ? ' primary' : '') + '" onclick="plItemCol(\'' + id + '\',' + c + ')">' + (c + 1) + '</button>').join('') + '</div><hr>'
     if (it.src === 'add') {
-      h += (it.of > 1 ? '<button onclick="plItemDelete(\'' + id + '\',false)">Remove this date only</button>' : '') +
+      h += (it.of > 1 || PL_KINDS[it.kind].series ? '<button onclick="plItemDelete(\'' + id + '\',false)">' + (PL_KINDS[it.kind].series ? 'Skip this date (adds a week on the end)' : 'Remove this date only') + '</button>' : '') +
         '<button onclick="plItemDelete(\'' + id + '\',true)" style="color:var(--bad)">Delete' + (it.of > 1 ? ' on all ' + it.of + ' dates' : '') + '</button>'
     } else {
       h += '<button onclick="plItemDelete(\'' + id + '\',false)" style="color:var(--bad)">Take out this date</button>' +
@@ -4227,8 +4227,20 @@ function plItemDelete(id, all) {
   const d = pl.plan.data
   if (id.startsWith('A|')) {
     const [, aid, date] = id.split('|'), a = d.adds.find(x => x.id === aid)
-    if (all || a.dates.length <= 1) d.adds = d.adds.filter(x => x.id !== aid)
-    else a.dates = a.dates.filter(x => x !== date)
+    if (all || (a.dates.length <= 1 && !PL_KINDS[a.kind].series)) d.adds = d.adds.filter(x => x.id !== aid)
+    else {
+      a.dates = a.dates.filter(x => x !== date)
+      if (PL_KINDS[a.kind].series) {
+        // keep the same number of classes: add the next free week after the last class
+        const cap = addDays(pl.plan.week_start, 12 * 7 - 1)
+        let next = addDays(a.dates.length ? a.dates.slice().sort().pop() : date, 7)
+        while (next <= date) next = addDays(next, 7)
+        if (next <= cap) {
+          a.dates.push(next)
+          if (next > plLastDate()) { pl.plan.weeks = Math.min(12, Math.floor(daysBetween(pl.plan.week_start, next) / 7) + 1); toast('Plan is now ' + pl.plan.weeks + ' weeks') }
+        } else toast('No room for another week inside 12 weeks: this session is now ' + a.dates.length + ' classes', true)
+      }
+    }
   } else (all ? plSameDowIds(id) : [id]).forEach(x => { d.removed[x] = true })
   plCloseMenu(); plTouch()
 }
@@ -4263,8 +4275,8 @@ function plStartAdd(kind, date, t, col) {
   if (kind === 'wheel_session') h += '<div class="pl-f"><span>Who is it for?</span>' + radios('pl-f-aud', ['Kids', 'Teen', 'Adult', 'Family'], 'Kids') + '</div>'
   h += '<div class="pl-frow"><label class="pl-f"><span>Starts at</span><select class="input" id="pl-f-time" onchange="plFormUpdate()">' + times + '</select></label>' +
     '<label class="pl-f"><span>Column</span><select class="input" id="pl-f-col">' + [0, 1, 2].map(c => '<option value="' + c + '"' + (c === col ? ' selected' : '') + '>' + (c + 1) + '</option>').join('') + '</select></label>' +
-    '<label class="pl-f"><span>' + (K.series ? 'How many weeks?' : 'Repeat for how many weeks?') + '</span><input class="input" type="number" min="1" max="12" id="pl-f-weeks" value="' + Math.max(1, weeksLeft) + '" oninput="plFormUpdate()"></label></div>'
-  h += '<div class="pl-f"><span>Dates (untick any to skip, e.g. a holiday)</span><div class="pl-dates" id="pl-f-dates"></div></div>'
+    '<label class="pl-f"><span>' + (K.series ? 'How many classes?' : 'Repeat for how many weeks?') + '</span><input class="input" type="number" min="1" max="12" id="pl-f-weeks" value="' + Math.max(1, weeksLeft) + '" oninput="plFormUpdate()"></label></div>'
+  h += '<div class="pl-f"><span>Dates (untick any to skip, e.g. a holiday)</span><div class="pl-dates" id="pl-f-dates"></div><div class="muted small" id="pl-f-dates-note"></div></div>'
   if (kind === 'session_class' || kind === 'wheel_session') {
     h += '<div class="pl-f"><span>Replacing regular drop-ins, or adding?</span><div class="opts">' +
       '<label><input type="radio" name="pl-f-repl" value="replace" checked onchange="plFormUpdate()"> Replace drop-ins that start during it</label>' +
@@ -4281,7 +4293,15 @@ function plStartAdd(kind, date, t, col) {
 }
 function plFormDates() {
   const n = Math.max(1, Math.min(12, Number(document.getElementById('pl-f-weeks').value) || 1)), out = []
-  for (let i = 0; i < n; i++) out.push(addDays(plForm.date, 7 * i))
+  if (!PL_KINDS[plForm.kind].series) { for (let i = 0; i < n; i++) out.push(addDays(plForm.date, 7 * i)); return out }
+  // Sessions: n is the number of classes, so every skipped week adds one on the end
+  const cap = addDays(pl.plan.week_start, 12 * 7 - 1)
+  for (let i = 0, got = 0; got < n; i++) {
+    const d = addDays(plForm.date, 7 * i)
+    if (d > cap) break
+    out.push(d)
+    if (!plForm.skip[d]) got++
+  }
   return out
 }
 function plFormUpdate() {
@@ -4289,7 +4309,17 @@ function plFormUpdate() {
   if (!box) return
   const last = plLastDate(), cap = addDays(pl.plan.week_start, 12 * 7 - 1)
   box.innerHTML = plFormDates().map(d => '<label class="' + (d > last ? 'out' : '') + '"' + (d > cap ? ' title="More than 12 weeks from the plan start"' : d > last ? ' title="Past the plan end: the plan gets longer"' : '') + '><input type="checkbox" ' + (plForm.skip[d] ? '' : 'checked') +
-    ' onchange="plForm.skip[\'' + d + '\']=!this.checked">' + plShortDate(d) + '</label>').join('')
+    ' onchange="plForm.skip[\'' + d + '\']=!this.checked;plFormUpdate()">' + plShortDate(d) + '</label>').join('')
+  const dn = document.getElementById('pl-f-dates-note')
+  if (dn) {
+    const all = plFormDates(), on = all.filter(d => !plForm.skip[d]), skipped = all.length - on.length
+    const want = Math.max(1, Math.min(12, Number(document.getElementById('pl-f-weeks').value) || 1))
+    dn.textContent = !on.length ? '' : PL_KINDS[plForm.kind].series
+      ? on.length + ' class' + (on.length > 1 ? 'es' : '') + ', ' + plShortDate(on[0]) + ' to ' + plShortDate(on[on.length - 1]) +
+        (skipped ? ', ' + skipped + ' week' + (skipped > 1 ? 's' : '') + ' skipped and added on the end' : '') +
+        (on.length < want ? '. Only ' + on.length + ' fit inside 12 weeks from the plan start.' : '')
+      : on.length + ' date' + (on.length > 1 ? 's' : '') + (skipped ? ', ' + skipped + ' skipped' : '')
+  }
   const note = document.getElementById('pl-f-repl-note')
   if (note) {
     const t = Number(document.getElementById('pl-f-time').value), repl = document.querySelector('input[name="pl-f-repl"]:checked').value === 'replace'
