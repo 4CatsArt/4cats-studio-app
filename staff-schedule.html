@@ -293,7 +293,7 @@ td[data-date] .wk-chip:not([draggable="true"]) { cursor: default; }
 .pl-tbl-wrap { max-height: 46vh; overflow: auto; border: 0.5px solid var(--line); border-radius: 8px; }
 table.list td.wrap { white-space: normal; }
 .pl-st { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 9px; white-space: nowrap; }
-.pl-st.remove, .pl-st.removed, .pl-st.drafted, .pl-st.done { background: var(--good-bg); color: var(--good); }
+.pl-st.remove, .pl-st.removed, .pl-st.drafted, .pl-st.done, .pl-st.hidden, .pl-st.restored { background: var(--good-bg); color: var(--good); }
 .pl-st.pending { background: var(--info-bg); color: var(--info); }
 .pl-st.blocked, .pl-st.failed { background: var(--bad-bg); color: var(--bad); }
 .pl-st.manual, .pl-st.skip { background: var(--warn-bg); color: var(--warn); }
@@ -3650,7 +3650,7 @@ const PL_ADD_ORDER = ['session_class', 'wheel_workshop', 'wheel_session', 'works
 const PL_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const PL_VARIANT_FN = SUPABASE_URL + '/functions/v1/shopify-variant-remove'
 const PL_STATUS_TEXT = {
-  remove: 'Remove variant', removed: 'Removed from Shopify', drafted: 'Product set to Draft', pending: 'Saved for later',
+  remove: 'Hide (set to 0)', hidden: 'Hidden in Shopify', restored: 'Put back', removed: 'Variant deleted', drafted: 'Product set to Draft', pending: 'Saved for later',
   blocked: 'Has bookings', manual: 'Do by hand', failed: 'Failed', done: 'Done', skip: 'Skipped'
 }
 
@@ -4694,7 +4694,7 @@ async function plOpenSet() {
   } catch (e) { plModal('<h2>Set plan</h2><div class="note bad">Could not check: ' + esc(e.message || e) + '</div><div class="pl-actions"><button class="btn" onclick="plCloseModal()">Close</button></div>', true); return }
   rows.forEach(r => {
     const old = prev.find(x => x.session_date === r.date && String(x.session_time).slice(0, 5) === r.time && x.kind === r.kind && (x.slot || 0) === r.slot)
-    if (old && ['removed', 'drafted', 'done'].includes(old.status)) { r.status = old.status; r.note = 'Handled ' + String(old.removed_at || old.updated_at || '').slice(0, 10); r.earlier = true }
+    if (old && ['removed', 'drafted', 'done', 'hidden'].includes(old.status)) { r.status = old.status; r.note = 'Handled ' + String(old.removed_at || old.updated_at || '').slice(0, 10); r.earlier = true }
   })
   pl.setRows = rows
   pl.setShiftsDone = null
@@ -4763,7 +4763,7 @@ async function plSendShifts() {
 function plSetLabel(toRemove) {
   const x = pl.setShifts, n = x && !x.error && x.send ? x.ok.length : 0
   const parts = []
-  if (toRemove) parts.push('remove ' + toRemove + ' variant' + (toRemove > 1 ? 's' : ''))
+  if (toRemove) parts.push('hide ' + toRemove + ' variant' + (toRemove > 1 ? 's' : ''))
   if (n) parts.push('send ' + n + ' shift' + (n > 1 ? 's' : ''))
   if (!parts.length) return 'Set plan'
   const t = parts.join(', ') + ' and set plan'
@@ -4781,7 +4781,7 @@ function plRenderSet(result) {
         '<td>' + plDayLabel(r.date) + '</td><td>' + bdFmtShort(toMin(r.time)) + '</td><td>' + esc(r.session ? r.session.title : r.label) + '</td><td class="muted">' + esc(r.why) + '</td>' +
         '<td class="wrap small">' + esc(r.shopifyTitle && r.shopifyTitle !== 'OVERRIDE' ? r.shopifyTitle : '') + '</td>' +
         '<td><span class="pl-st ' + (r.skip ? 'skip' : r.status) + '">' + (r.skip ? 'Skip for now' : PL_STATUS_TEXT[r.status]) + '</span>' + (r.note ? ' <span class="muted small">' + esc(r.note) + '</span>' : '') + '</td></tr>').join('') +
-      '</table></div><div class="muted small" style="margin-top:4px">Ticked rows: this studio\'s variant is removed from the Shopify product and the session is hidden. Everything that isn\'t in Shopify yet is saved to the Removal list to remove later.</div>'
+      '</table></div><div class="muted small" style="margin-top:4px">Ticked rows are hidden: this studio\'s variant is set to 0 left in Shopify (not deleted) and taken off the customer calendar, so it can be put back from the Removal list. Everything that isn\'t in Shopify yet is saved to the Removal list for later.</div>'
   }
   h += plShiftPreviewHtml(pl.setShifts, pl.setShiftsDone)
   h += plContactsHtml(plContacts(rows.filter(r => r.status === 'blocked').map(r => ({ date: r.date, time: r.time, what: r.session ? r.session.title : r.label, bookings: r.bookings }))))
@@ -4795,23 +4795,57 @@ function plRenderSet(result) {
   plModal(h, true)
 }
 
-async function plRemoveVariant(r) {
+// Hide one studio's variant: live Shopify inventory to 0 (never deleted), off the customer calendar.
+// The quantity it had is kept so Put back can restore it.
+async function plHideVariant(r) {
   try {
-    const { data: { session } } = await sb.auth.getSession()
-    const res = await fetch(PL_VARIANT_FN, { method: 'POST', headers: { Authorization: 'Bearer ' + (session ? session.access_token : SUPABASE_KEY), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ inventory_item_id: r.variant.inventory_item_id, session_id: r.session.id, studio_id: r.studio || pl.studio }) })
-    if (res.status === 404) return { status: 'pending', note: 'shopify-variant-remove isn\'t deployed yet' }
-    const j = await res.json().catch(() => ({}))
-    if (j.removed) return { status: 'removed', note: '' }
-    if (j.has_bookings) return { status: 'blocked', note: j.booked + ' booked' }
-    if (j.not_found) return { status: 'pending', note: 'Variant not found in Shopify' }
-    if (j.last_variant) {
-      const r2 = await bdInvCall({ action: 'set_status', product_title: r.shopifyTitle, status: 'draft' })
-      if (r2 && !r2.error) { await sb.from('sessions').update({ publish: false, show: false }).eq('id', r.session.id); return { status: 'drafted', note: 'Only variant on the product, so the product was set to Draft' } }
-      return { status: 'failed', note: 'Only variant on the product; could not set it to Draft: ' + ((r2 && r2.error) || '') }
-    }
-    return { status: 'failed', note: j.error || 'HTTP ' + res.status }
+    const booked = await bdBookedCount(r.session.id)
+    if (booked > 0) return { status: 'blocked', note: booked + ' booked' }
+    let prev = null
+    try {
+      const d = await bdInvCall({ action: 'get_all', product_title: r.shopifyTitle })
+      const v = (d.variants || []).find(x => String(x.inventory_item_id) === String(r.variant.inventory_item_id))
+      if (v) prev = v.inventory_quantity
+    } catch (e) {}
+    const data = await bdInvCall({ action: 'set', inventory_item_id: r.variant.inventory_item_id, quantity: 0 })
+    if (!data || !data.inventory_level) return { status: 'failed', note: (data && data.error) || 'Shopify inventory not changed' }
+    await sb.from('sessions').update({ spaces_left_cache: 0, publish: false }).eq('id', r.session.id)
+    return { status: 'hidden', note: prev != null ? 'Had ' + prev + ' left' : '', restore_qty: prev }
   } catch (e) { return { status: 'failed', note: e.message } }
+}
+
+// Put one Removal list row back in Shopify: hidden → its old quantity (else the session's capacity),
+// product set to Draft → active again, variant deleted → recreated by shopify-variant-remove (action restore).
+async function plRestoreRow(r) {
+  let cap = null
+  if (r.session_id) { const { data } = await sb.from('sessions').select('capacity').eq('id', r.session_id).maybeSingle(); cap = data ? data.capacity : null }
+  const qty = r.restore_qty > 0 ? r.restore_qty : cap > 0 ? cap : null
+  try {
+    if (r.status === 'hidden') {
+      if (qty == null) return { error: 'no quantity to put back (set it in admin)' }
+      const { data: v } = await sb.from('shopify_variants').select('inventory_item_id').eq('studio_id', r.studio_id).eq('shopify_title', r.shopify_title).not('inventory_item_id', 'is', null).limit(1)
+      if (!v || !v[0]) return { error: 'Shopify variant not found' }
+      const d = await bdInvCall({ action: 'set', inventory_item_id: v[0].inventory_item_id, quantity: qty })
+      if (!d || !d.inventory_level) return { error: (d && d.error) || 'Shopify not changed' }
+    } else if (r.status === 'drafted') {
+      const d = await bdInvCall({ action: 'set_status', product_title: r.shopify_title, status: 'active' })
+      if (!d || d.error) return { error: (d && d.error) || 'Shopify not changed' }
+    } else if (r.status === 'removed') {
+      if (qty == null) return { error: 'no quantity to put back (set it in admin)' }
+      const { data: { session } } = await sb.auth.getSession()
+      const res = await fetch(PL_VARIANT_FN, { method: 'POST', headers: { Authorization: 'Bearer ' + (session ? session.access_token : SUPABASE_KEY), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'restore', product_title: r.shopify_title, variant_name: PL_VARIANT_NAMES[r.studio_id], quantity: qty, studio_id: r.studio_id, session_id: r.session_id }) })
+      const j = await res.json().catch(() => ({}))
+      if (!(j.restored || j.exists)) return { error: j.error || (j.not_found ? 'product not found in Shopify' : 'deploy the updated shopify-variant-remove first') }
+    } else return { error: 'nothing to put back' }
+  } catch (e) { return { error: e.message } }
+  if (r.session_id) await sb.from('sessions').update(Object.assign({ publish: true, show: true }, r.status !== 'drafted' ? { spaces_left_cache: qty } : {})).eq('id', r.session_id)
+  const now = new Date().toISOString()
+  const patch = { status: 'restored', note: r.status === 'drafted' ? 'Product active again' : qty + ' left', updated_at: now, restored_at: now }
+  const up = await sb.from('schedule_plan_removals').update(patch).eq('id', r.id)
+  if (up.error && /restored_at/.test(up.error.message)) { delete patch.restored_at; await sb.from('schedule_plan_removals').update(patch).eq('id', r.id) }
+  Object.assign(r, patch)
+  return { ok: true }
 }
 
 async function plRunSet() {
@@ -4819,8 +4853,8 @@ async function plRunSet() {
   btn.disabled = true
   const rows = pl.setRows, todo = rows.filter(r => r.status === 'remove' && !r.skip)
   for (let i = 0; i < todo.length; i++) {
-    msg.textContent = 'Removing ' + (i + 1) + ' of ' + todo.length + '…'
-    Object.assign(todo[i], await plRemoveVariant(todo[i]))
+    msg.textContent = 'Hiding ' + (i + 1) + ' of ' + todo.length + '…'
+    Object.assign(todo[i], await plHideVariant(todo[i]))
   }
   rows.filter(r => r.skip).forEach(r => { r.status = 'pending'; r.note = 'Skipped when the plan was set' })
   const now = new Date().toISOString()
@@ -4828,18 +4862,19 @@ async function plRunSet() {
     plan_id: pl.plan.id, studio_id: pl.studio, session_date: r.date, session_time: r.time + ':00', kind: r.kind, slot: r.slot,
     label: r.label, session_id: r.session ? String(r.session.id) : null, session_title: r.session ? r.session.title : null,
     shopify_title: r.shopifyTitle && r.shopifyTitle !== 'OVERRIDE' ? r.shopifyTitle : null, status: r.status === 'remove' ? 'pending' : r.status,
-    note: r.note || null, updated_at: now, removed_at: ['removed', 'drafted'].includes(r.status) ? now : null
+    note: r.note || null, updated_at: now, removed_at: ['removed', 'drafted', 'hidden'].includes(r.status) ? now : null,
+    restore_qty: r.restore_qty != null ? r.restore_qty : null
   }))
   for (let i = 0; i < save.length; i += 200) {
-    const { error } = await sb.from('schedule_plan_removals').upsert(save.slice(i, i + 200), { onConflict: 'studio_id,session_date,session_time,kind,slot' })
-    if (error) { msg.textContent = 'Could not save the removal list: ' + error.message; btn.disabled = false; return }
+    let { error } = await sb.from('schedule_plan_removals').upsert(save.slice(i, i + 200), { onConflict: 'studio_id,session_date,session_time,kind,slot' })
+    if (error) { msg.textContent = 'Could not save the removal list: ' + error.message + (/restore_qty|status_check/.test(error.message) ? ' (run removal-hide.sql in Supabase first)' : ''); btn.disabled = false; return }
   }
   msg.textContent = 'Sending draft shifts…'
   pl.setShiftsDone = await plSendShifts()
   pl.plan.status = 'set'; pl.plan.set_at = now; pl.plan.dirty = true
   await plSave()
   const c = s => rows.filter(r => !r.earlier && r.status === s).length
-  plRenderSet('Plan set. ' + [c('removed') && c('removed') + ' variants removed', c('drafted') && c('drafted') + ' products set to Draft', c('pending') && c('pending') + ' saved to the Removal list for later',
+  plRenderSet('Plan set. ' + [c('hidden') && c('hidden') + ' variants hidden (set to 0)', c('drafted') && c('drafted') + ' products set to Draft', c('pending') && c('pending') + ' saved to the Removal list for later',
     c('blocked') && c('blocked') + ' have bookings', c('manual') && c('manual') + ' to do by hand', c('failed') && c('failed') + ' failed (see Status)'].filter(Boolean).join(', ') + '.')
   plRender()
 }
@@ -5004,7 +5039,7 @@ function plRenderAllRemove(msg) {
     '</table></div>'
   h += '<div class="pl-actions"><span class="muted small" id="pl-allrm-msg">Bookings to contact are in each studio\'s Removal list.</span><button class="btn" onclick="plCloseModal()">Close</button>' +
     (list.length ? '<button class="btn" onclick="plAllRemoveCopy()">Copy list</button><button class="btn" onclick="plAllRemoveCsv()">Download CSV</button>' : '') +
-    (rows.some(r => ['pending', 'failed', 'blocked'].includes(r.status)) ? '<button class="btn primary" id="pl-allrm-go" onclick="plAllRecheck()">Check Shopify again and remove</button>' : '') + '</div>'
+    (rows.some(r => ['pending', 'failed', 'blocked'].includes(r.status)) ? '<button class="btn primary" id="pl-allrm-go" onclick="plAllRecheck()">Check Shopify again and hide</button>' : '') + '</div>'
   plModal(h, true)
 }
 function plAllRemoveCopy() {
@@ -5028,7 +5063,7 @@ async function plAllRecheck() {
   let removed
   try { removed = await plRecheckRows((plAllState.removals || []).filter(r => ['pending', 'failed', 'blocked'].includes(r.status)), msg) }
   catch (e) { msg.textContent = 'Could not check: ' + (e.message || e); btn.disabled = false; return }
-  plRenderAllRemove(removed ? removed + ' removed from Shopify. The rest stay on the list with their updated status.' : 'Nothing new to remove yet.')
+  plRenderAllRemove(removed ? removed + ' hidden in Shopify. The rest stay on the list with their updated status.' : 'Nothing new to remove yet.')
 }
 
 function plAllCopy() {
@@ -5059,26 +5094,51 @@ async function plOpenRemovals() {
 }
 async function plLoadRemovalBookings() {
   pl.removalBookings = {}
-  const ids = pl.removals.filter(r => r.session_id && !['removed', 'drafted', 'done'].includes(r.status)).map(r => r.session_id)
+  const ids = pl.removals.filter(r => r.session_id && !PL_HANDLED.includes(r.status)).map(r => r.session_id)
   for (let i = 0; i < ids.length; i += 200) {
     const { data } = await sb.from('bookings').select(PL_BOOKING_COLS).in('session_id', ids.slice(i, i + 200)).gt('qty', 0).is('returned_at', null)
     ;(data || []).forEach(b => { (pl.removalBookings[b.session_id] = pl.removalBookings[b.session_id] || []).push(b) })
   }
 }
+const PL_HANDLED = ['removed', 'drafted', 'done', 'hidden', 'restored']
+const PL_CAN_PUT_BACK = ['hidden', 'drafted', 'removed']
 function plRenderRemovals(msg) {
-  const open = pl.removals.filter(r => !['removed', 'drafted', 'done'].includes(r.status)), done = pl.removals.length - open.length
-  let h = '<h2>Removal list</h2><div class="sub">' + esc(STUDIO_NAMES[pl.studio]) + ': offerings taken out by a plan that still need to come out of Shopify. ' + done + ' upcoming already handled.</div>'
+  const open = pl.removals.filter(r => !PL_HANDLED.includes(r.status))
+  const back = pl.removals.filter(r => PL_CAN_PUT_BACK.includes(r.status))
+  let h = '<h2>Removal list</h2><div class="sub">' + esc(STUDIO_NAMES[pl.studio]) + ': offerings a plan took out, today onward. Waiting to come out of Shopify, and what\'s already hidden (which you can put back).</div>'
   if (msg) h += '<div class="note info">' + msg + '</div>'
   if (!open.length) h += '<div class="empty">Nothing waiting.</div>'
   else h += '<div class="pl-tbl-wrap"><table class="list"><tr><th>Date</th><th>Time</th><th>What</th><th>Status</th><th></th></tr>' +
     open.map(r => '<tr><td>' + plDayLabel(r.session_date) + '</td><td>' + fmtTime(r.session_time) + '</td><td>' + esc(r.session_title || r.label) + '</td>' +
       '<td><span class="pl-st ' + r.status + '">' + PL_STATUS_TEXT[r.status] + '</span> <span class="muted small">' + esc(r.note || '') + '</span></td>' +
       '<td class="actions"><button class="btn small" onclick="plRemovalMark(\'' + r.id + '\',\'done\')">Mark done</button><button class="btn small bad" onclick="plRemovalForget(\'' + r.id + '\')" title="Take it off this list (it stays on Shopify)">Forget</button></td></tr>').join('') + '</table></div>'
+  h += '<h3>Hidden in Shopify (' + back.length + ')</h3>'
+  if (!back.length) h += '<div class="muted small">Nothing hidden yet.</div>'
+  else h += '<div class="pl-tbl-wrap"><table class="list"><tr><th>Date</th><th>Time</th><th>What</th><th>Status</th><th></th></tr>' +
+    back.map(r => '<tr><td>' + plDayLabel(r.session_date) + '</td><td>' + fmtTime(r.session_time) + '</td><td>' + esc(r.session_title || r.label) + '</td>' +
+      '<td><span class="pl-st ' + r.status + '">' + PL_STATUS_TEXT[r.status] + '</span> <span class="muted small">' + esc(r.note || '') + '</span></td>' +
+      '<td class="actions"><button class="btn small good" onclick="plPutBack(\'' + r.id + '\')">Put back</button></td></tr>').join('') +
+    '</table></div><div style="display:flex;gap:8px;margin-top:6px;align-items:center"><button class="btn small good" onclick="plPutBack(null)">Put all ' + back.length + ' back</button>' +
+    '<span class="muted small">Puts the spaces back in Shopify and on the customer calendar. Also put them back on the plan\'s grid, or the next Set plan hides them again.</span></div>'
   h += plContactsHtml(plContacts(open.filter(r => r.session_id && (pl.removalBookings || {})[r.session_id]).map(r => ({ date: r.session_date, time: String(r.session_time).slice(0, 5),
     what: r.session_title || r.label, bookings: pl.removalBookings[r.session_id] }))))
   h += '<div class="pl-actions"><span class="muted small" id="pl-rm-msg"></span><button class="btn" onclick="plCloseModal()">Close</button>' +
-    (open.some(r => ['pending', 'failed', 'blocked'].includes(r.status)) ? '<button class="btn primary" id="pl-rm-go" onclick="plRecheckRemovals()">Check Shopify again and remove</button>' : '') + '</div>'
+    (open.some(r => ['pending', 'failed', 'blocked'].includes(r.status)) ? '<button class="btn primary" id="pl-rm-go" onclick="plRecheckRemovals()">Check Shopify again and hide</button>' : '') + '</div>'
   plModal(h, true)
+}
+async function plPutBack(id) {
+  const list = pl.removals.filter(r => PL_CAN_PUT_BACK.includes(r.status) && (!id || r.id === id))
+  if (!list.length) return
+  if (!confirm('Put ' + (list.length === 1 ? '"' + (list[0].session_title || list[0].label) + '" on ' + fmtDate(list[0].session_date) : list.length + ' offerings') + ' back in Shopify?\n\n' +
+    'Hidden ones get the spaces they had back (or the session\'s capacity). Deleted variants are recreated. Customers can book them again.')) return
+  const msg = document.getElementById('pl-rm-msg'), fails = []
+  let ok = 0
+  for (let i = 0; i < list.length; i++) {
+    if (msg) msg.textContent = 'Putting back ' + (i + 1) + ' of ' + list.length + '…'
+    const res = await plRestoreRow(list[i])
+    if (res.ok) ok++; else fails.push(fmtDate(list[i].session_date) + ' ' + fmtTime(list[i].session_time) + ' ' + (list[i].session_title || list[i].label) + ': ' + res.error)
+  }
+  plRenderRemovals(ok + ' put back.' + (fails.length ? ' Not put back: ' + fails.join('; ') : ''))
 }
 async function plRemovalMark(id, status) {
   const { error } = await sb.from('schedule_plan_removals').update({ status, updated_at: new Date().toISOString() }).eq('id', id)
@@ -5097,7 +5157,7 @@ async function plRecheckRemovals() {
   try { removed = await plRecheckRows(pl.removals.filter(r => ['pending', 'failed', 'blocked'].includes(r.status)), msg) }
   catch (e) { msg.textContent = 'Could not check: ' + (e.message || e); btn.disabled = false; return }
   await plLoadRemovalBookings()
-  plRenderRemovals(removed ? removed + ' removed from Shopify.' : 'Nothing new to remove yet.')
+  plRenderRemovals(removed ? removed + ' hidden in Shopify.' : 'Nothing new to hide yet.')
 }
 // Re-match removal rows (any studios) to sessions, Shopify and bookings; remove what's ready; save each row's new status.
 async function plRecheckRows(rows, msg) {
@@ -5115,12 +5175,13 @@ async function plApplyRecheck(list, msg, tick, total) {
   let removed = 0
   for (let i = 0; i < list.length; i++) {
     const r = list[i], n = tick()
-    if (r.status === 'remove') { if (msg) msg.textContent = 'Removing ' + n + ' of ' + total + '…'; Object.assign(r, await plRemoveVariant(r)) }
+    if (r.status === 'remove') { if (msg) msg.textContent = 'Hiding ' + n + ' of ' + total + '…'; Object.assign(r, await plHideVariant(r)) }
     const now = new Date().toISOString()
     const patch = { status: r.status === 'remove' ? 'pending' : r.status, note: r.note || null, updated_at: now,
       session_id: r.session ? String(r.session.id) : r.src.session_id, session_title: r.session ? r.session.title : r.src.session_title,
       shopify_title: r.shopifyTitle && r.shopifyTitle !== 'OVERRIDE' ? r.shopifyTitle : r.src.shopify_title }
-    if (['removed', 'drafted'].includes(r.status)) { patch.removed_at = now; removed++ }
+    if (['removed', 'drafted', 'hidden'].includes(r.status)) { patch.removed_at = now; removed++ }
+    if (r.restore_qty != null) patch.restore_qty = r.restore_qty
     await sb.from('schedule_plan_removals').update(patch).eq('id', r.src.id)
     Object.assign(r.src, patch)
   }
