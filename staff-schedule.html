@@ -3720,6 +3720,7 @@ function plWeekDates(w) { const s = addDays(pl.plan.week_start, 7 * (w == null ?
 function plLastDate() { return addDays(pl.plan.week_start, pl.plan.weeks * 7 - 1) }
 function plId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7) }
 function plAddLabel(a) {
+  if (a.existing && a.name) return a.name
   if (a.catalog_id && a.name) return a.name
   if (a.kind === 'session_class') return a.name || 'Session class'
   if (a.kind === 'wheel_workshop') return (a.audience || 'Adult') + ' Wheel Workshop'
@@ -3904,6 +3905,7 @@ function plRenderBar() {
     '<label class="small">Weeks <select class="input" onchange="plSetWeeks(this.value)">' + weeks + '</select></label>' +
     (p.status === 'set' ? '<span class="pill approved" title="Set ' + esc(String(p.set_at || '').slice(0, 10)) + '">Set</span>' : '') +
     '<span class="spacer"></span><span id="pl-save-status" class="muted small"></span>' +
+    '<button class="btn" onclick="plOpenImport()" title="Add the session classes already running here, with registrations">Running classes</button>' +
     '<button class="btn" onclick="plOpenDefaults()">Defaults</button>' +
     '<button class="btn" onclick="plOpenRemovals()">Removal list</button>' +
     '<button class="btn primary" onclick="plOpenSet()">Set plan</button>' +
@@ -3965,7 +3967,7 @@ function plItems(date) {
   adds.forEach(a => {
     const ds = a.dates.slice().sort(), closed = d.closed[date]
     items.push({ id: 'A|' + a.id + '|' + date, addId: a.id, date, kind: a.kind, start: a.start, dur: a.dur, col: a.col, src: 'add', state: closed ? 'closed' : 'on', by: closed ? plClosedText(closed) : '',
-      label: plAddLabel(a), staff: a.staff, people: a.people, price: a.price, nth: ds.indexOf(date) + 1, of: ds.length })
+      label: plAddLabel(a) + (a.existing ? ' (running)' : ''), existing: !!a.existing, staff: a.staff, people: a.people, price: a.price, nth: ds.indexOf(date) + 1, of: ds.length })
   })
   pl.camps.filter(c => c.date === date).forEach(c => {
     const id = 'C|' + c.id + '|' + date, e = d.edits[id] || {}
@@ -4018,7 +4020,7 @@ function plCloseDay(date) {
   const d = pl.plan.data, why = document.querySelector('input[name="pl-close-why"]:checked')
   const rec = { reason: why ? why.value : 'Closed', note: document.getElementById('pl-close-note').value.trim(), shifted: [], shifts: null }
   d.closed[date] = rec   // first, so plNextWeek skips this date
-  d.adds.filter(a => PL_KINDS[a.kind].series && a.dates.includes(date)).forEach(a => {
+  d.adds.filter(a => PL_KINDS[a.kind].series && !a.existing && a.dates.includes(date)).forEach(a => {
     a.dates = a.dates.filter(x => x !== date)
     const next = plNextWeek(a, date)
     if (next) { a.dates.push(next); plGrowTo(next) }
@@ -4386,7 +4388,9 @@ function plItemClick(ev, id, date) {
     }
     h += '<div class="row"><span class="muted small">Column</span>' + [0, 1, 2].map(c => '<button class="btn small' + (c === it.col ? ' primary' : '') + '" onclick="plItemCol(\'' + id + '\',' + c + ')">' + (c + 1) + '</button>').join('') + '</div><hr>'
     if (it.src === 'add') {
-      h += (it.of > 1 || PL_KINDS[it.kind].series ? '<button onclick="plItemDelete(\'' + id + '\',false)">' + (PL_KINDS[it.kind].series ? 'Skip this date (adds a week on the end)' : 'Remove this date only') + '</button>' : '') +
+      const shifts = PL_KINDS[it.kind].series && !it.existing
+      if (it.existing) h += '<div class="row muted small">Already running with registrations. Its dates are fixed, and it isn\'t on the list to add to Shopify.</div>'
+      h += (it.of > 1 || shifts ? '<button onclick="plItemDelete(\'' + id + '\',false)">' + (shifts ? 'Skip this date (adds a week on the end)' : 'Remove this date only') + '</button>' : '') +
         '<button onclick="plItemDelete(\'' + id + '\',true)" style="color:var(--bad)">Delete' + (it.of > 1 ? ' on all ' + it.of + ' dates' : '') + '</button>'
     } else {
       h += '<button onclick="plItemDelete(\'' + id + '\',false)" style="color:var(--bad)">Take out this date</button>' +
@@ -4421,7 +4425,7 @@ function plItemDelete(id, all) {
     if (all || (a.dates.length <= 1 && !PL_KINDS[a.kind].series)) d.adds = d.adds.filter(x => x.id !== aid)
     else {
       a.dates = a.dates.filter(x => x !== date)
-      if (PL_KINDS[a.kind].series) {
+      if (PL_KINDS[a.kind].series && !a.existing) {
         // keep the same number of classes: add the next open week after the last class
         const next = plNextWeek(a, date)
         if (next) { a.dates.push(next); plGrowTo(next) }
@@ -4544,6 +4548,76 @@ function plConfirmAdd() {
   if (lastD > plLastDate()) { p.weeks = Math.min(12, Math.floor(daysBetween(p.week_start, lastD) / 7) + 1); toast('Plan is now ' + p.weeks + ' weeks to fit ' + plAddLabel(a)) }
   else toast('Added ' + plAddLabel(a) + ' on ' + dates.length + ' date' + (dates.length > 1 ? 's' : ''))
   plCloseModal(); plTouch()
+}
+
+/* ---------- running classes: sessions already on with registrations ---------- */
+// Read from the same staffing data as Coverage: kids classes and wheel sessions (one teacher per class)
+// with people enrolled. One plan item per class (same title, weekday and time), dates fixed.
+let plImport = null
+function plOpenImport() {
+  const from = pl.plan.week_start > todayStr() ? pl.plan.week_start : todayStr()
+  plModal('<h2>Running classes</h2><div class="sub">Session classes and wheel sessions already running at ' + esc(STUDIO_NAMES[pl.studio]) +
+    ' with registrations, on the plan\'s dates. They\'re added to the plan as running (not as new offerings for Shopify).</div>' +
+    '<div class="pl-frow"><label class="pl-f"><span>From</span><input class="input" type="date" id="pl-i-from" value="' + from + '" style="width:150px"></label>' +
+    '<label class="pl-f"><span>Kids session, per class</span><input class="input" type="number" min="0" id="pl-i-kids" value="15"></label>' +
+    '<label class="pl-f"><span>Wheel session, per class</span><input class="input" type="number" min="0" id="pl-i-wheel" value="35"></label></div>' +
+    '<label class="small" style="display:flex;gap:6px;align-items:center;margin-bottom:6px"><input type="checkbox" id="pl-i-repl" checked> Take out drop-ins that start during these classes (change any class afterwards by clicking it)</label>' +
+    '<div class="pl-actions" style="justify-content:flex-start"><button class="btn primary" onclick="plFindRunning()">Find running classes</button><span class="muted small" id="pl-i-msg"></span></div>' +
+    '<div id="pl-i-list"></div>', true)
+}
+async function plFindRunning() {
+  const from = document.getElementById('pl-i-from').value || todayStr(), to = plLastDate()
+  const kidsRate = Number(document.getElementById('pl-i-kids').value) || 0, wheelRate = Number(document.getElementById('pl-i-wheel').value) || 0
+  const msg = document.getElementById('pl-i-msg')
+  if (from > to) { msg.textContent = 'That\'s after the plan ends (' + plShortDate(to) + ').'; return }
+  msg.textContent = 'Looking…'
+  const r = await sb.rpc('get_staffing_need', { p_studio_id: pl.studio, p_from: from, p_to: to })
+  if (r.error) { msg.textContent = 'Could not load: ' + r.error.message; return }
+  const groups = {}
+  ;(r.data || []).filter(x => x.rule_kind === 'one_per_session' && (x.booked || 0) > 0 && x.start_time && x.end_time).forEach(x => {
+    const dow = plDow(x.session_date), key = classKey(x.title) + '|' + dow + '|' + x.start_time.slice(0, 5)
+    const g = groups[key] || (groups[key] = { key, title: classLabel(x.title), kind: /wheel/i.test(x.title) ? 'wheel_session' : 'session_class', dow,
+      start: toMin(x.start_time), dur: Math.max(15, toMin(x.end_time) - toMin(x.start_time)), dates: [], enrolled: 0 })
+    if (!g.dates.includes(x.session_date)) g.dates.push(x.session_date)
+    g.enrolled = Math.max(g.enrolled, x.booked || 0)
+  })
+  const list = Object.values(groups).sort((a, b) => ((a.dow + 6) % 7) - ((b.dow + 6) % 7) || a.start - b.start)
+  list.forEach(g => {
+    g.dates.sort()
+    g.rate = g.kind === 'wheel_session' ? wheelRate : kidsRate
+    g.inPlan = pl.plan.data.adds.some(a => a.sourceKey === g.key)
+    g.pick = true
+  })
+  plImport = { list, repl: document.getElementById('pl-i-repl').checked, from }
+  msg.textContent = list.length ? '' : 'No classes with registrations from ' + plShortDate(from) + ' to ' + plShortDate(to) + '.'
+  plRenderImport()
+}
+function plRenderImport() {
+  const box = document.getElementById('pl-i-list'), list = plImport.list
+  if (!list.length) { box.innerHTML = ''; return }
+  const n = list.filter(g => g.pick).length
+  box.innerHTML = '<div class="pl-tbl-wrap" style="margin-top:8px"><table class="list"><tr><th></th><th>Class</th><th>Day and time</th><th>Classes in the plan</th><th>Enrolled</th><th>Per class</th><th>Revenue</th></tr>' +
+    list.map((g, i) => '<tr><td><input type="checkbox"' + (g.pick ? ' checked' : '') + ' onchange="plImport.list[' + i + '].pick=this.checked;plRenderImport()"></td>' +
+      '<td class="wrap">' + esc(g.title) + (g.kind === 'wheel_session' ? ' <span class="muted small">wheel</span>' : '') + (g.inPlan ? ' <span class="muted small">(already in the plan: updates it)</span>' : '') + '</td>' +
+      '<td>' + DAY_SHORT[g.dow] + ' ' + bdFmtShort(g.start) + '–' + bdFmtShort(g.start + g.dur) + '</td>' +
+      '<td class="wrap small">' + g.dates.length + ': ' + g.dates.map(plShortDate).join(', ') + '</td><td>' + g.enrolled + '</td><td>$' + g.rate + '</td>' +
+      '<td>' + plMoney(g.rate * g.dates.length * g.enrolled) + ' <span class="muted small">($' + (g.rate * g.dates.length) + ' each)</span></td></tr>').join('') +
+    '</table></div><div class="pl-actions"><span class="muted small">Only dates inside the plan, ' + plShortDate(plImport.from) + ' to ' + plShortDate(plLastDate()) + '.</span>' +
+    '<button class="btn" onclick="plCloseModal()">Cancel</button><button class="btn primary"' + (n ? '' : ' disabled') + ' onclick="plConfirmImport()">Add ' + n + ' to the plan</button></div>'
+}
+function plConfirmImport() {
+  const d = pl.plan.data, picked = plImport.list.filter(g => g.pick)
+  let added = 0, updated = 0
+  picked.forEach(g => {
+    const vals = { kind: g.kind, name: g.title, start: g.start, dur: g.dur, dates: g.dates.slice(), people: g.enrolled, price: g.rate * g.dates.length }
+    const a = d.adds.find(x => x.sourceKey === g.key)
+    if (a) { Object.assign(a, vals); updated++; return }
+    d.adds.push(Object.assign({ id: plId(), existing: true, sourceKey: g.key, audience: '', catalog_id: null, col: 1,
+      replace: plImport.repl, replaceKinds: plImport.repl ? PL_DROPINS.slice() : [], staff: Number(pl.plan.settings.k[g.kind].staff) || 1, added_at: todayStr() }, vals))
+    added++
+  })
+  plCloseModal(); plTouch()
+  toast((added ? added + ' running class' + (added === 1 ? '' : 'es') + ' added' : '') + (added && updated ? ', ' : '') + (updated ? updated + ' updated' : ''))
 }
 
 /* ---------- defaults ---------- */
@@ -4670,6 +4744,7 @@ function plAdditions() { return plAdditionsFor(pl.plan.data) }
 function plAdditionsFor(data) {
   const out = [], closed = data.closed || {}
   ;(data.adds || []).forEach(a => {
+    if (a.existing) return   // already running and in Shopify
     const dates = a.dates.filter(x => !closed[x]).sort(), name = plAddLabel(a)
     if (!dates.length) return
     const repl = a.replace ? (a.replaceKinds && a.replaceKinds.length < PL_DROPINS.length ? a.replaceKinds.map(k => PL_KINDS[k].label).join(', ') : 'Yes') : 'No'
