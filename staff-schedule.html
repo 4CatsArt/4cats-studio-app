@@ -259,6 +259,8 @@ td[data-date] .wk-chip:not([draggable="true"]) { cursor: default; }
 .pl-legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11px; color: var(--muted); align-items: center; }
 .pl-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; border-left: 3px solid; }
 
+.pl-menu { max-height: 80vh; overflow-y: auto; }
+.pl-menu > button.cat { padding: 5px 8px 5px 22px; font-size: 12px; }
 .pl-menu { position: fixed; z-index: 500; background: #fff; border: 0.5px solid var(--line-2); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.14); padding: 6px; width: 260px; }
 .pl-menu-h { font-size: 11px; color: var(--muted); padding: 4px 8px 6px; }
 .pl-menu-h b { color: var(--ink); font-size: 13px; display: block; }
@@ -391,6 +393,8 @@ table.pl-staff .bad { color: var(--bad); }
     <div class="view" id="view-plan">
       <div class="toolbar">
         <select class="input" id="pl-studio" onchange="plLoadStudio()"></select>
+        <button class="btn" onclick="plOpenCatalog()" title="Upcoming sessions for every studio: these show in the Add menu">Session list</button>
+        <button class="btn" onclick="plOpenAll()" title="Everything every studio's plans add, grouped into Shopify products">All studios</button>
         <span id="pl-planbar" style="display:contents"></span>
       </div>
       <div class="note info" style="margin-bottom:1rem">
@@ -3648,6 +3652,26 @@ const PL_STATUS_TEXT = {
   blocked: 'Has bookings', manual: 'Do by hand', failed: 'Failed', done: 'Done', skip: 'Skipped'
 }
 
+// Shopify variant names per studio (copied from admin.html's STUDIO_VARIANT_MAP)
+const PL_VARIANT_NAMES = {
+  'AB-YYC-ING':'AB / CALGARY - INGLEWOOD','AB-STA-STA':'AB / ST ALBERT',
+  'BC-RICH-GC':'BC / RICHMOND - GARDEN CITY','BC-RICH-STV':'BC / RICHMOND - STEVESTON',
+  'BC-SUR-SSR':'BC / SURREY - SOUTH','BC-YVR-KIT':'BC / VANCOUVER - KITSILANO',
+  'BC-YVR-MS':'BC / VANCOUVER - MAIN STREET','BC-YVR-UBC':'BC / VANCOUVER - UBC',
+  'BC-YYJ-CSV':'BC / VICTORIA - COOK STREET VILLAGE','BC-YYJ-ESQ':'BC / VICTORIA - ESQUIMALT',
+  'BC-YYJ-OB':'BC / VICTORIA - OAK BAY','BC-YYJ-VIC':'BC / VICTORIA - UPTOWN',
+  'ON-BRL-BRL':'ON / BURLINGTON - SOUTH','ON-CMB-GLT':'ON / CAMBRIDGE - GALT',
+  'ON-ERN-ERN':'ON / ERIN','ON-HAM-OS':'ON / HAMILTON - OTTAWA STREET',
+  'ON-HAM-WD':'ON / HAMILTON - WATERDOWN','ON-HAM-WH':'ON / HAMILTON - WEST HARBOUR',
+  'ON-KGN-AP':'ON / KINGSTON - ARLINGTON PARK','ON-LDN-BYR':'ON / LONDON - BYRON',
+  'ON-LDN-WVG':'ON / LONDON - WORTLEY VILLAGE','ON-MIS-PC':'ON / MISSISSAUGA - PORT CREDIT',
+  'ON-OAK-OAK':'ON / OAKVILLE - NORTH','ON-OAK-WST':'ON / OAKVILLE - WEST',
+  'ON-YOW-GLB':'ON / OTTAWA - THE GLEBE','ON-STC-STC':'ON / ST CATHARINES',
+  'ON-YYZ-AVE':'ON / TORONTO - AVENUE ROAD','ON-YYZ-BP':'ON / TORONTO - BABY POINT',
+  'ON-YYZ-LEA':'ON / TORONTO - LEASIDE','ON-YYZ-BEA':'ON / TORONTO - THE BEACHES',
+  'ON-WTR-WTR':'ON / WATERLOO - UPTOWN'
+}
+let plCatalog = []   // session_catalog rows (all studios)
 let pl = { studio: '', plans: [], plan: null, week: 0, parties: [], pool: [], allStaff: [], wages: {}, saveTimer: null, lo: 540, setRows: null }
 
 function plDefaults() {
@@ -3693,6 +3717,7 @@ function plWeekDates(w) { const s = addDays(pl.plan.week_start, 7 * (w == null ?
 function plLastDate() { return addDays(pl.plan.week_start, pl.plan.weeks * 7 - 1) }
 function plId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7) }
 function plAddLabel(a) {
+  if (a.catalog_id && a.name) return a.name
   if (a.kind === 'session_class') return a.name || 'Session class'
   if (a.kind === 'wheel_workshop') return (a.audience || 'Adult') + ' Wheel Workshop'
   if (a.kind === 'wheel_session') return (a.audience || 'Kids') + ' Wheel Session'
@@ -3739,6 +3764,7 @@ function initPlan() {
   sel.innerHTML = '<option value="">Choose a studio…</option>' +
     Object.keys(STUDIO_NAMES).map(id => '<option value="' + id + '">' + esc(STUDIO_NAMES[id]) + '</option>').join('')
   document.addEventListener('click', ev => { const m = document.getElementById('pl-menu'); if (m && !m.contains(ev.target)) m.remove() })
+  plLoadCatalog()
   window.addEventListener('beforeunload', ev => { if (pl.plan && pl.plan.dirty) { plSave(); ev.preventDefault(); ev.returnValue = '' } })
 }
 
@@ -4243,8 +4269,22 @@ function plColClick(ev) {
   const t = pl.lo + Math.floor((ev.clientY - col.getBoundingClientRect().top) / PL_RH) * 15
   plShowMenu(ev, '<div class="pl-menu-h"><b>Add at ' + bdFmtShort(t) + '</b>' + plDayLabel(date) + ', column ' + (c + 1) + '</div>' +
     PL_ADD_ORDER.map(k => '<button onclick="plStartAdd(\'' + k + '\',\'' + date + '\',' + t + ',' + c + ')">' + PL_KINDS[k].label +
-      ' <span class="muted small">' + PL_KINDS[k].dur + ' min</span></button>').join(''))
+      ' <span class="muted small">' + PL_KINDS[k].dur + ' min</span></button>' + plCatalogButtons(k, date, t, c)).join(''))
 }
+// Upcoming sessions from the Session list, started on the clicked weekday of their starting week
+function plCatalogButtons(kind, date, t, c) {
+  const cap = addDays(pl.plan.week_start, 12 * 7 - 1)
+  let out = '', hidden = 0
+  plCatalog.filter(x => x.active && x.kind === kind).forEach(x => {
+    const first = addDays(x.start_week, plDow(date))
+    if (first < pl.plan.week_start || first > cap) { hidden++; return }
+    out += '<button class="cat" onclick="plStartAdd(\'' + kind + '\',\'' + date + '\',' + t + ',' + c + ',\'' + x.id + '\')">' + esc(x.title) +
+      ' <span class="muted small">' + plShortDate(first) + ', ' + x.classes + ' classes</span></button>'
+  })
+  if (hidden) out += '<div class="pl-menu-h" style="padding-left:22px">' + hidden + ' more start outside this plan</div>'
+  return out
+}
+
 
 function plFindItem(id, date) { return plItems(date).find(i => i.id === id) }
 function plSameDowIds(id) {
@@ -4335,18 +4375,22 @@ function plModal(html, wide) {
 function plCloseModal() { const m = document.getElementById('pl-modal'); if (m) m.remove() }
 
 let plForm = null
-function plStartAdd(kind, date, t, col) {
+function plStartAdd(kind, date, t, col, catId) {
   plCloseMenu()
-  const K = PL_KINDS[kind], def = pl.plan.settings.k[kind]
-  const weeksLeft = Math.floor(daysBetween(date, plLastDate()) / 7) + 1
-  plForm = { kind, date, col, skip: Object.assign({}, ...Object.keys(pl.plan.data.closed).map(x => ({ [x]: true }))) }
+  const cat = catId ? plCatalog.find(x => x.id === catId) : null
+  if (cat) date = addDays(cat.start_week, plDow(date))   // its starting week, on the day clicked
+  const K = PL_KINDS[kind], def = Object.assign({}, pl.plan.settings.k[kind])
+  if (cat && cat.price != null) def.price = Number(cat.price)
+  const weeksLeft = cat ? cat.classes : Math.floor(daysBetween(date, plLastDate()) / 7) + 1
+  plForm = { kind, date, col, catId: cat ? cat.id : null, skip: Object.assign({}, ...Object.keys(pl.plan.data.closed).map(x => ({ [x]: true }))) }
   const radios = (name, list, checked) => '<div class="opts">' + list.map(v => '<label><input type="radio" name="' + name + '" value="' + v + '"' + (v === checked ? ' checked' : '') + ' onchange="plFormUpdate()"> ' + v + '</label>').join('') + '</div>'
   let times = ''
   for (let m = 480; m <= 1260; m += 15) times += '<option value="' + m + '"' + (m === t ? ' selected' : '') + '>' + bdFmtShort(m) + '</option>'
-  let h = '<h2>Add ' + K.label.toLowerCase() + '</h2><div class="sub">' + K.dur + ' minute block, starting ' + DAY_NAMES[plDow(date)] + ' ' + plShortDate(date) + '</div>'
-  if (kind === 'session_class') h += '<label class="pl-f"><span>What is it?</span><input class="input" id="pl-f-name" placeholder="e.g. Dragons (ages 5–12)"></label>'
+  let h = '<h2>Add ' + (cat ? esc(cat.title) : K.label.toLowerCase()) + '</h2><div class="sub">' + K.dur + ' minute block, starting ' + DAY_NAMES[plDow(date)] + ' ' + plShortDate(date) + '</div>'
+  if (cat) h += '<div class="muted small" style="margin:-8px 0 12px">From the Session list: starts the week of ' + plShortDate(cat.start_week) + ', ' + cat.classes + ' classes</div>'
+  else if (kind === 'session_class') h += '<label class="pl-f"><span>What is it?</span><input class="input" id="pl-f-name" placeholder="e.g. Dragons (ages 5–12)"></label>'
   if (kind === 'wheel_workshop') h += '<div class="pl-f"><span>Who is it for?</span>' + radios('pl-f-aud', ['Adult', 'Family'], 'Adult') + '</div>'
-  if (kind === 'wheel_session') h += '<div class="pl-f"><span>Who is it for?</span>' + radios('pl-f-aud', ['Kids', 'Teen', 'Adult', 'Family'], 'Kids') + '</div>'
+  if (kind === 'wheel_session' && !cat) h += '<div class="pl-f"><span>Who is it for?</span>' + radios('pl-f-aud', ['Kids', 'Teen', 'Adult', 'Family'], 'Kids') + '</div>'
   h += '<div class="pl-frow"><label class="pl-f"><span>Starts at</span><select class="input" id="pl-f-time" onchange="plFormUpdate()">' + times + '</select></label>' +
     '<label class="pl-f"><span>Column</span><select class="input" id="pl-f-col">' + [0, 1, 2].map(c => '<option value="' + c + '"' + (c === col ? ' selected' : '') + '>' + (c + 1) + '</option>').join('') + '</select></label>' +
     '<label class="pl-f"><span>' + (K.series ? 'How many classes?' : 'Repeat for how many weeks?') + '</span><input class="input" type="number" min="1" max="12" id="pl-f-weeks" value="' + Math.max(1, weeksLeft) + '" oninput="plFormUpdate()"></label></div>'
@@ -4403,7 +4447,8 @@ function plFormUpdate() {
 }
 function plConfirmAdd() {
   const f = plForm, K = PL_KINDS[f.kind], p = pl.plan
-  const name = (document.getElementById('pl-f-name') || {}).value
+  const cat = f.catId ? plCatalog.find(x => x.id === f.catId) : null
+  const name = cat ? cat.title : (document.getElementById('pl-f-name') || {}).value
   if (f.kind === 'session_class' && !String(name || '').trim()) { document.getElementById('pl-f-msg').textContent = 'Add what the class is.'; return }
   const cap = addDays(p.week_start, 12 * 7 - 1)
   const dates = plFormDates().filter(d => !f.skip[d] && d <= cap)
@@ -4411,7 +4456,7 @@ function plConfirmAdd() {
   const aud = document.querySelector('input[name="pl-f-aud"]:checked')
   const repl = document.querySelector('input[name="pl-f-repl"]:checked')
   const num = id => Number(document.getElementById(id).value) || 0
-  const a = { id: plId(), kind: f.kind, name: name ? name.trim() : '', audience: aud ? aud.value : '', start: Number(document.getElementById('pl-f-time').value),
+  const a = { id: plId(), kind: f.kind, name: name ? name.trim() : '', audience: aud ? aud.value : cat ? cat.audience || '' : '', catalog_id: cat ? cat.id : null, start: Number(document.getElementById('pl-f-time').value),
     dur: K.dur, col: Number(document.getElementById('pl-f-col').value), dates, replace: repl ? repl.value === 'replace' : false,
     staff: num('pl-f-staff'), people: num('pl-f-people'), price: num('pl-f-price'), added_at: todayStr() }
   p.data.adds.push(a)
@@ -4499,10 +4544,11 @@ async function plResolve(list) {
   return list
 }
 
-function plAdditions() {
-  const out = []
-  pl.plan.data.adds.forEach(a => {
-    const dates = a.dates.filter(x => !pl.plan.data.closed[x]).sort(), name = plAddLabel(a)
+function plAdditions() { return plAdditionsFor(pl.plan.data) }
+function plAdditionsFor(data) {
+  const out = [], closed = data.closed || {}
+  ;(data.adds || []).forEach(a => {
+    const dates = a.dates.filter(x => !closed[x]).sort(), name = plAddLabel(a)
     if (!dates.length) return
     const repl = a.replace ? 'Yes' : 'No'
     if (PL_KINDS[a.kind].series) out.push({ title: plShopTitle(dates[0], a.start, name) + ' | ' + dates.length + ' Week Session', dates, a, repl })
@@ -4614,6 +4660,127 @@ function plDownloadAdds() {
   const a = document.createElement('a')
   a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }))
   a.download = 'plan-additions-' + pl.studio + '-' + pl.plan.week_start + '.csv'
+  document.body.appendChild(a); a.click(); a.remove()
+}
+
+/* ---------- Session list (global, all studios) ---------- */
+async function plLoadCatalog() {
+  const { data, error } = await sb.from('session_catalog').select('*').order('start_week').order('title')
+  plCatalog = error ? [] : (data || [])
+  return error
+}
+let plCatEdit = null
+async function plOpenCatalog() {
+  const err = await plLoadCatalog()
+  if (err) { plModal('<h2>Session list</h2><div class="note bad">' + esc(err.message) + '. Run session-catalog.sql in Supabase first.</div><div class="pl-actions"><button class="btn" onclick="plCloseModal()">Close</button></div>', true); return }
+  plCatEdit = { rows: plCatalog.map(x => Object.assign({}, x)), deleted: [] }
+  plRenderCatalog()
+}
+function plRenderCatalog(msg) {
+  const opt = (list, v) => list.map(([val, lab]) => '<option value="' + val + '"' + (val === (v || '') ? ' selected' : '') + '>' + lab + '</option>').join('')
+  let h = '<h2>Session list</h2><div class="sub">Upcoming sessions for every studio. They show in the Add menu under their type, starting in their starting week on the day you click.</div>'
+  if (msg) h += '<div class="note bad">' + esc(msg) + '</div>'
+  h += '<div class="pl-tbl-wrap"><table class="list"><tr><th>Title (as it should read in Shopify)</th><th>Type</th><th>Who</th><th>Starts the week of</th><th>Classes</th><th>Price</th><th>Use</th><th></th></tr>' +
+    plCatEdit.rows.map((r, i) => {
+      const on = 'onchange="plCatSet(' + i + ',this)"'
+      return '<tr><td><input class="input" style="width:230px" data-f="title" value="' + esc(r.title || '') + '" ' + on + ' placeholder="e.g. Dragons (ages 5–12)"></td>' +
+        '<td><select class="input" data-f="kind" ' + on + '>' + opt([['session_class', 'Session class'], ['wheel_session', 'Wheel session']], r.kind) + '</select></td>' +
+        '<td><select class="input" data-f="audience" ' + on + '>' + opt([['', '–'], ['Kids', 'Kids'], ['Teen', 'Teen'], ['Adult', 'Adult'], ['Family', 'Family']], r.audience) + '</select></td>' +
+        '<td><input class="input" type="date" data-f="start_week" value="' + (r.start_week || '') + '" ' + on + '></td>' +
+        '<td><input class="input" style="width:60px" type="number" min="1" max="12" data-f="classes" value="' + (r.classes || '') + '" ' + on + '></td>' +
+        '<td><input class="input" style="width:80px" type="number" min="0" data-f="price" value="' + (r.price ?? '') + '" ' + on + ' title="Per person, whole session"></td>' +
+        '<td><input type="checkbox" data-f="active"' + (r.active !== false ? ' checked' : '') + ' ' + on + ' title="Show in the Add menu"></td>' +
+        '<td><button class="btn small bad" onclick="plCatDelete(' + i + ')" title="Delete">×</button></td></tr>'
+    }).join('') + '</table></div>' +
+    '<div style="margin-top:6px"><button class="btn small" onclick="plCatAdd()">+ Add session</button></div>' +
+    '<div class="muted small" style="margin-top:6px">Pick any date in the starting week; it saves as that week\'s Sunday. Untick Use to hide a session from the Add menu without deleting it. Plans that already used a session keep their own copy, so changes here only affect new additions.</div>' +
+    '<div class="pl-actions"><button class="btn" onclick="plCloseModal()">Cancel</button><button class="btn primary" onclick="plSaveCatalog()">Save session list</button></div>'
+  plModal(h, true)
+}
+function plCatAdd() { plCatEdit.rows.push({ kind: 'session_class', classes: 6, active: true }); plRenderCatalog() }
+function plCatSet(i, el) {
+  const f = el.dataset.f, r = plCatEdit.rows[i]
+  r[f] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? (el.value === '' ? null : Number(el.value)) : el.value
+}
+function plCatDelete(i) {
+  const r = plCatEdit.rows[i]
+  if (r.id) plCatEdit.deleted.push(r.id)
+  plCatEdit.rows.splice(i, 1); plRenderCatalog()
+}
+async function plSaveCatalog() {
+  const rows = plCatEdit.rows
+  const bad = rows.findIndex(r => !String(r.title || '').trim() || !r.start_week || !(r.classes >= 1 && r.classes <= 12))
+  if (bad !== -1) { plRenderCatalog('Row ' + (bad + 1) + ' needs a title, a starting week and 1–12 classes.'); return }
+  if (plCatEdit.deleted.length) {
+    const { error } = await sb.from('session_catalog').delete().in('id', plCatEdit.deleted)
+    if (error) { plRenderCatalog(error.message); return }
+    plCatEdit.deleted = []
+  }
+  const now = new Date().toISOString()
+  const clean = r => ({ title: r.title.trim(), kind: r.kind || 'session_class', audience: r.audience || null, start_week: sundayOf(r.start_week),
+    classes: Number(r.classes), price: r.price == null ? null : Number(r.price), active: r.active !== false, updated_at: now })
+  for (const r of rows.filter(x => x.id)) { const { error } = await sb.from('session_catalog').update(clean(r)).eq('id', r.id); if (error) { plRenderCatalog(error.message); return } }
+  const ins = rows.filter(x => !x.id)
+  if (ins.length) { const { error } = await sb.from('session_catalog').insert(ins.map(clean)); if (error) { plRenderCatalog(error.message); return } }
+  await plLoadCatalog()
+  plCloseModal(); toast('Session list saved')
+}
+
+/* ---------- All studios: everything to add to Shopify, grouped by product ---------- */
+let plAllState = null
+async function plOpenAll() {
+  await plFlush()
+  plModal('<h2>All studios</h2><div class="loading">Loading every studio\'s plans…</div>', true)
+  const { data, error } = await sb.from('schedule_plans').select('id, studio_id, name, status, week_start, weeks, data, updated_at').neq('status', 'archived')
+  if (error) { plModal('<h2>All studios</h2><div class="note bad">' + esc(error.message) + '</div>', true); return }
+  plAllState = { plans: data || [], drafts: false }
+  plRenderAll()
+}
+function plAllGroups() {
+  const plans = plAllState.plans.filter(p => p.status === 'set' || plAllState.drafts), groups = {}
+  plans.forEach(p => plAdditionsFor(plMerge(plEmptyData(), p.data)).forEach(x => {
+    const g = groups[x.title] || (groups[x.title] = { title: x.title, dates: x.dates, start: x.a.start, dur: x.a.dur, series: !!PL_KINDS[x.a.kind].series, studios: {} })
+    ;(g.studios[p.studio_id] = g.studios[p.studio_id] || []).push(p.name + (p.status === 'set' ? '' : ' (not set)'))
+  }))
+  return { plans, list: Object.values(groups).sort((a, b) => a.dates[0].localeCompare(b.dates[0]) || a.start - b.start || a.title.localeCompare(b.title)) }
+}
+function plRenderAll() {
+  const { plans, list } = plAllGroups(), all = Object.keys(STUDIO_NAMES)
+  const studiosIn = new Set(plans.map(p => p.studio_id))
+  const drafts = plAllState.plans.filter(p => p.status !== 'set')
+  const variants = list.reduce((t, g) => t + Object.keys(g.studios).length, 0)
+  const doubled = list.filter(g => Object.values(g.studios).some(v => v.length > 1)).length
+  const pl_ = n => n === 1 ? '' : 's'
+  let h = '<h2>All studios: to add to Shopify</h2><div class="sub">' + list.length + ' product' + pl_(list.length) + ' with ' + variants + ' studio variant' + pl_(variants) +
+    ', from ' + plans.length + ' plan' + pl_(plans.length) + ' at ' + studiosIn.size + ' of ' + all.length + ' studios.</div>' +
+    '<label class="small" style="display:flex;gap:6px;align-items:center;margin-bottom:8px"><input type="checkbox"' + (plAllState.drafts ? ' checked' : '') +
+    ' onchange="plAllState.drafts=this.checked;plRenderAll()"> Include plans that aren\'t set yet (' + drafts.length + ')</label>'
+  if (doubled) h += '<div class="note warn">' + doubled + ' product' + (doubled > 1 ? 's come' : ' comes') + ' from more than one plan at the same studio. Hover the studios to see which plans, and delete any duplicate plan.</div>'
+  const missing = all.filter(id => !studiosIn.has(id))
+  if (missing.length && studiosIn.size) h += '<div class="muted small" style="margin-bottom:8px">Nothing yet from: ' + missing.map(id => esc(STUDIO_NAMES[id])).join(', ') + '</div>'
+  if (!list.length) h += '<div class="empty">No additions yet' + (plAllState.drafts ? '' : ' in set plans') + '.</div>'
+  else h += '<div class="pl-tbl-wrap"><table class="list"><tr><th>Shopify title</th><th>Dates</th><th>Studios (variants)</th></tr>' +
+    list.map(g => '<tr><td class="wrap">' + esc(g.title) + '</td><td class="wrap small">' + (g.series ? g.dates.map(plShortDate).join(', ') : plShortDate(g.dates[0])) + '</td>' +
+      '<td class="wrap small" title="' + esc(Object.keys(g.studios).map(id => STUDIO_NAMES[id] + ': ' + g.studios[id].join(', ')).join('\n')) + '"><b>' + Object.keys(g.studios).length + '</b> ' +
+      esc(Object.keys(g.studios).map(id => STUDIO_NAMES[id]).join(', ')) + '</td></tr>').join('') + '</table></div>'
+  h += '<div class="pl-actions"><span class="muted small">The CSV has one row per product per studio variant.</span><button class="btn" onclick="plCloseModal()">Close</button>' +
+    (list.length ? '<button class="btn" onclick="plAllCopy()">Copy list</button><button class="btn primary" onclick="plAllCsv()">Download CSV</button>' : '') + '</div>'
+  plModal(h, true)
+}
+function plAllCopy() {
+  const { list } = plAllGroups()
+  const txt = list.map(g => g.title + '\n  ' + Object.keys(g.studios).map(id => PL_VARIANT_NAMES[id] || id).join('\n  ') +
+    (g.series ? '\n  Classes: ' + g.dates.map(plShortDate).join(', ') : '')).join('\n\n')
+  navigator.clipboard.writeText(txt).then(() => toast('Copied'), () => toast('Could not copy', true))
+}
+function plAllCsv() {
+  const { list } = plAllGroups(), q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'
+  const lines = [['Shopify title', 'Variant', 'Studio ID', 'Studio', 'First date', 'All dates', 'Start', 'Minutes', 'Plans'].map(q).join(',')]
+  list.forEach(g => Object.keys(g.studios).forEach(id => lines.push([g.title, PL_VARIANT_NAMES[id] || id, id, STUDIO_NAMES[id], g.dates[0], g.dates.join(' '),
+    bdFmtShort(g.start), g.dur, g.studios[id].join('; ')].map(q).join(','))))
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }))
+  a.download = 'all-studios-additions-' + todayStr() + '.csv'
   document.body.appendChild(a); a.click(); a.remove()
 }
 
