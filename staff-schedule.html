@@ -3960,6 +3960,7 @@ async function plSetStart(v) {
   await Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere()]); plTouch()
 }
 function plSetWeeks(v) { pl.plan.weeks = Number(v); pl.week = Math.min(pl.week, pl.plan.weeks - 1); Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere()]).then(plTouch) }
+function plWeekTo(w) { pl.week = Math.max(0, Math.min(pl.plan.weeks - 1, w)); plRender() }
 function plWeekGo(n) { pl.week = Math.max(0, Math.min(pl.plan.weeks - 1, pl.week + n)); plRender() }
 async function plArchive() {
   if (!confirm('Delete the plan "' + pl.plan.name + '"? Its removal list stays.')) return
@@ -4007,6 +4008,7 @@ function plItems(date) {
   })
   adds.forEach(a => {
     const ds = a.dates.slice().sort(), closed = d.closed[date]
+    if (closed && a.existing) return   // running class on a day the studio is closed: not on at all
     items.push({ id: 'A|' + a.id + '|' + date, addId: a.id, date, kind: a.kind, start: a.start, dur: a.dur, col: a.col, src: 'add', state: closed ? 'closed' : 'on', by: closed ? plClosedText(closed) : '',
       label: plAddLabel(a) + (a.existing ? ' (running)' : ''), existing: !!a.existing, staff: a.staff, people: a.people, price: a.price, nth: ds.indexOf(date) + 1, of: ds.length })
   })
@@ -4067,6 +4069,11 @@ function plCloseDay(date) {
     if (next) { a.dates.push(next); plGrowTo(next) }
     else toast(plAddLabel(a) + ': no room for another week inside 12 weeks', true)
     rec.shifted.push({ id: a.id, added: next })
+  })
+  // running classes don't run that day (their dates are fixed, so no week is added on the end)
+  d.adds.filter(a => a.existing && a.dates.includes(date)).forEach(a => {
+    a.dates = a.dates.filter(x => x !== date)
+    rec.shifted.push({ id: a.id, added: null })
   })
   if (document.getElementById('pl-close-staff').checked && d.shifts[date] && Object.keys(d.shifts[date]).length) { rec.shifts = d.shifts[date]; delete d.shifts[date] }
   plCloseMenu(); plTouch()
@@ -4184,6 +4191,21 @@ function plRender() {
     '<table class="pl-sum"><tr><th></th><th>Revenue est.</th>' + (wageOk ? '<th>Labour</th><th>Labour %</th>' : '') +
     '<th>Hours needed</th><th>Hours planned</th><th>Short</th><th>Over</th></tr>' + sumRow('This week', week) + sumRow('Whole plan', all) + '</table></div>'
   if (!pricesSet) html += '<div class="note warn">Add prices under <b>Defaults</b> to see revenue and labour %.</div>'
+  // Week 1: heads-up for every PA day (and camp) anywhere in the plan
+  if (pl.week === 0 && pl.camps.length) {
+    const byLabel = {}
+    pl.camps.slice().sort((a, b) => a.date.localeCompare(b.date) || a.start - b.start).forEach(c => {
+      ;(byLabel[plCampLabel(c.title)] = byLabel[plCampLabel(c.title)] || []).push(c)
+    })
+    html += '<div class="note warn">' + ['PA Day', 'Camp'].filter(l => byLabel[l]).map(l => {
+      const list = byLabel[l]
+      return '<b>' + (l === 'PA Day' ? 'PA day' : 'Camp') + (list.length > 1 ? 's' : '') + ' in this plan:</b> ' + list.map(c => {
+        const w = Math.floor(daysBetween(p.week_start, c.date) / 7)
+        return '<a href="#" onclick="plWeekTo(' + w + ');return false" title="' + esc(c.title) + '">' + plDayLabel(c.date) + ' ' + bdFmtShort(c.start) + '–' + bdFmtShort(c.end) +
+          (c.booked != null ? ' (' + c.booked + ' booked)' : '') + '</a>' + (w > 0 ? ' <span class="muted small">week ' + (w + 1) + '</span>' : '')
+      }).join(', ')
+    }).join('<br>') + '<br><span class="small">Each needs ' + (Number(p.settings.k.camp.staff) || 1) + ' staff for the whole day, on top of the floor. Click a date to go to that week.</span></div>'
+  }
   if (!wageOk) html += '<div class="note warn">Labour cost needs finance access. Hours still show.</div>'
 
   html += '<div class="toolbar pl-legend">' + ['glazing', 'minimake', 'workshop', 'party', 'session_class', 'wheel_workshop', 'wheel_session', 'camp'].map(k =>
@@ -4625,7 +4647,8 @@ async function plFindRunning() {
   const r = await sb.rpc('get_staffing_need', { p_studio_id: pl.studio, p_from: from, p_to: to })
   if (r.error) { msg.textContent = 'Could not load: ' + r.error.message; return }
   const groups = {}
-  ;(r.data || []).filter(x => x.rule_kind === 'one_per_session' && (x.booked || 0) > 0 && x.start_time && x.end_time).forEach(x => {
+  const closed = pl.plan.data.closed || {}
+  ;(r.data || []).filter(x => x.rule_kind === 'one_per_session' && (x.booked || 0) > 0 && x.start_time && x.end_time && !closed[x.session_date]).forEach(x => {
     const dow = plDow(x.session_date), key = classKey(x.title) + '|' + dow + '|' + x.start_time.slice(0, 5)
     const g = groups[key] || (groups[key] = { key, title: classLabel(x.title), kind: /wheel/i.test(x.title) ? 'wheel_session' : 'session_class', dow,
       start: toMin(x.start_time), dur: Math.max(15, toMin(x.end_time) - toMin(x.start_time)), dates: [], enrolled: 0 })
@@ -4653,7 +4676,7 @@ function plRenderImport() {
       '<td>' + DAY_SHORT[g.dow] + ' ' + bdFmtShort(g.start) + '–' + bdFmtShort(g.start + g.dur) + '</td>' +
       '<td class="wrap small">' + g.dates.length + ': ' + g.dates.map(plShortDate).join(', ') + '</td><td>' + g.enrolled + '</td><td>$' + g.rate + '</td>' +
       '<td>' + plMoney(g.rate * g.dates.length * g.enrolled) + ' <span class="muted small">($' + (g.rate * g.dates.length) + ' each)</span></td></tr>').join('') +
-    '</table></div><div class="pl-actions"><span class="muted small">Only dates inside the plan, ' + plShortDate(plImport.from) + ' to ' + plShortDate(plLastDate()) + '.</span>' +
+    '</table></div><div class="pl-actions"><span class="muted small">Days closed in the plan are left out. Only dates inside the plan, ' + plShortDate(plImport.from) + ' to ' + plShortDate(plLastDate()) + '.</span>' +
     '<button class="btn" onclick="plCloseModal()">Cancel</button><button class="btn primary"' + (n ? '' : ' disabled') + ' onclick="plConfirmImport()">Add ' + n + ' to the plan</button></div>'
 }
 function plConfirmImport() {
