@@ -237,6 +237,7 @@ td[data-date] .wk-chip:not([draggable="true"]) { cursor: default; }
 .pl-dayhead.isclosed { background: var(--bad-bg); color: var(--bad); }
 .pl-dayhead.isclosed .muted { color: var(--bad); }
 .pl-camp { font-size: 10px; font-weight: 600; background: #dff1ef; color: #00695c; border-radius: 8px; padding: 1px 6px; }
+table.pl-staff input.pl-sh.elsewhere { background: #eaf0f8; border-style: dashed; }
 .pl-off { font-size: 10px; font-weight: 600; background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 1px 6px; }
 .pl-daybody.isclosed { background-color: #fbf3f2; background-image: repeating-linear-gradient(45deg, transparent 0 8px, rgba(192,57,43,.06) 8px 16px); }
 .pl-sub { display: grid; grid-template-columns: 1fr 1fr 1fr 26px; font-size: 10px; color: var(--muted); border-left: 0.5px solid var(--line); text-align: center; padding-bottom: 2px; }
@@ -3674,7 +3675,7 @@ const PL_VARIANT_NAMES = {
   'ON-WTR-WTR':'ON / WATERLOO - UPTOWN'
 }
 let plCatalog = []   // session_catalog rows (all studios)
-let pl = { studio: '', plans: [], plan: null, week: 0, parties: [], camps: [], pool: [], allStaff: [], wages: {}, saveTimer: null, lo: 540, setRows: null }
+let pl = { studio: '', plans: [], plan: null, week: 0, parties: [], camps: [], elsewhere: {}, pool: [], allStaff: [], wages: {}, saveTimer: null, lo: 540, setRows: null }
 
 function plDefaults() {
   return {
@@ -3824,9 +3825,45 @@ async function plOpenPlan(id) {
   p.settings = plMerge(plDefaults(), p.settings)
   p.data = plMerge(plEmptyData(), p.data)
   pl.plan = p; pl.week = 0
-  await Promise.all([plLoadWages(), plLoadCamps()])
+  await Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere()])
   plRender()
 }
+
+/* ---------- shifts at other studios (other studios' plans + the real schedule) ---------- */
+// pl.elsewhere[staffId][date] = [{ studio, a, b, what }]. Read when a plan opens or its dates change,
+// so switch studios (or reopen the plan) to see changes made in another studio's plan.
+async function plLoadElsewhere() {
+  pl.elsewhere = {}
+  if (!pl.plan) return
+  const from = pl.plan.week_start, to = plLastDate(), seen = new Set()
+  const add = (sid, date, x) => {
+    const k = sid + '|' + date + '|' + x.studio
+    if (seen.has(k)) return
+    seen.add(k)
+    const m = pl.elsewhere[sid] = pl.elsewhere[sid] || {}
+    ;(m[date] = m[date] || []).push(x)
+  }
+  const [plans, shifts] = await Promise.all([
+    sb.from('schedule_plans').select('studio_id, data').neq('studio_id', pl.studio).neq('status', 'archived').lte('week_start', to),
+    plFetchAll(() => sb.from('staff_shifts').select('staff_id, studio_id, shift_date, start_time, end_time, status').neq('studio_id', pl.studio)
+      .gte('shift_date', from).lte('shift_date', to).not('start_time', 'is', null).order('shift_date')).catch(() => [])
+  ])
+  // the real schedule first (approved, posted, and drafts sent from a set plan)
+  shifts.forEach(x => add(x.staff_id, x.shift_date, { studio: x.studio_id, a: toMin(x.start_time), b: toMin(x.end_time), what: x.status === 'draft' ? 'Draft shift' : 'Shift' }))
+  ;((plans && plans.data) || []).forEach(p => {
+    const sh = (p.data && p.data.shifts) || {}, closed = (p.data && p.data.closed) || {}
+    Object.keys(sh).forEach(date => {
+      if (date < from || date > to || closed[date]) return
+      Object.keys(sh[date] || {}).forEach(k => {
+        if (k.startsWith('open')) return
+        const [a, b] = sh[date][k]
+        add(k, date, { studio: p.studio_id, a, b, what: 'Planned' })
+      })
+    })
+  })
+}
+function plElsewhere(staffId, date) { return ((pl.elsewhere || {})[staffId] || {})[date] || [] }
+const plShortStudio = id => String(STUDIO_NAMES[id] || id).split(' - ').pop()
 
 /* ---------- camps and PA days already scheduled at the studio ---------- */
 // Read from the same staffing data as Coverage (real start and end times), falling back to sessions
@@ -3920,9 +3957,9 @@ function plRename(v) { pl.plan.name = v.trim() || 'Plan'; plTouch() }
 async function plSetStart(v) {
   if (!v) return
   pl.plan.week_start = sundayOf(v); pl.week = 0
-  await Promise.all([plLoadWages(), plLoadCamps()]); plTouch()
+  await Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere()]); plTouch()
 }
-function plSetWeeks(v) { pl.plan.weeks = Number(v); pl.week = Math.min(pl.week, pl.plan.weeks - 1); Promise.all([plLoadWages(), plLoadCamps()]).then(plTouch) }
+function plSetWeeks(v) { pl.plan.weeks = Number(v); pl.week = Math.min(pl.week, pl.plan.weeks - 1); Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere()]).then(plTouch) }
 function plWeekGo(n) { pl.week = Math.max(0, Math.min(pl.plan.weeks - 1, pl.week + n)); plRender() }
 async function plArchive() {
   if (!confirm('Delete the plan "' + pl.plan.name + '"? Its removal list stays.')) return
@@ -4243,22 +4280,30 @@ function plStaffHtml(dates, stats) {
   html += '<div style="overflow-x:auto"><table class="pl-staff"><thead><tr><th>Person</th>' + dates.map(d => '<th>' + plDayLabel(d) + '</th>').join('') +
     '<th class="num">Hours</th>' + (wageOk ? '<th class="num">Labour</th>' : '') + '</tr></thead><tbody>'
   rows.forEach(r => {
-    let mins = 0, cost = 0
+    let mins = 0, cost = 0, otherMins = 0
     const wage = r.open ? plOpenWage() : (pl.wages[r.key] ?? null)
     const cells = dates.map(d => {
       const v = plShiftsOn(d)[r.key]
       const un = r.open ? [] : plUnav(r.key, d)
+      const ew = r.open ? [] : plElsewhere(r.key, d)
+      ew.forEach(x => { otherMins += paidMins(x.studio, x.a, x.b) })
       let cls = 'pl-sh'
       if (v) { cls += ' filled'; const pm = paidMins(pl.studio, v[0], v[1]); mins += pm; cost += pm / 60 * (wage ?? plOpenWage()) }
-      if (un.length) cls += v && un.some(u => u.a < v[1] && v[0] < u.b) ? ' conflict' : ' unav'
+      // one shift a person a day: a shift here on a day they work elsewhere is a conflict
+      if (v && ew.length) cls += ' conflict'
+      else if (un.length) cls += v && un.some(u => u.a < v[1] && v[0] < u.b) ? ' conflict' : ' unav'
+      else if (ew.length) cls += ' elsewhere'
+      const tips = un.map(u => u.txt).concat(ew.map(x => x.what + ' at ' + (STUDIO_NAMES[x.studio] || x.studio) + ' ' + bdFmtShort(x.a) + '-' + bdFmtShort(x.b)))
       return '<td><input class="' + cls + '" data-date="' + d + '" data-key="' + r.key + '" value="' + (v ? bdFmtShort(v[0]) + '-' + bdFmtShort(v[1]) : '') + '"' +
-        (un.length ? ' title="' + esc(un.map(u => u.txt).join('; ')) + '"' : '') + ' onchange="plSetShift(this)" placeholder="' + (un.length ? 'off' : '') + '"></td>'
+        (tips.length ? ' title="' + esc(tips.join('; ')) + '"' : '') + ' onchange="plSetShift(this)" placeholder="' +
+        esc(ew.length ? '@ ' + plShortStudio(ew[0].studio) : un.length ? 'off' : '') + '"></td>'
     }).join('')
     const max = r.p && r.p.max_weekly_hours
     const name = r.open ? '<span class="muted">' + r.name + '</span>' + (pl.plan.data.openRows > 0 && r.key === 'open' + pl.plan.data.openRows ? ' <button class="btn small" onclick="plOpenRows(-1)" title="Remove this row">×</button>' : '')
       : esc(r.p.display_name) + (r.extra ? ' <span class="muted small">(other studio)</span> <button class="btn small" onclick="plRemoveExtra(\'' + r.key + '\')" title="Remove from this plan">×</button>' : '')
     html += '<tr><td>' + name + (wageOk && wage != null ? ' <span class="wage">$' + Number(wage).toFixed(2) + '</span>' : '') + '</td>' + cells +
-      '<td class="num' + (max && mins / 60 > max ? ' bad' : '') + '"' + (max ? ' title="Max ' + max + 'h a week"' : '') + '>' + (mins ? plH(mins) : '') + '</td>' +
+      '<td class="num' + (max && (mins + otherMins) / 60 > max ? ' bad' : '') + '"' + (max || otherMins ? ' title="' + (otherMins ? plH(otherMins) + 'h this week at other studios. ' : '') + (max ? 'Max ' + max + 'h a week, all studios' : '') + '"' : '') + '>' +
+        (mins ? plH(mins) : '') + (otherMins ? ' <span class="muted small">+' + plH(otherMins) + ' elsewhere</span>' : '') + '</td>' +
       (wageOk ? '<td class="num">' + (cost ? plMoney(cost) : '') + '</td>' : '') + '</tr>'
   })
   const foot = (label, fn) => '<tr class="foot"><td>' + label + '</td>' + dates.map(d => '<td>' + fn(stats[d]) + '</td>').join('') + '<td></td>' + (wageOk ? '<td></td>' : '') + '</tr>'
@@ -4279,6 +4324,8 @@ function plSetShift(el) {
     const r = bdParseRange(txt)
     if (!r) { toast('Use a time like 1p-7:30p (am/pm on both sides)', true); el.classList.add('conflict'); return }
     d.shifts[date][key] = [r.start, r.end]
+    const ew = plElsewhere(key, date)
+    if (ew.length) toast((pl.allStaff.find(p => p.id === key) || {}).display_name + ' already has ' + ew.map(x => x.what.toLowerCase() + ' at ' + plShortStudio(x.studio) + ' ' + bdFmtShort(x.a) + '-' + bdFmtShort(x.b)).join(', ') + ' that day', true)
   }
   plTouch()
 }
