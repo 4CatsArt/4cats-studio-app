@@ -400,8 +400,8 @@ table.pl-staff .bad { color: var(--bad); }
       <div class="note info" style="margin-bottom:1rem">
         A sandbox for planning offerings and staff 4–12 weeks ahead. It starts from the regular schedule (glazing on the hour, Mini Make on the :15, workshops on the :30, and party slots).
         Click an empty spot in a day to add something; click anything on the grid to change or delete it. The narrow column on each day shows people planned / people needed every 15 minutes.
-        Staff planned here are saved with the plan only. They never go into the real schedule or finance.html's labour.
-        <b>Set plan</b> lists what came out (and removes those studio variants from Shopify) and what was added, for you to add to Shopify.
+        <b>Set plan</b> lists what came out (and removes those studio variants from Shopify) and what was added, for you to add to Shopify,
+        and sends the planned staff to Build schedule as draft shifts. Until then, planned staff stay with the plan only.
       </div>
       <div id="pl-body"><div class="panel"><div class="empty">Choose a studio to start planning.</div></div></div>
     </div>
@@ -4176,7 +4176,7 @@ function plUnav(staffId, date) {
 }
 function plStaffHtml(dates, stats) {
   const rows = plStaffRows(), wageOk = bdWageAccess
-  let html = '<div class="panel"><div class="panel-head"><h2>Planned staff</h2><span class="muted small">Type shifts like 1p-7:30p. Saved with this plan only.</span>' +
+  let html = '<div class="panel"><div class="panel-head"><h2>Planned staff</h2><span class="muted small">Type shifts like 1p-7:30p. They go to Build schedule as drafts when you set the plan.</span>' +
     '<span class="spacer"></span>' +
     '<button class="btn small" onclick="plCopyWeek(-1)"' + (pl.week === 0 ? ' disabled' : '') + '>Copy last week</button>' +
     '<button class="btn small" onclick="plCopyForward()"' + (pl.week === pl.plan.weeks - 1 ? ' disabled' : '') + '>Copy this week to later weeks</button>' +
@@ -4525,15 +4525,16 @@ async function plResolve(list) {
     if (error) throw error
     ;(data || []).forEach(v => { if (v.inventory_item_id) vars[v.shopify_title] = v })
   }
-  const ids = list.filter(r => r.session).map(r => r.session.id), booked = {}
+  const ids = list.filter(r => r.session).map(r => r.session.id), booked = {}, bookingRows = {}
   for (let i = 0; i < ids.length; i += 200) {
-    const { data, error } = await sb.from('bookings').select('session_id, qty').in('session_id', ids.slice(i, i + 200)).gt('qty', 0).is('returned_at', null)
+    const { data, error } = await sb.from('bookings').select(PL_BOOKING_COLS).in('session_id', ids.slice(i, i + 200)).gt('qty', 0).is('returned_at', null)
     if (error) throw error
-    ;(data || []).forEach(b => { booked[b.session_id] = (booked[b.session_id] || 0) + (b.qty || 0) })
+    ;(data || []).forEach(b => { booked[b.session_id] = (booked[b.session_id] || 0) + (b.qty || 0); (bookingRows[b.session_id] = bookingRows[b.session_id] || []).push(b) })
   }
   list.forEach(r => {
     r.variant = r.shopifyTitle ? vars[r.shopifyTitle] || null : null
     r.booked = r.session ? booked[r.session.id] || 0 : 0
+    r.bookings = r.session ? bookingRows[r.session.id] || [] : []
     if (!r.session) { r.status = 'pending'; r.note = 'Not in the system yet' }
     else if (r.kind === 'party') { r.status = 'manual'; r.note = 'Party slots aren\'t their own Shopify product: close it in admin' }
     else if (!r.shopifyTitle || r.shopifyTitle === 'OVERRIDE') { r.status = 'manual'; r.note = 'No matching Shopify product title' }
@@ -4542,6 +4543,45 @@ async function plResolve(list) {
     else { r.status = 'remove'; r.note = '' }
   })
   return list
+}
+
+/* ---------- people to contact (bookings on offerings being taken out) ---------- */
+const PL_BOOKING_COLS = 'id, session_id, qty, customer_name, customer_email, shopify_order_name, booked_at, raw_payload'
+function plPhone(rp) {
+  if (!rp || typeof rp !== 'object') return ''
+  const o = rp.order || rp
+  return o.phone || (o.customer && o.customer.phone) || (o.billing_address && o.billing_address.phone) || (o.shipping_address && o.shipping_address.phone) || ''
+}
+// rows: [{ date, time ('HH:MM'), what, bookings: [...] }] → one line per booking
+function plContacts(rows) {
+  const out = []
+  rows.forEach(r => (r.bookings || []).forEach(b => out.push({ date: r.date, time: r.time, what: r.what, name: b.customer_name || '', email: b.customer_email || '',
+    phone: plPhone(b.raw_payload), order: b.shopify_order_name || '', qty: b.qty || 0 })))
+  return out.sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time) || a.name.localeCompare(b.name))
+}
+function plContactsHtml(list) {
+  if (!list.length) return ''
+  pl.contacts = list
+  const people = new Set(list.map(c => (c.email || c.name).toLowerCase())).size
+  return '<h3>Bookings to contact (' + people + ' customer' + (people === 1 ? '' : 's') + ', ' + list.reduce((t, c) => t + c.qty, 0) + ' spots)</h3>' +
+    '<div class="muted small" style="margin-bottom:6px">These offerings have bookings, so they stay in Shopify until you move or refund them. Then use Check Shopify again in the Removal list.</div>' +
+    '<div class="pl-tbl-wrap"><table class="list"><tr><th>Date</th><th>Time</th><th>What</th><th>Customer</th><th>Email</th><th>Phone</th><th>Order</th><th>Spots</th></tr>' +
+    list.map(c => '<tr><td>' + plDayLabel(c.date) + '</td><td>' + bdFmtShort(toMin(c.time)) + '</td><td>' + esc(c.what) + '</td><td>' + esc(c.name) + '</td>' +
+      '<td>' + (c.email ? '<a href="mailto:' + esc(c.email) + '">' + esc(c.email) + '</a>' : '') + '</td><td>' + esc(c.phone) + '</td><td>' + esc(c.order) + '</td><td>' + c.qty + '</td></tr>').join('') +
+    '</table></div><div style="display:flex;gap:8px;margin-top:6px"><button class="btn small" onclick="plContactsCopyEmails()">Copy emails</button><button class="btn small" onclick="plContactsCsv()">Download contact list</button></div>'
+}
+function plContactsCopyEmails() {
+  const emails = [...new Set(pl.contacts.map(c => c.email).filter(Boolean))]
+  navigator.clipboard.writeText(emails.join(', ')).then(() => toast('Copied ' + emails.length + ' email' + (emails.length === 1 ? '' : 's')), () => toast('Could not copy', true))
+}
+function plContactsCsv() {
+  const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'
+  const lines = [['Studio', 'Date', 'Time', 'What', 'Customer', 'Email', 'Phone', 'Order', 'Spots'].map(q).join(',')]
+  pl.contacts.forEach(c => lines.push([STUDIO_NAMES[pl.studio], c.date, bdFmtShort(toMin(c.time)), c.what, c.name, c.email, c.phone, c.order, c.qty].map(q).join(',')))
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }))
+  a.download = 'bookings-to-contact-' + pl.studio + '-' + todayStr() + '.csv'
+  document.body.appendChild(a); a.click(); a.remove()
 }
 
 function plAdditions() { return plAdditionsFor(pl.plan.data) }
@@ -4575,9 +4615,78 @@ async function plOpenSet() {
     if (old && ['removed', 'drafted', 'done'].includes(old.status)) { r.status = old.status; r.note = 'Handled ' + String(old.removed_at || old.updated_at || '').slice(0, 10); r.earlier = true }
   })
   pl.setRows = rows
+  pl.setShiftsDone = null
+  try { pl.setShifts = await plShiftPreview() } catch (e) { pl.setShifts = { error: e.message || String(e) } }
   plRenderSet()
 }
 
+/* ---------- planned staff → Build schedule drafts ---------- */
+// Rows to write, plus what can't go in: open shifts, closed days, and anyone who already has
+// an approved/posted shift here that day or any shift at another studio (one shift a person a day).
+async function plShiftPreview() {
+  const d = pl.plan.data, from = pl.plan.week_start, to = plLastDate()
+  const rows = [], open = [], closed = []
+  plDates().forEach(date => Object.keys(d.shifts[date] || {}).forEach(key => {
+    const [a, b] = d.shifts[date][key]
+    if (key.startsWith('open')) { open.push({ date, a, b }); return }
+    if (d.closed[date]) { closed.push({ date, key }); return }
+    rows.push({ staff_id: key, studio_id: pl.studio, shift_date: date, start_time: fromMin(a), end_time: fromMin(b), status: 'draft' })
+  }))
+  const ids = [...new Set(rows.map(r => r.staff_id))]
+  let existing = []
+  if (ids.length) existing = await plFetchAll(() => sb.from('staff_shifts').select('staff_id, studio_id, shift_date, status').in('staff_id', ids)
+    .gte('shift_date', from).lte('shift_date', to).order('shift_date'))
+  const draftsHere = (await sb.from('staff_shifts').select('staff_id', { count: 'exact', head: true }).eq('studio_id', pl.studio).eq('status', 'draft').gte('shift_date', from).lte('shift_date', to)).count || 0
+  const skip = [], ok = []
+  rows.forEach(r => {
+    const same = existing.filter(x => x.staff_id === r.staff_id && x.shift_date === r.shift_date)
+    const here = same.find(x => x.studio_id === pl.studio && x.status !== 'draft')
+    const other = same.find(x => x.studio_id !== pl.studio)
+    if (here) skip.push({ r, why: 'already has an ' + here.status + ' shift here' })
+    else if (other) skip.push({ r, why: 'has a shift at ' + (STUDIO_NAMES[other.studio_id] || other.studio_id) + (other.status === 'draft' ? ' (draft)' : '') })
+    else ok.push(r)
+  })
+  return { ok, skip, open, closed, draftsHere, from, to, send: true }
+}
+function plShiftPreviewHtml(x, done) {
+  if (!x) return ''
+  if (x.error) return '<h3>Staff schedule</h3><div class="note bad">Could not check shifts: ' + esc(x.error) + '</div>'
+  const name = id => (pl.allStaff.find(p => p.id === id) || {}).display_name || staffName(id)
+  const n = x.ok.length
+  let h = '<h3>Staff schedule (' + n + ' draft shift' + (n === 1 ? '' : 's') + ')</h3>'
+  if (done) h += '<div class="note ' + (done.error ? 'bad' : 'info') + '">' + esc(done.error || done.msg) + '</div>'
+  else h += '<label class="small" style="display:flex;gap:6px;align-items:center"><input type="checkbox"' + (x.send ? ' checked' : '') + ' onchange="pl.setShifts.send=this.checked;plRenderSet()"> ' +
+    'Send planned staff to Build schedule as drafts, ' + plShortDate(x.from) + ' to ' + plShortDate(x.to) +
+    (x.draftsHere ? ' (replaces the ' + x.draftsHere + ' draft shift' + (x.draftsHere === 1 ? '' : 's') + ' already there for these dates; approved shifts stay)' : '') + '</label>'
+  const notes = []
+  if (x.open.length) notes.push(x.open.length + ' open shift' + (x.open.length === 1 ? '' : 's') + ' left out (no one assigned)')
+  if (x.closed.length) notes.push(x.closed.length + ' on closed days left out')
+  if (notes.length) h += '<div class="muted small" style="margin-top:4px">' + notes.join('. ') + '.</div>'
+  if (x.skip.length) h += '<div class="note warn" style="margin-top:6px">Not sent, so sort these out in Build schedule:<br>' +
+    x.skip.map(s => esc(name(s.r.staff_id)) + ', ' + plDayLabel(s.r.shift_date) + ': ' + esc(s.why)).join('<br>') + '</div>'
+  return h
+}
+async function plSendShifts() {
+  const x = pl.setShifts
+  if (!x || x.error || !x.send) return null
+  const del = await sb.from('staff_shifts').delete().eq('studio_id', pl.studio).eq('status', 'draft').gte('shift_date', x.from).lte('shift_date', x.to)
+  if (del.error) return { error: 'Draft shifts not sent: ' + del.error.message }
+  for (let i = 0; i < x.ok.length; i += 200) {
+    const ins = await sb.from('staff_shifts').insert(x.ok.slice(i, i + 200))
+    if (ins.error) return { error: 'Draft shifts not sent: ' + ins.error.message }
+  }
+  return { msg: x.ok.length + ' draft shift' + (x.ok.length === 1 ? '' : 's') + ' sent to Build schedule. Approve them there as usual.' }
+}
+
+function plSetLabel(toRemove) {
+  const x = pl.setShifts, n = x && !x.error && x.send ? x.ok.length : 0
+  const parts = []
+  if (toRemove) parts.push('remove ' + toRemove + ' variant' + (toRemove > 1 ? 's' : ''))
+  if (n) parts.push('send ' + n + ' shift' + (n > 1 ? 's' : ''))
+  if (!parts.length) return 'Set plan'
+  const t = parts.join(', ') + ' and set plan'
+  return t.charAt(0).toUpperCase() + t.slice(1)
+}
 function plRenderSet(result) {
   const rows = pl.setRows, adds = plAdditions(), toRemove = rows.filter(r => r.status === 'remove' && !r.skip).length
   let h = '<h2>Set plan: ' + esc(pl.plan.name) + '</h2><div class="sub">' + esc(STUDIO_NAMES[pl.studio]) + ', ' + plShortDate(pl.plan.week_start) + ' to ' + plShortDate(plLastDate()) + '</div>'
@@ -4592,13 +4701,15 @@ function plRenderSet(result) {
         '<td><span class="pl-st ' + (r.skip ? 'skip' : r.status) + '">' + (r.skip ? 'Skip for now' : PL_STATUS_TEXT[r.status]) + '</span>' + (r.note ? ' <span class="muted small">' + esc(r.note) + '</span>' : '') + '</td></tr>').join('') +
       '</table></div><div class="muted small" style="margin-top:4px">Ticked rows: this studio\'s variant is removed from the Shopify product and the session is hidden. Everything that isn\'t in Shopify yet is saved to the Removal list to remove later.</div>'
   }
+  h += plShiftPreviewHtml(pl.setShifts, pl.setShiftsDone)
+  h += plContactsHtml(plContacts(rows.filter(r => r.status === 'blocked').map(r => ({ date: r.date, time: r.time, what: r.session ? r.session.title : r.label, bookings: r.bookings }))))
   h += '<h3>Added (' + adds.length + ' Shopify product' + (adds.length === 1 ? '' : 's') + ' to add by hand)</h3>'
   if (!adds.length) h += '<div class="muted">Nothing was added.</div>'
   else h += '<div class="pl-tbl-wrap"><table class="list"><tr><th>Shopify title</th><th>Dates</th><th>Length</th><th>Replaces drop-ins</th><th>Staff</th></tr>' +
     adds.map(x => '<tr><td class="wrap">' + esc(x.title) + '</td><td class="wrap">' + x.dates.map(plShortDate).join(', ') + '</td><td>' + x.a.dur + ' min</td><td>' + x.repl + '</td><td>' + x.a.staff + '</td></tr>').join('') +
     '</table></div><div style="display:flex;gap:8px;margin-top:6px"><button class="btn small" onclick="plCopyAdds()">Copy list</button><button class="btn small" onclick="plDownloadAdds()">Download CSV</button></div>'
   h += '<div class="pl-actions"><span class="muted small" id="pl-set-msg"></span><button class="btn" onclick="plCloseModal()">' + (result ? 'Close' : 'Cancel') + '</button>' +
-    (result ? '' : '<button class="btn primary" id="pl-set-go" onclick="plRunSet()">' + (toRemove ? 'Remove ' + toRemove + ' variant' + (toRemove > 1 ? 's' : '') + ' and set plan' : 'Set plan') + '</button>') + '</div>'
+    (result ? '' : '<button class="btn primary" id="pl-set-go" onclick="plRunSet()">' + plSetLabel(toRemove) + '</button>') + '</div>'
   plModal(h, true)
 }
 
@@ -4641,6 +4752,8 @@ async function plRunSet() {
     const { error } = await sb.from('schedule_plan_removals').upsert(save.slice(i, i + 200), { onConflict: 'studio_id,session_date,session_time,kind,slot' })
     if (error) { msg.textContent = 'Could not save the removal list: ' + error.message; btn.disabled = false; return }
   }
+  msg.textContent = 'Sending draft shifts…'
+  pl.setShiftsDone = await plSendShifts()
   pl.plan.status = 'set'; pl.plan.set_at = now; pl.plan.dirty = true
   await plSave()
   const c = s => rows.filter(r => !r.earlier && r.status === s).length
@@ -4790,7 +4903,16 @@ async function plOpenRemovals() {
   const { data, error } = await sb.from('schedule_plan_removals').select('*').eq('studio_id', pl.studio).gte('session_date', todayStr()).order('session_date').order('session_time')
   if (error) { plModal('<h2>Removal list</h2><div class="note bad">' + esc(error.message) + '</div>', true); return }
   pl.removals = data || []
+  await plLoadRemovalBookings()
   plRenderRemovals()
+}
+async function plLoadRemovalBookings() {
+  pl.removalBookings = {}
+  const ids = pl.removals.filter(r => r.session_id && !['removed', 'drafted', 'done'].includes(r.status)).map(r => r.session_id)
+  for (let i = 0; i < ids.length; i += 200) {
+    const { data } = await sb.from('bookings').select(PL_BOOKING_COLS).in('session_id', ids.slice(i, i + 200)).gt('qty', 0).is('returned_at', null)
+    ;(data || []).forEach(b => { (pl.removalBookings[b.session_id] = pl.removalBookings[b.session_id] || []).push(b) })
+  }
 }
 function plRenderRemovals(msg) {
   const open = pl.removals.filter(r => !['removed', 'drafted', 'done'].includes(r.status)), done = pl.removals.length - open.length
@@ -4801,6 +4923,8 @@ function plRenderRemovals(msg) {
     open.map(r => '<tr><td>' + plDayLabel(r.session_date) + '</td><td>' + fmtTime(r.session_time) + '</td><td>' + esc(r.session_title || r.label) + '</td>' +
       '<td><span class="pl-st ' + r.status + '">' + PL_STATUS_TEXT[r.status] + '</span> <span class="muted small">' + esc(r.note || '') + '</span></td>' +
       '<td class="actions"><button class="btn small" onclick="plRemovalMark(\'' + r.id + '\',\'done\')">Mark done</button><button class="btn small bad" onclick="plRemovalForget(\'' + r.id + '\')" title="Take it off this list (it stays on Shopify)">Forget</button></td></tr>').join('') + '</table></div>'
+  h += plContactsHtml(plContacts(open.filter(r => r.session_id && (pl.removalBookings || {})[r.session_id]).map(r => ({ date: r.session_date, time: String(r.session_time).slice(0, 5),
+    what: r.session_title || r.label, bookings: pl.removalBookings[r.session_id] }))))
   h += '<div class="pl-actions"><span class="muted small" id="pl-rm-msg"></span><button class="btn" onclick="plCloseModal()">Close</button>' +
     (open.some(r => ['pending', 'failed', 'blocked'].includes(r.status)) ? '<button class="btn primary" id="pl-rm-go" onclick="plRecheckRemovals()">Check Shopify again and remove</button>' : '') + '</div>'
   plModal(h, true)
@@ -4834,6 +4958,7 @@ async function plRecheckRemovals() {
     await sb.from('schedule_plan_removals').update(patch).eq('id', r.src.id)
     Object.assign(r.src, patch)
   }
+  await plLoadRemovalBookings()
   plRenderRemovals(removed ? removed + ' removed from Shopify.' : 'Nothing new to remove yet.')
 }
 </script>
