@@ -4568,9 +4568,9 @@ function plSaveDefaults() {
 
 /* ---------- set plan: what came out, what went in ---------- */
 // Matches each taken-out item to its session row, Shopify variant and bookings
-async function plResolve(list) {
+async function plResolve(list, studioId) {
   if (!list.length) return []
-  const studio = pl.studio, dates = list.map(x => x.date).sort()
+  const studio = studioId || pl.studio, dates = list.map(x => x.date).sort()
   const sess = await plFetchAll(() => sb.from('sessions').select('id, title, session_date, session_time').eq('studio_id', studio)
     .gte('session_date', dates[0]).lte('session_date', dates[dates.length - 1]).order('id'))
   list.forEach(r => {
@@ -4777,7 +4777,7 @@ async function plRemoveVariant(r) {
   try {
     const { data: { session } } = await sb.auth.getSession()
     const res = await fetch(PL_VARIANT_FN, { method: 'POST', headers: { Authorization: 'Bearer ' + (session ? session.access_token : SUPABASE_KEY), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ inventory_item_id: r.variant.inventory_item_id, session_id: r.session.id, studio_id: pl.studio }) })
+      body: JSON.stringify({ inventory_item_id: r.variant.inventory_item_id, session_id: r.session.id, studio_id: r.studio || pl.studio }) })
     if (res.status === 404) return { status: 'pending', note: 'shopify-variant-remove isn\'t deployed yet' }
     const j = await res.json().catch(() => ({}))
     if (j.removed) return { status: 'removed', note: '' }
@@ -4906,7 +4906,10 @@ async function plOpenAll() {
   plModal('<h2>All studios</h2><div class="loading">Loading every studio\'s plans…</div>', true)
   const { data, error } = await sb.from('schedule_plans').select('id, studio_id, name, status, week_start, weeks, data, updated_at').neq('status', 'archived')
   if (error) { plModal('<h2>All studios</h2><div class="note bad">' + esc(error.message) + '</div>', true); return }
-  plAllState = { plans: data || [], drafts: false }
+  let removals = []
+  try { removals = await plFetchAll(() => sb.from('schedule_plan_removals').select('*').gte('session_date', todayStr()).order('session_date').order('session_time').order('id')) }
+  catch (e) { removals = null }
+  plAllState = { plans: data || [], drafts: false, tab: plAllState ? plAllState.tab : 'add', removals }
   plRenderAll()
 }
 function plAllGroups() {
@@ -4917,14 +4920,22 @@ function plAllGroups() {
   }))
   return { plans, list: Object.values(groups).sort((a, b) => a.dates[0].localeCompare(b.dates[0]) || a.start - b.start || a.title.localeCompare(b.title)) }
 }
+const PL_REMOVE_OPEN = ['pending', 'blocked', 'manual', 'failed']
+function plAllTabs(nAdd) {
+  const nRem = plAllRemoveGroups().length
+  return '<div style="display:flex;gap:6px;margin:4px 0 12px">' +
+    '<button class="btn small' + (plAllState.tab !== 'remove' ? ' primary' : '') + '" onclick="plAllState.tab=\'add\';plRenderAll()">To add (' + nAdd + ')</button>' +
+    '<button class="btn small' + (plAllState.tab === 'remove' ? ' primary' : '') + '" onclick="plAllState.tab=\'remove\';plRenderAll()">To remove (' + nRem + ')</button></div>'
+}
 function plRenderAll() {
+  if (plAllState.tab === 'remove') { plRenderAllRemove(); return }
   const { plans, list } = plAllGroups(), all = Object.keys(STUDIO_NAMES)
   const studiosIn = new Set(plans.map(p => p.studio_id))
   const drafts = plAllState.plans.filter(p => p.status !== 'set')
   const variants = list.reduce((t, g) => t + Object.keys(g.studios).length, 0)
   const doubled = list.filter(g => Object.values(g.studios).some(v => v.length > 1)).length
   const pl_ = n => n === 1 ? '' : 's'
-  let h = '<h2>All studios: to add to Shopify</h2><div class="sub">' + list.length + ' product' + pl_(list.length) + ' with ' + variants + ' studio variant' + pl_(variants) +
+  let h = '<h2>All studios: to add to Shopify</h2>' + plAllTabs(list.length) + '<div class="sub">' + list.length + ' product' + pl_(list.length) + ' with ' + variants + ' studio variant' + pl_(variants) +
     ', from ' + plans.length + ' plan' + pl_(plans.length) + ' at ' + studiosIn.size + ' of ' + all.length + ' studios.</div>' +
     '<label class="small" style="display:flex;gap:6px;align-items:center;margin-bottom:8px"><input type="checkbox"' + (plAllState.drafts ? ' checked' : '') +
     ' onchange="plAllState.drafts=this.checked;plRenderAll()"> Include plans that aren\'t set yet (' + drafts.length + ')</label>'
@@ -4940,6 +4951,64 @@ function plRenderAll() {
     (list.length ? '<button class="btn" onclick="plAllCopy()">Copy list</button><button class="btn primary" onclick="plAllCsv()">Download CSV</button>' : '') + '</div>'
   plModal(h, true)
 }
+/* ---------- All studios: everything waiting to come out of Shopify ---------- */
+// Grouped by Shopify product, one variant per studio. Items not in the system yet have no confirmed
+// title, so they get the house-format title for their date, time and type (marked as not confirmed).
+const PL_REMOVE_TITLE = { glazing: 'Glazing', minimake: 'Mini Make Drop In', workshop: 'Workshop', party: 'Party Time Slot' }
+function plAllRemoveGroups() {
+  const groups = {}
+  ;(plAllState.removals || []).filter(r => PL_REMOVE_OPEN.includes(r.status)).forEach(r => {
+    const t = String(r.session_time).slice(0, 5)
+    const title = r.shopify_title || plShopTitle(r.session_date, toMin(t), r.session_title || PL_REMOVE_TITLE[r.kind] || r.label || r.kind)
+    const g = groups[title] || (groups[title] = { title, guess: !r.shopify_title, date: r.session_date, time: t, rows: [] })
+    g.rows.push(r)
+  })
+  return Object.values(groups).sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time) || a.title.localeCompare(b.title))
+}
+function plRenderAllRemove(msg) {
+  const list = plAllRemoveGroups()
+  const rows = list.reduce((t, g) => t.concat(g.rows), [])
+  const count = s => rows.filter(r => r.status === s).length
+  let h = '<h2>All studios: to remove from Shopify</h2>' + plAllTabs(plAllGroups().list.length)
+  if (plAllState.removals === null) h += '<div class="note bad">Could not load the removal lists.</div>'
+  h += '<div class="sub">' + list.length + ' product' + (list.length === 1 ? '' : 's') + ' with ' + rows.length + ' studio variant' + (rows.length === 1 ? '' : 's') + ' still to come out, from every studio\'s Removal list (today onward). ' +
+    [count('pending') && count('pending') + ' saved for later', count('blocked') && count('blocked') + ' with bookings', count('manual') && count('manual') + ' to do by hand', count('failed') && count('failed') + ' failed'].filter(Boolean).join(', ') + '.</div>'
+  if (msg) h += '<div class="note info">' + esc(msg) + '</div>'
+  if (count('pending')) h += '<div class="note warn">Rows not in Shopify yet: take them out of your bulk import before it runs, so they never go up. Titles marked "not confirmed" are built from the date, time and type, so match them by date and time.</div>'
+  if (!list.length) h += '<div class="empty">Nothing waiting to come out.</div>'
+  else h += '<div class="pl-tbl-wrap"><table class="list"><tr><th>Shopify title</th><th>Date</th><th>Studios (variants)</th></tr>' +
+    list.map(g => '<tr><td class="wrap">' + esc(g.title) + (g.guess ? ' <span class="muted small">(not confirmed)</span>' : '') + '</td><td>' + plDayLabel(g.date) + '</td>' +
+      '<td class="wrap small"><b>' + g.rows.length + '</b> ' + g.rows.map(r => esc(STUDIO_NAMES[r.studio_id] || r.studio_id) + ' <span class="pl-st ' + r.status + '" title="' + esc(r.note || '') + '">' + PL_STATUS_TEXT[r.status] + '</span>').join(', ') + '</td></tr>').join('') +
+    '</table></div>'
+  h += '<div class="pl-actions"><span class="muted small" id="pl-allrm-msg">Bookings to contact are in each studio\'s Removal list.</span><button class="btn" onclick="plCloseModal()">Close</button>' +
+    (list.length ? '<button class="btn" onclick="plAllRemoveCopy()">Copy list</button><button class="btn" onclick="plAllRemoveCsv()">Download CSV</button>' : '') +
+    (rows.some(r => ['pending', 'failed', 'blocked'].includes(r.status)) ? '<button class="btn primary" id="pl-allrm-go" onclick="plAllRecheck()">Check Shopify again and remove</button>' : '') + '</div>'
+  plModal(h, true)
+}
+function plAllRemoveCopy() {
+  const txt = plAllRemoveGroups().map(g => g.title + (g.guess ? ' (not confirmed)' : '') + '\n  ' +
+    g.rows.map(r => (PL_VARIANT_NAMES[r.studio_id] || r.studio_id) + ' (' + PL_STATUS_TEXT[r.status] + ')').join('\n  ')).join('\n\n')
+  navigator.clipboard.writeText(txt).then(() => toast('Copied'), () => toast('Could not copy', true))
+}
+function plAllRemoveCsv() {
+  const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'
+  const lines = [['Shopify title', 'Title confirmed', 'Variant', 'Studio ID', 'Studio', 'Date', 'Time', 'What', 'Status', 'Note'].map(q).join(',')]
+  plAllRemoveGroups().forEach(g => g.rows.forEach(r => lines.push([g.title, g.guess ? 'No' : 'Yes', PL_VARIANT_NAMES[r.studio_id] || r.studio_id, r.studio_id, STUDIO_NAMES[r.studio_id],
+    r.session_date, fmtTime(r.session_time), r.session_title || r.label, PL_STATUS_TEXT[r.status], r.note].map(q).join(','))))
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }))
+  a.download = 'all-studios-removals-' + todayStr() + '.csv'
+  document.body.appendChild(a); a.click(); a.remove()
+}
+async function plAllRecheck() {
+  const btn = document.getElementById('pl-allrm-go'), msg = document.getElementById('pl-allrm-msg')
+  btn.disabled = true
+  let removed
+  try { removed = await plRecheckRows((plAllState.removals || []).filter(r => ['pending', 'failed', 'blocked'].includes(r.status)), msg) }
+  catch (e) { msg.textContent = 'Could not check: ' + (e.message || e); btn.disabled = false; return }
+  plRenderAllRemove(removed ? removed + ' removed from Shopify. The rest stay on the list with their updated status.' : 'Nothing new to remove yet.')
+}
+
 function plAllCopy() {
   const { list } = plAllGroups()
   const txt = list.map(g => g.title + '\n  ' + Object.keys(g.studios).map(id => PL_VARIANT_NAMES[id] || id).join('\n  ') +
@@ -5002,14 +5071,29 @@ async function plRemovalForget(id) {
 async function plRecheckRemovals() {
   const btn = document.getElementById('pl-rm-go'), msg = document.getElementById('pl-rm-msg')
   btn.disabled = true; msg.textContent = 'Checking…'
-  const open = pl.removals.filter(r => ['pending', 'failed', 'blocked'].includes(r.status))
-  let list
-  try { list = await plResolve(open.map(r => ({ src: r, date: r.session_date, time: String(r.session_time).slice(0, 5), kind: r.kind, slot: r.slot || 0, label: r.label }))) }
+  let removed
+  try { removed = await plRecheckRows(pl.removals.filter(r => ['pending', 'failed', 'blocked'].includes(r.status)), msg) }
   catch (e) { msg.textContent = 'Could not check: ' + (e.message || e); btn.disabled = false; return }
+  await plLoadRemovalBookings()
+  plRenderRemovals(removed ? removed + ' removed from Shopify.' : 'Nothing new to remove yet.')
+}
+// Re-match removal rows (any studios) to sessions, Shopify and bookings; remove what's ready; save each row's new status.
+async function plRecheckRows(rows, msg) {
+  const byStudio = {}
+  rows.forEach(r => { (byStudio[r.studio_id] = byStudio[r.studio_id] || []).push(r) })
+  let removed = 0, done = 0
+  for (const st of Object.keys(byStudio)) {
+    if (msg) msg.textContent = 'Checking ' + (STUDIO_NAMES[st] || st) + '…'
+    const list = await plResolve(byStudio[st].map(r => ({ src: r, studio: st, date: r.session_date, time: String(r.session_time).slice(0, 5), kind: r.kind, slot: r.slot || 0, label: r.label })), st)
+    removed += await plApplyRecheck(list, msg, () => ++done, rows.length)
+  }
+  return removed
+}
+async function plApplyRecheck(list, msg, tick, total) {
   let removed = 0
   for (let i = 0; i < list.length; i++) {
-    const r = list[i]
-    if (r.status === 'remove') { msg.textContent = 'Removing ' + (i + 1) + ' of ' + list.length + '…'; Object.assign(r, await plRemoveVariant(r)) }
+    const r = list[i], n = tick()
+    if (r.status === 'remove') { if (msg) msg.textContent = 'Removing ' + n + ' of ' + total + '…'; Object.assign(r, await plRemoveVariant(r)) }
     const now = new Date().toISOString()
     const patch = { status: r.status === 'remove' ? 'pending' : r.status, note: r.note || null, updated_at: now,
       session_id: r.session ? String(r.session.id) : r.src.session_id, session_title: r.session ? r.session.title : r.src.session_title,
@@ -5018,8 +5102,7 @@ async function plRecheckRemovals() {
     await sb.from('schedule_plan_removals').update(patch).eq('id', r.src.id)
     Object.assign(r.src, patch)
   }
-  await plLoadRemovalBookings()
-  plRenderRemovals(removed ? removed + ' removed from Shopify.' : 'Nothing new to remove yet.')
+  return removed
 }
 </script>
 </body>
