@@ -236,6 +236,7 @@ td[data-date] .wk-chip:not([draggable="true"]) { cursor: default; }
 .pl-dayhead:hover { background: var(--soft); }
 .pl-dayhead.isclosed { background: var(--bad-bg); color: var(--bad); }
 .pl-dayhead.isclosed .muted { color: var(--bad); }
+.pl-camp { font-size: 10px; font-weight: 600; background: #dff1ef; color: #00695c; border-radius: 8px; padding: 1px 6px; }
 .pl-off { font-size: 10px; font-weight: 600; background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 1px 6px; }
 .pl-daybody.isclosed { background-color: #fbf3f2; background-image: repeating-linear-gradient(45deg, transparent 0 8px, rgba(192,57,43,.06) 8px 16px); }
 .pl-sub { display: grid; grid-template-columns: 1fr 1fr 1fr 26px; font-size: 10px; color: var(--muted); border-left: 0.5px solid var(--line); text-align: center; padding-bottom: 2px; }
@@ -3642,7 +3643,8 @@ const PL_KINDS = {
   party:          { label: 'Party slot',     short: 'Party',     dur: 120, bg: '#fde4ee', ink: '#ad1457' },
   session_class:  { label: 'Session class',  short: 'Class',     dur: 90,  bg: '#fff1cc', ink: '#7a5a00', series: true },
   wheel_workshop: { label: 'Wheel workshop', short: 'Wheel',     dur: 90,  bg: '#efe4d8', ink: '#5d4037' },
-  wheel_session:  { label: 'Wheel session',  short: 'Wheel',     dur: 90,  bg: '#e2d3c1', ink: '#4e342e', series: true }
+  wheel_session:  { label: 'Wheel session',  short: 'Wheel',     dur: 90,  bg: '#e2d3c1', ink: '#4e342e', series: true },
+  camp:           { label: 'Camp / PA day',  short: 'Camp',      dur: 390, bg: '#dff1ef', ink: '#00695c', fixed: true }
 }
 const PL_ADD_ORDER = ['session_class', 'wheel_workshop', 'wheel_session', 'workshop', 'glazing', 'minimake']
 const PL_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -3672,7 +3674,7 @@ const PL_VARIANT_NAMES = {
   'ON-WTR-WTR':'ON / WATERLOO - UPTOWN'
 }
 let plCatalog = []   // session_catalog rows (all studios)
-let pl = { studio: '', plans: [], plan: null, week: 0, parties: [], pool: [], allStaff: [], wages: {}, saveTimer: null, lo: 540, setRows: null }
+let pl = { studio: '', plans: [], plan: null, week: 0, parties: [], camps: [], pool: [], allStaff: [], wages: {}, saveTimer: null, lo: 540, setRows: null }
 
 function plDefaults() {
   return {
@@ -3690,7 +3692,8 @@ function plDefaults() {
       party:          { staff: 1, people: 0.5, price: 0, dur: 120 },
       session_class:  { staff: 1, people: 8, price: 0 },
       wheel_workshop: { staff: 1, people: 6, price: 0 },
-      wheel_session:  { staff: 1, people: 6, price: 0 }
+      wheel_session:  { staff: 1, people: 6, price: 0 },
+      camp:           { staff: 1, dur: 390 }     // booked camps / PA days: staff for their full hours; dur only if a session has no length
     }
   }
 }
@@ -3819,8 +3822,37 @@ async function plOpenPlan(id) {
   p.settings = plMerge(plDefaults(), p.settings)
   p.data = plMerge(plEmptyData(), p.data)
   pl.plan = p; pl.week = 0
-  await plLoadWages()
+  await Promise.all([plLoadWages(), plLoadCamps()])
   plRender()
+}
+
+/* ---------- camps and PA days already scheduled at the studio ---------- */
+// Read from the same staffing data as Coverage (real start and end times), falling back to sessions
+// with the default length. They show as fixed blocks: they're booked and run outside the plan.
+const PL_CAMP_RE = /\bcamp\b|pa\s*\/?\s*pd|\bpa day\b|\bpd day\b|no school/i
+const plCampLabel = t => /pa\s*\/?\s*pd|\bpa day\b|\bpd day\b|no school/i.test(t || '') ? 'PA Day' : 'Camp'
+async function plLoadCamps() {
+  pl.camps = []
+  if (!pl.plan) return
+  const from = pl.plan.week_start, to = plLastDate(), seen = new Set()
+  const r = await sb.rpc('get_staffing_need', { p_studio_id: pl.studio, p_from: from, p_to: to })
+  if (!r.error) {
+    ;(r.data || []).forEach(x => {
+      if (!PL_CAMP_RE.test(x.title || '') || !x.start_time || seen.has(x.session_id)) return
+      if (/early (drop|arrival)|after.?care/i.test(x.title)) return
+      seen.add(x.session_id)
+      const a = toMin(x.start_time), b = x.end_time ? toMin(x.end_time) : a + (Number(pl.plan.settings.k.camp.dur) || 390)
+      pl.camps.push({ id: x.session_id, date: x.session_date, start: a, end: Math.max(b, a + 15), title: x.title, booked: x.booked || 0 })
+    })
+    return
+  }
+  const { data } = await sb.from('sessions').select('id, title, session_date, session_time, session_type').eq('studio_id', pl.studio)
+    .gte('session_date', from).lte('session_date', to)
+  ;(data || []).forEach(x => {
+    if (!(x.session_type === 'camp' || PL_CAMP_RE.test(x.title || '')) || !x.session_time || /early (drop|arrival)|after.?care/i.test(x.title)) return
+    const a = toMin(x.session_time)
+    pl.camps.push({ id: x.id, date: x.session_date, start: a, end: a + (Number(pl.plan.settings.k.camp.dur) || 390), title: x.title, booked: null })
+  })
 }
 
 async function plLoadWages() {
@@ -3882,9 +3914,9 @@ function plRename(v) { pl.plan.name = v.trim() || 'Plan'; plTouch() }
 async function plSetStart(v) {
   if (!v) return
   pl.plan.week_start = sundayOf(v); pl.week = 0
-  await plLoadWages(); plTouch()
+  await Promise.all([plLoadWages(), plLoadCamps()]); plTouch()
 }
-function plSetWeeks(v) { pl.plan.weeks = Number(v); pl.week = Math.min(pl.week, pl.plan.weeks - 1); plLoadWages().then(plTouch) }
+function plSetWeeks(v) { pl.plan.weeks = Number(v); pl.week = Math.min(pl.week, pl.plan.weeks - 1); Promise.all([plLoadWages(), plLoadCamps()]).then(plTouch) }
 function plWeekGo(n) { pl.week = Math.max(0, Math.min(pl.plan.weeks - 1, pl.week + n)); plRender() }
 async function plArchive() {
   if (!confirm('Delete the plan "' + pl.plan.name + '"? Its removal list stays.')) return
@@ -3935,6 +3967,11 @@ function plItems(date) {
     items.push({ id: 'A|' + a.id + '|' + date, addId: a.id, date, kind: a.kind, start: a.start, dur: a.dur, col: a.col, src: 'add', state: closed ? 'closed' : 'on', by: closed ? plClosedText(closed) : '',
       label: plAddLabel(a), staff: a.staff, people: a.people, price: a.price, nth: ds.indexOf(date) + 1, of: ds.length })
   })
+  pl.camps.filter(c => c.date === date).forEach(c => {
+    const id = 'C|' + c.id + '|' + date, e = d.edits[id] || {}
+    items.push({ id, date, kind: 'camp', start: c.start, dur: c.end - c.start, col: e.col ?? 2, src: 'camp', state: 'on',
+      label: plCampLabel(c.title) + ': ' + c.title, staff: e.staff ?? s.k.camp.staff, people: c.booked, price: 0, booked: c.booked })
+  })
   return items
 }
 /* ---------- closing a day (stat holiday, short staffed, …) ---------- */
@@ -3972,6 +4009,7 @@ function plDayClick(ev, date) {
       '<div class="row"><input class="input" id="pl-close-note" placeholder="Note (optional), e.g. Remembrance Day" style="width:100%"></div>' +
       '<div class="row"><label style="flex-direction:row;align-items:center;gap:4px;color:var(--ink);font-size:12px"><input type="checkbox" id="pl-close-staff" checked> Clear planned staff that day</label></div>' +
       (series ? '<div class="row muted small">' + series + ' session class' + (series > 1 ? 'es skip' : ' skips') + ' this date and get' + (series > 1 ? '' : 's') + ' a week added on the end.</div>' : '') +
+      (pl.camps.some(x => x.date === date) ? '<div class="row small" style="color:var(--warn)">A camp or PA day is booked this day. It stays on the plan and still needs its staff.</div>' : '') +
       '<div class="row"><button class="btn small bad" onclick="plCloseDay(\'' + date + '\')">Close this day</button></div>'
   }
   plShowMenu(ev, h)
@@ -4005,7 +4043,7 @@ function plReopenDay(date) {
 }
 
 function plRevenue(it) {
-  if (it.state !== 'on') return 0
+  if (it.state !== 'on' || it.src === 'camp') return 0   // camps are already booked, not part of what you're planning
   const per = PL_KINDS[it.kind].series ? (Number(it.price) || 0) / (it.of || 1) : Number(it.price) || 0
   return per * (Number(it.people) || 0)
 }
@@ -4090,7 +4128,7 @@ function plRender() {
   if (!pricesSet) html += '<div class="note warn">Add prices under <b>Defaults</b> to see revenue and labour %.</div>'
   if (!wageOk) html += '<div class="note warn">Labour cost needs finance access. Hours still show.</div>'
 
-  html += '<div class="toolbar pl-legend">' + ['glazing', 'minimake', 'workshop', 'party', 'session_class', 'wheel_workshop', 'wheel_session'].map(k =>
+  html += '<div class="toolbar pl-legend">' + ['glazing', 'minimake', 'workshop', 'party', 'session_class', 'wheel_workshop', 'wheel_session', 'camp'].map(k =>
     '<span><i style="background:' + PL_KINDS[k].bg + ';border-color:' + PL_KINDS[k].ink + '"></i>' + PL_KINDS[k].label + '</span>').join('') +
     '<span><i style="background:#fff;border:1px dashed #bbb"></i>Taken out</span>' +
     '<span>Right-hand column: <b style="color:var(--good)">planned/needed</b>, <b style="color:var(--bad)">short</b>, <b style="color:var(--warn)">over</b></span></div>'
@@ -4100,7 +4138,7 @@ function plRender() {
   dates.forEach(d => {
     const st = stats[d], open = st.items.some(i => i.state === 'on'), c = p.data.closed[d], off = plOffOn(d)
     html += '<div class="pl-dayhead' + (c ? ' isclosed' : open ? '' : ' closed') + '" onclick="plDayClick(event,\'' + d + '\')" title="Click to close or reopen this day">' +
-      '<b>' + plDayLabel(d) + '</b>' + (off.length ? ' <span class="pl-off" title="' + esc(off.map(x => x.display_name).join(', ')) + '">' + off.length + ' off</span>' : '') +
+      '<b>' + plDayLabel(d) + '</b>' + [...new Set(pl.camps.filter(x => x.date === d).map(x => plCampLabel(x.title)))].map(t => ' <span class="pl-camp">' + t + '</span>').join('') + (off.length ? ' <span class="pl-off" title="' + esc(off.map(x => x.display_name).join(', ')) + '">' + off.length + ' off</span>' : '') +
       '<span class="muted">' + (c ? esc(plClosedText(c)) : open ? plMoney(st.rev) + ' est., ' + plH(st.needMin) + 'h needed' : 'Nothing on') + '</span></div>'
   })
   html += '<div></div>' + dates.map(() => '<div class="pl-sub"><span>1</span><span>2</span><span>3</span><span title="Planned / needed">👤</span></div>').join('')
@@ -4299,6 +4337,13 @@ function plItemClick(ev, id, date) {
   const range = bdFmtShort(it.start) + '–' + bdFmtShort(it.start + it.dur)
   const every = 'every ' + DAY_NAMES[plDow(date)] + ' at ' + bdFmtShort(it.start)
   let h = '<div class="pl-menu-h"><b>' + esc(it.label) + '</b>' + plDayLabel(date) + ', ' + range + (it.of ? ' (' + it.nth + ' of ' + it.of + ')' : '') + '</div>'
+  if (it.src === 'camp') {
+    h += '<div class="row small">' + (it.booked != null ? it.booked + ' booked. ' : '') + 'Already scheduled at the studio, so it can\'t be changed here.</div>' +
+      '<div class="row"><label>Staff<input class="input" type="number" min="0" step="1" id="pl-m-staff" value="' + it.staff + '"></label>' +
+      '<button class="btn small primary" style="align-self:flex-end" onclick="plCampStaff(\'' + id + '\')">Save</button></div>' +
+      '<div class="row"><span class="muted small">Column</span>' + [0, 1, 2].map(c => '<button class="btn small' + (c === it.col ? ' primary' : '') + '" onclick="plItemCol(\'' + id + '\',' + c + ')">' + (c + 1) + '</button>').join('') + '</div>'
+    plShowMenu(ev, h); return
+  }
   if (it.state === 'closed') {
     h += '<div class="row muted small">' + esc(it.by) + '. Click the day heading to reopen it.</div>'
   } else if (it.state === 'replaced') {
@@ -4335,9 +4380,15 @@ function plItemSave(id, all) {
   else (all ? plSameDowIds(id) : [id]).forEach(x => { d.edits[x] = Object.assign(d.edits[x] || {}, vals) })
   plCloseMenu(); plTouch()
 }
+function plCampStaff(id) {
+  const d = pl.plan.data, v = document.getElementById('pl-m-staff').value
+  d.edits[id] = Object.assign(d.edits[id] || {}, { staff: v === '' ? 0 : Number(v) })
+  plCloseMenu(); plTouch()
+}
 function plItemCol(id, c) {
   const d = pl.plan.data
-  if (id.startsWith('A|')) d.adds.find(a => a.id === id.split('|')[1]).col = c
+  if (id.startsWith('C|')) d.edits[id] = Object.assign(d.edits[id] || {}, { col: c })
+  else if (id.startsWith('A|')) d.adds.find(a => a.id === id.split('|')[1]).col = c
   else plSameDowIds(id).forEach(x => { d.edits[x] = Object.assign(d.edits[x] || {}, { col: c }) })
   plCloseMenu(); plTouch()
 }
@@ -4438,6 +4489,13 @@ function plFormUpdate() {
         (on.length < want ? '. Only ' + on.length + ' fit inside 12 weeks from the plan start.' : '')
       : on.length + ' date' + (on.length > 1 ? 's' : '') + (skipped ? ', ' + skipped + ' skipped' : '')
   }
+  const msgEl = document.getElementById('pl-f-msg')
+  if (msgEl) {
+    const t0 = Number(document.getElementById('pl-f-time').value), t1 = t0 + PL_KINDS[plForm.kind].dur
+    const hits = plFormDates().filter(d => !plForm.skip[d]).map(d => pl.camps.find(x => x.date === d && x.start < t1 && t0 < x.end)).filter(Boolean)
+    msgEl.style.color = hits.length ? 'var(--warn)' : ''
+    msgEl.textContent = hits.length ? 'Overlaps ' + hits.length + ' camp/PA day' + (hits.length > 1 ? 's' : '') + ': ' + hits.slice(0, 3).map(x => plShortDate(x.date) + ' ' + bdFmtShort(x.start) + '–' + bdFmtShort(x.end)).join(', ') + (hits.length > 3 ? '…' : '') : ''
+  }
   const note = document.getElementById('pl-f-repl-note')
   if (note) {
     const t = Number(document.getElementById('pl-f-time').value), repl = document.querySelector('input[name="pl-f-repl"]:checked').value === 'replace'
@@ -4469,7 +4527,7 @@ function plConfirmAdd() {
 /* ---------- defaults ---------- */
 function plOpenDefaults() {
   const s = pl.plan.settings
-  const kinds = ['workshop', 'glazing', 'minimake', 'party', 'session_class', 'wheel_workshop', 'wheel_session']
+  const kinds = ['workshop', 'glazing', 'minimake', 'party', 'session_class', 'wheel_workshop', 'wheel_session', 'camp']
   let h = '<h2>Defaults for this plan</h2><div class="sub">The regular schedule and the starting numbers for anything you add. New plans start from the latest plan\'s defaults.</div>' +
     '<h3>Regular drop-in hours</h3><div class="pl-frow">' +
     '<label class="pl-f"><span>Weekdays open</span><input class="input" type="time" id="pl-d-wo" value="' + s.weekday.open + '"></label>' +
@@ -4485,11 +4543,13 @@ function plOpenDefaults() {
     (bdWageAccess ? '<label class="pl-f"><span>Open shift wage (blank = studio average)</span><input class="input" type="number" min="0" step="0.25" id="pl-d-ow" value="' + (s.openWage ?? '') + '"></label>' : '') + '</div>' +
     '<h3>Each offering</h3><table class="list"><tr><th>Offering</th><th>Staff</th><th>Expected people</th><th>Price</th><th>Minutes</th></tr>' +
     kinds.map(k => { const v = s.k[k], K = PL_KINDS[k]
+      if (k === 'camp') return '<tr><td>' + K.label + '</td><td><input class="input" style="width:80px" type="number" min="0" step="1" data-k="camp" data-f="staff" value="' + v.staff + '"></td>' +
+        '<td class="muted">booked</td><td class="muted">–</td><td><input class="input" style="width:70px" type="number" min="15" step="15" data-k="camp" data-f="dur" value="' + v.dur + '" title="Only used when a camp session has no end time"></td></tr>'
       const mins = K.dropin ? '<input class="input" style="width:70px" type="number" min="15" step="15" data-k="' + k + '" data-f="stay" value="' + v.stay + '" title="How long people stay (for floor staff)">'
         : k === 'party' ? '<input class="input" style="width:70px" type="number" min="15" step="15" data-k="party" data-f="dur" value="' + v.dur + '">' : K.dur
       return '<tr><td>' + K.label + '</td>' + ['staff', 'people', 'price'].map(f => '<td><input class="input" style="width:80px" type="number" min="0" step="' + (k === 'party' && f === 'people' ? '0.1' : '1') + '" data-k="' + k + '" data-f="' + f + '" value="' + v[f] + '"></td>').join('') + '<td>' + mins + '</td></tr>'
     }).join('') + '</table>' +
-    '<div class="muted small" style="margin-top:6px">Party: expected people is the chance the slot books (0.5 = half the time), price is the party price. Session prices are per person for the whole session. Drop-in minutes are how long people stay.</div>' +
+    '<div class="muted small" style="margin-top:6px">Party: expected people is the chance the slot books (0.5 = half the time), price is the party price. Session prices are per person for the whole session. Drop-in minutes are how long people stay. Camp / PA day minutes are only used when a session has no end time.</div>' +
     '<div class="pl-actions"><button class="btn" onclick="plCloseModal()">Cancel</button><button class="btn primary" onclick="plSaveDefaults()">Save defaults</button></div>'
   plModal(h, true)
 }
@@ -4601,7 +4661,7 @@ async function plOpenSet() {
   if (!(await plFlush())) { toast('Save the plan first', true); return }
   plModal('<h2>Set plan</h2><div class="loading">Checking sessions, Shopify and bookings…</div>', true)
   const list = []
-  plDates().forEach(date => plItems(date).filter(i => i.src !== 'add' && i.state !== 'on').forEach(i =>
+  plDates().forEach(date => plItems(date).filter(i => i.src !== 'add' && i.src !== 'camp' && i.state !== 'on').forEach(i =>
     list.push({ date, time: plHM(i.start), kind: i.kind, slot: i.slot || 0, label: PL_KINDS[i.kind].label, why: i.state === 'closed' ? i.by : i.state === 'replaced' ? 'Replaced by ' + i.by : 'Taken out' })))
   let rows, prev
   try {
