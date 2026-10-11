@@ -1570,6 +1570,47 @@ async function findClass1SessionId(studioId, sessionTime, seriesTitle) {
   return bookings?.length ? bookings[0].session_id : candidates[0].id
 }
 
+// ONE way to count registrations, matching index.html exactly:
+//   1. bookings with qty > 0 that haven't been returned (returned_at IS NULL)
+//   2. series Class 2+ weeks: replaced by get_class_week_bookings (term sign-ups covering
+//      this week, mid-term entry points like the 8/10 Week Sessions, single classes)
+//   3. "Catch Up Class" sessions: + one per class_catchups row
+// Every admin view that shows a REG number should call this, so admin and the iPad agree.
+async function countEnrolments(sessions) {
+  const list = (sessions || []).filter(s => s && s.id)
+  const ids = list.map(s => s.id), counts = {}
+  for (let i = 0; i < ids.length; i += 500) {
+    const { data: bookings } = await sb.from('bookings').select('session_id, qty')
+      .in('session_id', ids.slice(i, i + 500)).gt('qty', 0).is('returned_at', null)
+    if (bookings) bookings.forEach(b => { counts[b.session_id] = (counts[b.session_id] || 0) + (b.qty || 0) })
+  }
+  if (!(await applyClassWeekCounts(list, counts))) await applySeriesEnrolment(list, counts)
+  const cuIds = list.filter(s => s.title === 'Catch Up Class').map(s => s.id)
+  for (let i = 0; i < cuIds.length; i += 500) {
+    const { data: cu } = await sb.from('class_catchups').select('target_session_id').in('target_session_id', cuIds.slice(i, i + 500))
+    ;(cu || []).forEach(r => { counts[r.target_session_id] = (counts[r.target_session_id] || 0) + 1 })
+  }
+  return counts
+}
+
+// Class 2+ weeks: the same count the iPad class list shows (get_class_week_bookings) —
+// term sign-ups covering this week, mid-term sign-ups, and single classes booked on this
+// week itself. Replaces the session's own booking count rather than only filling zeros,
+// because one drop-in on class 5 used to hide everyone enrolled through class 1.
+// Returns false if any call failed, so the caller can fall back to applySeriesEnrolment.
+async function applyClassWeekCounts(sessions, counts) {
+  const todo = (sessions || []).filter(s => s && s.id && isSeriesClass2Plus(s.title || ''))
+  let ok = true
+  for (let i = 0; i < todo.length; i += 20) {
+    await Promise.all(todo.slice(i, i + 20).map(async s => {
+      const { data, error } = await sb.rpc('get_class_week_bookings', { p_session_id: s.id })
+      if (error) { ok = false; console.warn('get_class_week_bookings failed for', s.id, error.message); return }
+      counts[s.id] = (data || []).reduce((sum, r) => sum + (r.qty || 0), 0)
+    }))
+  }
+  return ok
+}
+
 // Series class 2+: fill counts[id] with the enrolment of the series' first session, using
 // get_series_enrolment (database; matches by weekday, time, title and age group, the same
 // rule finance.html and staff-schedule.html use). Only touches Class 2+ sessions with no
@@ -1617,12 +1658,7 @@ async function loadSchedule() {
   const toExclusive = dateStr(addDays(new Date(to + 'T12:00:00'), 1))
   const { data: sessions } = await sb.from('sessions').select('*').gte('session_date', from).lt('session_date', toExclusive).order('session_date').order('session_time').limit(5000)
   if (!sessions || !sessions.length) { document.getElementById('grid-body').innerHTML = '<tr><td colspan="2" class="empty">No sessions found.</td></tr>'; return }
-  const ids = sessions.map(s => s.id), counts = {}
-  for (let i = 0; i < ids.length; i += 500) {
-    const { data: bookings } = await sb.from('bookings').select('session_id, qty').in('session_id', ids.slice(i, i+500))
-    if (bookings) bookings.forEach(b => { counts[b.session_id] = (counts[b.session_id]||0) + (b.qty||0) })
-  }
-  await applySeriesEnrolment(sessions, counts)   // series class 2+ — enrolment from the series' first session
+  const counts = await countEnrolments(sessions)
   scheduleData = sessions.map(s => ({ ...s, reg: counts[s.id] || 0 }))
   gridStudios = allStudios.filter(s => [...new Set(sessions.map(x => x.studio_id))].includes(s.id))
   await fetchCurriculumData()
@@ -2157,11 +2193,7 @@ async function loadWorkshopView() {
   document.getElementById('workshop-container').innerHTML = '<div class="loading">Loading...</div>'
   const { data: sessions } = await sb.from('sessions').select('*').gte('session_date',from).lte('session_date',to).order('session_date').order('session_time')
   if (!sessions||!sessions.length) { document.getElementById('workshop-container').innerHTML='<div class="empty">No sessions found.</div>'; return }
-  const ids = sessions.map(s=>s.id), counts = {}
-  for (let i=0; i<ids.length; i+=500) {
-    const { data: bookings } = await sb.from('bookings').select('session_id, qty').in('session_id', ids.slice(i,i+500))
-    if (bookings) bookings.forEach(b => { counts[b.session_id]=(counts[b.session_id]||0)+(b.qty||0) })
-  }
+  const counts = await countEnrolments(sessions)
   workshopData = sessions.map(s => ({...s, reg: counts[s.id]||0})); renderWorkshopView()
 }
 
@@ -2198,13 +2230,7 @@ async function loadStudioView() {
   const { data: sessions } = await sb.from('sessions').select('*').gte('session_date',from).lte('session_date',from).order('session_date').order('session_time')
   const studioSessions = (sessions||[]).filter(s=>s.studio_id===studioId)
   const studioKeys = new Set(studioSessions.map(s=>`${s.session_date}__${s.title}`))
-  const ids = studioSessions.map(s=>s.id), counts = {}
-  if (ids.length) {
-    const { data: bookings } = await sb.from('bookings').select('session_id, qty').in('session_id', ids)
-    if (bookings) bookings.forEach(b => { counts[b.session_id]=(counts[b.session_id]||0)+(b.qty||0) })
-  }
-  // Series class 2+ — enrolment from the series' first session
-  await applySeriesEnrolment(studioSessions, counts)
+  const counts = await countEnrolments(studioSessions)
   const activeSessions = studioSessions.map(s=>({...s,reg:counts[s.id]||0})).filter(s=>s.show)
 
   // Pre-populate studioViewVariantMap from cached shopify_variants so Set buttons
@@ -2332,7 +2358,7 @@ async function syncStudioInventory() {
   const studioId = document.getElementById('bs-studio').value, date = document.getElementById('bs-date').value
   const { data: freshSessions } = await sb.from('sessions').select('*').eq('studio_id', studioId).eq('session_date', date)
   const ids = (freshSessions || []).map(s => s.id), counts = {}
-  if (ids.length) { const { data: bookings } = await sb.from('bookings').select('session_id, qty').in('session_id', ids); if (bookings) bookings.forEach(b => { counts[b.session_id] = (counts[b.session_id]||0) + (b.qty||0) }) }
+  if (ids.length) { const { data: bookings } = await sb.from('bookings').select('session_id, qty').in('session_id', ids).gt('qty', 0).is('returned_at', null); if (bookings) bookings.forEach(b => { counts[b.session_id] = (counts[b.session_id]||0) + (b.qty||0) }) }
   const activeSessions = (freshSessions || []).map(s => ({ ...s, reg: counts[s.id] || 0 }))
   const toSync = [], seen = new Set()
   activeSessions.forEach(s => { const t = buildShopifyTitle(s.session_date, s.session_time || '00:00:00', s.title); if (!t || t === 'OVERRIDE' || seen.has(t)) return; seen.add(t); toSync.push({ shopifyTitle: t, session_date: s.session_date, session_time: s.session_time }) })
@@ -3526,7 +3552,7 @@ async function previewCloseStudio() {
 
   const sessionIds = sessions.map(s => s.id)
   const bookingCounts = {}
-  const { data: bookings } = await sb.from('bookings').select('session_id, qty').in('session_id', sessionIds).gt('qty', 0)
+  const { data: bookings } = await sb.from('bookings').select('session_id, qty').in('session_id', sessionIds).gt('qty', 0).is('returned_at', null)
   if (bookings) bookings.forEach(b => { bookingCounts[b.session_id] = (bookingCounts[b.session_id]||0) + (b.qty||0) })
 
   let rows = sessions.map(s => {
@@ -3579,7 +3605,7 @@ async function executeCloseStudio() {
 
   const sessionIds = sessions.map(s => s.id)
   const bookingCounts = {}
-  const { data: bookings } = await sb.from('bookings').select('session_id, qty').in('session_id', sessionIds).gt('qty', 0)
+  const { data: bookings } = await sb.from('bookings').select('session_id, qty').in('session_id', sessionIds).gt('qty', 0).is('returned_at', null)
   if (bookings) bookings.forEach(b => { bookingCounts[b.session_id] = (bookingCounts[b.session_id]||0) + (b.qty||0) })
 
   let done = 0, errors = 0
@@ -6179,20 +6205,7 @@ async function loadWeekView() {
 
   if (error) { container.innerHTML = '<div class="empty">Error loading sessions.</div>'; return }
 
-  var sessionIds = (sessions || []).map(function(s) { return s.id })
-  var counts = {}
-  if (sessionIds.length) {
-    var { data: bookings } = await sb.from('bookings')
-      .select('session_id, qty')
-      .in('session_id', sessionIds)
-      .gt('qty', 0)
-    if (bookings) bookings.forEach(function(b) {
-      counts[b.session_id] = (counts[b.session_id] || 0) + (b.qty || 0)
-    })
-  }
-
-  // Series class 2+ — enrolment from the series' first session
-  await applySeriesEnrolment((sessions || []).map(function (s) { return Object.assign({ studio_id: studioId }, s) }), counts)
+  var counts = await countEnrolments((sessions || []).map(function (s) { return Object.assign({ studio_id: studioId }, s) }))
 
   weekViewData = (sessions || []).map(function(s) {
     return Object.assign({}, s, { reg: counts[s.id] || 0 })
