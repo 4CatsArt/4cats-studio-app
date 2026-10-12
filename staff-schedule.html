@@ -3871,6 +3871,19 @@ const plShortStudio = id => String(STUDIO_NAMES[id] || id).split(' - ').pop()
 // with the default length. They show as fixed blocks: they're booked and run outside the plan.
 const PL_CAMP_RE = /\bcamp\b|pa\s*\/?\s*pd|\bpa day\b|\bpd day\b|no school/i
 const plCampLabel = t => /pa\s*\/?\s*pd|\bpa day\b|\bpd day\b|no school/i.test(t || '') ? 'PA Day' : 'Camp'
+// get_staffing_need for a long range, one week per call: Supabase returns at most 1,000 rows per call,
+// and a studio's drop-ins over several weeks go past that (later weeks would quietly go missing).
+async function plStaffingNeed(studio, from, to) {
+  const calls = []
+  for (let a = from; a <= to; a = addDays(a, 7)) {
+    const b = addDays(a, 6) < to ? addDays(a, 6) : to
+    calls.push(sb.rpc('get_staffing_need', { p_studio_id: studio, p_from: a, p_to: b }))
+  }
+  const res = await Promise.all(calls)
+  const bad = res.find(r => r.error)
+  return bad ? { error: bad.error } : { data: res.reduce((t, r) => t.concat(r.data || []), []) }
+}
+
 async function plLoadCamps() {
   pl.camps = []
   if (!pl.plan) return
@@ -3883,7 +3896,7 @@ async function plLoadCamps() {
     return endMin && endMin > a ? endMin : a + (Number(k.dur) || 390)
   }
   const keep = t => PL_CAMP_RE.test(t || '') && !/early (drop|arrival)|after.?care/i.test(t)
-  const r = await sb.rpc('get_staffing_need', { p_studio_id: pl.studio, p_from: from, p_to: to })
+  const r = await plStaffingNeed(pl.studio, from, to)
   if (!r.error) {
     ;(r.data || []).forEach(x => {
       if (!keep(x.title) || !x.start_time || seen.has(x.session_id)) return
@@ -3894,6 +3907,7 @@ async function plLoadCamps() {
   } else {
     const { data } = await sb.from('sessions').select('id, title, session_date, session_time, session_type, show').eq('studio_id', pl.studio)
       .gte('session_date', from).lte('session_date', to)
+      .or('session_type.eq.camp,title.ilike.%camp%,title.ilike.%pa%day%,title.ilike.%pd%day%,title.ilike.%pa/pd%,title.ilike.%no school%')
     ;(data || []).forEach(x => {
       if (x.show === false || !x.session_time || !(x.session_type === 'camp' || keep(x.title))) return
       const a = toMin(x.session_time)
@@ -4679,7 +4693,7 @@ async function plFindRunning() {
   const msg = document.getElementById('pl-i-msg')
   if (from > to) { msg.textContent = 'That\'s after the plan ends (' + plShortDate(to) + ').'; return }
   msg.textContent = 'Looking…'
-  const r = await sb.rpc('get_staffing_need', { p_studio_id: pl.studio, p_from: from, p_to: to })
+  const r = await plStaffingNeed(pl.studio, from, to)
   if (r.error) { msg.textContent = 'Could not load: ' + r.error.message; return }
   const groups = {}
   const closed = pl.plan.data.closed || {}
