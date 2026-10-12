@@ -5248,12 +5248,23 @@ function buildStaffStudioList(selectedIds = []) {
 const stEsc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 let stData = [], stBadgeTypes = [], stBadgesBy = {}, stSort = { key: 'name', dir: 1 }, stSelected = new Set()
 const ST_COLS_KEY = 'staffTableCols_v1'
+// Today as YYYY-MM-DD in local time (dates in staff_profiles are plain dates)
+function stToday() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') }
+// "leaving Oct 20" / "left Oct 20" / "starts Nov 3" next to the name
+function stLeavingTag(s) {
+  const t = stToday(), md = d => new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })
+  if (s.termination_date) return s.termination_date < t
+    ? ` <span class="st-pill" style="background:#eee;color:#777">left ${md(s.termination_date)}</span>`
+    : ` <span class="st-pill" style="background:#fdecc8;color:#92400e">leaving · last day ${md(s.termination_date)}</span>`
+  if (s.hire_date && s.hire_date > t) return ` <span class="st-pill" style="background:#dcfce7;color:#166534">starts ${md(s.hire_date)}</span>`
+  return ''
+}
 function stColumns() {
   const studioName = id => STUDIO_VARIANT_MAP[id] || id
   const cols = [
     { key: 'name', label: 'Name', always: true, val: s => s.display_name || '',
       html: s => `${s.is_active ? '<span class="st-dot on"></span>' : '<span class="st-dot"></span>'}<strong>${stEsc(s.display_name || '')}</strong>` +
-        (s.preferred_name ? ` <span class="st-sub">goes by ${stEsc(s.preferred_name)}</span>` : '') + (s.nickname ? ` <span class="st-sub">(${stEsc(s.nickname)})</span>` : '') },
+        (s.preferred_name ? ` <span class="st-sub">goes by ${stEsc(s.preferred_name)}</span>` : '') + (s.nickname ? ` <span class="st-sub">(${stEsc(s.nickname)})</span>` : '') + stLeavingTag(s) },
     { key: 'preferred', label: 'Preferred name', val: s => s.preferred_name || '', edit: { type: 'text', field: 'preferred_name' } },
     { key: 'nickname', label: '4CATS name', val: s => s.nickname || '', edit: { type: 'text', field: 'nickname' } },
     { key: 'studios', label: 'Studios', val: s => s.studio_ids?.length ? s.studio_ids.map(studioName).join(', ') : 'All / floater',
@@ -5264,6 +5275,8 @@ function stColumns() {
       edit: { type: 'role', field: 'role' } },
     { key: 'province', label: 'Province', val: s => s.province_code || '', edit: { type: 'select', field: 'province_code', options: ['BC', 'AB', 'ON'] } },
     { key: 'hire', label: 'Hire date', val: s => s.hire_date || '', edit: { type: 'date', field: 'hire_date' } },
+    { key: 'term', label: 'Last day', val: s => s.termination_date || '', edit: { type: 'date', field: 'termination_date' },
+      html: s => s.termination_date ? `<span style="color:${s.termination_date < stToday() ? '#999' : '#b45309'};font-weight:600">${stEsc(s.termination_date)}</span>` : '' },
     { key: 'bday', label: 'Birthday', val: s => s.birthday_month && s.birthday_day ? String(s.birthday_month).padStart(2, '0') + '-' + String(s.birthday_day).padStart(2, '0') : '',
       html: s => s.birthday_month && s.birthday_day ? stEsc(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][s.birthday_month - 1] + ' ' + s.birthday_day) : '' },
     { key: 'min', label: 'Min hrs', val: s => s.min_weekly_hours ?? '', num: true, edit: { type: 'hours', field: 'min_weekly_hours' } },
@@ -5421,7 +5434,13 @@ async function stEditCell(ev, id, key) {
     const v = (box.querySelector('[data-f="v"]') || {}).value
     let patch
     if (e.type === 'text') patch = { [e.field]: String(v || '').trim() || null }
-    else if (e.type === 'date' || e.type === 'select' || e.type === 'home') patch = { [e.field]: v || null }
+    else if (e.type === 'date' || e.type === 'select' || e.type === 'home') {
+      if (e.type === 'date' && v) {
+        const hire = e.field === 'hire_date' ? v : s.hire_date, term = e.field === 'termination_date' ? v : s.termination_date
+        if (hire && term && term < hire) { alert('The last day can\'t be before the hire date.'); return }
+      }
+      patch = { [e.field]: v || null }
+    }
     else if (e.type === 'role') {
       if (v === 'manager' && !s.home_studio_id) { alert('Set a home studio first: managers are scheduled 40 hours a week there.'); return }
       patch = { role: v }
@@ -5615,6 +5634,7 @@ async function openStaffModal(id = null) {
       }
       document.getElementById('staff-can-adjust-spaces').checked = !!data.can_adjust_spaces
       document.getElementById('staff-hire-date').value = data.hire_date || ''
+      document.getElementById('staff-termination-date').value = data.termination_date || ''
       document.getElementById('staff-bday-month').value = data.birthday_month ? String(data.birthday_month) : ''
       document.getElementById('staff-bday-day').value = data.birthday_day ? String(data.birthday_day) : ''
       document.getElementById('staff-hourly-wage').value = ''
@@ -5674,6 +5694,7 @@ async function openStaffModal(id = null) {
     staffPinLoaded = true
     document.getElementById('staff-can-adjust-spaces').checked = false
     document.getElementById('staff-hire-date').value = ''
+    document.getElementById('staff-termination-date').value = ''
     document.getElementById('staff-bday-month').value = ''
     document.getElementById('staff-bday-day').value = ''
     document.getElementById('staff-hourly-wage').value = ''
@@ -5730,6 +5751,9 @@ async function saveStaff() {
   if (bdayMonth && bdayDay > [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][bdayMonth - 1]) {
     alert('That birthday date doesn\'t exist. Please check the month and day.'); return
   }
+  const hireDate = document.getElementById('staff-hire-date').value || null
+  const termDate = document.getElementById('staff-termination-date').value || null
+  if (hireDate && termDate && termDate < hireDate) { alert('The last day can\'t be before the hire date.'); return }
   const sched = readSchedulingFields()
   if (sched.max_studio_days_per_week != null && !(Number.isInteger(sched.max_studio_days_per_week) && sched.max_studio_days_per_week >= 1 && sched.max_studio_days_per_week <= 7)) {
     alert('Max in-studio days must be a whole number from 1 to 7, or blank.'); return
@@ -5752,7 +5776,8 @@ async function saveStaff() {
     province_code: document.getElementById('staff-province').value || null,
     training_unit_ids: trainingUnitIds,
     can_adjust_spaces: document.getElementById('staff-role').value === 'manager' ? document.getElementById('staff-can-adjust-spaces').checked : false,
-    hire_date: document.getElementById('staff-hire-date').value || null,
+    hire_date: hireDate,
+    termination_date: termDate,
     birthday_month: bdayMonth,
     birthday_day: bdayDay,
   }
@@ -5818,7 +5843,7 @@ async function saveStaff() {
     {
       const { data: newRow3 } = await sb.from('staff_profiles').select('id').eq('email', email).maybeSingle()
       if (newRow3) {
-        const { error: sErr } = await sb.from('staff_profiles').update(sched).eq('id', newRow3.id)
+        const { error: sErr } = await sb.from('staff_profiles').update({ ...sched, hire_date: hireDate, termination_date: termDate, birthday_month: bdayMonth, birthday_day: bdayDay }).eq('id', newRow3.id)
         const bErr = sErr ? null : (await saveStaffBadges(newRow3.id)) || (await saveStaffScheduleNotes(newRow3.id))
         if (sErr || bErr) alert('Staff member created, but the scheduling details were not saved (' + (sErr || bErr).message + '). Open them and save again.')
       }
@@ -9765,6 +9790,10 @@ function showAdminToast(msg, duration = 2500) {
       <div>
         <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Hire Date</label>
         <input id="staff-hire-date" type="date" style="width:180px;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;background:white">
+      </div>
+      <div>
+        <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Last Day <span style="font-weight:400;text-transform:none;color:#aaa">(termination — can't be scheduled after)</span></label>
+        <input id="staff-termination-date" type="date" style="width:180px;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;background:white">
       </div>
       <div>
         <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Birthday <span style="font-weight:400;text-transform:none;color:#aaa">(no year — for the dashboard birthday theme)</span></label>
