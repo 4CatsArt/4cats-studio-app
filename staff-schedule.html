@@ -4750,9 +4750,12 @@ function plItemClick(ev, id, date) {
       if (it.existing) h += '<div class="row muted small">Already running with registrations. Its dates are fixed, and it isn\'t on the list to add to Shopify.</div>'
       h += (it.of > 1 || shifts ? '<button onclick="plItemDelete(\'' + id + '\',false)">' + (shifts ? 'Skip this date (adds a week on the end)' : 'Remove this date only') + '</button>' : '') +
         '<button onclick="plItemDelete(\'' + id + '\',true)" style="color:var(--bad)">Delete' + (it.of > 1 ? ' on all ' + it.of + ' dates' : '') + '</button>'
+    } else if (it.kind === 'party' && it.booked) {
+      h += '<div class="row muted small">Booked party: parties are never cancelled, so it can\'t be taken out. Take out an unbooked (lighter) slot at this time instead.</div>'
     } else {
       h += '<button onclick="plItemDelete(\'' + id + '\',false)" style="color:var(--bad)">Take out this date</button>' +
-        '<button onclick="plItemDelete(\'' + id + '\',true)" style="color:var(--bad)">Take out ' + every + '</button>'
+        '<button onclick="plItemDelete(\'' + id + '\',true)" style="color:var(--bad)">Take out ' + every + '</button>' +
+        (it.kind === 'party' ? '<div class="row muted small">Any week where this slot is booked is left alone.</div>' : '')
     }
   }
   plShowMenu(ev, h)
@@ -5051,8 +5054,11 @@ async function plResolve(list, studioId) {
     if (r.kind === 'party') {
       // the bookable party product at this time (Kids / Splatter party), not the internal "Party Time Slot"
       const sellable = cands.filter(c => { const t = buildShopifyTitle(c.session_date, c.session_time || '00:00:00', c.title); return t && t !== 'OVERRIDE' })
-      if (sellable.length === 1) { r.session = sellable[0]; r.partyShared = true }      // one variant, several slots
-      else r.session = sellable[r.slot] || cands[r.slot] || null                          // one session per slot
+      // one Shopify variant for the time (one session, or several sessions under the same product title):
+      // taking out a slot just lowers that variant's inventory by 1, never below 0
+      const sellTitles = new Set(sellable.map(c => buildShopifyTitle(c.session_date, c.session_time || '00:00:00', c.title)))
+      if (sellable.length && sellTitles.size === 1) { r.session = sellable[0]; r.partyShared = true }
+      else { r.partyCands = sellable.length ? sellable : cands; r.session = null }       // one session per slot: chosen below, unbooked only
     } else r.session = cands[0] || null
     r.shopifyTitle = r.session ? buildShopifyTitle(r.session.session_date, r.session.session_time || '00:00:00', r.session.title) : null
   })
@@ -5063,17 +5069,32 @@ async function plResolve(list, studioId) {
     if (error) throw error
     ;(data || []).forEach(v => { if (v.inventory_item_id) vars[v.shopify_title] = v })
   }
-  const ids = list.filter(r => r.session).map(r => r.session.id), booked = {}, bookingRows = {}
+  const ids = [...new Set(list.filter(r => r.session).map(r => r.session.id).concat(...list.filter(r => r.partyCands).map(r => r.partyCands.map(c => c.id))))], booked = {}, bookingRows = {}
   for (let i = 0; i < ids.length; i += 200) {
     const { data, error } = await sb.from('bookings').select(PL_BOOKING_COLS).in('session_id', ids.slice(i, i + 200)).gt('qty', 0).is('returned_at', null)
     if (error) throw error
     ;(data || []).forEach(b => { booked[b.session_id] = (booked[b.session_id] || 0) + (b.qty || 0); (bookingRows[b.session_id] = bookingRows[b.session_id] || []).push(b) })
   }
+  // Parties are never cancelled. With one session per party slot, each slot taken out is matched to an
+  // UNBOOKED session at that time; if every remaining one is booked, nothing is closed.
+  const usedParty = new Set()
+  list.filter(r => r.partyCands).forEach(r => {
+    const free = r.partyCands.find(c => !(booked[c.id] > 0) && !usedParty.has(c.id))
+    if (free) { usedParty.add(free.id); r.session = free; r.shopifyTitle = buildShopifyTitle(free.session_date, free.session_time || '00:00:00', free.title) }
+    else r.partyAllBooked = r.partyCands.length > 0
+  })
+  if (list.some(r => r.partyCands && r.session)) {
+    const more = [...new Set(list.filter(r => r.partyCands && r.shopifyTitle && !vars[r.shopifyTitle]).map(r => r.shopifyTitle))]
+    if (more.length) { const { data } = await sb.from('shopify_variants').select('*').eq('studio_id', studio).in('shopify_title', more); (data || []).forEach(v => { if (v.inventory_item_id) vars[v.shopify_title] = v }) }
+  }
   list.forEach(r => {
+    if (r.partyAllBooked) { r.status = 'blocked'; r.note = 'Every party at this time is booked: parties are never cancelled, so nothing changes'; r.booked = 0; r.bookings = []; return }
     r.variant = r.shopifyTitle ? vars[r.shopifyTitle] || null : null
     r.booked = r.session ? booked[r.session.id] || 0 : 0
     r.bookings = r.session ? bookingRows[r.session.id] || [] : []
+    if (r.kind === 'party') r.bookings = []   // never a party on the contact list
     if (!r.session) { r.status = 'pending'; r.note = 'Not in the system yet' }
+    else if (r.kind === 'party' && !r.partyShared && r.booked > 0) { r.status = 'blocked'; r.note = 'Booked party: parties are never cancelled, so nothing changes' }
     else if (r.kind === 'party' && !r.partyShared && (!r.shopifyTitle || r.shopifyTitle === 'OVERRIDE')) { r.status = 'manual'; r.note = 'No bookable party product at this time: close it in admin' }
     else if (!r.shopifyTitle || r.shopifyTitle === 'OVERRIDE') { r.status = 'manual'; r.note = 'No matching Shopify product title' }
     else if (!r.variant) { r.status = 'pending'; r.note = 'Not in Shopify yet' + (r.booked ? ', ' + r.booked + ' booked' : '') }
@@ -5284,6 +5305,7 @@ async function plHideVariant(r) {
   if (r.partyShared) return plCloseOnePartySlot(r)
   try {
     const booked = await bdBookedCount(r.session.id)
+    if (r.kind === 'party' && booked > 0) return { status: 'blocked', note: 'Booked party: parties are never cancelled, so nothing changes' }
     let prev = null
     try {
       const d = await bdInvCall({ action: 'get_all', product_title: r.shopifyTitle })
@@ -5294,7 +5316,7 @@ async function plHideVariant(r) {
     if (!data || !data.inventory_level) return { status: 'failed', note: (data && data.error) || 'Shopify inventory not changed' }
     // off the customer calendar; staff still see it (show stays on) while people are booked
     await sb.from('sessions').update({ spaces_left_cache: 0, publish: false }).eq('id', r.session.id)
-    return { status: 'hidden', note: (booked > 0 ? 'Closed at −' + booked + ', ' + booked + ' booked to contact' : '') + (prev != null ? (booked > 0 ? '. ' : '') + 'Had ' + prev + ' left' : ''), restore_qty: prev != null && prev > 0 ? prev : null }
+    return { status: 'hidden', note: (booked > 0 ? 'Closed at −' + booked + ', ' + booked + ' booked to contact' : '') + (prev != null ? (booked > 0 ? '. ' : '') + 'Had ' + prev + ' left' : ''), restore_qty: prev != null ? prev : null }
   } catch (e) { return { status: 'failed', note: e.message } }
 }
 
@@ -5319,7 +5341,8 @@ async function plCloseOnePartySlot(r) {
 async function plRestoreRow(r) {
   let cap = null
   if (r.session_id) { const { data } = await sb.from('sessions').select('capacity').eq('id', r.session_id).maybeSingle(); cap = data ? data.capacity : null }
-  const qty = r.restore_qty > 0 ? r.restore_qty : cap > 0 ? cap : null
+  // exactly what it had before (0 for something full), else the session's capacity
+  const qty = r.restore_qty != null ? r.restore_qty : cap > 0 ? cap : null
   try {
     if (r.status === 'hidden' && r.kind === 'party' && /party slot closed/i.test(r.note || '')) {
       const { data: v } = await sb.from('shopify_variants').select('inventory_item_id').eq('studio_id', r.studio_id).eq('shopify_title', r.shopify_title).not('inventory_item_id', 'is', null).limit(1)
@@ -5647,7 +5670,7 @@ function plRenderRemovals(msg) {
       '<td class="actions"><button class="btn small good" onclick="plPutBack(\'' + r.id + '\')">Put back</button></td></tr>').join('') +
     '</table></div><div style="display:flex;gap:8px;margin-top:6px;align-items:center"><button class="btn small good" onclick="plPutBack(null)">Put all ' + back.length + ' back</button>' +
     '<span class="muted small">Puts the spaces back in Shopify and on the customer calendar. Also put them back on the plan\'s grid, or the next Set plan hides them again.</span></div>'
-  h += plContactsHtml(plContacts(pl.removals.filter(r => r.session_id && !['removed', 'done', 'restored'].includes(r.status) && (pl.removalBookings || {})[r.session_id]).map(r => ({ date: r.session_date, time: String(r.session_time).slice(0, 5),
+  h += plContactsHtml(plContacts(pl.removals.filter(r => r.kind !== 'party' && r.session_id && !['removed', 'done', 'restored'].includes(r.status) && (pl.removalBookings || {})[r.session_id]).map(r => ({ date: r.session_date, time: String(r.session_time).slice(0, 5),
     what: r.session_title || r.label, bookings: pl.removalBookings[r.session_id] }))))
   h += '<div class="pl-actions"><span class="muted small" id="pl-rm-msg"></span><button class="btn" onclick="plCloseModal()">Close</button>' +
     (open.some(r => ['pending', 'failed', 'blocked'].includes(r.status)) ? '<button class="btn primary" id="pl-rm-go" onclick="plRecheckRemovals()">Check Shopify again and hide</button>' : '') + '</div>'
