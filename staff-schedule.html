@@ -253,6 +253,7 @@ table.pl-staff input.pl-sh.elsewhere { background: #eaf0f8; border-style: dashed
 .pl-it:hover { filter: brightness(.96); z-index: 3; }
 .pl-it.ghost { background: #fff !important; opacity: .55; border: 1px dashed var(--line-2); border-left-width: 1px; text-decoration: line-through; z-index: 1; color: var(--muted) !important; }
 .pl-it .meta { display: block; opacity: .8; }
+.pl-it.booked { font-weight: 600; }
 .pl-cov { position: relative; background: #fbfbf8; }
 .pl-cov div { position: absolute; left: 1px; right: 1px; font-size: 9px; text-align: center; border-radius: 2px; line-height: 14px; }
 .pl-cov .ok { background: var(--good-bg); color: var(--good); }
@@ -3639,14 +3640,15 @@ async function runImport() {
    ===================================================================== */
 const PL_RH = 15   // px per 15 minutes on the grid
 const PL_KINDS = {
-  glazing:        { label: 'Glazing',        short: 'Glaze',     dur: 15,  bg: '#e3eefb', ink: '#1a4fa0', dropin: true },
-  minimake:       { label: 'Mini Make',      short: 'Mini Make', dur: 15,  bg: '#f1e6fa', ink: '#6a1b9a', dropin: true },
-  workshop:       { label: 'Workshop',       short: 'Workshop',  dur: 15,  bg: '#e3f3e4', ink: '#2e7d32', dropin: true },
-  party:          { label: 'Party slot',     short: 'Party',     dur: 120, bg: '#fde4ee', ink: '#ad1457' },
-  session_class:  { label: 'Session class',  short: 'Class',     dur: 90,  bg: '#fff1cc', ink: '#7a5a00', series: true },
-  wheel_workshop: { label: 'Wheel workshop', short: 'Wheel',     dur: 90,  bg: '#efe4d8', ink: '#5d4037' },
-  wheel_session:  { label: 'Wheel session',  short: 'Wheel',     dur: 90,  bg: '#e2d3c1', ink: '#4e342e', series: true },
-  camp:           { label: 'Camp / PA day',  short: 'Camp',      dur: 390, bg: '#dff1ef', ink: '#00695c', fixed: true }
+  glazing:        { label: 'Glazing',        short: 'Glaze',     dur: 15,  bg: '#e3eefb', ink: '#1a4fa0', dropin: true, bgB: '#b5cff2' },
+  minimake:       { label: 'Mini Make',      short: 'Mini Make', dur: 15,  bg: '#f1e6fa', ink: '#6a1b9a', dropin: true, bgB: '#d8bdef' },
+  workshop:       { label: 'Workshop',       short: 'Workshop',  dur: 15,  bg: '#e3f3e4', ink: '#2e7d32', dropin: true, bgB: '#b3dfb7' },
+  party:          { label: 'Party slot',     short: 'Party',     dur: 120, bg: '#fde4ee', ink: '#ad1457', bgB: '#f4adc7' },
+  session_class:  { label: 'Session class',  short: 'Class',     dur: 90,  bg: '#fff1cc', ink: '#7a5a00', series: true, bgB: '#ffd97a' },
+  wheel_workshop: { label: 'Wheel workshop', short: 'Wheel',     dur: 90,  bg: '#efe4d8', ink: '#5d4037', bgB: '#d9c1a5' },
+  wheel_session:  { label: 'Wheel session',  short: 'Wheel',     dur: 90,  bg: '#e2d3c1', ink: '#4e342e', series: true, bgB: '#c9ab8a' },
+  camp:           { label: 'Camp / PA day',  short: 'Camp',      dur: 390, bg: '#dff1ef', ink: '#00695c', fixed: true, bgB: '#a4d9d1' },
+  event:          { label: 'Team building / field trip', short: 'Booked', dur: 120, bg: '#ffe7cc', ink: '#a14a00', fixed: true, bgB: '#ffc98a' }
 }
 const PL_ADD_ORDER = ['session_class', 'wheel_workshop', 'wheel_session', 'workshop', 'glazing', 'minimake']
 const PL_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -3676,7 +3678,7 @@ const PL_VARIANT_NAMES = {
   'ON-WTR-WTR':'ON / WATERLOO - UPTOWN'
 }
 let plCatalog = []   // session_catalog rows (all studios)
-let pl = { studio: '', plans: [], plan: null, week: 0, parties: [], camps: [], elsewhere: {}, pool: [], allStaff: [], wages: {}, saveTimer: null, lo: 540, setRows: null }
+let pl = { studio: '', plans: [], plan: null, week: 0, parties: [], camps: [], elsewhere: {}, bk: {}, events: [], pool: [], allStaff: [], wages: {}, saveTimer: null, lo: 540, setRows: null }
 
 function plDefaults() {
   return {
@@ -3827,7 +3829,7 @@ async function plOpenPlan(id) {
   p.settings = plMerge(plDefaults(), p.settings)
   p.data = plMerge(plEmptyData(), p.data)
   pl.plan = p; pl.week = 0
-  await Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere()])
+  await Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere(), plLoadBookings()])
   plRender()
 }
 
@@ -3883,6 +3885,41 @@ async function plStaffingNeed(studio, from, to) {
   const res = await Promise.all(calls)
   const bad = res.find(r => r.error)
   return bad ? { error: bad.error } : { data: res.reduce((t, r) => t.concat(r.data || []), []) }
+}
+
+/* ---------- what's already booked (shown as a darker shade on the grid) ---------- */
+// pl.bk['date|HH:MM|kind'] = { n: people booked, count: sessions with bookings }; kind as plKindOfTitle.
+// Booked team building, field trips, get-togethers (and parties at a time with no party slot) become pl.events.
+const PL_EVENT_RE = /team.?build|field trip|get.?together|corporate|group booking/i
+async function plLoadBookings() {
+  pl.bk = {}; pl.events = []
+  if (!pl.plan) return
+  const studio = pl.studio, from = pl.plan.week_start, to = plLastDate()
+  let rows
+  try {
+    rows = await plFetchAll(() => sb.from('bookings').select('session_id, qty').eq('studio_id', studio).gte('event_date', from).lte('event_date', to)
+      .gt('qty', 0).is('returned_at', null).order('session_id'))
+  } catch (e) { return }
+  const per = {}
+  rows.forEach(b => { if (b.session_id) per[b.session_id] = (per[b.session_id] || 0) + (b.qty || 0) })
+  const ids = Object.keys(per), sess = []
+  for (let i = 0; i < ids.length; i += 200) {
+    const { data } = await sb.from('sessions').select('id, title, session_date, session_time').in('id', ids.slice(i, i + 200))
+    sess.push(...(data || []))
+  }
+  if (pl.studio !== studio) return
+  sess.forEach(x => {
+    if (!x.session_time || x.session_date < from || x.session_date > to) return
+    const t = x.session_time.slice(0, 5), title = x.title || '', n = per[x.id], kind = plKindOfTitle(title)
+    const partySlotHere = pl.parties.some(p => p.day_of_week === plDow(x.session_date) && p.time_slot.slice(0, 5) === t)
+    if (PL_EVENT_RE.test(title) || (kind === 'party' && !partySlotHere)) {
+      pl.events.push({ id: x.id, date: x.session_date, start: toMin(t), end: toMin(t) + (Number(pl.plan.settings.k.party.dur) || 120), title, booked: n })
+      return
+    }
+    const key = x.session_date + '|' + t + '|' + kind
+    const cur = pl.bk[key] || (pl.bk[key] = { n: 0, count: 0 })
+    cur.n += n; cur.count++
+  })
 }
 
 async function plLoadCamps() {
@@ -3994,9 +4031,9 @@ function plRename(v) { pl.plan.name = v.trim() || 'Plan'; plTouch() }
 async function plSetStart(v) {
   if (!v) return
   pl.plan.week_start = sundayOf(v); pl.week = 0
-  await Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere()]); plTouch()
+  await Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere(), plLoadBookings()]); plTouch()
 }
-function plSetWeeks(v) { pl.plan.weeks = Number(v); pl.week = Math.min(pl.week, pl.plan.weeks - 1); Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere()]).then(plTouch) }
+function plSetWeeks(v) { pl.plan.weeks = Number(v); pl.week = Math.min(pl.week, pl.plan.weeks - 1); Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere(), plLoadBookings()]).then(plTouch) }
 function plWeekTo(w) { pl.week = Math.max(0, Math.min(pl.plan.weeks - 1, w)); plRender() }
 function plWeekGo(n) { pl.week = Math.max(0, Math.min(pl.plan.weeks - 1, pl.week + n)); plRender() }
 async function plArchive() {
@@ -4036,6 +4073,10 @@ function plItems(date) {
   const items = plRegular(date).map(it => {
     const e = d.edits[it.id] || {}, k = s.k[it.kind]
     Object.assign(it, { date, label: PL_KINDS[it.kind].label, staff: e.staff ?? k.staff, people: e.people ?? k.people, price: e.price ?? k.price, col: e.col ?? it.col })
+    const b = (pl.bk || {})[date + '|' + plHM(it.start) + '|' + it.kind]
+    if (it.kind === 'party') it.booked = b && it.slot < b.count ? 1 : 0
+    else it.booked = b ? b.n : 0
+    if (it.booked && !(d.edits[it.id] && d.edits[it.id].people != null)) it.people = it.kind === 'party' ? 1 : Math.max(Number(it.people) || 0, it.booked)
     const by = PL_KINDS[it.kind].dropin && adds.find(a => plReplaces(a, it.kind) && it.start >= a.start && it.start < a.start + a.dur)
     const closed = d.closed[date]
     it.state = d.removed[it.id] ? 'removed' : closed ? 'closed' : by ? 'replaced' : 'on'
@@ -4047,7 +4088,7 @@ function plItems(date) {
     const ds = a.dates.slice().sort(), closed = d.closed[date]
     if (closed && a.existing) return   // running class on a day the studio is closed: not on at all
     items.push({ id: 'A|' + a.id + '|' + date, addId: a.id, date, kind: a.kind, start: a.start, dur: a.dur, col: a.col, src: 'add', state: closed ? 'closed' : 'on', by: closed ? plClosedText(closed) : '',
-      label: plAddLabel(a) + (a.existing ? ' (running)' : ''), existing: !!a.existing, staff: a.staff, people: a.people, price: a.price, nth: ds.indexOf(date) + 1, of: ds.length })
+      label: plAddLabel(a) + (a.existing ? ' (running)' : ''), existing: !!a.existing, booked: a.existing ? a.people : 0, staff: a.staff, people: a.people, price: a.price, nth: ds.indexOf(date) + 1, of: ds.length })
   })
   pl.camps.filter(c => c.date === date).forEach(c => {
     const id = 'C|' + c.id + '|' + date, e = d.edits[id] || {}
@@ -4055,6 +4096,11 @@ function plItems(date) {
       label: plCampLabel(c.title) + ': ' + c.title, staff: e.staff ?? s.k.camp.staff, booked: c.booked,
       // children planned for: what this day is set to, else the studio's expected number or what's booked, whichever is more
       people: e.people ?? Math.max(Number(s.k.camp.people) || 0, c.booked || 0), price: e.price ?? (Number(s.k.camp.price) || 0) })
+  })
+  ;(pl.events || []).filter(c => c.date === date).forEach(c => {
+    const id = 'E|' + c.id + '|' + date, e = d.edits[id] || {}
+    items.push({ id, date, kind: 'event', start: c.start, dur: c.end - c.start, col: e.col ?? 2, src: 'event', state: 'on',
+      label: 'Booked: ' + c.title, staff: e.staff ?? 1, booked: c.booked, people: e.people ?? c.booked, price: e.price ?? 0 })
   })
   return items
 }
@@ -4247,8 +4293,9 @@ function plRender() {
   }
   if (!wageOk) html += '<div class="note warn">Labour cost needs finance access. Hours still show.</div>'
 
-  html += '<div class="toolbar pl-legend">' + ['glazing', 'minimake', 'workshop', 'party', 'session_class', 'wheel_workshop', 'wheel_session', 'camp'].map(k =>
+  html += '<div class="toolbar pl-legend">' + ['glazing', 'minimake', 'workshop', 'party', 'session_class', 'wheel_workshop', 'wheel_session', 'camp', 'event'].map(k =>
     '<span><i style="background:' + PL_KINDS[k].bg + ';border-color:' + PL_KINDS[k].ink + '"></i>' + PL_KINDS[k].label + '</span>').join('') +
+    '<span><i style="background:#b3dfb7;border-color:#2e7d32"></i><b>Darker = has bookings</b> (·3 = 3 booked)</span>' +
     '<span><i style="background:#fff;border:1px dashed #bbb"></i>Taken out</span>' +
     '<span>Right-hand column: <b style="color:var(--good)">planned/needed</b>, <b style="color:var(--bad)">short</b>, <b style="color:var(--warn)">over</b></span></div>'
 
@@ -4303,15 +4350,16 @@ function plColItems(items, lo) {
     i.lanes = Math.max(...overl.map(j => j.lane)) + 1
   })
   const box = (i, ghost) => {
+    const bk = (i.booked || 0) > 0, warnBk = ghost && bk
     const K = PL_KINDS[i.kind], top = (i.start - lo) / 15 * PL_RH, h = Math.max(PL_RH, i.dur / 15 * PL_RH) - 1
     const w = ghost ? 100 : 100 / i.lanes, left = ghost ? 0 : i.lane * w
     const long = i.dur >= 45
     const tip = i.label + ', ' + bdFmtShort(i.start) + '–' + bdFmtShort(i.start + i.dur) +
-      (i.state === 'closed' ? ' (' + i.by + ')' : i.state === 'replaced' ? ' (replaced by ' + i.by + ')' : i.state === 'removed' ? ' (taken out)' : '') + (i.of ? ', ' + i.nth + ' of ' + i.of : '')
-    const meta = long && !ghost ? '<span class="meta">' + bdFmtShort(i.start) + '–' + bdFmtShort(i.start + i.dur) + (i.staff ? ', ' + i.staff + ' staff' : '') + (i.of > 1 ? ', ' + i.nth + '/' + i.of : '') + '</span>' : ''
-    return '<div class="pl-it' + (long ? ' long' : '') + (ghost ? ' ghost' : '') + '" style="top:' + top + 'px;height:' + h + 'px;left:calc(' + left + '% + 1px);width:calc(' + w + '% - 2px);background:' +
-      K.bg + ';border-left-color:' + K.ink + ';color:' + K.ink + '" title="' + esc(tip) + '" onclick="plItemClick(event,\'' + i.id + '\',\'' + i.date + '\')">' +
-      (long ? '<b>' + esc(i.label) + '</b>' + meta : '<b>' + bdFmtShort(i.start) + '</b> ' + esc(K.short)) + '</div>'
+      (i.state === 'closed' ? ' (' + i.by + ')' : i.state === 'replaced' ? ' (replaced by ' + i.by + ')' : i.state === 'removed' ? ' (taken out)' : '') + (i.of ? ', ' + i.nth + ' of ' + i.of : '') + (bk ? ', ' + (i.kind === 'party' ? 'booked' : i.booked + ' booked') : '')
+    const meta = long && !ghost ? '<span class="meta">' + bdFmtShort(i.start) + '–' + bdFmtShort(i.start + i.dur) + (i.staff ? ', ' + i.staff + ' staff' : '') + (i.of > 1 ? ', ' + i.nth + '/' + i.of : '') + (bk ? ', <b>' + (i.kind === 'party' ? 'booked' : i.booked + ' booked') + '</b>' : '') + '</span>' : ''
+    return '<div class="pl-it' + (long ? ' long' : '') + (ghost ? ' ghost' : '') + (bk ? ' booked' : '') + '" style="top:' + top + 'px;height:' + h + 'px;left:calc(' + left + '% + 1px);width:calc(' + w + '% - 2px);background:' +
+      (bk ? K.bgB || K.bg : K.bg) + ';border-left-color:' + K.ink + ';color:' + K.ink + (warnBk ? ';border:1.5px solid var(--bad);opacity:.9' : '') + '" title="' + esc(tip + (warnBk ? ' · has bookings: move or refund them before it comes out' : '')) + '" onclick="plItemClick(event,\'' + i.id + '\',\'' + i.date + '\')">' +
+      (long ? '<b>' + esc(i.label) + '</b>' + meta : '<b>' + bdFmtShort(i.start) + '</b> ' + esc(K.short) + (bk && i.kind !== 'party' ? ' <b>·' + i.booked + '</b>' : '') + (warnBk ? ' ⚠' : '')) + '</div>'
   }
   return items.filter(i => i.state !== 'on').map(i => box(i, true)).join('') + on.map(i => box(i, false)).join('')
 }
@@ -4539,16 +4587,18 @@ function plSameDowIds(id) {
 
 function plItemClick(ev, id, date) {
   ev.stopPropagation()
+  let bk
   const it = plFindItem(id, date)
   if (!it) return
   const range = bdFmtShort(it.start) + '–' + bdFmtShort(it.start + it.dur)
   const every = 'every ' + DAY_NAMES[plDow(date)] + ' at ' + bdFmtShort(it.start)
   let h = '<div class="pl-menu-h"><b>' + esc(it.label) + '</b>' + plDayLabel(date) + ', ' + range + (it.of ? ' (' + it.nth + ' of ' + it.of + ')' : '') + '</div>'
-  if (it.src === 'camp') {
-    h += '<div class="row small">' + (it.booked != null ? it.booked + ' booked. ' : '') + 'Already scheduled at the studio, so it can\'t be changed here.</div>' +
+  if (bk = (it.booked || 0) > 0) h += '<div class="row small" style="color:var(--good);font-weight:600">' + (it.kind === 'party' ? 'Booked' : it.booked + ' booked') + (it.state !== 'on' ? ' <span style="color:var(--bad)">· taken out, so move or refund them first</span>' : '') + '</div>'
+  if (it.src === 'camp' || it.src === 'event') {
+    h += '<div class="row small">' + (it.src === 'event' ? 'Booked at the studio' : 'Already scheduled at the studio') + ', so it can\'t be changed here.</div>' +
       '<div class="row"><label>Staff<input class="input" type="number" min="0" step="1" id="pl-m-staff" value="' + it.staff + '"></label>' +
-      '<label>Children expected<input class="input" type="number" min="0" step="1" id="pl-m-people" value="' + it.people + '"></label>' +
-      '<label>Price per child<input class="input" type="number" min="0" step="1" id="pl-m-price" value="' + it.price + '"></label></div>' +
+      '<label>' + (it.src === 'event' ? 'People' : 'Children expected') + '<input class="input" type="number" min="0" step="1" id="pl-m-people" value="' + it.people + '"></label>' +
+      '<label>' + (it.src === 'event' ? 'Revenue' : 'Price per child') + '<input class="input" type="number" min="0" step="1" id="pl-m-price" value="' + it.price + '"></label></div>' +
       '<div class="row"><button class="btn small primary" onclick="plCampStaff(\'' + id + '\')">Save this day</button></div>' +
       '<div class="row"><span class="muted small">Column</span>' + [0, 1, 2].map(c => '<button class="btn small' + (c === it.col ? ' primary' : '') + '" onclick="plItemCol(\'' + id + '\',' + c + ')">' + (c + 1) + '</button>').join('') + '</div>'
     plShowMenu(ev, h); return
@@ -4605,7 +4655,7 @@ function plCampStaff(id) {
 }
 function plItemCol(id, c) {
   const d = pl.plan.data
-  if (id.startsWith('C|')) d.edits[id] = Object.assign(d.edits[id] || {}, { col: c })
+  if (id.startsWith('C|') || id.startsWith('E|')) d.edits[id] = Object.assign(d.edits[id] || {}, { col: c })
   else if (id.startsWith('A|')) d.adds.find(a => a.id === id.split('|')[1]).col = c
   else plSameDowIds(id).forEach(x => { d.edits[x] = Object.assign(d.edits[x] || {}, { col: c }) })
   plCloseMenu(); plTouch()
@@ -4969,7 +5019,7 @@ async function plOpenSet() {
   if (!(await plFlush())) { toast('Save the plan first', true); return }
   plModal('<h2>Set plan</h2><div class="loading">Checking sessions, Shopify and bookings…</div>', true)
   const list = []
-  plDates().forEach(date => plItems(date).filter(i => i.src !== 'add' && i.src !== 'camp' && i.state !== 'on').forEach(i =>
+  plDates().forEach(date => plItems(date).filter(i => i.src !== 'add' && i.src !== 'camp' && i.src !== 'event' && i.state !== 'on').forEach(i =>
     list.push({ date, time: plHM(i.start), kind: i.kind, slot: i.slot || 0, label: PL_KINDS[i.kind].label, why: i.state === 'closed' ? i.by : i.state === 'replaced' ? 'Replaced by ' + i.by : 'Taken out' })))
   let rows, prev
   try {
