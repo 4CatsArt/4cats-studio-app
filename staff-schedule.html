@@ -3694,7 +3694,7 @@ function plDefaults() {
       session_class:  { staff: 1, people: 8, price: 0 },
       wheel_workshop: { staff: 1, people: 4, price: 35 },
       wheel_session:  { staff: 1, people: 4, price: 174 },
-      camp:           { staff: 1, dur: 390, paDur: 360 }   // booked camps / PA days: staff for their full hours. PA days always run paDur
+      camp:           { staff: 1, people: 10, price: 55, dur: 390, paDur: 360 }   // booked camps / PA days: staff for their full hours. PA days always run paDur
                                                             // from their start (9–3); camps use their own length, or dur if they have none
     }
   }
@@ -3873,27 +3873,48 @@ const plCampLabel = t => /pa\s*\/?\s*pd|\bpa day\b|\bpd day\b|no school/i.test(t
 async function plLoadCamps() {
   pl.camps = []
   if (!pl.plan) return
-  const from = pl.plan.week_start, to = plLastDate(), seen = new Set()
+  const from = pl.plan.week_start, to = plLastDate(), k = pl.plan.settings.k.camp, raw = [], seen = new Set()
+  // The staffing data only covers art time (2 h), so set real lengths: PA days and full-day camps run
+  // paDur from their start (9–3); half-day camps at least 3 h; other camps their own length (or dur).
+  const span = (title, a, endMin) => {
+    if (plCampLabel(title) === 'PA Day' || /full\s*day/i.test(title)) return a + (Number(k.paDur) || 360)
+    if (/half\s*day/i.test(title)) return Math.max(endMin || 0, a + 180)
+    return endMin && endMin > a ? endMin : a + (Number(k.dur) || 390)
+  }
+  const keep = t => PL_CAMP_RE.test(t || '') && !/early (drop|arrival)|after.?care/i.test(t)
   const r = await sb.rpc('get_staffing_need', { p_studio_id: pl.studio, p_from: from, p_to: to })
   if (!r.error) {
     ;(r.data || []).forEach(x => {
-      if (!PL_CAMP_RE.test(x.title || '') || !x.start_time || seen.has(x.session_id)) return
-      if (/early (drop|arrival)|after.?care/i.test(x.title)) return
+      if (!keep(x.title) || !x.start_time || seen.has(x.session_id)) return
       seen.add(x.session_id)
-      const a = toMin(x.start_time), k = pl.plan.settings.k.camp
-      // PA days: the staffing data only covers the art time, so use the full day
-      const b = plCampLabel(x.title) === 'PA Day' ? a + (Number(k.paDur) || 360) : x.end_time ? toMin(x.end_time) : a + (Number(k.dur) || 390)
-      pl.camps.push({ id: x.session_id, date: x.session_date, start: a, end: Math.max(b, a + 15), title: x.title, booked: x.booked || 0 })
+      const a = toMin(x.start_time)
+      raw.push({ id: x.session_id, date: x.session_date, start: a, end: span(x.title, a, x.end_time ? toMin(x.end_time) : null), title: x.title, booked: x.booked || 0 })
     })
-    return
+  } else {
+    const { data } = await sb.from('sessions').select('id, title, session_date, session_time, session_type, show').eq('studio_id', pl.studio)
+      .gte('session_date', from).lte('session_date', to)
+    ;(data || []).forEach(x => {
+      if (x.show === false || !x.session_time || !(x.session_type === 'camp' || keep(x.title))) return
+      const a = toMin(x.session_time)
+      raw.push({ id: x.id, date: x.session_date, start: a, end: span(x.title, a, null), title: x.title, booked: null })
+    })
   }
-  const { data } = await sb.from('sessions').select('id, title, session_date, session_time, session_type').eq('studio_id', pl.studio)
-    .gte('session_date', from).lte('session_date', to)
-  ;(data || []).forEach(x => {
-    if (!(x.session_type === 'camp' || PL_CAMP_RE.test(x.title || '')) || !x.session_time || /early (drop|arrival)|after.?care/i.test(x.title)) return
-    const a = toMin(x.session_time)
-    const k = pl.plan.settings.k.camp
-    pl.camps.push({ id: x.id, date: x.session_date, start: a, end: a + (Number(plCampLabel(x.title) === 'PA Day' ? k.paDur : k.dur) || 360), title: x.title, booked: null })
+  // One block per day: a full day and its half days are the same camp, run by the same person
+  const byDay = {}
+  raw.forEach(c => {
+    const kind = plCampLabel(c.title), key = c.date + '|' + kind
+    const g = byDay[key]
+    if (!g) { byDay[key] = Object.assign({}, c, { titles: [c.title] }); return }
+    g.start = Math.min(g.start, c.start); g.end = Math.max(g.end, c.end)
+    if (c.booked != null) g.booked = (g.booked || 0) + c.booked
+    if (!g.titles.includes(c.title)) g.titles.push(c.title)
+  })
+  pl.camps = Object.values(byDay).map(g => {
+    if (g.titles.length > 1) {
+      const base = g.titles[0].replace(/\s*(full|half)\s*day.*$/i, '').trim()
+      g.title = base && g.titles.every(t => t.toLowerCase().startsWith(base.toLowerCase())) ? base + ' (full and half day)' : g.titles.join(' + ')
+    }
+    return g
   })
 }
 
@@ -4015,7 +4036,9 @@ function plItems(date) {
   pl.camps.filter(c => c.date === date).forEach(c => {
     const id = 'C|' + c.id + '|' + date, e = d.edits[id] || {}
     items.push({ id, date, kind: 'camp', start: c.start, dur: c.end - c.start, col: e.col ?? 2, src: 'camp', state: 'on',
-      label: plCampLabel(c.title) + ': ' + c.title, staff: e.staff ?? s.k.camp.staff, people: c.booked, price: 0, booked: c.booked })
+      label: plCampLabel(c.title) + ': ' + c.title, staff: e.staff ?? s.k.camp.staff, booked: c.booked,
+      // children planned for: what this day is set to, else the studio's expected number or what's booked, whichever is more
+      people: e.people ?? Math.max(Number(s.k.camp.people) || 0, c.booked || 0), price: e.price ?? (Number(s.k.camp.price) || 0) })
   })
   return items
 }
@@ -4108,7 +4131,7 @@ function plSetReplace(addId, kind, on) {
 }
 
 function plRevenue(it) {
-  if (it.state !== 'on' || it.src === 'camp') return 0   // camps are already booked, not part of what you're planning
+  if (it.state !== 'on') return 0
   const per = PL_KINDS[it.kind].series ? (Number(it.price) || 0) / (it.of || 1) : Number(it.price) || 0
   return per * (Number(it.people) || 0)
 }
@@ -4430,7 +4453,9 @@ function plItemClick(ev, id, date) {
   if (it.src === 'camp') {
     h += '<div class="row small">' + (it.booked != null ? it.booked + ' booked. ' : '') + 'Already scheduled at the studio, so it can\'t be changed here.</div>' +
       '<div class="row"><label>Staff<input class="input" type="number" min="0" step="1" id="pl-m-staff" value="' + it.staff + '"></label>' +
-      '<button class="btn small primary" style="align-self:flex-end" onclick="plCampStaff(\'' + id + '\')">Save</button></div>' +
+      '<label>Children expected<input class="input" type="number" min="0" step="1" id="pl-m-people" value="' + it.people + '"></label>' +
+      '<label>Price per child<input class="input" type="number" min="0" step="1" id="pl-m-price" value="' + it.price + '"></label></div>' +
+      '<div class="row"><button class="btn small primary" onclick="plCampStaff(\'' + id + '\')">Save this day</button></div>' +
       '<div class="row"><span class="muted small">Column</span>' + [0, 1, 2].map(c => '<button class="btn small' + (c === it.col ? ' primary' : '') + '" onclick="plItemCol(\'' + id + '\',' + c + ')">' + (c + 1) + '</button>').join('') + '</div>'
     plShowMenu(ev, h); return
   }
@@ -4480,8 +4505,8 @@ function plItemSave(id, all) {
   plCloseMenu(); plTouch()
 }
 function plCampStaff(id) {
-  const d = pl.plan.data, v = document.getElementById('pl-m-staff').value
-  d.edits[id] = Object.assign(d.edits[id] || {}, { staff: v === '' ? 0 : Number(v) })
+  const d = pl.plan.data, n = el => { const v = document.getElementById(el).value; return v === '' ? 0 : Number(v) }
+  d.edits[id] = Object.assign(d.edits[id] || {}, { staff: n('pl-m-staff'), people: n('pl-m-people'), price: n('pl-m-price') })
   plCloseMenu(); plTouch()
 }
 function plItemCol(id, c) {
@@ -4714,13 +4739,14 @@ function plOpenDefaults() {
     '<h3>Each offering</h3><table class="list"><tr><th>Offering</th><th>Staff</th><th>Expected people</th><th>Price</th><th>Minutes</th></tr>' +
     kinds.map(k => { const v = s.k[k], K = PL_KINDS[k]
       if (k === 'camp') return '<tr><td>' + K.label + '</td><td><input class="input" style="width:80px" type="number" min="0" step="1" data-k="camp" data-f="staff" value="' + v.staff + '"></td>' +
-        '<td class="muted">booked</td><td class="muted">–</td><td><input class="input" style="width:70px" type="number" min="15" step="15" data-k="camp" data-f="dur" value="' + v.dur + '" title="Only used when a camp session has no end time"></td></tr>' +
+        '<td><input class="input" style="width:80px" type="number" min="0" step="1" data-k="camp" data-f="people" value="' + (v.people ?? 10) + '" title="Children expected per camp / PA day (more if more are booked)"></td>' +
+        '<td><input class="input" style="width:80px" type="number" min="0" step="1" data-k="camp" data-f="price" value="' + (v.price ?? 55) + '" title="Per child, per day"></td><td><input class="input" style="width:70px" type="number" min="15" step="15" data-k="camp" data-f="dur" value="' + v.dur + '" title="Only used when a camp session has no end time"></td></tr>' +
         '<tr><td>PA day</td><td class="muted">same</td><td class="muted">booked</td><td class="muted">–</td><td><input class="input" style="width:70px" type="number" min="15" step="15" data-k="camp" data-f="paDur" value="' + (v.paDur || 360) + '" title="Full PA day, from its start time"></td></tr>'
       const mins = K.dropin ? '<input class="input" style="width:70px" type="number" min="15" step="15" data-k="' + k + '" data-f="stay" value="' + v.stay + '" title="How long people stay (for floor staff)">'
         : k === 'party' ? '<input class="input" style="width:70px" type="number" min="15" step="15" data-k="party" data-f="dur" value="' + v.dur + '">' : K.dur
       return '<tr><td>' + K.label + '</td>' + ['staff', 'people', 'price'].map(f => '<td><input class="input" style="width:80px" type="number" min="0" step="' + (k === 'party' && f === 'people' ? '0.1' : '1') + '" data-k="' + k + '" data-f="' + f + '" value="' + v[f] + '"></td>').join('') + '<td>' + mins + '</td></tr>'
     }).join('') + '</table>' +
-    '<div class="muted small" style="margin-top:6px">Party: expected people is the chance the slot books (0.5 = half the time), price is the party price. Session prices are per person for the whole session. Drop-in minutes are how long people stay. Camp minutes are only used when a camp session has no end time. PA days always run their full length from their start time (360 = 9 to 3).</div>' +
+    '<div class="muted small" style="margin-top:6px">Party: expected people is the chance the slot books (0.5 = half the time), price is the party price. Session prices are per person for the whole session. Drop-in minutes are how long people stay. Camp / PA day: expected children and price are per day (the plan uses what\'s booked if that\'s more). Camp minutes are only used when a camp session has no end time. PA days always run their full length from their start time (360 = 9 to 3).</div>' +
     '<div class="pl-actions"><span class="muted small" id="pl-d-msg"></span><button class="btn" onclick="plCloseModal()">Cancel</button>' +
     '<button class="btn" onclick="plSaveDefaultsAll()" title="Every studio\'s plans get these defaults (you can still change any plan after)">Save for all plans</button>' +
     '<button class="btn primary" onclick="plSaveDefaults()">Save for this plan</button></div>'
