@@ -3892,7 +3892,7 @@ async function plStaffingNeed(studio, from, to) {
 // Booked team building, field trips, get-togethers (and parties at a time with no party slot) become pl.events.
 const PL_EVENT_RE = /team.?build|field trip|get.?together|corporate|group booking/i
 async function plLoadBookings() {
-  pl.bk = {}; pl.events = []
+  pl.bk = {}; pl.events = []; pl.bookedSess = []
   if (!pl.plan) return
   const studio = pl.studio, from = pl.plan.week_start, to = plLastDate()
   let rows
@@ -3919,6 +3919,19 @@ async function plLoadBookings() {
     const key = x.session_date + '|' + t + '|' + kind
     const cur = pl.bk[key] || (pl.bk[key] = { n: 0, count: 0 })
     cur.n += n; cur.count++
+    pl.bookedSess.push({ id: x.id, date: x.session_date, start: toMin(t), title, kind, n })
+  })
+}
+// A booked session the plan has no block for (a wheel workshop already in Shopify, Paint Night, a one-off
+// workshop at an odd time, a class that wasn't imported) gets its own Booked block, so no booking is missed.
+function plBookedMatches(s, items) {
+  return items.some(i => {
+    if (i.src === 'camp') return PL_CAMP_RE.test(s.title) && s.start >= i.start && s.start < i.start + i.dur
+    if (i.start !== s.start) return false
+    if (i.kind === s.kind) return true
+    if (s.kind === 'wheel') return i.kind === 'wheel_workshop' || i.kind === 'wheel_session'
+    if (s.kind === 'series') return !!i.existing
+    return false
   })
 }
 
@@ -4096,6 +4109,12 @@ function plItems(date) {
       label: plCampLabel(c.title) + ': ' + c.title, staff: e.staff ?? s.k.camp.staff, booked: c.booked,
       // children planned for: what this day is set to, else the studio's expected number or what's booked, whichever is more
       people: e.people ?? Math.max(Number(s.k.camp.people) || 0, c.booked || 0), price: e.price ?? (Number(s.k.camp.price) || 0) })
+  })
+  ;(pl.bookedSess || []).filter(x => x.date === date && !plBookedMatches(x, items)).forEach(x => {
+    const id = 'E|' + x.id + '|' + date, e = d.edits[id] || {}, drop = PL_KINDS[x.kind] && PL_KINDS[x.kind].dropin
+    const dur = x.kind === 'party' ? (Number(s.k.party.dur) || 120) : drop ? 15 : 90
+    items.push({ id, date, kind: 'event', start: x.start, dur, col: e.col ?? 2, src: 'event', state: 'on',
+      label: 'Booked: ' + x.title, staff: e.staff ?? (drop ? 0 : 1), booked: x.n, people: e.people ?? x.n, price: e.price ?? 0 })
   })
   ;(pl.events || []).filter(c => c.date === date).forEach(c => {
     const id = 'E|' + c.id + '|' + date, e = d.edits[id] || {}
