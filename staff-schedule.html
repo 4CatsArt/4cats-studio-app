@@ -138,6 +138,8 @@ table.wk tr.wk-total td { background: var(--soft); }
 .wk-chip.open  { background: #fff; color: var(--bad); border: 1px dashed var(--bad); }
 .wk-chip.unav  { background: #ececE6; color: #777; }
 .wk-chip.off   { background: #6b6b66; color: #fff; }
+.wk-chip.gone  { background: repeating-linear-gradient(135deg, #e4e4de 0 6px, #efefea 6px 12px); color: #666; font-weight: 600; }
+td.wk-gone { background: #f4f4f0; }
 .wk-chip[draggable="true"] { cursor: grab; }
 .wk-chip[draggable="true"]:active { cursor: grabbing; }
 table.wk td.drop-ok { outline: 2px dashed #4a7fd4; outline-offset: -3px; background: #f0f6ff !important; }
@@ -306,6 +308,7 @@ table.pl-staff td.num, table.pl-staff th.num { text-align: right; }
 table.pl-staff input.pl-sh { width: 100%; min-width: 92px; height: 28px; padding: 3px 6px; border: 0.5px solid var(--line-2); border-radius: 5px; font-size: 12px; }
 table.pl-staff input.pl-sh.filled { background: var(--good-bg); border-color: #b9dcbc; }
 table.pl-staff input.pl-sh.unav { background: #efefea; }
+table.pl-staff input.pl-sh.gone { background: repeating-linear-gradient(135deg, #e4e4de 0 6px, #efefea 6px 12px); cursor: not-allowed; }
 table.pl-staff input.pl-sh.unavpart { background: linear-gradient(to right, #fff 55%, #efefea); }
 table.pl-staff input.pl-sh.conflict { border: 1.5px solid var(--bad); background: var(--bad-bg); }
 table.pl-staff tr.foot td { background: var(--soft); font-weight: 600; }
@@ -573,6 +576,18 @@ function parseYmd(s) { const [y, m, d] = s.split('-').map(Number); return new Da
 function addDays(s, n) { const d = parseYmd(s); d.setDate(d.getDate() + n); return ymd(d) }
 function daysBetween(a, b) { return Math.round((parseYmd(b) - parseYmd(a)) / 86400000) }
 function todayStr() { return ymd(new Date()) }
+// Employment window from the staff profile: hire_date = first day, termination_date = last day (both optional).
+// Outside it the person can't be scheduled at all.
+function employedOn(p, date) { return !!p && (!p.hire_date || date >= p.hire_date) && (!p.termination_date || date <= p.termination_date) }
+function employedDuring(p, from, to) { return !!p && (!p.hire_date || p.hire_date <= to) && (!p.termination_date || p.termination_date >= from) }
+function shortDay(s) { return parseYmd(s).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) }
+// Why the person can't work that date because of their dates (null = they can)
+function employmentBlock(p, date) {
+  if (!p) return null
+  if (p.termination_date && date > p.termination_date) return 'no longer working here (last day ' + shortDay(p.termination_date) + ')'
+  if (p.hire_date && date < p.hire_date) return 'not started yet (starts ' + shortDay(p.hire_date) + ')'
+  return null
+}
 function fmtDate(s) { return s ? parseYmd(s).toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }) : '' }
 function fmtTime(t) {
   if (!t) return ''
@@ -644,7 +659,7 @@ function switchView(v) {
 /* ---------- staff (no wages: explicit columns only) ---------- */
 async function loadStaff() {
   const { data, error } = await sb.from('staff_profiles')
-    .select('id, display_name, preferred_name, nickname, studio_ids, province_code, is_active')
+    .select('id, display_name, preferred_name, nickname, studio_ids, province_code, is_active, hire_date, termination_date')
     .order('display_name')
   if (error) { toast('Could not load staff: ' + error.message, true); return }
   staff = (data || []).map(applyPreferredName).sort((a, b) => a.display_name.localeCompare(b.display_name))
@@ -1078,7 +1093,7 @@ async function bdLoad(studio) {
     sb.from('studio_opening_times').select('*'),
     sb.from('province_overtime_rules').select('*'),
     sb.from('province_break_rules').select('*'),
-    sb.from('staff_profiles').select('id, display_name, preferred_name, nickname, role, hire_date, on_call, on_call_until, studio_ids, home_studio_id, min_weekly_hours, max_weekly_hours, max_studio_days_per_week, exclude_from_schedule, is_active'),
+    sb.from('staff_profiles').select('id, display_name, preferred_name, nickname, role, hire_date, termination_date, on_call, on_call_until, studio_ids, home_studio_id, min_weekly_hours, max_weekly_hours, max_studio_days_per_week, exclude_from_schedule, is_active'),
     sb.from('staff_badges').select('staff_id, badge_code'),
     sb.from('staff_schedule_prefs').select('staff_id, notes'),
     sb.from('staff_unavailability').select('staff_id, day_of_week, start_time, end_time, effective_from, effective_to'),
@@ -1116,7 +1131,8 @@ async function bdLoad(studio) {
   const badgesBy = {}; badges.data.forEach(b => { (badgesBy[b.staff_id] = badgesBy[b.staff_id] || new Set()).add(b.badge_code) })
   const notesBy = {}; notes.data.forEach(n => { if (n.notes) notesBy[n.staff_id] = n.notes })
   people.data.forEach(applyPreferredName)
-  const pool = people.data.filter(p => p.is_active && !p.exclude_from_schedule &&
+  // Only people employed for at least one day of this week (hire date / last day on their profile)
+  const pool = people.data.filter(p => p.is_active && !p.exclude_from_schedule && employedDuring(p, from, to) &&
     (!(p.studio_ids || []).length || p.studio_ids.includes(studio)))
   // Shifts worked before this week (any studio), only for people without the solo badge.
   // We only need to know whether it's 3 yet, so one small count per person.
@@ -1134,7 +1150,7 @@ async function bdLoad(studio) {
     pastShifts[p.id] = count || 0
   }))
   return { studio, from, to, sessions: need.data || [], ruleBadge, badgeLabel, opening: opening.data, ot: ot.data,
-           pool, badgesBy, notesBy, pastShifts, recentWeekends, classTeachers, coordinators, daySessions, dayScheduleError, minimums, partyToClose, wages, unav: unav.data, toff: toff.data, shifts: shifts.data }
+           pool, everyone: people.data, badgesBy, notesBy, pastShifts, recentWeekends, classTeachers, coordinators, daySessions, dayScheduleError, minimums, partyToClose, wages, unav: unav.data, toff: toff.data, shifts: shifts.data }
 }
 
 // Minimum people on for this studio at this weekday and time (studio_staffing_minimums), or 0
@@ -1264,6 +1280,7 @@ function bdBlocks(ctx, date, slots, target) {
 
 // Available for at least part of the day (no all-day unavailability or all-day approved time off)
 function bdAvailableDay(ctx, p, date) {
+  if (!employedOn(p, date)) return false
   const dow = parseYmd(date).getDay()
   if (ctx.unav.some(u => u.staff_id === p.id && u.day_of_week === dow && !u.start_time && u.effective_from <= date && (!u.effective_to || u.effective_to >= date))) return false
   if (ctx.toff.some(o => o.staff_id === p.id && o.status === 'approved' && !o.start_time && o.start_date <= date && o.end_date >= date)) return false
@@ -1296,6 +1313,8 @@ function bdTrainingDone(ctx, p, blocks, beforeDate) {
 // Why a person can't take a block (hard rules); null = they can
 function bdBlocked(ctx, p, blk, state) {
   const date = blk.date, dow = parseYmd(date).getDay()
+  const gone = employmentBlock(p, date)
+  if (gone) return gone
   if (!blk.training && state.blocks && bdTrainingDone(ctx, p, state.blocks, date) !== null)
     return 'in training (' + bdTrainingDone(ctx, p, state.blocks, date) + ' of ' + TRAINING_SHIFTS_NEEDED + ')'
   if (p.role === 'manager' && p.home_studio_id && p.home_studio_id !== ctx.studio) return 'manager at another studio'
@@ -1722,7 +1741,7 @@ function renderAll() {
 }
 function bdRefresh() { const cur = bdCtx && bdCtx.studio; renderAll(); if (cur) bdUse(cur) }
 
-function bdPerson(id) { return bdCtx.pool.find(p => p.id === id) || staffById[id] || { id, display_name: '(unknown)' } }
+function bdPerson(id) { return bdCtx.pool.find(p => p.id === id) || (bdCtx.everyone || []).find(p => p.id === id) || staffById[id] || { id, display_name: '(unknown)' } }
 
 // Click ⓘ: a small card with the person's details (works on touch screens too). Click anywhere else to close.
 function bdShowInfo(ev, staffId) {
@@ -1753,6 +1772,7 @@ function bdInfo(p) {
     const mo = Math.max(0, Math.round(daysBetween(p.hire_date, todayStr()) / 30.4))
     lines.push('Hired: ' + fmtDate(p.hire_date) + ' (' + (mo < 12 ? mo + ' month' + (mo === 1 ? '' : 's') : Math.floor(mo / 12) + ' yr' + (mo % 12 ? ' ' + (mo % 12) + ' mo' : '')) + ')')
   }
+  if (p.termination_date) lines.push('Last day: ' + fmtDate(p.termination_date) + ' (not scheduled after)')
   lines.push('Home studio: ' + (p.home_studio_id ? (STUDIO_NAMES[p.home_studio_id] || p.home_studio_id) : 'not set'))
   if (p.role === 'manager') lines.push('Manager: 40 h/week at home studio, works Fridays (event night)')
   if (bdIsSC(ctx, p, ctx.from) || bdIsSC(ctx, p, ctx.to)) lines.push('Studio coordinator here: works Fridays (event night)')
@@ -1795,7 +1815,7 @@ function renderBuild(withLegend) {
   // Reassign dropdown for one block
   const picker = (b, idx) => {
     const st = bdState(ctx, plan.blocks.filter((_, j) => j !== idx))
-    const opts = ctx.pool.map(p => ({ p, why: bdBlocked(ctx, p, b, st) }))
+    const opts = ctx.pool.filter(p => p.id === b.staffId || !employmentBlock(p, b.date)).map(p => ({ p, why: bdBlocked(ctx, p, b, st) }))
       .sort((x, y) => (!!x.why - !!y.why) || x.p.display_name.localeCompare(y.p.display_name))
     return '<select class="wk-pick" onchange="' + U + 'bdAssign(' + idx + ', this.value)" title="Change who works this shift"><option value="">— Unfilled —</option>' +
       opts.map(o => '<option value="' + o.p.id + '"' + (o.p.id === b.staffId ? ' selected' : '') + '>' + esc(o.p.display_name) + (onCall(o.p, b.date) ? ' · on call' : '') + (o.why ? ' (' + o.why + ')' : '') + '</option>').join('') + '</select>'
@@ -1899,7 +1919,7 @@ function renderBuild(withLegend) {
     rows += '<tr class="wk-classes"><td class="wk-name"><b>Classes</b><div class="muted small">teacher for the term</div></td>' + days.map(d => '<td>' +
       classes.filter(c => c.date === d).sort((a, b) => a.start - b.start).map(c => {
         const tid = bdTeacherFor(ctx, c)
-        const opts = ctx.pool.slice().sort((a, b) => {
+        const opts = ctx.pool.filter(p => p.id === tid || employedOn(p, c.date)).sort((a, b) => {
           const ab = c.badge ? (ctx.badgesBy[a.id] || new Set()).has(c.badge) : false, bb = c.badge ? (ctx.badgesBy[b.id] || new Set()).has(c.badge) : false
           return (bb - ab) || ((b.home_studio_id === ctx.studio) - (a.home_studio_id === ctx.studio)) || a.display_name.localeCompare(b.display_name)
         })
@@ -1908,7 +1928,7 @@ function renderBuild(withLegend) {
         let status = ''
         if (active && isSubRow(active)) status = '<div style="font-weight:600">Substitute this week</div>'
         else if (tid) {
-          const tp = ctx.pool.find(x => x.id === tid)
+          const tp = ctx.pool.find(x => x.id === tid) || (ctx.everyone || []).find(x => x.id === tid && !employedOn(x, c.date))
           // Working at THIS studio that day is expected (that's the shift they teach in), so leave
           // their shifts here out of the check: plan blocks and approved/draft shifts alike.
           // Shifts at other studios that day still count, and so do time off and unavailability.
@@ -1934,13 +1954,21 @@ function renderBuild(withLegend) {
 
   people.forEach(p => {
     const h = hrs(state.minutesOf(p.id)), flags = []
-    if (p.role === 'manager' && p.home_studio_id === ctx.studio && p.max_studio_days_per_week == null && h < 40) flags.push('Manager under 40 h')
+    // Starts or leaves partway through (or outside) this week: hours targets don't apply
+    const partWeek = days.some(d => !employedOn(p, d))
+    // Any shift on a day they're not employed (left / not started) must move to someone else
+    days.filter(d => !employedOn(p, d)).forEach(d => {
+      const n = plan.blocks.filter(b => b.staffId === p.id && b.date === d).length +
+        ctx.shifts.filter(x => x.staff_id === p.id && x.shift_date === d && x.studio_id === ctx.studio && x.status !== 'draft' && x.start_time).length
+      if (n) warn.push(fmtDate(d) + ': ' + p.display_name + ' has a shift but is ' + employmentBlock(p, d) + '. Give it to someone else')
+    })
+    if (p.role === 'manager' && p.home_studio_id === ctx.studio && p.max_studio_days_per_week == null && h < 40 && !partWeek) flags.push('Manager under 40 h')
     if (p.role === 'manager' && p.home_studio_id === ctx.studio) {
       const shortDays = plan.blocks.filter(b => b.staffId === p.id && !b.training && paidMins(ctx.studio, b.start, b.end) < MAX_PAID)
         .map(b => parseYmd(b.date).toLocaleDateString('en-CA', { weekday: 'short' }))
       if (shortDays.length) flags.push('Manager shift under 8 h (' + shortDays.join(', ') + ')')
     }
-    if (p.min_weekly_hours != null && h < p.min_weekly_hours) flags.push('Under minimum')
+    if (p.min_weekly_hours != null && h < p.min_weekly_hours && !partWeek) flags.push('Under minimum')
     if (ot && h > ot.weekly_hours) flags.push('Overtime')
     days.filter(isFriday).forEach(d => {
       if (bdIsLeader(ctx, p, d) && ctx.dayWindow[d] && bdAvailableDay(ctx, p, d) && !state.daysOf(p.id).has(d)) flags.push('No Friday shift (event night)')
@@ -1952,6 +1980,8 @@ function renderBuild(withLegend) {
     const oc = onCall(p, ctx.from) || onCall(p, ctx.to)
     if (oc) { for (let k = flags.length - 1; k >= 0; k--) if (/^No (Sat|Sun) shift|Under minimum|Manager under/.test(flags[k])) flags.splice(k, 1) }
     flags.forEach(f => warn.push(p.display_name + ': ' + f))
+    if (p.termination_date && p.termination_date <= ctx.to) flags.unshift(p.termination_date < ctx.from ? 'Left ' + shortDay(p.termination_date) : 'Last day ' + parseYmd(p.termination_date).toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))
+    if (p.hire_date && p.hire_date > ctx.from) flags.unshift('Starts ' + parseYmd(p.hire_date).toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))
     if (oc) flags.unshift('On call' + (p.on_call_until ? ' until ' + parseYmd(p.on_call_until).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : ''))
     const range = (p.min_weekly_hours != null || p.max_weekly_hours != null)
       ? ' / ' + (p.min_weekly_hours != null ? p.min_weekly_hours : 0) + '–' + (p.max_weekly_hours != null ? p.max_weekly_hours : '') : (p.role === 'manager' ? ' / 40' : '')
@@ -1991,7 +2021,9 @@ function renderBuild(withLegend) {
       ctx.toff.filter(o => o.staff_id === p.id && o.start_date <= d && o.end_date >= d).forEach(o => {
         cell += '<div class="wk-chip off">' + (o.start_time ? fmtRange(o.start_time, o.end_time) : 'All day') + '<div>Time off' + (o.status === 'pending' ? ' (pending)' : '') + '</div></div>'
       })
-      rows += '<td ' + bdDropAttrs(p.id, d) + '>' + cell + '</td>'
+      const gone = employmentBlock(p, d)
+      if (gone) cell = '<div class="wk-chip gone">' + (p.termination_date && d > p.termination_date ? 'Left' : 'Not started') + '<div>' + esc(gone.replace(/^.*\(|\)$/g, '')) + '</div></div>' + cell
+      rows += '<td ' + (gone ? 'class="wk-gone" ' : '') + bdDropAttrs(p.id, d) + '>' + cell + '</td>'
     })
     rows += '</tr>'
   })
@@ -2113,7 +2145,7 @@ function bdPlaceTeachers(ctx, blocks) {
   bdClasses(ctx).forEach(c => {
     const tid = bdTeacherFor(ctx, c)
     if (!tid) return
-    const p = ctx.pool.find(x => x.id === tid) || null
+    const p = ctx.pool.find(x => x.id === tid) || (ctx.everyone || []).find(x => x.id === tid && !employedOn(x, c.date)) || null
     const nm = p ? p.display_name : 'The assigned teacher'
     // already has a shift that day here? stretch it to cover the class if it can
     const own = blocks.find(b => b.staffId === tid && b.date === c.date)
@@ -2692,6 +2724,8 @@ function bdDrop(ev) {
   if (!bdCtx.dayWindow[date] && !confirm('The studio has nothing open on ' + fmtDate(date) + '. Move the shift there anyway?')) return
   if (staffId) {
     const p = bdPerson(staffId)
+    const gone = employmentBlock(p, date)
+    if (gone) { toast(p.display_name + ' is ' + gone + '. They can\'t be scheduled on ' + fmtDate(date) + '.', true); return }
     const clash = bdState(bdCtx, bdPlan.blocks.filter((_, j) => j !== idx)).daysOf(staffId).has(date)
     if (clash) { toast(p.display_name + ' already has a shift on ' + fmtDate(date) + '. Move or remove that one first.', true); return }
     const moved = Object.assign({}, b, { date })
@@ -2734,6 +2768,8 @@ function bdCellClick(ev) {
     const blk = { date, start: r.start, end: r.end, layer: 1, badges: [], staffId, manual: true }
     if (staffId) {
       const p = bdPerson(staffId), state = bdState(bdCtx, bdPlan.blocks)
+      const gone = employmentBlock(p, date)
+      if (gone) { toast(p.display_name + ' is ' + gone + '. They can\'t be scheduled on ' + fmtDate(date) + '.', true); input.remove(); return }
       if (state.daysOf(staffId).has(date)) { toast(p.display_name + ' already has a shift on ' + fmtDate(date) + '. Change that one instead.', true); input.remove(); return }
       const why = bdBlocked(bdCtx, p, blk, state)
       if (why && !confirm(p.display_name + ': ' + why + ' on ' + fmtDate(date) + '. Add this shift anyway?')) { input.remove(); return }
@@ -2803,7 +2839,11 @@ function bdDeleteShift(ev, idx) {
   bdRefresh()
 }
 
-function bdAssign(idx, staffId) { bdPlan.blocks[idx].staffId = staffId || null; bdPlan.dirty = true; bdRefresh() }
+function bdAssign(idx, staffId) {
+  const gone = staffId ? employmentBlock(bdPerson(staffId), bdPlan.blocks[idx].date) : null
+  if (gone) { toast(bdPerson(staffId).display_name + ' is ' + gone + '.', true); bdRefresh(); return }
+  bdPlan.blocks[idx].staffId = staffId || null; bdPlan.dirty = true; bdRefresh()
+}
 
 // The draft rows a studio's plan would save (assigned shifts only)
 function bdDraftRows(st) {
@@ -3786,7 +3826,7 @@ async function plLoadStudio() {
   const [plans, parties, people, breaks] = await Promise.all([
     sb.from('schedule_plans').select('*').eq('studio_id', studio).neq('status', 'archived').order('updated_at', { ascending: false }),
     sb.from('party_slot_schedule').select('day_of_week, time_slot, slots').eq('studio_id', studio),
-    sb.from('staff_profiles').select('id, display_name, preferred_name, studio_ids, home_studio_id, is_active, exclude_from_schedule, max_weekly_hours'),
+    sb.from('staff_profiles').select('id, display_name, preferred_name, studio_ids, home_studio_id, is_active, exclude_from_schedule, max_weekly_hours, hire_date, termination_date'),
     bdBreakRules.length ? Promise.resolve({ data: bdBreakRules }) : sb.from('province_break_rules').select('*')
   ])
   if (pl.studio !== studio) return
@@ -4317,8 +4357,11 @@ function plColItems(items, lo) {
 
 /* ---------- staff (planned only) ---------- */
 function plStaffRows() {
-  const d = pl.plan.data, rows = pl.pool.map(p => ({ key: p.id, p }))
-  d.extraStaff.forEach(id => { if (!rows.some(r => r.key === id)) { const p = pl.allStaff.find(x => x.id === id); if (p) rows.push({ key: id, p, extra: true }) } })
+  const d = pl.plan.data, wk = plWeekDates()
+  // Hide anyone not employed during the week shown (hire date / last day), unless they still have a planned shift that week
+  const showFor = p => employedDuring(p, wk[0], wk[6]) || wk.some(dt => (d.shifts[dt] || {})[p.id])
+  const rows = pl.pool.filter(showFor).map(p => ({ key: p.id, p }))
+  d.extraStaff.forEach(id => { if (!rows.some(r => r.key === id)) { const p = pl.allStaff.find(x => x.id === id); if (p && showFor(p)) rows.push({ key: id, p, extra: true }) } })
   for (let i = 1; i <= d.openRows; i++) rows.push({ key: 'open' + i, open: true, name: 'Open shift ' + i })
   return rows
 }
@@ -4356,6 +4399,12 @@ function plStaffHtml(dates, stats) {
       const offTxt = allDay ? 'off' : un.map(u => 'off ' + bdFmtShort(u.a) + '–' + bdFmtShort(u.b)).join(', ')
       ew.forEach(x => { otherMins += paidMins(x.studio, x.a, x.b) })
       let cls = 'pl-sh'
+      const gone = r.open ? null : employmentBlock(r.p, d)
+      if (gone) {
+        // not employed that day: blocked box (a shift typed earlier still shows, in red, so it can be cleared)
+        return '<td><input class="pl-sh gone' + (v ? ' conflict' : '') + '" data-date="' + d + '" data-key="' + r.key + '" value="' + (v ? bdFmtShort(v[0]) + '-' + bdFmtShort(v[1]) : '') + '"' +
+          ' title="' + esc(r.p.display_name + ' is ' + gone) + '"' + (v ? ' onchange="plSetShift(this)"' : ' readonly') + ' placeholder="' + (r.p.termination_date && d > r.p.termination_date ? 'left' : 'not started') + '"></td>'
+      }
       if (v) { cls += ' filled'; const pm = paidMins(pl.studio, v[0], v[1]); mins += pm; cost += pm / 60 * (wage ?? plOpenWage()) }
       // one shift a person a day: a shift here on a day they work elsewhere is a conflict
       if (v && ew.length) cls += ' conflict'
@@ -4369,7 +4418,8 @@ function plStaffHtml(dates, stats) {
     }).join('')
     const max = r.p && r.p.max_weekly_hours
     const name = r.open ? '<span class="muted">' + r.name + '</span>' + (pl.plan.data.openRows > 0 && r.key === 'open' + pl.plan.data.openRows ? ' <button class="btn small" onclick="plOpenRows(-1)" title="Remove this row">×</button>' : '')
-      : esc(r.p.display_name) + (r.extra ? ' <span class="muted small">(other studio)</span> <button class="btn small" onclick="plRemoveExtra(\'' + r.key + '\')" title="Remove from this plan">×</button>' : '')
+      : esc(r.p.display_name) + (r.p.termination_date && r.p.termination_date <= dates[6] ? ' <span class="muted small">(last day ' + shortDay(r.p.termination_date) + ')</span>' : '') +
+        (r.p.hire_date && r.p.hire_date > dates[0] ? ' <span class="muted small">(starts ' + shortDay(r.p.hire_date) + ')</span>' : '') + (r.extra ? ' <span class="muted small">(other studio)</span> <button class="btn small" onclick="plRemoveExtra(\'' + r.key + '\')" title="Remove from this plan">×</button>' : '')
     html += '<tr><td>' + name + (wageOk && wage != null ? ' <span class="wage">$' + Number(wage).toFixed(2) + '</span>' : '') + '</td>' + cells +
       '<td class="num' + (max && (mins + otherMins) / 60 > max ? ' bad' : '') + '"' + (max || otherMins ? ' title="' + (otherMins ? plH(otherMins) + 'h this week at other studios. ' : '') + (max ? 'Max ' + max + 'h a week, all studios' : '') + '"' : '') + '>' +
         (mins ? plH(mins) : '') + (otherMins ? ' <span class="muted small">+' + plH(otherMins) + ' elsewhere</span>' : '') + '</td>' +
@@ -4381,7 +4431,7 @@ function plStaffHtml(dates, stats) {
   if (wageOk) html += foot('Labour / revenue', s => (s.labour || s.rev) ? plMoney(s.labour) + ' / ' + plMoney(s.rev) + (s.rev ? ' (' + Math.round(s.labour / s.rev * 100) + '%)' : '') : '')
   html += '</tbody></table></div><div class="panel-body" style="display:flex;gap:8px;flex-wrap:wrap">' +
     '<select class="input" onchange="plAddExtra(this.value)"><option value="">Add someone from another studio…</option>' +
-    pl.allStaff.filter(p => !rows.some(r => r.key === p.id)).map(p => '<option value="' + p.id + '">' + esc(p.display_name) + '</option>').join('') + '</select>' +
+    pl.allStaff.filter(p => !rows.some(r => r.key === p.id) && employedDuring(p, dates[0], dates[6])).map(p => '<option value="' + p.id + '">' + esc(p.display_name) + '</option>').join('') + '</select>' +
     '<button class="btn" onclick="plOpenRows(1)">+ Open shift row</button></div></div>'
   return html
 }
@@ -4390,6 +4440,8 @@ function plSetShift(el) {
   if (!d.shifts[date]) d.shifts[date] = {}
   if (!txt) delete d.shifts[date][key]
   else {
+    const who = pl.allStaff.find(p => p.id === key), gone = employmentBlock(who, date)
+    if (gone) { const was = d.shifts[date][key]; toast(who.display_name + ' is ' + gone + '. They can\'t be planned on ' + plShortDate(date) + '.', true); el.value = was ? bdFmtShort(was[0]) + '-' + bdFmtShort(was[1]) : ''; return }
     const r = bdParseRange(txt)
     if (!r) { toast('Use a time like 1p-7:30p (am/pm on both sides)', true); el.classList.add('conflict'); return }
     d.shifts[date][key] = [r.start, r.end]
@@ -4410,15 +4462,21 @@ function plOpenRows(n) {
   if (n < 0) Object.keys(d.shifts).forEach(dt => { delete d.shifts[dt]['open' + d.openRows] })
   d.openRows = Math.max(0, d.openRows + n); plTouch()
 }
+// Copy one day's planned shifts to another date, leaving out anyone not employed on that date
+function plCopyDay(src, dt) {
+  const out = JSON.parse(JSON.stringify(src || {}))
+  Object.keys(out).forEach(key => { const p = pl.allStaff.find(x => x.id === key); if (p && !employedOn(p, dt)) delete out[key] })
+  return out
+}
 function plCopyWeek(dir) {
   const d = pl.plan.data, from = plWeekDates(pl.week + dir), to = plWeekDates()
-  to.forEach((dt, i) => { d.shifts[dt] = JSON.parse(JSON.stringify(d.shifts[from[i]] || {})) })
+  to.forEach((dt, i) => { d.shifts[dt] = plCopyDay(d.shifts[from[i]], dt) })
   plTouch()
 }
 function plCopyForward() {
   if (!confirm('Copy this week\'s planned staff into every later week of the plan? Later weeks\' planned staff are replaced.')) return
   const d = pl.plan.data, src = plWeekDates()
-  for (let w = pl.week + 1; w < pl.plan.weeks; w++) plWeekDates(w).forEach((dt, i) => { d.shifts[dt] = JSON.parse(JSON.stringify(d.shifts[src[i]] || {})) })
+  for (let w = pl.week + 1; w < pl.plan.weeks; w++) plWeekDates(w).forEach((dt, i) => { d.shifts[dt] = plCopyDay(d.shifts[src[i]], dt) })
   plTouch()
 }
 function plClearWeek() {
@@ -4937,6 +4995,8 @@ async function plShiftPreview() {
   const draftsHere = (await sb.from('staff_shifts').select('staff_id', { count: 'exact', head: true }).eq('studio_id', pl.studio).eq('status', 'draft').gte('shift_date', from).lte('shift_date', to)).count || 0
   const skip = [], ok = []
   rows.forEach(r => {
+    const gone = employmentBlock(pl.allStaff.find(p => p.id === r.staff_id), r.shift_date)
+    if (gone) { skip.push({ r, why: gone }); return }
     const same = existing.filter(x => x.staff_id === r.staff_id && x.shift_date === r.shift_date)
     const here = same.find(x => x.studio_id === pl.studio && x.status !== 'draft')
     const other = same.find(x => x.studio_id !== pl.studio)
