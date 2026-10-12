@@ -138,6 +138,8 @@ table.wk tr.wk-total td { background: var(--soft); }
 .wk-chip.open  { background: #fff; color: var(--bad); border: 1px dashed var(--bad); }
 .wk-chip.unav  { background: #ececE6; color: #777; }
 .wk-chip.off   { background: #6b6b66; color: #fff; }
+.wk-chip.gone  { background: repeating-linear-gradient(135deg, #e4e4de 0 6px, #efefea 6px 12px); color: #666; font-weight: 600; }
+td.wk-gone { background: #f4f4f0; }
 .wk-chip[draggable="true"] { cursor: grab; }
 .wk-chip[draggable="true"]:active { cursor: grabbing; }
 table.wk td.drop-ok { outline: 2px dashed #4a7fd4; outline-offset: -3px; background: #f0f6ff !important; }
@@ -253,7 +255,6 @@ table.pl-staff input.pl-sh.elsewhere { background: #eaf0f8; border-style: dashed
 .pl-it:hover { filter: brightness(.96); z-index: 3; }
 .pl-it.ghost { background: #fff !important; opacity: .55; border: 1px dashed var(--line-2); border-left-width: 1px; text-decoration: line-through; z-index: 1; color: var(--muted) !important; }
 .pl-it .meta { display: block; opacity: .8; }
-.pl-it.booked { font-weight: 600; }
 .pl-cov { position: relative; background: #fbfbf8; }
 .pl-cov div { position: absolute; left: 1px; right: 1px; font-size: 9px; text-align: center; border-radius: 2px; line-height: 14px; }
 .pl-cov .ok { background: var(--good-bg); color: var(--good); }
@@ -307,6 +308,7 @@ table.pl-staff td.num, table.pl-staff th.num { text-align: right; }
 table.pl-staff input.pl-sh { width: 100%; min-width: 92px; height: 28px; padding: 3px 6px; border: 0.5px solid var(--line-2); border-radius: 5px; font-size: 12px; }
 table.pl-staff input.pl-sh.filled { background: var(--good-bg); border-color: #b9dcbc; }
 table.pl-staff input.pl-sh.unav { background: #efefea; }
+table.pl-staff input.pl-sh.gone { background: repeating-linear-gradient(135deg, #e4e4de 0 6px, #efefea 6px 12px); cursor: not-allowed; }
 table.pl-staff input.pl-sh.unavpart { background: linear-gradient(to right, #fff 55%, #efefea); }
 table.pl-staff input.pl-sh.conflict { border: 1.5px solid var(--bad); background: var(--bad-bg); }
 table.pl-staff tr.foot td { background: var(--soft); font-weight: 600; }
@@ -543,6 +545,9 @@ let currentUser = null
 // same as finance.html). Wages come from get_studio_staff_for_wages_range, which the
 // database also limits to that list, so nobody else can read them from this page.
 let bdWageAccess = false
+// Labour % only (no wages, no labour $, no revenue): logins on has_labour_pct_access (e.g. Alona).
+// The % is worked out in Supabase (plan_labour_pct) so wages never reach this page.
+let bdLabourPctAccess = false
 let staff = []          // active staff: {id, display_name, nickname, studio_ids, province_code}
 let staffById = {}
 let timeOffRows = []
@@ -574,6 +579,18 @@ function parseYmd(s) { const [y, m, d] = s.split('-').map(Number); return new Da
 function addDays(s, n) { const d = parseYmd(s); d.setDate(d.getDate() + n); return ymd(d) }
 function daysBetween(a, b) { return Math.round((parseYmd(b) - parseYmd(a)) / 86400000) }
 function todayStr() { return ymd(new Date()) }
+// Employment window from the staff profile: hire_date = first day, termination_date = last day (both optional).
+// Outside it the person can't be scheduled at all.
+function employedOn(p, date) { return !!p && (!p.hire_date || date >= p.hire_date) && (!p.termination_date || date <= p.termination_date) }
+function employedDuring(p, from, to) { return !!p && (!p.hire_date || p.hire_date <= to) && (!p.termination_date || p.termination_date >= from) }
+function shortDay(s) { return parseYmd(s).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) }
+// Why the person can't work that date because of their dates (null = they can)
+function employmentBlock(p, date) {
+  if (!p) return null
+  if (p.termination_date && date > p.termination_date) return 'no longer working here (last day ' + shortDay(p.termination_date) + ')'
+  if (p.hire_date && date < p.hire_date) return 'not started yet (starts ' + shortDay(p.hire_date) + ')'
+  return null
+}
 function fmtDate(s) { return s ? parseYmd(s).toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }) : '' }
 function fmtTime(t) {
   if (!t) return ''
@@ -626,6 +643,7 @@ async function initApp(user) {
   }
   currentUser = user
   { const fa = await sb.rpc('has_finance_access'); bdWageAccess = !fa.error && fa.data === true }
+  if (!bdWageAccess) { const la = await sb.rpc('has_labour_pct_access'); bdLabourPctAccess = !la.error && la.data === true }
   if (bdWageAccess) document.getElementById('bd-post-pay').style.display = ''
   document.getElementById('login-screen').style.display = 'none'
   document.getElementById('app-screen').style.display = 'block'
@@ -645,7 +663,7 @@ function switchView(v) {
 /* ---------- staff (no wages: explicit columns only) ---------- */
 async function loadStaff() {
   const { data, error } = await sb.from('staff_profiles')
-    .select('id, display_name, preferred_name, nickname, studio_ids, province_code, is_active')
+    .select('id, display_name, preferred_name, nickname, studio_ids, province_code, is_active, hire_date, termination_date')
     .order('display_name')
   if (error) { toast('Could not load staff: ' + error.message, true); return }
   staff = (data || []).map(applyPreferredName).sort((a, b) => a.display_name.localeCompare(b.display_name))
@@ -1079,7 +1097,7 @@ async function bdLoad(studio) {
     sb.from('studio_opening_times').select('*'),
     sb.from('province_overtime_rules').select('*'),
     sb.from('province_break_rules').select('*'),
-    sb.from('staff_profiles').select('id, display_name, preferred_name, nickname, role, hire_date, on_call, on_call_until, studio_ids, home_studio_id, min_weekly_hours, max_weekly_hours, max_studio_days_per_week, exclude_from_schedule, is_active'),
+    sb.from('staff_profiles').select('id, display_name, preferred_name, nickname, role, hire_date, termination_date, on_call, on_call_until, studio_ids, home_studio_id, min_weekly_hours, max_weekly_hours, max_studio_days_per_week, exclude_from_schedule, is_active'),
     sb.from('staff_badges').select('staff_id, badge_code'),
     sb.from('staff_schedule_prefs').select('staff_id, notes'),
     sb.from('staff_unavailability').select('staff_id, day_of_week, start_time, end_time, effective_from, effective_to'),
@@ -1117,7 +1135,8 @@ async function bdLoad(studio) {
   const badgesBy = {}; badges.data.forEach(b => { (badgesBy[b.staff_id] = badgesBy[b.staff_id] || new Set()).add(b.badge_code) })
   const notesBy = {}; notes.data.forEach(n => { if (n.notes) notesBy[n.staff_id] = n.notes })
   people.data.forEach(applyPreferredName)
-  const pool = people.data.filter(p => p.is_active && !p.exclude_from_schedule &&
+  // Only people employed for at least one day of this week (hire date / last day on their profile)
+  const pool = people.data.filter(p => p.is_active && !p.exclude_from_schedule && employedDuring(p, from, to) &&
     (!(p.studio_ids || []).length || p.studio_ids.includes(studio)))
   // Shifts worked before this week (any studio), only for people without the solo badge.
   // We only need to know whether it's 3 yet, so one small count per person.
@@ -1135,7 +1154,7 @@ async function bdLoad(studio) {
     pastShifts[p.id] = count || 0
   }))
   return { studio, from, to, sessions: need.data || [], ruleBadge, badgeLabel, opening: opening.data, ot: ot.data,
-           pool, badgesBy, notesBy, pastShifts, recentWeekends, classTeachers, coordinators, daySessions, dayScheduleError, minimums, partyToClose, wages, unav: unav.data, toff: toff.data, shifts: shifts.data }
+           pool, everyone: people.data, badgesBy, notesBy, pastShifts, recentWeekends, classTeachers, coordinators, daySessions, dayScheduleError, minimums, partyToClose, wages, unav: unav.data, toff: toff.data, shifts: shifts.data }
 }
 
 // Minimum people on for this studio at this weekday and time (studio_staffing_minimums), or 0
@@ -1265,6 +1284,7 @@ function bdBlocks(ctx, date, slots, target) {
 
 // Available for at least part of the day (no all-day unavailability or all-day approved time off)
 function bdAvailableDay(ctx, p, date) {
+  if (!employedOn(p, date)) return false
   const dow = parseYmd(date).getDay()
   if (ctx.unav.some(u => u.staff_id === p.id && u.day_of_week === dow && !u.start_time && u.effective_from <= date && (!u.effective_to || u.effective_to >= date))) return false
   if (ctx.toff.some(o => o.staff_id === p.id && o.status === 'approved' && !o.start_time && o.start_date <= date && o.end_date >= date)) return false
@@ -1297,6 +1317,8 @@ function bdTrainingDone(ctx, p, blocks, beforeDate) {
 // Why a person can't take a block (hard rules); null = they can
 function bdBlocked(ctx, p, blk, state) {
   const date = blk.date, dow = parseYmd(date).getDay()
+  const gone = employmentBlock(p, date)
+  if (gone) return gone
   if (!blk.training && state.blocks && bdTrainingDone(ctx, p, state.blocks, date) !== null)
     return 'in training (' + bdTrainingDone(ctx, p, state.blocks, date) + ' of ' + TRAINING_SHIFTS_NEEDED + ')'
   if (p.role === 'manager' && p.home_studio_id && p.home_studio_id !== ctx.studio) return 'manager at another studio'
@@ -1723,7 +1745,7 @@ function renderAll() {
 }
 function bdRefresh() { const cur = bdCtx && bdCtx.studio; renderAll(); if (cur) bdUse(cur) }
 
-function bdPerson(id) { return bdCtx.pool.find(p => p.id === id) || staffById[id] || { id, display_name: '(unknown)' } }
+function bdPerson(id) { return bdCtx.pool.find(p => p.id === id) || (bdCtx.everyone || []).find(p => p.id === id) || staffById[id] || { id, display_name: '(unknown)' } }
 
 // Click ⓘ: a small card with the person's details (works on touch screens too). Click anywhere else to close.
 function bdShowInfo(ev, staffId) {
@@ -1754,6 +1776,7 @@ function bdInfo(p) {
     const mo = Math.max(0, Math.round(daysBetween(p.hire_date, todayStr()) / 30.4))
     lines.push('Hired: ' + fmtDate(p.hire_date) + ' (' + (mo < 12 ? mo + ' month' + (mo === 1 ? '' : 's') : Math.floor(mo / 12) + ' yr' + (mo % 12 ? ' ' + (mo % 12) + ' mo' : '')) + ')')
   }
+  if (p.termination_date) lines.push('Last day: ' + fmtDate(p.termination_date) + ' (not scheduled after)')
   lines.push('Home studio: ' + (p.home_studio_id ? (STUDIO_NAMES[p.home_studio_id] || p.home_studio_id) : 'not set'))
   if (p.role === 'manager') lines.push('Manager: 40 h/week at home studio, works Fridays (event night)')
   if (bdIsSC(ctx, p, ctx.from) || bdIsSC(ctx, p, ctx.to)) lines.push('Studio coordinator here: works Fridays (event night)')
@@ -1796,7 +1819,7 @@ function renderBuild(withLegend) {
   // Reassign dropdown for one block
   const picker = (b, idx) => {
     const st = bdState(ctx, plan.blocks.filter((_, j) => j !== idx))
-    const opts = ctx.pool.map(p => ({ p, why: bdBlocked(ctx, p, b, st) }))
+    const opts = ctx.pool.filter(p => p.id === b.staffId || !employmentBlock(p, b.date)).map(p => ({ p, why: bdBlocked(ctx, p, b, st) }))
       .sort((x, y) => (!!x.why - !!y.why) || x.p.display_name.localeCompare(y.p.display_name))
     return '<select class="wk-pick" onchange="' + U + 'bdAssign(' + idx + ', this.value)" title="Change who works this shift"><option value="">— Unfilled —</option>' +
       opts.map(o => '<option value="' + o.p.id + '"' + (o.p.id === b.staffId ? ' selected' : '') + '>' + esc(o.p.display_name) + (onCall(o.p, b.date) ? ' · on call' : '') + (o.why ? ' (' + o.why + ')' : '') + '</option>').join('') + '</select>'
@@ -1900,7 +1923,7 @@ function renderBuild(withLegend) {
     rows += '<tr class="wk-classes"><td class="wk-name"><b>Classes</b><div class="muted small">teacher for the term</div></td>' + days.map(d => '<td>' +
       classes.filter(c => c.date === d).sort((a, b) => a.start - b.start).map(c => {
         const tid = bdTeacherFor(ctx, c)
-        const opts = ctx.pool.slice().sort((a, b) => {
+        const opts = ctx.pool.filter(p => p.id === tid || employedOn(p, c.date)).sort((a, b) => {
           const ab = c.badge ? (ctx.badgesBy[a.id] || new Set()).has(c.badge) : false, bb = c.badge ? (ctx.badgesBy[b.id] || new Set()).has(c.badge) : false
           return (bb - ab) || ((b.home_studio_id === ctx.studio) - (a.home_studio_id === ctx.studio)) || a.display_name.localeCompare(b.display_name)
         })
@@ -1909,7 +1932,7 @@ function renderBuild(withLegend) {
         let status = ''
         if (active && isSubRow(active)) status = '<div style="font-weight:600">Substitute this week</div>'
         else if (tid) {
-          const tp = ctx.pool.find(x => x.id === tid)
+          const tp = ctx.pool.find(x => x.id === tid) || (ctx.everyone || []).find(x => x.id === tid && !employedOn(x, c.date))
           // Working at THIS studio that day is expected (that's the shift they teach in), so leave
           // their shifts here out of the check: plan blocks and approved/draft shifts alike.
           // Shifts at other studios that day still count, and so do time off and unavailability.
@@ -1935,13 +1958,21 @@ function renderBuild(withLegend) {
 
   people.forEach(p => {
     const h = hrs(state.minutesOf(p.id)), flags = []
-    if (p.role === 'manager' && p.home_studio_id === ctx.studio && p.max_studio_days_per_week == null && h < 40) flags.push('Manager under 40 h')
+    // Starts or leaves partway through (or outside) this week: hours targets don't apply
+    const partWeek = days.some(d => !employedOn(p, d))
+    // Any shift on a day they're not employed (left / not started) must move to someone else
+    days.filter(d => !employedOn(p, d)).forEach(d => {
+      const n = plan.blocks.filter(b => b.staffId === p.id && b.date === d).length +
+        ctx.shifts.filter(x => x.staff_id === p.id && x.shift_date === d && x.studio_id === ctx.studio && x.status !== 'draft' && x.start_time).length
+      if (n) warn.push(fmtDate(d) + ': ' + p.display_name + ' has a shift but is ' + employmentBlock(p, d) + '. Give it to someone else')
+    })
+    if (p.role === 'manager' && p.home_studio_id === ctx.studio && p.max_studio_days_per_week == null && h < 40 && !partWeek) flags.push('Manager under 40 h')
     if (p.role === 'manager' && p.home_studio_id === ctx.studio) {
       const shortDays = plan.blocks.filter(b => b.staffId === p.id && !b.training && paidMins(ctx.studio, b.start, b.end) < MAX_PAID)
         .map(b => parseYmd(b.date).toLocaleDateString('en-CA', { weekday: 'short' }))
       if (shortDays.length) flags.push('Manager shift under 8 h (' + shortDays.join(', ') + ')')
     }
-    if (p.min_weekly_hours != null && h < p.min_weekly_hours) flags.push('Under minimum')
+    if (p.min_weekly_hours != null && h < p.min_weekly_hours && !partWeek) flags.push('Under minimum')
     if (ot && h > ot.weekly_hours) flags.push('Overtime')
     days.filter(isFriday).forEach(d => {
       if (bdIsLeader(ctx, p, d) && ctx.dayWindow[d] && bdAvailableDay(ctx, p, d) && !state.daysOf(p.id).has(d)) flags.push('No Friday shift (event night)')
@@ -1953,6 +1984,8 @@ function renderBuild(withLegend) {
     const oc = onCall(p, ctx.from) || onCall(p, ctx.to)
     if (oc) { for (let k = flags.length - 1; k >= 0; k--) if (/^No (Sat|Sun) shift|Under minimum|Manager under/.test(flags[k])) flags.splice(k, 1) }
     flags.forEach(f => warn.push(p.display_name + ': ' + f))
+    if (p.termination_date && p.termination_date <= ctx.to) flags.unshift(p.termination_date < ctx.from ? 'Left ' + shortDay(p.termination_date) : 'Last day ' + parseYmd(p.termination_date).toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))
+    if (p.hire_date && p.hire_date > ctx.from) flags.unshift('Starts ' + parseYmd(p.hire_date).toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))
     if (oc) flags.unshift('On call' + (p.on_call_until ? ' until ' + parseYmd(p.on_call_until).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : ''))
     const range = (p.min_weekly_hours != null || p.max_weekly_hours != null)
       ? ' / ' + (p.min_weekly_hours != null ? p.min_weekly_hours : 0) + '–' + (p.max_weekly_hours != null ? p.max_weekly_hours : '') : (p.role === 'manager' ? ' / 40' : '')
@@ -1992,7 +2025,9 @@ function renderBuild(withLegend) {
       ctx.toff.filter(o => o.staff_id === p.id && o.start_date <= d && o.end_date >= d).forEach(o => {
         cell += '<div class="wk-chip off">' + (o.start_time ? fmtRange(o.start_time, o.end_time) : 'All day') + '<div>Time off' + (o.status === 'pending' ? ' (pending)' : '') + '</div></div>'
       })
-      rows += '<td ' + bdDropAttrs(p.id, d) + '>' + cell + '</td>'
+      const gone = employmentBlock(p, d)
+      if (gone) cell = '<div class="wk-chip gone">' + (p.termination_date && d > p.termination_date ? 'Left' : 'Not started') + '<div>' + esc(gone.replace(/^.*\(|\)$/g, '')) + '</div></div>' + cell
+      rows += '<td ' + (gone ? 'class="wk-gone" ' : '') + bdDropAttrs(p.id, d) + '>' + cell + '</td>'
     })
     rows += '</tr>'
   })
@@ -2114,7 +2149,7 @@ function bdPlaceTeachers(ctx, blocks) {
   bdClasses(ctx).forEach(c => {
     const tid = bdTeacherFor(ctx, c)
     if (!tid) return
-    const p = ctx.pool.find(x => x.id === tid) || null
+    const p = ctx.pool.find(x => x.id === tid) || (ctx.everyone || []).find(x => x.id === tid && !employedOn(x, c.date)) || null
     const nm = p ? p.display_name : 'The assigned teacher'
     // already has a shift that day here? stretch it to cover the class if it can
     const own = blocks.find(b => b.staffId === tid && b.date === c.date)
@@ -2693,6 +2728,8 @@ function bdDrop(ev) {
   if (!bdCtx.dayWindow[date] && !confirm('The studio has nothing open on ' + fmtDate(date) + '. Move the shift there anyway?')) return
   if (staffId) {
     const p = bdPerson(staffId)
+    const gone = employmentBlock(p, date)
+    if (gone) { toast(p.display_name + ' is ' + gone + '. They can\'t be scheduled on ' + fmtDate(date) + '.', true); return }
     const clash = bdState(bdCtx, bdPlan.blocks.filter((_, j) => j !== idx)).daysOf(staffId).has(date)
     if (clash) { toast(p.display_name + ' already has a shift on ' + fmtDate(date) + '. Move or remove that one first.', true); return }
     const moved = Object.assign({}, b, { date })
@@ -2735,6 +2772,8 @@ function bdCellClick(ev) {
     const blk = { date, start: r.start, end: r.end, layer: 1, badges: [], staffId, manual: true }
     if (staffId) {
       const p = bdPerson(staffId), state = bdState(bdCtx, bdPlan.blocks)
+      const gone = employmentBlock(p, date)
+      if (gone) { toast(p.display_name + ' is ' + gone + '. They can\'t be scheduled on ' + fmtDate(date) + '.', true); input.remove(); return }
       if (state.daysOf(staffId).has(date)) { toast(p.display_name + ' already has a shift on ' + fmtDate(date) + '. Change that one instead.', true); input.remove(); return }
       const why = bdBlocked(bdCtx, p, blk, state)
       if (why && !confirm(p.display_name + ': ' + why + ' on ' + fmtDate(date) + '. Add this shift anyway?')) { input.remove(); return }
@@ -2804,7 +2843,11 @@ function bdDeleteShift(ev, idx) {
   bdRefresh()
 }
 
-function bdAssign(idx, staffId) { bdPlan.blocks[idx].staffId = staffId || null; bdPlan.dirty = true; bdRefresh() }
+function bdAssign(idx, staffId) {
+  const gone = staffId ? employmentBlock(bdPerson(staffId), bdPlan.blocks[idx].date) : null
+  if (gone) { toast(bdPerson(staffId).display_name + ' is ' + gone + '.', true); bdRefresh(); return }
+  bdPlan.blocks[idx].staffId = staffId || null; bdPlan.dirty = true; bdRefresh()
+}
 
 // The draft rows a studio's plan would save (assigned shifts only)
 function bdDraftRows(st) {
@@ -3640,15 +3683,14 @@ async function runImport() {
    ===================================================================== */
 const PL_RH = 15   // px per 15 minutes on the grid
 const PL_KINDS = {
-  glazing:        { label: 'Glazing',        short: 'Glaze',     dur: 15,  bg: '#e3eefb', ink: '#1a4fa0', dropin: true, bgB: '#b5cff2' },
-  minimake:       { label: 'Mini Make',      short: 'Mini Make', dur: 15,  bg: '#f1e6fa', ink: '#6a1b9a', dropin: true, bgB: '#d8bdef' },
-  workshop:       { label: 'Workshop',       short: 'Workshop',  dur: 15,  bg: '#e3f3e4', ink: '#2e7d32', dropin: true, bgB: '#b3dfb7' },
-  party:          { label: 'Party slot',     short: 'Party',     dur: 120, bg: '#fde4ee', ink: '#ad1457', bgB: '#f4adc7' },
-  session_class:  { label: 'Session class',  short: 'Class',     dur: 90,  bg: '#fff1cc', ink: '#7a5a00', series: true, bgB: '#ffd97a' },
-  wheel_workshop: { label: 'Wheel workshop', short: 'Wheel',     dur: 90,  bg: '#efe4d8', ink: '#5d4037', bgB: '#d9c1a5' },
-  wheel_session:  { label: 'Wheel session',  short: 'Wheel',     dur: 90,  bg: '#e2d3c1', ink: '#4e342e', series: true, bgB: '#c9ab8a' },
-  camp:           { label: 'Camp / PA day',  short: 'Camp',      dur: 390, bg: '#dff1ef', ink: '#00695c', fixed: true, bgB: '#a4d9d1' },
-  event:          { label: 'Team building / field trip', short: 'Booked', dur: 120, bg: '#ffe7cc', ink: '#a14a00', fixed: true, bgB: '#ffc98a' }
+  glazing:        { label: 'Glazing',        short: 'Glaze',     dur: 15,  bg: '#e3eefb', ink: '#1a4fa0', dropin: true },
+  minimake:       { label: 'Mini Make',      short: 'Mini Make', dur: 15,  bg: '#f1e6fa', ink: '#6a1b9a', dropin: true },
+  workshop:       { label: 'Workshop',       short: 'Workshop',  dur: 15,  bg: '#e3f3e4', ink: '#2e7d32', dropin: true },
+  party:          { label: 'Party slot',     short: 'Party',     dur: 120, bg: '#fde4ee', ink: '#ad1457' },
+  session_class:  { label: 'Session class',  short: 'Class',     dur: 90,  bg: '#fff1cc', ink: '#7a5a00', series: true },
+  wheel_workshop: { label: 'Wheel workshop', short: 'Wheel',     dur: 90,  bg: '#efe4d8', ink: '#5d4037' },
+  wheel_session:  { label: 'Wheel session',  short: 'Wheel',     dur: 90,  bg: '#e2d3c1', ink: '#4e342e', series: true },
+  camp:           { label: 'Camp / PA day',  short: 'Camp',      dur: 390, bg: '#dff1ef', ink: '#00695c', fixed: true }
 }
 const PL_ADD_ORDER = ['session_class', 'wheel_workshop', 'wheel_session', 'workshop', 'glazing', 'minimake']
 const PL_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -3678,7 +3720,7 @@ const PL_VARIANT_NAMES = {
   'ON-WTR-WTR':'ON / WATERLOO - UPTOWN'
 }
 let plCatalog = []   // session_catalog rows (all studios)
-let pl = { studio: '', plans: [], plan: null, week: 0, parties: [], camps: [], elsewhere: {}, bk: {}, events: [], pool: [], allStaff: [], wages: {}, saveTimer: null, lo: 540, setRows: null }
+let pl = { studio: '', plans: [], plan: null, week: 0, parties: [], camps: [], elsewhere: {}, pool: [], allStaff: [], wages: {}, saveTimer: null, lo: 540, setRows: null }
 
 function plDefaults() {
   return {
@@ -3788,7 +3830,7 @@ async function plLoadStudio() {
   const [plans, parties, people, breaks] = await Promise.all([
     sb.from('schedule_plans').select('*').eq('studio_id', studio).neq('status', 'archived').order('updated_at', { ascending: false }),
     sb.from('party_slot_schedule').select('day_of_week, time_slot, slots').eq('studio_id', studio),
-    sb.from('staff_profiles').select('id, display_name, preferred_name, studio_ids, home_studio_id, is_active, exclude_from_schedule, max_weekly_hours, min_weekly_hours, max_studio_days_per_week, role, hire_date, on_call, on_call_until'),
+    sb.from('staff_profiles').select('id, display_name, preferred_name, studio_ids, home_studio_id, is_active, exclude_from_schedule, max_weekly_hours, hire_date, termination_date'),
     bdBreakRules.length ? Promise.resolve({ data: bdBreakRules }) : sb.from('province_break_rules').select('*')
   ])
   if (pl.studio !== studio) return
@@ -3801,7 +3843,6 @@ async function plLoadStudio() {
   pl.parties = parties.error ? [] : (parties.data || []).filter(p => (p.slots || 0) > 0)
   pl.allStaff = people.error ? [] : (people.data || []).map(p => applyPreferredName(Object.assign({}, p))).filter(p => p.is_active !== false)
     .sort((a, b) => a.display_name.localeCompare(b.display_name))
-  plLoadInfoExtras(studio)   // badges, notes, coordinators for the ⓘ card (not needed to draw the plan)
   pl.pool = pl.allStaff.filter(p => !p.exclude_from_schedule && (p.home_studio_id === studio || (p.studio_ids || []).includes(studio)))
     .sort((a, b) => (a.home_studio_id === studio ? 0 : 1) - (b.home_studio_id === studio ? 0 : 1) || a.display_name.localeCompare(b.display_name))
   if (pl.plans.length) await plOpenPlan(pl.plans[0].id)
@@ -3829,7 +3870,7 @@ async function plOpenPlan(id) {
   p.settings = plMerge(plDefaults(), p.settings)
   p.data = plMerge(plEmptyData(), p.data)
   pl.plan = p; pl.week = 0
-  await Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere(), plLoadBookings()])
+  await Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere()])
   plRender()
 }
 
@@ -3885,54 +3926,6 @@ async function plStaffingNeed(studio, from, to) {
   const res = await Promise.all(calls)
   const bad = res.find(r => r.error)
   return bad ? { error: bad.error } : { data: res.reduce((t, r) => t.concat(r.data || []), []) }
-}
-
-/* ---------- what's already booked (shown as a darker shade on the grid) ---------- */
-// pl.bk['date|HH:MM|kind'] = { n: people booked, count: sessions with bookings }; kind as plKindOfTitle.
-// Booked team building, field trips, get-togethers (and parties at a time with no party slot) become pl.events.
-const PL_EVENT_RE = /team.?build|field trip|get.?together|corporate|group booking/i
-async function plLoadBookings() {
-  pl.bk = {}; pl.events = []; pl.bookedSess = []
-  if (!pl.plan) return
-  const studio = pl.studio, from = pl.plan.week_start, to = plLastDate()
-  let rows
-  try {
-    rows = await plFetchAll(() => sb.from('bookings').select('session_id, qty').eq('studio_id', studio).gte('event_date', from).lte('event_date', to)
-      .gt('qty', 0).is('returned_at', null).order('session_id'))
-  } catch (e) { return }
-  const per = {}
-  rows.forEach(b => { if (b.session_id) per[b.session_id] = (per[b.session_id] || 0) + (b.qty || 0) })
-  const ids = Object.keys(per), sess = []
-  for (let i = 0; i < ids.length; i += 200) {
-    const { data } = await sb.from('sessions').select('id, title, session_date, session_time').in('id', ids.slice(i, i + 200))
-    sess.push(...(data || []))
-  }
-  if (pl.studio !== studio) return
-  sess.forEach(x => {
-    if (!x.session_time || x.session_date < from || x.session_date > to) return
-    const t = x.session_time.slice(0, 5), title = x.title || '', n = per[x.id], kind = plKindOfTitle(title)
-    const partySlotHere = pl.parties.some(p => p.day_of_week === plDow(x.session_date) && p.time_slot.slice(0, 5) === t)
-    if (PL_EVENT_RE.test(title) || (kind === 'party' && !partySlotHere)) {
-      pl.events.push({ id: x.id, date: x.session_date, start: toMin(t), end: toMin(t) + (Number(pl.plan.settings.k.party.dur) || 120), title, booked: n })
-      return
-    }
-    const key = x.session_date + '|' + t + '|' + kind
-    const cur = pl.bk[key] || (pl.bk[key] = { n: 0, count: 0 })
-    cur.n += n; cur.count++
-    pl.bookedSess.push({ id: x.id, date: x.session_date, start: toMin(t), title, kind, n })
-  })
-}
-// A booked session the plan has no block for (a wheel workshop already in Shopify, Paint Night, a one-off
-// workshop at an odd time, a class that wasn't imported) gets its own Booked block, so no booking is missed.
-function plBookedMatches(s, items) {
-  return items.some(i => {
-    if (i.src === 'camp') return PL_CAMP_RE.test(s.title) && s.start >= i.start && s.start < i.start + i.dur
-    if (i.start !== s.start) return false
-    if (i.kind === s.kind) return true
-    if (s.kind === 'wheel') return i.kind === 'wheel_workshop' || i.kind === 'wheel_session'
-    if (s.kind === 'series') return !!i.existing
-    return false
-  })
 }
 
 async function plLoadCamps() {
@@ -4044,9 +4037,9 @@ function plRename(v) { pl.plan.name = v.trim() || 'Plan'; plTouch() }
 async function plSetStart(v) {
   if (!v) return
   pl.plan.week_start = sundayOf(v); pl.week = 0
-  await Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere(), plLoadBookings()]); plTouch()
+  await Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere()]); plTouch()
 }
-function plSetWeeks(v) { pl.plan.weeks = Number(v); pl.week = Math.min(pl.week, pl.plan.weeks - 1); Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere(), plLoadBookings()]).then(plTouch) }
+function plSetWeeks(v) { pl.plan.weeks = Number(v); pl.week = Math.min(pl.week, pl.plan.weeks - 1); Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere()]).then(plTouch) }
 function plWeekTo(w) { pl.week = Math.max(0, Math.min(pl.plan.weeks - 1, w)); plRender() }
 function plWeekGo(n) { pl.week = Math.max(0, Math.min(pl.plan.weeks - 1, pl.week + n)); plRender() }
 async function plArchive() {
@@ -4086,10 +4079,6 @@ function plItems(date) {
   const items = plRegular(date).map(it => {
     const e = d.edits[it.id] || {}, k = s.k[it.kind]
     Object.assign(it, { date, label: PL_KINDS[it.kind].label, staff: e.staff ?? k.staff, people: e.people ?? k.people, price: e.price ?? k.price, col: e.col ?? it.col })
-    const b = (pl.bk || {})[date + '|' + plHM(it.start) + '|' + it.kind]
-    if (it.kind === 'party') it.booked = b && it.slot < b.count ? 1 : 0
-    else it.booked = b ? b.n : 0
-    if (it.booked && !(d.edits[it.id] && d.edits[it.id].people != null)) it.people = it.kind === 'party' ? 1 : Math.max(Number(it.people) || 0, it.booked)
     const by = PL_KINDS[it.kind].dropin && adds.find(a => plReplaces(a, it.kind) && it.start >= a.start && it.start < a.start + a.dur)
     const closed = d.closed[date]
     it.state = d.removed[it.id] ? 'removed' : closed ? 'closed' : by ? 'replaced' : 'on'
@@ -4101,7 +4090,7 @@ function plItems(date) {
     const ds = a.dates.slice().sort(), closed = d.closed[date]
     if (closed && a.existing) return   // running class on a day the studio is closed: not on at all
     items.push({ id: 'A|' + a.id + '|' + date, addId: a.id, date, kind: a.kind, start: a.start, dur: a.dur, col: a.col, src: 'add', state: closed ? 'closed' : 'on', by: closed ? plClosedText(closed) : '',
-      label: plAddLabel(a) + (a.existing ? ' (running)' : ''), existing: !!a.existing, booked: a.existing ? a.people : 0, staff: a.staff, people: a.people, price: a.price, nth: ds.indexOf(date) + 1, of: ds.length })
+      label: plAddLabel(a) + (a.existing ? ' (running)' : ''), existing: !!a.existing, staff: a.staff, people: a.people, price: a.price, nth: ds.indexOf(date) + 1, of: ds.length })
   })
   pl.camps.filter(c => c.date === date).forEach(c => {
     const id = 'C|' + c.id + '|' + date, e = d.edits[id] || {}
@@ -4109,17 +4098,6 @@ function plItems(date) {
       label: plCampLabel(c.title) + ': ' + c.title, staff: e.staff ?? s.k.camp.staff, booked: c.booked,
       // children planned for: what this day is set to, else the studio's expected number or what's booked, whichever is more
       people: e.people ?? Math.max(Number(s.k.camp.people) || 0, c.booked || 0), price: e.price ?? (Number(s.k.camp.price) || 0) })
-  })
-  ;(pl.bookedSess || []).filter(x => x.date === date && !plBookedMatches(x, items)).forEach(x => {
-    const id = 'E|' + x.id + '|' + date, e = d.edits[id] || {}, drop = PL_KINDS[x.kind] && PL_KINDS[x.kind].dropin
-    const dur = x.kind === 'party' ? (Number(s.k.party.dur) || 120) : drop ? 15 : 90
-    items.push({ id, date, kind: 'event', start: x.start, dur, col: e.col ?? 2, src: 'event', state: 'on',
-      label: 'Booked: ' + x.title, staff: e.staff ?? (drop ? 0 : 1), booked: x.n, people: e.people ?? x.n, price: e.price ?? 0 })
-  })
-  ;(pl.events || []).filter(c => c.date === date).forEach(c => {
-    const id = 'E|' + c.id + '|' + date, e = d.edits[id] || {}
-    items.push({ id, date, kind: 'event', start: c.start, dur: c.end - c.start, col: e.col ?? 2, src: 'event', state: 'on',
-      label: 'Booked: ' + c.title, staff: e.staff ?? 1, booked: c.booked, people: e.people ?? c.booked, price: e.price ?? 0 })
   })
   return items
 }
@@ -4234,6 +4212,37 @@ function plNeed(date, items) {
   return need
 }
 function plShiftsOn(date) { return pl.plan.data.shifts[date] || {} }
+
+// Labour % for logins without wage access. Sends paid minutes per person (open shifts as null)
+// and the revenue estimate for this week and the whole plan; Supabase returns whole-number %s only.
+function plPctBucket(dates) {
+  const mins = {}, rev = dates.reduce((t, d) => t + plItems(d).reduce((x, i) => x + plRevenue(i), 0), 0)
+  let open = 0
+  dates.forEach(d => Object.entries(plShiftsOn(d)).forEach(([key, [a, b]]) => {
+    const pm = paidMins(pl.studio, a, b)
+    if (key.startsWith('open')) open += pm; else mins[key] = (mins[key] || 0) + pm
+  }))
+  return { rev: Math.round(rev * 100) / 100, open_mins: open, shifts: Object.keys(mins).map(id => ({ staff_id: id, mins: mins[id] })) }
+}
+async function plLabourPct(weekDates) {
+  if (!pl.plan) return
+  const all = plDates()
+  const buckets = { week: plPctBucket(weekDates), plan: plPctBucket(all) }
+  const sig = pl.studio + '|' + JSON.stringify(buckets) + '|' + (pl.plan.settings.openWage ?? '')
+  const paint = () => ['week', 'plan'].forEach(k => { const el = document.getElementById('pl-pct-' + k); if (el) el.textContent = pl.pctShown[k] }) 
+  if (sig === pl.pctSig) { if (pl.pctShown) paint(); return }
+  pl.pctSig = sig
+  const r = await sb.rpc('plan_labour_pct', { p_studio_id: pl.studio, p_from: all[0], p_to: all[all.length - 1],
+    p_open_wage: pl.plan.settings.openWage === '' || pl.plan.settings.openWage == null ? null : Number(pl.plan.settings.openWage), p_buckets: buckets })
+  if (sig !== pl.pctSig) return   // a newer request is on its way
+  pl.pctShown = {}
+  ;['week', 'plan'].forEach(k => {
+    const v = r.error ? null : (r.data || {})[k]
+    pl.pctShown[k] = v == null ? '–' : v + '%'
+  })
+  if (r.error) console.error('plan_labour_pct', r.error)
+  paint()
+}
 function plDayStats(date) {
   const items = plItems(date), need = plNeed(date, items), sh = plShiftsOn(date)
   const have = {}
@@ -4281,9 +4290,11 @@ function plRender() {
   const height = (hi - lo) / 15 * PL_RH
 
   const week = plTotals(dates), all = plTotals(plDates())
-  const wageOk = bdWageAccess
-  const sumRow = (name, t) => '<tr><td>' + name + '</td><td>' + plMoney(t.rev) + '</td>' +
+  const wageOk = bdWageAccess, pctOnly = !wageOk && bdLabourPctAccess
+  // pctOnly: Labour % comes from Supabase (plLabourPct fills these cells in); revenue and labour $ stay hidden
+  const sumRow = (name, t, key) => '<tr><td>' + name + '</td>' + (wageOk ? '<td>' + plMoney(t.rev) + '</td>' : '') +
     (wageOk ? '<td>' + plMoney(t.labour) + '</td><td>' + (t.rev ? Math.round(t.labour / t.rev * 100) + '%' : '–') + '</td>' : '') +
+    (pctOnly ? '<td id="pl-pct-' + key + '">' + (pl.pctShown && pl.pctShown[key] != null ? pl.pctShown[key] : '…') + '</td>' : '') +
     '<td>' + plH(t.needMin) + '</td><td>' + plH(t.paid) + '</td><td class="' + (t.shortMin ? 'bad' : '') + '">' + plH(t.shortMin) + '</td><td class="' + (t.overMin ? 'over' : '') + '">' + plH(t.overMin) + '</td></tr>'
   const pricesSet = Object.keys(p.settings.k).some(k => Number(p.settings.k[k].price) > 0)
 
@@ -4292,9 +4303,10 @@ function plRender() {
     '<strong>Week ' + (pl.week + 1) + ' of ' + p.weeks + ': ' + plShortDate(dates[0]) + '–' + plShortDate(dates[6]) + '</strong>' +
     '<button class="btn" onclick="plWeekGo(1)" aria-label="Next week"' + (pl.week === p.weeks - 1 ? ' disabled' : '') + '>&#9654;</button>' +
     '<span class="spacer"></span>' +
-    '<table class="pl-sum"><tr><th></th><th>Revenue est.</th>' + (wageOk ? '<th>Labour</th><th>Labour %</th>' : '') +
-    '<th>Hours needed</th><th>Hours planned</th><th>Short</th><th>Over</th></tr>' + sumRow('This week', week) + sumRow('Whole plan', all) + '</table></div>'
-  if (!pricesSet) html += '<div class="note warn">Add prices under <b>Defaults</b> to see revenue and labour %.</div>'
+    '<table class="pl-sum"><tr><th></th>' + (wageOk ? '<th>Revenue est.</th><th>Labour</th><th>Labour %</th>' : '') + (pctOnly ? '<th>Labour %</th>' : '') +
+    '<th>Hours needed</th><th>Hours planned</th><th>Short</th><th>Over</th></tr>' + sumRow('This week', week, 'week') + sumRow('Whole plan', all, 'plan') + '</table></div>'
+  if (!pricesSet && (wageOk || pctOnly)) html += '<div class="note warn">Add prices under <b>Defaults</b> to see ' + (wageOk ? 'revenue and ' : '') + 'labour %.</div>'
+  if (pctOnly) setTimeout(() => plLabourPct(dates), 0)
   // Week 1: heads-up for every PA day (and camp) anywhere in the plan
   if (pl.week === 0 && pl.camps.length) {
     const byLabel = {}
@@ -4310,11 +4322,10 @@ function plRender() {
       }).join(', ')
     }).join('<br>') + '<br><span class="small">Each needs ' + (Number(p.settings.k.camp.staff) || 1) + ' staff for the whole day, on top of the floor. Click a date to go to that week.</span></div>'
   }
-  if (!wageOk) html += '<div class="note warn">Labour cost needs finance access. Hours still show.</div>'
+  if (!wageOk && !pctOnly) html += '<div class="note warn">Labour cost needs finance access. Hours still show.</div>'
 
-  html += '<div class="toolbar pl-legend">' + ['glazing', 'minimake', 'workshop', 'party', 'session_class', 'wheel_workshop', 'wheel_session', 'camp', 'event'].map(k =>
+  html += '<div class="toolbar pl-legend">' + ['glazing', 'minimake', 'workshop', 'party', 'session_class', 'wheel_workshop', 'wheel_session', 'camp'].map(k =>
     '<span><i style="background:' + PL_KINDS[k].bg + ';border-color:' + PL_KINDS[k].ink + '"></i>' + PL_KINDS[k].label + '</span>').join('') +
-    '<span><i style="background:#b3dfb7;border-color:#2e7d32"></i><b>Darker = has bookings</b> (·3 = 3 booked)</span>' +
     '<span><i style="background:#fff;border:1px dashed #bbb"></i>Taken out</span>' +
     '<span>Right-hand column: <b style="color:var(--good)">planned/needed</b>, <b style="color:var(--bad)">short</b>, <b style="color:var(--warn)">over</b></span></div>'
 
@@ -4324,7 +4335,7 @@ function plRender() {
     const st = stats[d], open = st.items.some(i => i.state === 'on'), c = p.data.closed[d], off = plOffOn(d)
     html += '<div class="pl-dayhead' + (c ? ' isclosed' : open ? '' : ' closed') + '" onclick="plDayClick(event,\'' + d + '\')" title="Click to close or reopen this day">' +
       '<b>' + plDayLabel(d) + '</b>' + [...new Set(pl.camps.filter(x => x.date === d).map(x => plCampLabel(x.title)))].map(t => ' <span class="pl-camp">' + t + '</span>').join('') + (off.length ? ' <span class="pl-off" title="' + esc(off.map(x => x.display_name).join(', ')) + '">' + off.length + ' off</span>' : '') +
-      '<span class="muted">' + (c ? esc(plClosedText(c)) : open ? plMoney(st.rev) + ' est., ' + plH(st.needMin) + 'h needed' : 'Nothing on') + '</span></div>'
+      '<span class="muted">' + (c ? esc(plClosedText(c)) : open ? (wageOk ? plMoney(st.rev) + ' est., ' : '') + plH(st.needMin) + 'h needed' : 'Nothing on') + '</span></div>'
   })
   html += '<div></div>' + dates.map(() => '<div class="pl-sub"><span>1</span><span>2</span><span>3</span><span title="Planned / needed">👤</span></div>').join('')
   html += '<div class="pl-axis" style="height:' + height + 'px">'
@@ -4369,93 +4380,26 @@ function plColItems(items, lo) {
     i.lanes = Math.max(...overl.map(j => j.lane)) + 1
   })
   const box = (i, ghost) => {
-    const bk = (i.booked || 0) > 0, warnBk = ghost && bk
     const K = PL_KINDS[i.kind], top = (i.start - lo) / 15 * PL_RH, h = Math.max(PL_RH, i.dur / 15 * PL_RH) - 1
     const w = ghost ? 100 : 100 / i.lanes, left = ghost ? 0 : i.lane * w
     const long = i.dur >= 45
     const tip = i.label + ', ' + bdFmtShort(i.start) + '–' + bdFmtShort(i.start + i.dur) +
-      (i.state === 'closed' ? ' (' + i.by + ')' : i.state === 'replaced' ? ' (replaced by ' + i.by + ')' : i.state === 'removed' ? ' (taken out)' : '') + (i.of ? ', ' + i.nth + ' of ' + i.of : '') + (bk ? ', ' + (i.kind === 'party' ? 'booked' : i.booked + ' booked') : '')
-    const meta = long && !ghost ? '<span class="meta">' + bdFmtShort(i.start) + '–' + bdFmtShort(i.start + i.dur) + (i.staff ? ', ' + i.staff + ' staff' : '') + (i.of > 1 ? ', ' + i.nth + '/' + i.of : '') + (bk ? ', <b>' + (i.kind === 'party' ? 'booked' : i.booked + ' booked') + '</b>' : '') + '</span>' : ''
-    return '<div class="pl-it' + (long ? ' long' : '') + (ghost ? ' ghost' : '') + (bk ? ' booked' : '') + '" style="top:' + top + 'px;height:' + h + 'px;left:calc(' + left + '% + 1px);width:calc(' + w + '% - 2px);background:' +
-      (bk ? K.bgB || K.bg : K.bg) + ';border-left-color:' + K.ink + ';color:' + K.ink + (warnBk ? ';border:1.5px solid var(--bad);opacity:.9' : '') + '" title="' + esc(tip + (warnBk ? ' · has bookings: move or refund them before it comes out' : '')) + '" onclick="plItemClick(event,\'' + i.id + '\',\'' + i.date + '\')">' +
-      (long ? '<b>' + esc(i.label) + '</b>' + meta : '<b>' + bdFmtShort(i.start) + '</b> ' + esc(K.short) + (bk && i.kind !== 'party' ? ' <b>·' + i.booked + '</b>' : '') + (warnBk ? ' ⚠' : '')) + '</div>'
+      (i.state === 'closed' ? ' (' + i.by + ')' : i.state === 'replaced' ? ' (replaced by ' + i.by + ')' : i.state === 'removed' ? ' (taken out)' : '') + (i.of ? ', ' + i.nth + ' of ' + i.of : '')
+    const meta = long && !ghost ? '<span class="meta">' + bdFmtShort(i.start) + '–' + bdFmtShort(i.start + i.dur) + (i.staff ? ', ' + i.staff + ' staff' : '') + (i.of > 1 ? ', ' + i.nth + '/' + i.of : '') + '</span>' : ''
+    return '<div class="pl-it' + (long ? ' long' : '') + (ghost ? ' ghost' : '') + '" style="top:' + top + 'px;height:' + h + 'px;left:calc(' + left + '% + 1px);width:calc(' + w + '% - 2px);background:' +
+      K.bg + ';border-left-color:' + K.ink + ';color:' + K.ink + '" title="' + esc(tip) + '" onclick="plItemClick(event,\'' + i.id + '\',\'' + i.date + '\')">' +
+      (long ? '<b>' + esc(i.label) + '</b>' + meta : '<b>' + bdFmtShort(i.start) + '</b> ' + esc(K.short)) + '</div>'
   }
   return items.filter(i => i.state !== 'on').map(i => box(i, true)).join('') + on.map(i => box(i, false)).join('')
 }
 
 /* ---------- staff (planned only) ---------- */
-/* ---------- ⓘ person card (same details as Build schedule) ---------- */
-async function plLoadInfoExtras(studio) {
-  pl.info = { badges: {}, badgeLabel: {}, notes: {}, coords: [] }
-  const [b, t, n, c] = await Promise.all([
-    sb.from('staff_badges').select('staff_id, badge_code'),
-    sb.from('badge_types').select('code, label'),
-    sb.from('staff_schedule_prefs').select('staff_id, notes'),
-    sb.rpc('list_studio_coordinators')
-  ])
-  if (pl.studio !== studio) return
-  ;(b.data || []).forEach(x => { (pl.info.badges[x.staff_id] = pl.info.badges[x.staff_id] || []).push(x.badge_code) })
-  ;(t.data || []).forEach(x => { pl.info.badgeLabel[x.code] = x.label })
-  ;(n.data || []).forEach(x => { if (x.notes) pl.info.notes[x.staff_id] = x.notes })
-  pl.info.coords = c.error ? [] : (c.data || []).filter(r => r.studio_id === studio)
-}
-function plInfoLines(p) {
-  const I = pl.info || { badges: {}, badgeLabel: {}, notes: {}, coords: [] }, lines = [], dates = plWeekDates()
-  if (p.legal_name && p.legal_name !== p.display_name) lines.push('Legal name: ' + p.legal_name)
-  if (p.hire_date) {
-    const mo = Math.max(0, Math.round(daysBetween(p.hire_date, todayStr()) / 30.4))
-    lines.push('Hired: ' + fmtDate(p.hire_date) + ' (' + (mo < 12 ? mo + ' month' + (mo === 1 ? '' : 's') : Math.floor(mo / 12) + ' yr' + (mo % 12 ? ' ' + (mo % 12) + ' mo' : '')) + ')')
-  }
-  lines.push('Home studio: ' + (p.home_studio_id ? (STUDIO_NAMES[p.home_studio_id] || p.home_studio_id) : 'not set'))
-  if (p.role === 'manager') lines.push('Manager: 40 h/week at home studio, works Fridays (event night)')
-  if (I.coords.some(r => (r.staff_profile_id || r.staff_id || r.staff_profiles_id) === p.id && r.start_date <= dates[6] && (!r.end_date || r.end_date >= dates[0])))
-    lines.push('Studio coordinator here: works Fridays (event night)')
-  lines.push('Hours promised: ' + (p.min_weekly_hours != null ? 'at least ' + p.min_weekly_hours : 'no minimum') + ', ' +
-    (p.max_weekly_hours != null ? 'at most ' + p.max_weekly_hours : 'no maximum (avoid overtime)'))
-  if (p.max_studio_days_per_week != null) lines.push('In-studio days: at most ' + p.max_studio_days_per_week + ' a week')
-  if (p.on_call) lines.push('On call' + (p.on_call_until ? ' until ' + fmtDate(p.on_call_until) : '') + ': only scheduled when nobody else can cover')
-  const bs = (I.badges[p.id] || []).map(c => I.badgeLabel[c] || c)
-  if (bs.length) lines.push('Badges: ' + bs.join(', '))
-  // this plan week: here, plus other studios' plans and the real schedule
-  let here = 0, other = 0, days = 0
-  dates.forEach(d => {
-    const v = plShiftsOn(d)[p.id], ew = plElsewhere(p.id, d)
-    if (v) here += paidMins(pl.studio, v[0], v[1])
-    ew.forEach(x => { other += paidMins(x.studio, x.a, x.b) })
-    if (v || ew.length) days++
-  })
-  lines.push('This week: ' + plH(here) + ' h here' + (other ? ' + ' + plH(other) + ' h at other studios' : '') + ', on ' + days + ' day' + (days === 1 ? '' : 's'))
-  const un = unavailRows.filter(r => r.staff_id === p.id && (!r.effective_from || r.effective_from <= dates[6]) && (!r.effective_to || r.effective_to >= dates[0]))
-    .sort((a, b) => ((a.day_of_week + 6) % 7) - ((b.day_of_week + 6) % 7))
-  if (un.length) lines.push('Unavailable: ' + un.map(r => DAY_SHORT[r.day_of_week] + ' ' + (r.start_time ? fmtRange(r.start_time, r.end_time) : 'all day')).join(', '))
-  const off = timeOffRows.filter(r => r.staff_id === p.id && ['approved', 'pending'].includes(r.status) && r.start_date <= plLastDate() && r.end_date >= pl.plan.week_start)
-  if (off.length) lines.push('Time off in this plan: ' + off.map(r => (r.start_date === r.end_date ? plShortDate(r.start_date) : plShortDate(r.start_date) + '–' + plShortDate(r.end_date)) + (r.status === 'pending' ? ' (pending)' : '')).join(', '))
-  if (I.notes[p.id]) lines.push('Notes: ' + I.notes[p.id])
-  return lines
-}
-function plShowInfo(ev, staffId) {
-  ev.stopPropagation()
-  let pop = document.getElementById('pl-info-pop')
-  if (!pop) {
-    pop = document.createElement('div'); pop.id = 'pl-info-pop'; pop.className = 'wk-pop'
-    document.body.appendChild(pop)
-    document.addEventListener('click', e => { if (!e.target.closest('#pl-info-pop')) pop.style.display = 'none' })
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') pop.style.display = 'none' })
-  }
-  const p = pl.allStaff.find(x => x.id === staffId)
-  if (!p) return
-  pop.innerHTML = '<div class="wk-pop-head"><b>' + esc(p.display_name) + '</b><button onclick="document.getElementById(\'pl-info-pop\').style.display=\'none\'" title="Close">✕</button></div>' +
-    plInfoLines(p).map(l => { const i = l.indexOf(': '); return '<div>' + (i > 0 ? '<span class="muted">' + esc(l.slice(0, i)) + ':</span> ' + esc(l.slice(i + 2)) : esc(l)) + '</div>' }).join('')
-  pop.style.display = 'block'
-  const r = ev.currentTarget.getBoundingClientRect(), w = Math.min(340, window.innerWidth - 24)
-  pop.style.width = w + 'px'
-  pop.style.left = Math.max(12, Math.min(window.innerWidth - w - 12, r.left)) + 'px'
-  pop.style.top = (window.scrollY + r.bottom + 6) + 'px'
-}
-
 function plStaffRows() {
-  const d = pl.plan.data, rows = pl.pool.map(p => ({ key: p.id, p }))
-  d.extraStaff.forEach(id => { if (!rows.some(r => r.key === id)) { const p = pl.allStaff.find(x => x.id === id); if (p) rows.push({ key: id, p, extra: true }) } })
+  const d = pl.plan.data, wk = plWeekDates()
+  // Hide anyone not employed during the week shown (hire date / last day), unless they still have a planned shift that week
+  const showFor = p => employedDuring(p, wk[0], wk[6]) || wk.some(dt => (d.shifts[dt] || {})[p.id])
+  const rows = pl.pool.filter(showFor).map(p => ({ key: p.id, p }))
+  d.extraStaff.forEach(id => { if (!rows.some(r => r.key === id)) { const p = pl.allStaff.find(x => x.id === id); if (p && showFor(p)) rows.push({ key: id, p, extra: true }) } })
   for (let i = 1; i <= d.openRows; i++) rows.push({ key: 'open' + i, open: true, name: 'Open shift ' + i })
   return rows
 }
@@ -4493,6 +4437,12 @@ function plStaffHtml(dates, stats) {
       const offTxt = allDay ? 'off' : un.map(u => 'off ' + bdFmtShort(u.a) + '–' + bdFmtShort(u.b)).join(', ')
       ew.forEach(x => { otherMins += paidMins(x.studio, x.a, x.b) })
       let cls = 'pl-sh'
+      const gone = r.open ? null : employmentBlock(r.p, d)
+      if (gone) {
+        // not employed that day: blocked box (a shift typed earlier still shows, in red, so it can be cleared)
+        return '<td><input class="pl-sh gone' + (v ? ' conflict' : '') + '" data-date="' + d + '" data-key="' + r.key + '" value="' + (v ? bdFmtShort(v[0]) + '-' + bdFmtShort(v[1]) : '') + '"' +
+          ' title="' + esc(r.p.display_name + ' is ' + gone) + '"' + (v ? ' onchange="plSetShift(this)"' : ' readonly') + ' placeholder="' + (r.p.termination_date && d > r.p.termination_date ? 'left' : 'not started') + '"></td>'
+      }
       if (v) { cls += ' filled'; const pm = paidMins(pl.studio, v[0], v[1]); mins += pm; cost += pm / 60 * (wage ?? plOpenWage()) }
       // one shift a person a day: a shift here on a day they work elsewhere is a conflict
       if (v && ew.length) cls += ' conflict'
@@ -4506,7 +4456,8 @@ function plStaffHtml(dates, stats) {
     }).join('')
     const max = r.p && r.p.max_weekly_hours
     const name = r.open ? '<span class="muted">' + r.name + '</span>' + (pl.plan.data.openRows > 0 && r.key === 'open' + pl.plan.data.openRows ? ' <button class="btn small" onclick="plOpenRows(-1)" title="Remove this row">×</button>' : '')
-      : esc(r.p.display_name) + ' <button class="wk-info" title="Details" onclick="plShowInfo(event,\'' + r.key + '\')">ⓘ</button>' + (r.extra ? ' <span class="muted small">(other studio)</span> <button class="btn small" onclick="plRemoveExtra(\'' + r.key + '\')" title="Remove from this plan">×</button>' : '')
+      : esc(r.p.display_name) + (r.p.termination_date && r.p.termination_date <= dates[6] ? ' <span class="muted small">(last day ' + shortDay(r.p.termination_date) + ')</span>' : '') +
+        (r.p.hire_date && r.p.hire_date > dates[0] ? ' <span class="muted small">(starts ' + shortDay(r.p.hire_date) + ')</span>' : '') + (r.extra ? ' <span class="muted small">(other studio)</span> <button class="btn small" onclick="plRemoveExtra(\'' + r.key + '\')" title="Remove from this plan">×</button>' : '')
     html += '<tr><td>' + name + (wageOk && wage != null ? ' <span class="wage">$' + Number(wage).toFixed(2) + '</span>' : '') + '</td>' + cells +
       '<td class="num' + (max && (mins + otherMins) / 60 > max ? ' bad' : '') + '"' + (max || otherMins ? ' title="' + (otherMins ? plH(otherMins) + 'h this week at other studios. ' : '') + (max ? 'Max ' + max + 'h a week, all studios' : '') + '"' : '') + '>' +
         (mins ? plH(mins) : '') + (otherMins ? ' <span class="muted small">+' + plH(otherMins) + ' elsewhere</span>' : '') + '</td>' +
@@ -4518,7 +4469,7 @@ function plStaffHtml(dates, stats) {
   if (wageOk) html += foot('Labour / revenue', s => (s.labour || s.rev) ? plMoney(s.labour) + ' / ' + plMoney(s.rev) + (s.rev ? ' (' + Math.round(s.labour / s.rev * 100) + '%)' : '') : '')
   html += '</tbody></table></div><div class="panel-body" style="display:flex;gap:8px;flex-wrap:wrap">' +
     '<select class="input" onchange="plAddExtra(this.value)"><option value="">Add someone from another studio…</option>' +
-    pl.allStaff.filter(p => !rows.some(r => r.key === p.id)).map(p => '<option value="' + p.id + '">' + esc(p.display_name) + '</option>').join('') + '</select>' +
+    pl.allStaff.filter(p => !rows.some(r => r.key === p.id) && employedDuring(p, dates[0], dates[6])).map(p => '<option value="' + p.id + '">' + esc(p.display_name) + '</option>').join('') + '</select>' +
     '<button class="btn" onclick="plOpenRows(1)">+ Open shift row</button></div></div>'
   return html
 }
@@ -4527,6 +4478,8 @@ function plSetShift(el) {
   if (!d.shifts[date]) d.shifts[date] = {}
   if (!txt) delete d.shifts[date][key]
   else {
+    const who = pl.allStaff.find(p => p.id === key), gone = employmentBlock(who, date)
+    if (gone) { const was = d.shifts[date][key]; toast(who.display_name + ' is ' + gone + '. They can\'t be planned on ' + plShortDate(date) + '.', true); el.value = was ? bdFmtShort(was[0]) + '-' + bdFmtShort(was[1]) : ''; return }
     const r = bdParseRange(txt)
     if (!r) { toast('Use a time like 1p-7:30p (am/pm on both sides)', true); el.classList.add('conflict'); return }
     d.shifts[date][key] = [r.start, r.end]
@@ -4547,15 +4500,21 @@ function plOpenRows(n) {
   if (n < 0) Object.keys(d.shifts).forEach(dt => { delete d.shifts[dt]['open' + d.openRows] })
   d.openRows = Math.max(0, d.openRows + n); plTouch()
 }
+// Copy one day's planned shifts to another date, leaving out anyone not employed on that date
+function plCopyDay(src, dt) {
+  const out = JSON.parse(JSON.stringify(src || {}))
+  Object.keys(out).forEach(key => { const p = pl.allStaff.find(x => x.id === key); if (p && !employedOn(p, dt)) delete out[key] })
+  return out
+}
 function plCopyWeek(dir) {
   const d = pl.plan.data, from = plWeekDates(pl.week + dir), to = plWeekDates()
-  to.forEach((dt, i) => { d.shifts[dt] = JSON.parse(JSON.stringify(d.shifts[from[i]] || {})) })
+  to.forEach((dt, i) => { d.shifts[dt] = plCopyDay(d.shifts[from[i]], dt) })
   plTouch()
 }
 function plCopyForward() {
   if (!confirm('Copy this week\'s planned staff into every later week of the plan? Later weeks\' planned staff are replaced.')) return
   const d = pl.plan.data, src = plWeekDates()
-  for (let w = pl.week + 1; w < pl.plan.weeks; w++) plWeekDates(w).forEach((dt, i) => { d.shifts[dt] = JSON.parse(JSON.stringify(d.shifts[src[i]] || {})) })
+  for (let w = pl.week + 1; w < pl.plan.weeks; w++) plWeekDates(w).forEach((dt, i) => { d.shifts[dt] = plCopyDay(d.shifts[src[i]], dt) })
   plTouch()
 }
 function plClearWeek() {
@@ -4606,18 +4565,16 @@ function plSameDowIds(id) {
 
 function plItemClick(ev, id, date) {
   ev.stopPropagation()
-  let bk
   const it = plFindItem(id, date)
   if (!it) return
   const range = bdFmtShort(it.start) + '–' + bdFmtShort(it.start + it.dur)
   const every = 'every ' + DAY_NAMES[plDow(date)] + ' at ' + bdFmtShort(it.start)
   let h = '<div class="pl-menu-h"><b>' + esc(it.label) + '</b>' + plDayLabel(date) + ', ' + range + (it.of ? ' (' + it.nth + ' of ' + it.of + ')' : '') + '</div>'
-  if (bk = (it.booked || 0) > 0) h += '<div class="row small" style="color:var(--good);font-weight:600">' + (it.kind === 'party' ? 'Booked' : it.booked + ' booked') + (it.state !== 'on' ? ' <span style="color:var(--bad)">· taken out, so move or refund them first</span>' : '') + '</div>'
-  if (it.src === 'camp' || it.src === 'event') {
-    h += '<div class="row small">' + (it.src === 'event' ? 'Booked at the studio' : 'Already scheduled at the studio') + ', so it can\'t be changed here.</div>' +
+  if (it.src === 'camp') {
+    h += '<div class="row small">' + (it.booked != null ? it.booked + ' booked. ' : '') + 'Already scheduled at the studio, so it can\'t be changed here.</div>' +
       '<div class="row"><label>Staff<input class="input" type="number" min="0" step="1" id="pl-m-staff" value="' + it.staff + '"></label>' +
-      '<label>' + (it.src === 'event' ? 'People' : 'Children expected') + '<input class="input" type="number" min="0" step="1" id="pl-m-people" value="' + it.people + '"></label>' +
-      '<label>' + (it.src === 'event' ? 'Revenue' : 'Price per child') + '<input class="input" type="number" min="0" step="1" id="pl-m-price" value="' + it.price + '"></label></div>' +
+      '<label>Children expected<input class="input" type="number" min="0" step="1" id="pl-m-people" value="' + it.people + '"></label>' +
+      '<label>Price per child<input class="input" type="number" min="0" step="1" id="pl-m-price" value="' + it.price + '"></label></div>' +
       '<div class="row"><button class="btn small primary" onclick="plCampStaff(\'' + id + '\')">Save this day</button></div>' +
       '<div class="row"><span class="muted small">Column</span>' + [0, 1, 2].map(c => '<button class="btn small' + (c === it.col ? ' primary' : '') + '" onclick="plItemCol(\'' + id + '\',' + c + ')">' + (c + 1) + '</button>').join('') + '</div>'
     plShowMenu(ev, h); return
@@ -4674,7 +4631,7 @@ function plCampStaff(id) {
 }
 function plItemCol(id, c) {
   const d = pl.plan.data
-  if (id.startsWith('C|') || id.startsWith('E|')) d.edits[id] = Object.assign(d.edits[id] || {}, { col: c })
+  if (id.startsWith('C|')) d.edits[id] = Object.assign(d.edits[id] || {}, { col: c })
   else if (id.startsWith('A|')) d.adds.find(a => a.id === id.split('|')[1]).col = c
   else plSameDowIds(id).forEach(x => { d.edits[x] = Object.assign(d.edits[x] || {}, { col: c }) })
   plCloseMenu(); plTouch()
@@ -4974,8 +4931,9 @@ async function plResolve(list, studioId) {
     if (!r.session) { r.status = 'pending'; r.note = 'Not in the system yet' }
     else if (r.kind === 'party') { r.status = 'manual'; r.note = 'Party slots aren\'t their own Shopify product: close it in admin' }
     else if (!r.shopifyTitle || r.shopifyTitle === 'OVERRIDE') { r.status = 'manual'; r.note = 'No matching Shopify product title' }
-    else if (!r.variant) { r.status = 'pending'; r.note = 'Not in Shopify yet' + (r.booked ? ', ' + r.booked + ' booked' : '') }
-    else { r.status = 'remove'; r.note = r.booked ? r.booked + ' booked: closes at −' + r.booked + ', contact them' : '' }
+    else if (r.booked > 0) { r.status = 'blocked'; r.note = r.booked + ' booked: move or refund them first' }
+    else if (!r.variant) { r.status = 'pending'; r.note = 'Not in Shopify yet' }
+    else { r.status = 'remove'; r.note = '' }
   })
   return list
 }
@@ -4999,7 +4957,7 @@ function plContactsHtml(list) {
   pl.contacts = list
   const people = new Set(list.map(c => (c.email || c.name).toLowerCase())).size
   return '<h3>Bookings to contact (' + people + ' customer' + (people === 1 ? '' : 's') + ', ' + list.reduce((t, c) => t + c.qty, 0) + ' spots)</h3>' +
-    '<div class="muted small" style="margin-bottom:6px">These were taken out while people are booked. They\'re closed in Shopify below 0 (so a cancellation doesn\'t reopen a space) and still show on the staff dashboard. Contact them to move or refund their booking.</div>' +
+    '<div class="muted small" style="margin-bottom:6px">These offerings have bookings, so they stay in Shopify until you move or refund them. Then use Check Shopify again in the Removal list.</div>' +
     '<div class="pl-tbl-wrap"><table class="list"><tr><th>Date</th><th>Time</th><th>What</th><th>Customer</th><th>Email</th><th>Phone</th><th>Order</th><th>Spots</th></tr>' +
     list.map(c => '<tr><td>' + plDayLabel(c.date) + '</td><td>' + bdFmtShort(toMin(c.time)) + '</td><td>' + esc(c.what) + '</td><td>' + esc(c.name) + '</td>' +
       '<td>' + (c.email ? '<a href="mailto:' + esc(c.email) + '">' + esc(c.email) + '</a>' : '') + '</td><td>' + esc(c.phone) + '</td><td>' + esc(c.order) + '</td><td>' + c.qty + '</td></tr>').join('') +
@@ -5037,7 +4995,7 @@ async function plOpenSet() {
   if (!(await plFlush())) { toast('Save the plan first', true); return }
   plModal('<h2>Set plan</h2><div class="loading">Checking sessions, Shopify and bookings…</div>', true)
   const list = []
-  plDates().forEach(date => plItems(date).filter(i => i.src !== 'add' && i.src !== 'camp' && i.src !== 'event' && i.state !== 'on').forEach(i =>
+  plDates().forEach(date => plItems(date).filter(i => i.src !== 'add' && i.src !== 'camp' && i.state !== 'on').forEach(i =>
     list.push({ date, time: plHM(i.start), kind: i.kind, slot: i.slot || 0, label: PL_KINDS[i.kind].label, why: i.state === 'closed' ? i.by : i.state === 'replaced' ? 'Replaced by ' + i.by : 'Taken out' })))
   let rows, prev
   try {
@@ -5051,12 +5009,6 @@ async function plOpenSet() {
     if (old && ['removed', 'drafted', 'done', 'hidden'].includes(old.status)) { r.status = old.status; r.note = 'Handled ' + String(old.removed_at || old.updated_at || '').slice(0, 10); r.earlier = true }
   })
   pl.setRows = rows
-  // Back on the schedule since the last Set (a class deleted, drop-ins ticked back on, a day reopened):
-  // hidden ones go back into Shopify; ones still waiting just come off the Removal list
-  const taken = new Set(rows.map(r => r.date + '|' + r.time + '|' + r.kind + '|' + r.slot))
-  const notTaken = prev.filter(x => x.session_date >= todayStr() && !taken.has(x.session_date + '|' + String(x.session_time).slice(0, 5) + '|' + x.kind + '|' + (x.slot || 0)))
-  pl.setBack = { put: notTaken.filter(x => PL_CAN_PUT_BACK.includes(x.status)).map(x => Object.assign(x, { pick: true })),
-                 drop: notTaken.filter(x => ['pending', 'blocked', 'manual', 'failed'].includes(x.status)), done: null }
   pl.setShiftsDone = null
   try { pl.setShifts = await plShiftPreview() } catch (e) { pl.setShifts = { error: e.message || String(e) } }
   plRenderSet()
@@ -5081,6 +5033,8 @@ async function plShiftPreview() {
   const draftsHere = (await sb.from('staff_shifts').select('staff_id', { count: 'exact', head: true }).eq('studio_id', pl.studio).eq('status', 'draft').gte('shift_date', from).lte('shift_date', to)).count || 0
   const skip = [], ok = []
   rows.forEach(r => {
+    const gone = employmentBlock(pl.allStaff.find(p => p.id === r.staff_id), r.shift_date)
+    if (gone) { skip.push({ r, why: gone }); return }
     const same = existing.filter(x => x.staff_id === r.staff_id && x.shift_date === r.shift_date)
     const here = same.find(x => x.studio_id === pl.studio && x.status !== 'draft')
     const other = same.find(x => x.studio_id !== pl.studio)
@@ -5120,25 +5074,10 @@ async function plSendShifts() {
   return { msg: x.ok.length + ' draft shift' + (x.ok.length === 1 ? '' : 's') + ' sent to Build schedule. Approve them there as usual.' }
 }
 
-function plSetBackHtml(result) {
-  const B = pl.setBack
-  if (!B || (!B.put.length && !B.drop.length)) return ''
-  let h = '<h3>Back on the schedule (' + (B.put.length + B.drop.length) + ')</h3>'
-  if (B.done) h += '<div class="note ' + (B.done.fails.length ? 'warn' : 'info') + '">' + esc(B.done.msg) + '</div>'
-  if (B.put.length) h += '<div class="pl-tbl-wrap"><table class="list"><tr><th></th><th>Date</th><th>Time</th><th>What</th><th>Now</th></tr>' +
-    B.put.map((x, i) => '<tr><td>' + (result ? '' : '<input type="checkbox"' + (x.pick ? ' checked' : '') + ' onchange="pl.setBack.put[' + i + '].pick=this.checked;plRenderSet()">') + '</td>' +
-      '<td>' + plDayLabel(x.session_date) + '</td><td>' + fmtTime(x.session_time) + '</td><td>' + esc(x.session_title || x.label) + '</td>' +
-      '<td><span class="pl-st ' + x.status + '">' + PL_STATUS_TEXT[x.status] + '</span>' + (x.pick && !result ? ' <span class="muted small">→ put back</span>' : '') + '</td></tr>').join('') +
-    '</table></div><div class="muted small" style="margin-top:4px">Back on the plan since it was last set, so ticked ones are put back in Shopify: the spaces they had (or the session\'s capacity) and back on the customer calendar.</div>'
-  if (B.drop.length) h += '<div class="muted small" style="margin-top:4px">' + B.drop.length + ' waiting on the Removal list ' + (B.drop.length === 1 ? 'is' : 'are') + ' back on the plan, so ' + (B.drop.length === 1 ? 'it comes' : 'they come') + ' off the list and won\'t be hidden later.</div>'
-  return h
-}
 function plSetLabel(toRemove) {
   const x = pl.setShifts, n = x && !x.error && x.send ? x.ok.length : 0
-  const back = pl.setBack ? pl.setBack.put.filter(b => b.pick).length : 0
   const parts = []
   if (toRemove) parts.push('hide ' + toRemove + ' variant' + (toRemove > 1 ? 's' : ''))
-  if (back) parts.push('put back ' + back)
   if (n) parts.push('send ' + n + ' shift' + (n > 1 ? 's' : ''))
   if (!parts.length) return 'Set plan'
   const t = parts.join(', ') + ' and set plan'
@@ -5156,11 +5095,10 @@ function plRenderSet(result) {
         '<td>' + plDayLabel(r.date) + '</td><td>' + bdFmtShort(toMin(r.time)) + '</td><td>' + esc(r.session ? r.session.title : r.label) + '</td><td class="muted">' + esc(r.why) + '</td>' +
         '<td class="wrap small">' + esc(r.shopifyTitle && r.shopifyTitle !== 'OVERRIDE' ? r.shopifyTitle : '') + '</td>' +
         '<td><span class="pl-st ' + (r.skip ? 'skip' : r.status) + '">' + (r.skip ? 'Skip for now' : PL_STATUS_TEXT[r.status]) + '</span>' + (r.note ? ' <span class="muted small">' + esc(r.note) + '</span>' : '') + '</td></tr>').join('') +
-      '</table></div><div class="muted small" style="margin-top:4px">Ticked rows are hidden: this studio\'s variant is set to 0 left in Shopify (below 0 if people are booked; never deleted) and taken off the customer calendar, so it can be put back from the Removal list. Everything that isn\'t in Shopify yet is saved to the Removal list for later.</div>'
+      '</table></div><div class="muted small" style="margin-top:4px">Ticked rows are hidden: this studio\'s variant is set to 0 left in Shopify (not deleted) and taken off the customer calendar, so it can be put back from the Removal list. Everything that isn\'t in Shopify yet is saved to the Removal list for later.</div>'
   }
-  h += plSetBackHtml(result)
   h += plShiftPreviewHtml(pl.setShifts, pl.setShiftsDone)
-  h += plContactsHtml(plContacts(rows.filter(r => (r.bookings || []).length && !r.skip).map(r => ({ date: r.date, time: r.time, what: r.session ? r.session.title : r.label, bookings: r.bookings }))))
+  h += plContactsHtml(plContacts(rows.filter(r => r.status === 'blocked').map(r => ({ date: r.date, time: r.time, what: r.session ? r.session.title : r.label, bookings: r.bookings }))))
   h += '<h3>Added (' + adds.length + ' Shopify product' + (adds.length === 1 ? '' : 's') + ' to add by hand)</h3>'
   if (!adds.length) h += '<div class="muted">Nothing was added.</div>'
   else h += '<div class="pl-tbl-wrap"><table class="list"><tr><th>Shopify title</th><th>Dates</th><th>Length</th><th>Replaces drop-ins</th><th>Staff</th></tr>' +
@@ -5173,22 +5111,20 @@ function plRenderSet(result) {
 
 // Hide one studio's variant: live Shopify inventory to 0 (never deleted), off the customer calendar.
 // The quantity it had is kept so Put back can restore it.
-// With bookings it closes at MINUS the number booked (2 booked → −2), same as Build schedule's Close:
-// a cancellation that restocks climbs back toward 0 instead of reopening a space.
 async function plHideVariant(r) {
   try {
     const booked = await bdBookedCount(r.session.id)
+    if (booked > 0) return { status: 'blocked', note: booked + ' booked' }
     let prev = null
     try {
       const d = await bdInvCall({ action: 'get_all', product_title: r.shopifyTitle })
       const v = (d.variants || []).find(x => String(x.inventory_item_id) === String(r.variant.inventory_item_id))
       if (v) prev = v.inventory_quantity
     } catch (e) {}
-    const data = await bdInvCall({ action: 'set', inventory_item_id: r.variant.inventory_item_id, quantity: booked > 0 ? -booked : 0 })
+    const data = await bdInvCall({ action: 'set', inventory_item_id: r.variant.inventory_item_id, quantity: 0 })
     if (!data || !data.inventory_level) return { status: 'failed', note: (data && data.error) || 'Shopify inventory not changed' }
-    // off the customer calendar; staff still see it (show stays on) while people are booked
     await sb.from('sessions').update({ spaces_left_cache: 0, publish: false }).eq('id', r.session.id)
-    return { status: 'hidden', note: (booked > 0 ? 'Closed at −' + booked + ', ' + booked + ' booked to contact' : '') + (prev != null ? (booked > 0 ? '. ' : '') + 'Had ' + prev + ' left' : ''), restore_qty: prev != null && prev > 0 ? prev : null }
+    return { status: 'hidden', note: prev != null ? 'Had ' + prev + ' left' : '', restore_qty: prev }
   } catch (e) { return { status: 'failed', note: e.message } }
 }
 
@@ -5246,20 +5182,6 @@ async function plRunSet() {
   for (let i = 0; i < save.length; i += 200) {
     let { error } = await sb.from('schedule_plan_removals').upsert(save.slice(i, i + 200), { onConflict: 'studio_id,session_date,session_time,kind,slot' })
     if (error) { msg.textContent = 'Could not save the removal list: ' + error.message + (/restore_qty|status_check/.test(error.message) ? ' (run removal-hide.sql in Supabase first)' : ''); btn.disabled = false; return }
-  }
-  // put back what's on the schedule again, and clear waiting ones off the Removal list
-  const B = pl.setBack
-  if (B) {
-    let ok = 0
-    const fails = [], put = B.put.filter(x => x.pick)
-    for (let i = 0; i < put.length; i++) {
-      msg.textContent = 'Putting back ' + (i + 1) + ' of ' + put.length + '…'
-      const res = await plRestoreRow(put[i])
-      if (res.ok) ok++; else fails.push(fmtDate(put[i].session_date) + ' ' + fmtTime(put[i].session_time) + ' ' + (put[i].session_title || put[i].label) + ': ' + res.error)
-    }
-    if (B.drop.length) await sb.from('schedule_plan_removals').delete().in('id', B.drop.map(x => x.id))
-    if (put.length || B.drop.length) B.done = { fails, msg: [put.length && ok + ' put back in Shopify', B.drop.length && B.drop.length + ' taken off the Removal list'].filter(Boolean).join(', ') + '.' +
-      (fails.length ? ' Not put back (try again from the Removal list): ' + fails.join('; ') : '') }
   }
   msg.textContent = 'Sending draft shifts…'
   pl.setShiftsDone = await plSendShifts()
@@ -5486,7 +5408,7 @@ async function plOpenRemovals() {
 }
 async function plLoadRemovalBookings() {
   pl.removalBookings = {}
-  const ids = pl.removals.filter(r => r.session_id && !['removed', 'done', 'restored'].includes(r.status)).map(r => r.session_id)
+  const ids = pl.removals.filter(r => r.session_id && !PL_HANDLED.includes(r.status)).map(r => r.session_id)
   for (let i = 0; i < ids.length; i += 200) {
     const { data } = await sb.from('bookings').select(PL_BOOKING_COLS).in('session_id', ids.slice(i, i + 200)).gt('qty', 0).is('returned_at', null)
     ;(data || []).forEach(b => { (pl.removalBookings[b.session_id] = pl.removalBookings[b.session_id] || []).push(b) })
@@ -5512,7 +5434,7 @@ function plRenderRemovals(msg) {
       '<td class="actions"><button class="btn small good" onclick="plPutBack(\'' + r.id + '\')">Put back</button></td></tr>').join('') +
     '</table></div><div style="display:flex;gap:8px;margin-top:6px;align-items:center"><button class="btn small good" onclick="plPutBack(null)">Put all ' + back.length + ' back</button>' +
     '<span class="muted small">Puts the spaces back in Shopify and on the customer calendar. Also put them back on the plan\'s grid, or the next Set plan hides them again.</span></div>'
-  h += plContactsHtml(plContacts(pl.removals.filter(r => r.session_id && !['removed', 'done', 'restored'].includes(r.status) && (pl.removalBookings || {})[r.session_id]).map(r => ({ date: r.session_date, time: String(r.session_time).slice(0, 5),
+  h += plContactsHtml(plContacts(open.filter(r => r.session_id && (pl.removalBookings || {})[r.session_id]).map(r => ({ date: r.session_date, time: String(r.session_time).slice(0, 5),
     what: r.session_title || r.label, bookings: pl.removalBookings[r.session_id] }))))
   h += '<div class="pl-actions"><span class="muted small" id="pl-rm-msg"></span><button class="btn" onclick="plCloseModal()">Close</button>' +
     (open.some(r => ['pending', 'failed', 'blocked'].includes(r.status)) ? '<button class="btn primary" id="pl-rm-go" onclick="plRecheckRemovals()">Check Shopify again and hide</button>' : '') + '</div>'
