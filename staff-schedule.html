@@ -3944,8 +3944,8 @@ async function plLoadBookings() {
     rows = await plFetchAll(() => sb.from('bookings').select('session_id, qty').eq('studio_id', studio).gte('event_date', from).lte('event_date', to)
       .gt('qty', 0).is('returned_at', null).order('session_id'))
   } catch (e) { return }
-  const per = {}
-  rows.forEach(b => { if (b.session_id) per[b.session_id] = (per[b.session_id] || 0) + (b.qty || 0) })
+  const per = {}, orders = {}
+  rows.forEach(b => { if (b.session_id) { per[b.session_id] = (per[b.session_id] || 0) + (b.qty || 0); orders[b.session_id] = (orders[b.session_id] || 0) + 1 } })
   const ids = Object.keys(per), sess = []
   for (let i = 0; i < ids.length; i += 200) {
     const { data } = await sb.from('sessions').select('id, title, session_date, session_time').in('id', ids.slice(i, i + 200))
@@ -3961,11 +3961,15 @@ async function plLoadBookings() {
       return
     }
     const key = x.session_date + '|' + t + '|' + kind
-    const cur = pl.bk[key] || (pl.bk[key] = { n: 0, count: 0 })
-    cur.n += n; cur.count++
+    const cur = pl.bk[key] || (pl.bk[key] = { n: 0, count: 0, titles: [] })
+    if (kind === 'party') { const c = orders[x.id] || 1; cur.n += c; cur.count += c; for (let i = 0; i < c; i++) cur.titles.push(plPartyType(title) + ' Party') }
+    else { cur.n += n; cur.count++ }
     pl.bookedSess.push({ id: x.id, date: x.session_date, start: toMin(t), title, kind, n })
   })
 }
+// Kids or Splatter, from a party title
+function plPartyType(title) { return /splatter/i.test(title || '') ? 'Splatter' : 'Kids' }
+
 // A booked session the plan has no block for (a wheel workshop already in Shopify, Paint Night, a one-off
 // workshop at an odd time, a class that wasn't imported) gets its own Booked block, so no booking is missed.
 function plBookedMatches(s, items) {
@@ -4131,7 +4135,11 @@ function plItems(date) {
     const e = d.edits[it.id] || {}, k = s.k[it.kind]
     Object.assign(it, { date, label: PL_KINDS[it.kind].label, staff: e.staff ?? k.staff, people: e.people ?? k.people, price: e.price ?? k.price, col: e.col ?? it.col })
     const b = (pl.bk || {})[date + '|' + plHM(it.start) + '|' + it.kind]
-    if (it.kind === 'party') it.booked = b && it.slot < b.count ? 1 : 0
+    if (it.kind === 'party') {
+      it.booked = b && it.slot < b.count ? 1 : 0
+      if (it.booked) it.label = b.titles[it.slot] + ' (booked)'
+      else if (typeof d.removed[it.id] === 'string') { it.partyType = d.removed[it.id]; it.label = 'Party slot: ' + (it.partyType === 'any' ? 'either kind' : it.partyType + ' Party') }
+    }
     else it.booked = b ? b.n : 0
     if (it.booked && !(d.edits[it.id] && d.edits[it.id].people != null)) it.people = it.kind === 'party' ? 1 : Math.max(Number(it.people) || 0, it.booked)
     const by = PL_KINDS[it.kind].dropin && adds.find(a => plReplaces(a, it.kind) && it.start >= a.start && it.start < a.start + a.dur)
@@ -4753,9 +4761,11 @@ function plItemClick(ev, id, date) {
     } else if (it.kind === 'party' && it.booked) {
       h += '<div class="row muted small">Booked party: parties are never cancelled, so it can\'t be taken out. Take out an unbooked (lighter) slot at this time instead.</div>'
     } else {
+      if (it.kind === 'party') h += '<div class="row"><label>Which party to close<select class="input" id="pl-m-ptype" style="height:28px">' +
+        '<option value="Kids">Kids Party</option><option value="Splatter">Splatter Party</option><option value="any">Either (whichever has an open slot)</option></select></label></div>'
       h += '<button onclick="plItemDelete(\'' + id + '\',false)" style="color:var(--bad)">Take out this date</button>' +
         '<button onclick="plItemDelete(\'' + id + '\',true)" style="color:var(--bad)">Take out ' + every + '</button>' +
-        (it.kind === 'party' ? '<div class="row muted small">Any week where this slot is booked is left alone.</div>' : '')
+        (it.kind === 'party' ? '<div class="row muted small">Closes one open slot of that kind. Booked parties are never touched; any week where this slot is booked is left alone.</div>' : '')
     }
   }
   plShowMenu(ev, h)
@@ -4793,7 +4803,10 @@ function plItemDelete(id, all) {
         else toast('No room for another week inside 12 weeks: this session is now ' + a.dates.length + ' classes', true)
       }
     }
-  } else (all ? plSameDowIds(id) : [id]).forEach(x => { d.removed[x] = true })
+  } else {
+    const pt = document.getElementById('pl-m-ptype'), val = id.startsWith('P|') && pt ? pt.value : true
+    ;(all ? plSameDowIds(id) : [id]).forEach(x => { d.removed[x] = val })
+  }
   plCloseMenu(); plTouch()
 }
 function plRestore(id, all) {
@@ -5047,18 +5060,18 @@ function plSaveDefaults(keepOpen) {
 async function plResolve(list, studioId) {
   if (!list.length) return []
   const studio = studioId || pl.studio, dates = list.map(x => x.date).sort()
-  const sess = await plFetchAll(() => sb.from('sessions').select('id, title, session_date, session_time').eq('studio_id', studio)
+  const sess = await plFetchAll(() => sb.from('sessions').select('id, title, session_date, session_time, spaces_left_cache').eq('studio_id', studio)
     .gte('session_date', dates[0]).lte('session_date', dates[dates.length - 1]).order('id'))
   list.forEach(r => {
     const cands = sess.filter(s => s.session_date === r.date && String(s.session_time || '').slice(0, 5) === r.time && plKindOfTitle(s.title) === r.kind)
     if (r.kind === 'party') {
-      // the bookable party product at this time (Kids / Splatter party), not the internal "Party Time Slot"
-      const sellable = cands.filter(c => { const t = buildShopifyTitle(c.session_date, c.session_time || '00:00:00', c.title); return t && t !== 'OVERRIDE' })
-      // one Shopify variant for the time (one session, or several sessions under the same product title):
-      // taking out a slot just lowers that variant's inventory by 1, never below 0
-      const sellTitles = new Set(sellable.map(c => buildShopifyTitle(c.session_date, c.session_time || '00:00:00', c.title)))
-      if (sellable.length && sellTitles.size === 1) { r.session = sellable[0]; r.partyShared = true }
-      else { r.partyCands = sellable.length ? sellable : cands; r.session = null }       // one session per slot: chosen below, unbooked only
+      // the bookable party products at this time (Kids / Splatter), not the internal "Party Time Slot"
+      let sellable = cands.filter(c => { const t = buildShopifyTitle(c.session_date, c.session_time || '00:00:00', c.title); return t && t !== 'OVERRIDE' })
+      if (r.partyType && r.partyType !== 'any') sellable = sellable.filter(c => plPartyType(c.title) === r.partyType)
+      // closing a party slot only ever lowers that product's open count by 1 (never below 0), so booked parties stay booked
+      const best = sellable.slice().sort((a, b) => (Number(b.spaces_left_cache) || 0) - (Number(a.spaces_left_cache) || 0))[0]
+      if (best) { r.session = best; r.partyShared = true }
+      else { r.session = null; r.partyNone = true }
     } else r.session = cands[0] || null
     r.shopifyTitle = r.session ? buildShopifyTitle(r.session.session_date, r.session.session_time || '00:00:00', r.session.title) : null
   })
@@ -5093,12 +5106,13 @@ async function plResolve(list, studioId) {
     r.booked = r.session ? booked[r.session.id] || 0 : 0
     r.bookings = r.session ? bookingRows[r.session.id] || [] : []
     if (r.kind === 'party') r.bookings = []   // never a party on the contact list
-    if (!r.session) { r.status = 'pending'; r.note = 'Not in the system yet' }
+    if (r.partyNone) { r.status = 'manual'; r.note = 'No ' + (r.partyType && r.partyType !== 'any' ? r.partyType + ' Party' : 'party') + ' product at this time' }
+    else if (!r.session) { r.status = 'pending'; r.note = 'Not in the system yet' }
     else if (r.kind === 'party' && !r.partyShared && r.booked > 0) { r.status = 'blocked'; r.note = 'Booked party: parties are never cancelled, so nothing changes' }
     else if (r.kind === 'party' && !r.partyShared && (!r.shopifyTitle || r.shopifyTitle === 'OVERRIDE')) { r.status = 'manual'; r.note = 'No bookable party product at this time: close it in admin' }
     else if (!r.shopifyTitle || r.shopifyTitle === 'OVERRIDE') { r.status = 'manual'; r.note = 'No matching Shopify product title' }
     else if (!r.variant) { r.status = 'pending'; r.note = 'Not in Shopify yet' + (r.booked ? ', ' + r.booked + ' booked' : '') }
-    else if (r.partyShared) { r.status = 'remove'; r.note = 'Closes one party slot (spaces − 1)' + (r.booked ? '; booked parties stay booked' : '') }
+    else if (r.partyShared) { r.status = 'remove'; r.note = 'Closes one ' + plPartyType(r.session.title) + ' Party slot (open − 1); booked parties stay booked' }
     else { r.status = 'remove'; r.note = r.booked ? r.booked + ' booked: closes at −' + r.booked + ', contact them' : '' }
   })
   return list
@@ -5162,7 +5176,7 @@ async function plOpenSet() {
   plModal('<h2>Set plan</h2><div class="loading">Checking sessions, Shopify and bookings…</div>', true)
   const list = []
   plDates().forEach(date => plItems(date).filter(i => i.src !== 'add' && i.src !== 'camp' && i.src !== 'event' && i.state !== 'on').forEach(i =>
-    list.push({ date, time: plHM(i.start), kind: i.kind, slot: i.slot || 0, label: PL_KINDS[i.kind].label, why: i.state === 'closed' ? i.by : i.state === 'replaced' ? 'Replaced by ' + i.by : 'Taken out' })))
+    list.push({ date, time: plHM(i.start), kind: i.kind, slot: i.slot || 0, partyType: i.partyType || null, label: i.kind === 'party' && i.partyType && i.partyType !== 'any' ? i.partyType + ' Party slot' : PL_KINDS[i.kind].label, why: i.state === 'closed' ? i.by : i.state === 'replaced' ? 'Replaced by ' + i.by : 'Taken out' })))
   let rows, prev
   try {
     rows = await plResolve(list)
@@ -5332,7 +5346,7 @@ async function plCloseOnePartySlot(r) {
     const set = await bdInvCall({ action: 'set', inventory_item_id: r.variant.inventory_item_id, quantity: now - 1 })
     if (!set || !set.inventory_level) return { status: 'failed', note: (set && set.error) || 'Shopify inventory not changed' }
     await sb.from('sessions').update(Object.assign({ spaces_left_cache: now - 1 }, now - 1 === 0 ? { publish: false } : {})).eq('id', r.session.id)
-    return { status: 'hidden', note: 'One party slot closed (' + now + ' → ' + (now - 1) + ' open)', restore_qty: null }
+    return { status: 'hidden', note: 'One ' + plPartyType(r.session.title) + ' Party slot closed (' + now + ' → ' + (now - 1) + ' open)', restore_qty: null }
   } catch (e) { return { status: 'failed', note: e.message } }
 }
 
