@@ -4955,9 +4955,8 @@ async function plResolve(list, studioId) {
     if (!r.session) { r.status = 'pending'; r.note = 'Not in the system yet' }
     else if (r.kind === 'party') { r.status = 'manual'; r.note = 'Party slots aren\'t their own Shopify product: close it in admin' }
     else if (!r.shopifyTitle || r.shopifyTitle === 'OVERRIDE') { r.status = 'manual'; r.note = 'No matching Shopify product title' }
-    else if (r.booked > 0) { r.status = 'blocked'; r.note = r.booked + ' booked: move or refund them first' }
-    else if (!r.variant) { r.status = 'pending'; r.note = 'Not in Shopify yet' }
-    else { r.status = 'remove'; r.note = '' }
+    else if (!r.variant) { r.status = 'pending'; r.note = 'Not in Shopify yet' + (r.booked ? ', ' + r.booked + ' booked' : '') }
+    else { r.status = 'remove'; r.note = r.booked ? r.booked + ' booked: closes at −' + r.booked + ', contact them' : '' }
   })
   return list
 }
@@ -4981,7 +4980,7 @@ function plContactsHtml(list) {
   pl.contacts = list
   const people = new Set(list.map(c => (c.email || c.name).toLowerCase())).size
   return '<h3>Bookings to contact (' + people + ' customer' + (people === 1 ? '' : 's') + ', ' + list.reduce((t, c) => t + c.qty, 0) + ' spots)</h3>' +
-    '<div class="muted small" style="margin-bottom:6px">These offerings have bookings, so they stay in Shopify until you move or refund them. Then use Check Shopify again in the Removal list.</div>' +
+    '<div class="muted small" style="margin-bottom:6px">These were taken out while people are booked. They\'re closed in Shopify below 0 (so a cancellation doesn\'t reopen a space) and still show on the staff dashboard. Contact them to move or refund their booking.</div>' +
     '<div class="pl-tbl-wrap"><table class="list"><tr><th>Date</th><th>Time</th><th>What</th><th>Customer</th><th>Email</th><th>Phone</th><th>Order</th><th>Spots</th></tr>' +
     list.map(c => '<tr><td>' + plDayLabel(c.date) + '</td><td>' + bdFmtShort(toMin(c.time)) + '</td><td>' + esc(c.what) + '</td><td>' + esc(c.name) + '</td>' +
       '<td>' + (c.email ? '<a href="mailto:' + esc(c.email) + '">' + esc(c.email) + '</a>' : '') + '</td><td>' + esc(c.phone) + '</td><td>' + esc(c.order) + '</td><td>' + c.qty + '</td></tr>').join('') +
@@ -5138,11 +5137,11 @@ function plRenderSet(result) {
         '<td>' + plDayLabel(r.date) + '</td><td>' + bdFmtShort(toMin(r.time)) + '</td><td>' + esc(r.session ? r.session.title : r.label) + '</td><td class="muted">' + esc(r.why) + '</td>' +
         '<td class="wrap small">' + esc(r.shopifyTitle && r.shopifyTitle !== 'OVERRIDE' ? r.shopifyTitle : '') + '</td>' +
         '<td><span class="pl-st ' + (r.skip ? 'skip' : r.status) + '">' + (r.skip ? 'Skip for now' : PL_STATUS_TEXT[r.status]) + '</span>' + (r.note ? ' <span class="muted small">' + esc(r.note) + '</span>' : '') + '</td></tr>').join('') +
-      '</table></div><div class="muted small" style="margin-top:4px">Ticked rows are hidden: this studio\'s variant is set to 0 left in Shopify (not deleted) and taken off the customer calendar, so it can be put back from the Removal list. Everything that isn\'t in Shopify yet is saved to the Removal list for later.</div>'
+      '</table></div><div class="muted small" style="margin-top:4px">Ticked rows are hidden: this studio\'s variant is set to 0 left in Shopify (below 0 if people are booked; never deleted) and taken off the customer calendar, so it can be put back from the Removal list. Everything that isn\'t in Shopify yet is saved to the Removal list for later.</div>'
   }
   h += plSetBackHtml(result)
   h += plShiftPreviewHtml(pl.setShifts, pl.setShiftsDone)
-  h += plContactsHtml(plContacts(rows.filter(r => r.status === 'blocked').map(r => ({ date: r.date, time: r.time, what: r.session ? r.session.title : r.label, bookings: r.bookings }))))
+  h += plContactsHtml(plContacts(rows.filter(r => (r.bookings || []).length && !r.skip).map(r => ({ date: r.date, time: r.time, what: r.session ? r.session.title : r.label, bookings: r.bookings }))))
   h += '<h3>Added (' + adds.length + ' Shopify product' + (adds.length === 1 ? '' : 's') + ' to add by hand)</h3>'
   if (!adds.length) h += '<div class="muted">Nothing was added.</div>'
   else h += '<div class="pl-tbl-wrap"><table class="list"><tr><th>Shopify title</th><th>Dates</th><th>Length</th><th>Replaces drop-ins</th><th>Staff</th></tr>' +
@@ -5155,20 +5154,22 @@ function plRenderSet(result) {
 
 // Hide one studio's variant: live Shopify inventory to 0 (never deleted), off the customer calendar.
 // The quantity it had is kept so Put back can restore it.
+// With bookings it closes at MINUS the number booked (2 booked → −2), same as Build schedule's Close:
+// a cancellation that restocks climbs back toward 0 instead of reopening a space.
 async function plHideVariant(r) {
   try {
     const booked = await bdBookedCount(r.session.id)
-    if (booked > 0) return { status: 'blocked', note: booked + ' booked' }
     let prev = null
     try {
       const d = await bdInvCall({ action: 'get_all', product_title: r.shopifyTitle })
       const v = (d.variants || []).find(x => String(x.inventory_item_id) === String(r.variant.inventory_item_id))
       if (v) prev = v.inventory_quantity
     } catch (e) {}
-    const data = await bdInvCall({ action: 'set', inventory_item_id: r.variant.inventory_item_id, quantity: 0 })
+    const data = await bdInvCall({ action: 'set', inventory_item_id: r.variant.inventory_item_id, quantity: booked > 0 ? -booked : 0 })
     if (!data || !data.inventory_level) return { status: 'failed', note: (data && data.error) || 'Shopify inventory not changed' }
+    // off the customer calendar; staff still see it (show stays on) while people are booked
     await sb.from('sessions').update({ spaces_left_cache: 0, publish: false }).eq('id', r.session.id)
-    return { status: 'hidden', note: prev != null ? 'Had ' + prev + ' left' : '', restore_qty: prev }
+    return { status: 'hidden', note: (booked > 0 ? 'Closed at −' + booked + ', ' + booked + ' booked to contact' : '') + (prev != null ? (booked > 0 ? '. ' : '') + 'Had ' + prev + ' left' : ''), restore_qty: prev != null && prev > 0 ? prev : null }
   } catch (e) { return { status: 'failed', note: e.message } }
 }
 
@@ -5466,7 +5467,7 @@ async function plOpenRemovals() {
 }
 async function plLoadRemovalBookings() {
   pl.removalBookings = {}
-  const ids = pl.removals.filter(r => r.session_id && !PL_HANDLED.includes(r.status)).map(r => r.session_id)
+  const ids = pl.removals.filter(r => r.session_id && !['removed', 'done', 'restored'].includes(r.status)).map(r => r.session_id)
   for (let i = 0; i < ids.length; i += 200) {
     const { data } = await sb.from('bookings').select(PL_BOOKING_COLS).in('session_id', ids.slice(i, i + 200)).gt('qty', 0).is('returned_at', null)
     ;(data || []).forEach(b => { (pl.removalBookings[b.session_id] = pl.removalBookings[b.session_id] || []).push(b) })
@@ -5492,7 +5493,7 @@ function plRenderRemovals(msg) {
       '<td class="actions"><button class="btn small good" onclick="plPutBack(\'' + r.id + '\')">Put back</button></td></tr>').join('') +
     '</table></div><div style="display:flex;gap:8px;margin-top:6px;align-items:center"><button class="btn small good" onclick="plPutBack(null)">Put all ' + back.length + ' back</button>' +
     '<span class="muted small">Puts the spaces back in Shopify and on the customer calendar. Also put them back on the plan\'s grid, or the next Set plan hides them again.</span></div>'
-  h += plContactsHtml(plContacts(open.filter(r => r.session_id && (pl.removalBookings || {})[r.session_id]).map(r => ({ date: r.session_date, time: String(r.session_time).slice(0, 5),
+  h += plContactsHtml(plContacts(pl.removals.filter(r => r.session_id && !['removed', 'done', 'restored'].includes(r.status) && (pl.removalBookings || {})[r.session_id]).map(r => ({ date: r.session_date, time: String(r.session_time).slice(0, 5),
     what: r.session_title || r.label, bookings: pl.removalBookings[r.session_id] }))))
   h += '<div class="pl-actions"><span class="muted small" id="pl-rm-msg"></span><button class="btn" onclick="plCloseModal()">Close</button>' +
     (open.some(r => ['pending', 'failed', 'blocked'].includes(r.status)) ? '<button class="btn primary" id="pl-rm-go" onclick="plRecheckRemovals()">Check Shopify again and hide</button>' : '') + '</div>'
