@@ -5168,7 +5168,8 @@ function plAdditionsFor(data) {
     if (PL_KINDS[a.kind].series) out.push({ title: plShopTitle(dates[0], a.start, name) + ' | ' + dates.length + ' Week Session', dates, a, repl })
     else dates.forEach(d => out.push({ title: plShopTitle(d, a.start, name), dates: [d], a, repl }))
   })
-  return out.sort((x, y) => x.dates[0].localeCompare(y.dates[0]) || x.a.start - y.a.start)
+  out.forEach(x => { x.kind = x.a.kind; x.name = plAddLabel(x.a); x.start = x.a.start })
+  return out.sort(plByType)
 }
 
 async function plOpenSet() {
@@ -5304,7 +5305,7 @@ function plRenderSet(result) {
   h += '<h3>Added (' + adds.length + ' Shopify product' + (adds.length === 1 ? '' : 's') + ' to add by hand)</h3>'
   if (!adds.length) h += '<div class="muted">Nothing was added.</div>'
   else h += '<div class="pl-tbl-wrap"><table class="list"><tr><th>Shopify title</th><th>Dates</th><th>Length</th><th>Replaces drop-ins</th><th>Staff</th></tr>' +
-    adds.map(x => '<tr><td class="wrap">' + esc(x.title) + '</td><td class="wrap">' + x.dates.map(plShortDate).join(', ') + '</td><td>' + x.a.dur + ' min</td><td>' + x.repl + '</td><td>' + x.a.staff + '</td></tr>').join('') +
+    adds.map((x, xi) => plTypeHead(adds, xi, 5) + '<tr><td class="wrap">' + esc(x.title) + '</td><td class="wrap">' + x.dates.map(plShortDate).join(', ') + '</td><td>' + x.a.dur + ' min</td><td>' + x.repl + '</td><td>' + x.a.staff + '</td></tr>').join('') +
     '</table></div><div style="display:flex;gap:8px;margin-top:6px"><button class="btn small" onclick="plCopyAdds()">Copy list</button><button class="btn small" onclick="plDownloadAdds()">Download CSV</button></div>'
   h += '<div class="pl-actions"><span class="muted small" id="pl-set-msg"></span><button class="btn" onclick="plCloseModal()">' + (result ? 'Close' : 'Cancel') + '</button>' +
     (result ? '' : '<button class="btn primary" id="pl-set-go" onclick="plRunSet()">' + plSetLabel(toRemove) + '</button>') + '</div>'
@@ -5530,16 +5531,27 @@ async function plOpenAll() {
   let removals = []
   try { removals = await plFetchAll(() => sb.from('schedule_plan_removals').select('*').gte('session_date', todayStr()).order('session_date').order('session_time').order('id')) }
   catch (e) { removals = null }
-  plAllState = { plans: data || [], drafts: false, tab: plAllState ? plAllState.tab : 'add', removals }
+  plAllState = { plans: data || [], drafts: false, tab: plAllState ? plAllState.tab : 'add', removals, inShop: {} }
+  await plLoadInShop()
   plRenderAll()
+}
+// shopify_variants rows for every product any plan adds: inShop[title] = Set of studio ids with a variant
+async function plLoadInShop() {
+  const titles = [...new Set(plAllState.plans.reduce((t, p) => t.concat(plAdditionsFor(plMerge(plEmptyData(), p.data)).map(x => x.title)), []))]
+  const inShop = {}
+  for (let i = 0; i < titles.length; i += 100) {
+    const { data } = await sb.from('shopify_variants').select('studio_id, shopify_title').in('shopify_title', titles.slice(i, i + 100))
+    ;(data || []).forEach(v => { (inShop[v.shopify_title] = inShop[v.shopify_title] || new Set()).add(v.studio_id) })
+  }
+  plAllState.inShop = inShop
 }
 function plAllGroups() {
   const plans = plAllState.plans.filter(p => p.status === 'set' || plAllState.drafts), groups = {}
   plans.forEach(p => plAdditionsFor(plMerge(plEmptyData(), p.data)).forEach(x => {
-    const g = groups[x.title] || (groups[x.title] = { title: x.title, dates: x.dates, start: x.a.start, dur: x.a.dur, series: !!PL_KINDS[x.a.kind].series, studios: {} })
+    const g = groups[x.title] || (groups[x.title] = { title: x.title, dates: x.dates, start: x.a.start, dur: x.a.dur, series: !!PL_KINDS[x.a.kind].series, kind: x.a.kind, name: plAddLabel(x.a), studios: {} })
     ;(g.studios[p.studio_id] = g.studios[p.studio_id] || []).push(p.name + (p.status === 'set' ? '' : ' (not set)'))
   }))
-  return { plans, list: Object.values(groups).sort((a, b) => a.dates[0].localeCompare(b.dates[0]) || a.start - b.start || a.title.localeCompare(b.title)) }
+  return { plans, list: Object.values(groups).sort(plByType) }
 }
 const PL_REMOVE_OPEN = ['pending', 'blocked', 'manual', 'failed']
 function plAllTabs(nAdd) {
@@ -5564,10 +5576,22 @@ function plRenderAll() {
   const missing = all.filter(id => !studiosIn.has(id))
   if (missing.length && studiosIn.size) h += '<div class="muted small" style="margin-bottom:8px">Nothing yet from: ' + missing.map(id => esc(STUDIO_NAMES[id])).join(', ') + '</div>'
   if (!list.length) h += '<div class="empty">No additions yet' + (plAllState.drafts ? '' : ' in set plans') + '.</div>'
-  else h += '<div class="pl-tbl-wrap"><table class="list"><tr><th>Shopify title</th><th>Dates</th><th>Studios (variants)</th></tr>' +
-    list.map(g => '<tr><td class="wrap">' + esc(g.title) + '</td><td class="wrap small">' + (g.series ? g.dates.map(plShortDate).join(', ') : plShortDate(g.dates[0])) + '</td>' +
-      '<td class="wrap small" title="' + esc(Object.keys(g.studios).map(id => STUDIO_NAMES[id] + ': ' + g.studios[id].join(', ')).join('\n')) + '"><b>' + Object.keys(g.studios).length + '</b> ' +
-      esc(Object.keys(g.studios).map(id => STUDIO_NAMES[id]).join(', ')) + '</td></tr>').join('') + '</table></div>'
+  else {
+    const canAdd = list.filter(g => plMissingStudios(g).length && (plAllState.inShop[g.title] || new Set()).size)
+    if (canAdd.length) h += '<div class="note info" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">' + canAdd.length + ' product' + (canAdd.length === 1 ? ' is' : 's are') +
+      ' in Shopify but missing some planned studios. <label class="small">Spaces for each new studio <input class="input" id="pl-add-qty" type="number" min="0" style="width:80px;height:28px" placeholder="same"></label>' +
+      '<button class="btn small primary" onclick="plAllAddStudios(null)">Add all missing studios</button><span class="muted small">Blank = same as the product\'s first studio.</span></div>'
+    h += '<div class="pl-tbl-wrap"><table class="list"><tr><th>Shopify title</th><th>Dates</th><th>Studios (variants)</th><th>In Shopify</th></tr>' +
+    list.map((g, gi) => {
+      const have = plAllState.inShop[g.title] || new Set(), miss = plMissingStudios(g)
+      const shop = !have.size ? '<span class="pl-st pending">Not created yet</span><div class="muted small">Create it by hand first</div>'
+        : !miss.length ? '<span class="pl-st removed">All ' + Object.keys(g.studios).length + ' in</span>'
+        : '<span class="pl-st manual">' + (Object.keys(g.studios).length - miss.length) + ' of ' + Object.keys(g.studios).length + ' in</span> <button class="btn small" onclick="plAllAddStudios(' + gi + ')">Add ' + miss.length + '</button>'
+      return plTypeHead(list, gi, 4) + '<tr><td class="wrap">' + esc(g.title) + '</td><td class="wrap small">' + (g.series ? g.dates.map(plShortDate).join(', ') : plShortDate(g.dates[0])) + '</td>' +
+        '<td class="wrap small" title="' + esc(Object.keys(g.studios).map(id => STUDIO_NAMES[id] + ': ' + g.studios[id].join(', ')).join('\n')) + '"><b>' + Object.keys(g.studios).length + '</b> ' +
+        Object.keys(g.studios).map(id => '<span style="' + (have.size && !have.has(id) ? 'color:var(--bad);font-weight:600' : '') + '">' + esc(STUDIO_NAMES[id]) + '</span>').join(', ') + '</td><td class="small">' + shop + '</td></tr>'
+    }).join('') + '</table></div>'
+  }
   h += '<div class="pl-actions"><span class="muted small">The CSV has one row per product per studio variant.</span><button class="btn" onclick="plCloseModal()">Close</button>' +
     (list.length ? '<button class="btn" onclick="plAllCopy()">Copy list</button><button class="btn primary" onclick="plAllCsv()">Download CSV</button>' : '') + '</div>'
   plModal(h, true)
@@ -5628,6 +5652,69 @@ async function plAllRecheck() {
   try { removed = await plRecheckRows((plAllState.removals || []).filter(r => ['pending', 'failed', 'blocked'].includes(r.status)), msg) }
   catch (e) { msg.textContent = 'Could not check: ' + (e.message || e); btn.disabled = false; return }
   plRenderAllRemove(removed ? removed + ' hidden in Shopify. The rest stay on the list with their updated status.' : 'Nothing new to remove yet.')
+}
+
+/* ---------- add the missing studios to products already made in Shopify ---------- */
+// Uses shopify-variant-remove's "restore" action: adds a variant for the studio (same price as the
+// product's other variants) with that many spaces. Session rows come from admin's Discover from
+// Shopify, which creates every studio's sessions; anything missing is listed afterwards.
+function plMissingStudios(g) {
+  const have = plAllState.inShop[g.title] || new Set()
+  return have.size ? Object.keys(g.studios).filter(id => !have.has(id)) : []
+}
+async function plAllAddStudios(gi) {
+  const list = plAllGroups().list
+  const groups = (gi == null ? list : [list[gi]]).filter(g => plMissingStudios(g).length)
+  if (!groups.length) return
+  const qtyEl = document.getElementById('pl-add-qty'), fixed = qtyEl && qtyEl.value !== '' ? Number(qtyEl.value) : null
+  const n = groups.reduce((t, g) => t + plMissingStudios(g).length, 0)
+  if (!confirm('Add ' + n + ' studio variant' + (n === 1 ? '' : 's') + ' to ' + groups.length + ' Shopify product' + (groups.length === 1 ? '' : 's') + '?\n\n' +
+    groups.map(g => g.title + ':\n  ' + plMissingStudios(g).map(id => PL_VARIANT_NAMES[id] || id).join('\n  ')).join('\n\n') +
+    '\n\nEach gets the same price as the product\'s other studios and ' + (fixed != null ? fixed + ' spaces' : 'the same spaces as its first studio') + '. Customers can book them right away.')) return
+  const { data: { session } } = await sb.auth.getSession()
+  const token = session ? session.access_token : SUPABASE_KEY
+  let ok = 0
+  const fails = [], noSessions = []
+  plModal('<h2>Adding studios to Shopify</h2><div class="loading" id="pl-add-msg">Starting…</div>', true)
+  for (const g of groups) {
+    let qty = fixed
+    if (qty == null) {
+      try {
+        const d = await bdInvCall({ action: 'get_all', product_title: g.title })
+        const qs = (d.variants || []).map(v => v.inventory_quantity).filter(q => q > 0)
+        qty = qs.length ? Math.max(...qs) : null
+      } catch (e) {}
+      if (qty == null) { fails.push(g.title + ': couldn\'t read its spaces in Shopify (enter a number and try again)'); continue }
+    }
+    for (const st of plMissingStudios(g)) {
+      const el = document.getElementById('pl-add-msg'); if (el) el.textContent = 'Adding ' + (STUDIO_NAMES[st] || st) + ' to ' + g.title + '…'
+      try {
+        const res = await fetch(PL_VARIANT_FN, { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'restore', product_title: g.title, variant_name: PL_VARIANT_NAMES[st], quantity: qty, studio_id: st }) })
+        const j = await res.json().catch(() => ({}))
+        if (j.restored || j.exists) {
+          ok++; (plAllState.inShop[g.title] = plAllState.inShop[g.title] || new Set()).add(st)
+          const { data: ss } = await sb.from('sessions').select('id').eq('studio_id', st).eq('session_date', g.dates[0]).eq('session_time', fromMin(g.start)).limit(1)
+          if (!ss || !ss.length) noSessions.push((STUDIO_NAMES[st] || st) + ', ' + plShortDate(g.dates[0]) + ' ' + bdFmtShort(g.start))
+        } else fails.push((STUDIO_NAMES[st] || st) + ' on ' + g.title + ': ' + (j.error || (j.not_found ? 'product not found in Shopify' : 'HTTP ' + res.status)))
+      } catch (e) { fails.push((STUDIO_NAMES[st] || st) + ' on ' + g.title + ': ' + e.message) }
+    }
+  }
+  plRenderAll()
+  const box = document.querySelector('#pl-modal .pl-modal')
+  if (box) box.insertAdjacentHTML('afterbegin', '<div class="note ' + (fails.length || noSessions.length ? 'warn' : 'info') + '">' + ok + ' studio variant' + (ok === 1 ? '' : 's') + ' added in Shopify.' +
+    (noSessions.length ? '<br><b>No session rows yet</b> for: ' + esc(noSessions.join('; ')) + '. Run <b>Discover from Shopify</b> in admin for those dates so bookings reach the staff dashboard.' : '') +
+    (fails.length ? '<br><b>Not added:</b> ' + esc(fails.join('; ')) : '') + '</div>')
+}
+
+const PL_TYPE_ORDER = ['session_class', 'wheel_session', 'wheel_workshop', 'workshop', 'glazing', 'minimake']
+const PL_TYPE_HEAD = { session_class: 'Session classes', wheel_session: 'Wheel sessions', wheel_workshop: 'Wheel workshops', workshop: 'Workshops', glazing: 'Glazing', minimake: 'Mini Make' }
+function plByType(a, b) {
+  return PL_TYPE_ORDER.indexOf(a.kind) - PL_TYPE_ORDER.indexOf(b.kind) || a.name.localeCompare(b.name) || a.dates[0].localeCompare(b.dates[0]) || a.start - b.start
+}
+// a header row before each new type
+function plTypeHead(list, i, cols) {
+  return i === 0 || list[i - 1].kind !== list[i].kind ? '<tr><td colspan="' + cols + '" style="background:var(--soft);font-weight:700">' + (PL_TYPE_HEAD[list[i].kind] || list[i].kind) + '</td></tr>' : ''
 }
 
 function plAllCopy() {
