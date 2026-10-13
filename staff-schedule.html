@@ -5233,8 +5233,10 @@ async function plOpenSet() {
   if (!(await plFlush())) { toast('Save the plan first', true); return }
   plModal('<h2>Set plan</h2><div class="loading">Checking sessions, Shopify and bookings…</div>', true)
   const list = []
+  const wheelSlot = {}
   plDates().forEach(date => plItems(date).filter(i => i.src !== 'add' && i.src !== 'camp' && i.src !== 'event' && i.state !== 'on').forEach(i =>
-    list.push({ date, time: plHM(i.start), kind: i.src === 'wheel' ? 'wheel' : i.kind, sessionId: i.src === 'wheel' ? i.id.split('|')[1] : null, slot: i.slot || 0, partyType: i.partyType || null, label: i.src === 'wheel' ? i.title : i.kind === 'party' && i.partyType && i.partyType !== 'any' ? i.partyType + ' Party slot' : PL_KINDS[i.kind].label, why: i.state === 'closed' ? i.by : i.state === 'replaced' ? 'Replaced by ' + i.by : 'Taken out' })))
+    list.push({ date, time: plHM(i.start), kind: i.src === 'wheel' ? 'wheel' : i.kind, sessionId: i.src === 'wheel' ? i.id.split('|')[1] : null,
+      slot: i.src === 'wheel' ? (wheelSlot[date + '|' + i.start] = (wheelSlot[date + '|' + i.start] ?? -1) + 1) : i.slot || 0, partyType: i.partyType || null, label: i.src === 'wheel' ? i.title : i.kind === 'party' && i.partyType && i.partyType !== 'any' ? i.partyType + ' Party slot' : PL_KINDS[i.kind].label, why: i.state === 'closed' ? i.by : i.state === 'replaced' ? 'Replaced by ' + i.by : 'Taken out' })))
   let rows, prev
   try {
     rows = await plResolve(list)
@@ -5388,7 +5390,7 @@ async function plHideVariant(r) {
     if (!data || !data.inventory_level) return { status: 'failed', note: (data && data.error) || 'Shopify inventory not changed' }
     // off the customer calendar; staff still see it (show stays on) while people are booked
     await sb.from('sessions').update({ spaces_left_cache: 0, publish: false }).eq('id', r.session.id)
-    return { status: 'hidden', note: (booked > 0 ? 'Closed at −' + booked + ', ' + booked + ' booked to contact' : '') + (prev != null ? (booked > 0 ? '. ' : '') + 'Had ' + prev + ' left' : ''), restore_qty: prev != null ? prev : null }
+    return { status: 'hidden', note: (booked > 0 ? 'Closed at −' + booked + ', ' + booked + ' booked to contact' : '') + (prev != null ? (booked > 0 ? '. ' : '') + 'Had ' + prev + ' left' : ''), restore_qty: prev != null && (prev > 0 || (prev === 0 && booked > 0)) ? prev : null }
   } catch (e) { return { status: 'failed', note: e.message } }
 }
 
@@ -5473,8 +5475,11 @@ async function plRunSet() {
     note: r.note || null, updated_at: now, removed_at: ['removed', 'drafted', 'hidden'].includes(r.status) ? now : null,
     restore_qty: r.restore_qty != null ? r.restore_qty : null
   }))
-  for (let i = 0; i < save.length; i += 200) {
-    let { error } = await sb.from('schedule_plan_removals').upsert(save.slice(i, i + 200), { onConflict: 'studio_id,session_date,session_time,kind,slot' })
+  const byKey = {}
+  save.forEach(x => { byKey[[x.studio_id, x.session_date, x.session_time, x.kind, x.slot].join('|')] = x })
+  const uniq = Object.values(byKey)
+  for (let i = 0; i < uniq.length; i += 200) {
+    let { error } = await sb.from('schedule_plan_removals').upsert(uniq.slice(i, i + 200), { onConflict: 'studio_id,session_date,session_time,kind,slot' })
     if (error) { msg.textContent = 'Could not save the removal list: ' + error.message + (/restore_qty|status_check/.test(error.message) ? ' (run removal-hide.sql in Supabase first)' : ''); btn.disabled = false; return }
   }
   // put back what's on the schedule again, and clear waiting ones off the Removal list
