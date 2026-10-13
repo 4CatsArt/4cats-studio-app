@@ -3793,7 +3793,13 @@ function plOpenWage() {
   const w = Object.values(pl.wages)
   return w.length ? w.reduce((a, b) => a + b, 0) / w.length : 0
 }
-function plKindOfTitle(title) {
+// Friday events are workshops at 5:30, 6:30 or 7:30 on a Friday, whatever they're called ("Polar Party")
+function plIsFridayEvent(title, date, time) {
+  return !!date && !!time && plDow(date) === 5 && ['17:30', '18:30', '19:30'].includes(String(time).slice(0, 5)) &&
+    !/kids?\s*party|splatter|birthday|get.?together|field trip|team.?build/i.test(title || '')
+}
+function plKindOfTitle(title, date, time) {
+  if (plIsFridayEvent(title, date, time)) return 'workshop'
   const t = String(title || '').toLowerCase()
   if (/glaz/.test(t)) return 'glazing'
   if (/mini\s*make/.test(t)) return 'minimake'
@@ -3956,7 +3962,7 @@ async function plLoadBookings() {
   if (pl.studio !== studio) return
   sess.forEach(x => {
     if (!x.session_time || x.session_date < from || x.session_date > to) return
-    const t = x.session_time.slice(0, 5), title = x.title || '', n = per[x.id], kind = plKindOfTitle(title)
+    const t = x.session_time.slice(0, 5), title = x.title || '', n = per[x.id], kind = plKindOfTitle(title, x.session_date, t)
     const partySlotHere = pl.parties.some(p => p.day_of_week === plDow(x.session_date) && p.time_slot.slice(0, 5) === t)
     if (PL_EVENT_RE.test(title) || (kind === 'party' && !partySlotHere)) {
       pl.events.push({ id: x.id, date: x.session_date, start: toMin(t), end: toMin(t) + (Number(pl.plan.settings.k.party.dur) || 120), title, booked: n })
@@ -3965,7 +3971,7 @@ async function plLoadBookings() {
     const key = x.session_date + '|' + t + '|' + kind
     const cur = pl.bk[key] || (pl.bk[key] = { n: 0, count: 0, titles: [] })
     if (kind === 'party') { const c = orders[x.id] || 1; cur.n += c; cur.count += c; for (let i = 0; i < c; i++) cur.titles.push(plPartyType(title) + ' Party') }
-    else { cur.n += n; cur.count++ }
+    else { cur.n += n; cur.count++; if (!cur.titles.includes(title)) cur.titles.push(title) }
     pl.bookedSess.push({ id: x.id, date: x.session_date, start: toMin(t), title, kind, n })
   })
 }
@@ -4162,6 +4168,7 @@ function plItems(date) {
       else if (typeof d.removed[it.id] === 'string') { it.partyType = d.removed[it.id]; it.label = 'Party slot: ' + (it.partyType === 'any' ? 'either kind' : it.partyType + ' Party') }
     }
     else it.booked = b ? b.n : 0
+    if (it.kind === 'workshop' && b && b.titles && b.titles.length && plIsFridayEvent(b.titles[0], date, plHM(it.start))) it.label = b.titles.join(' + ') + ' (Friday event)'
     if (it.booked && !(d.edits[it.id] && d.edits[it.id].people != null)) it.people = it.kind === 'party' ? 1 : Math.max(Number(it.people) || 0, it.booked)
     const by = PL_KINDS[it.kind].dropin && adds.find(a => plReplaces(a, it.kind) && it.start >= a.start && it.start < a.start + a.dur)
     const closed = d.closed[date]
@@ -5120,7 +5127,7 @@ async function plResolve(list, studioId) {
   const sess = await plFetchAll(() => sb.from('sessions').select('id, title, session_date, session_time, spaces_left_cache').eq('studio_id', studio)
     .gte('session_date', dates[0]).lte('session_date', dates[dates.length - 1]).order('id'))
   list.forEach(r => {
-    const cands = sess.filter(s => s.session_date === r.date && String(s.session_time || '').slice(0, 5) === r.time && plKindOfTitle(s.title) === r.kind)
+    const cands = sess.filter(s => s.session_date === r.date && String(s.session_time || '').slice(0, 5) === r.time && plKindOfTitle(s.title, s.session_date, s.session_time) === r.kind)
     if (r.kind === 'party') {
       // the bookable party products at this time (Kids / Splatter), not the internal "Party Time Slot"
       let sellable = cands.filter(c => { const t = buildShopifyTitle(c.session_date, c.session_time || '00:00:00', c.title); return t && t !== 'OVERRIDE' })
