@@ -3724,7 +3724,7 @@ const PL_VARIANT_NAMES = {
   'ON-WTR-WTR':'ON / WATERLOO - UPTOWN'
 }
 let plCatalog = []   // session_catalog rows (all studios)
-let pl = { studio: '', plans: [], plan: null, week: 0, parties: [], camps: [], elsewhere: {}, bk: {}, events: [], pool: [], allStaff: [], wages: {}, saveTimer: null, lo: 540, setRows: null }
+let pl = { studio: '', plans: [], plan: null, week: 0, parties: [], camps: [], elsewhere: {}, bk: {}, events: [], wheels: [], pool: [], allStaff: [], wages: {}, saveTimer: null, lo: 540, setRows: null }
 
 function plDefaults() {
   return {
@@ -3875,7 +3875,7 @@ async function plOpenPlan(id) {
   p.settings = plMerge(plDefaults(), p.settings)
   p.data = plMerge(plEmptyData(), p.data)
   pl.plan = p; pl.week = 0
-  await Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere(), plLoadBookings()])
+  await Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere(), plLoadBookings(), plLoadWheels()])
   plRender()
 }
 
@@ -3983,6 +3983,25 @@ function plBookedMatches(s, items) {
     if (s.kind === 'series') return !!i.existing
     return false
   })
+}
+
+/* ---------- wheel workshops and wheel sessions already scheduled (booked or not) ---------- */
+// Shown on the grid so you can decide what to close. Taking one out goes through Set plan like a drop-in
+// (closed in Shopify, below 0 if people are booked, with them on the contact list).
+async function plLoadWheels() {
+  pl.wheels = []
+  if (!pl.plan) return
+  const studio = pl.studio, from = pl.plan.week_start, to = plLastDate()
+  let rows = []
+  try {
+    rows = await plFetchAll(() => sb.from('sessions').select('id, title, session_date, session_time, show').eq('studio_id', studio)
+      .gte('session_date', from).lte('session_date', to).ilike('title', '%wheel%').order('id'))
+  } catch (e) { return }
+  if (pl.studio !== studio) return
+  pl.wheels = rows.filter(x => x.show !== false && x.session_time).map(x => ({
+    id: x.id, date: x.session_date, start: toMin(x.session_time.slice(0, 5)), title: x.title,
+    kind: /\b(class|week|part)\s+\d+\s+of\s+\d+|week session/i.test(x.title) ? 'wheel_session' : 'wheel_workshop'
+  }))
 }
 
 async function plLoadCamps() {
@@ -4094,9 +4113,9 @@ function plRename(v) { pl.plan.name = v.trim() || 'Plan'; plTouch() }
 async function plSetStart(v) {
   if (!v) return
   pl.plan.week_start = sundayOf(v); pl.week = 0
-  await Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere(), plLoadBookings()]); plTouch()
+  await Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere(), plLoadBookings(), plLoadWheels()]); plTouch()
 }
-function plSetWeeks(v) { pl.plan.weeks = Number(v); pl.week = Math.min(pl.week, pl.plan.weeks - 1); Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere(), plLoadBookings()]).then(plTouch) }
+function plSetWeeks(v) { pl.plan.weeks = Number(v); pl.week = Math.min(pl.week, pl.plan.weeks - 1); Promise.all([plLoadWages(), plLoadCamps(), plLoadElsewhere(), plLoadBookings(), plLoadWheels()]).then(plTouch) }
 function plWeekTo(w) { pl.week = Math.max(0, Math.min(pl.plan.weeks - 1, w)); plRender() }
 function plWeekGo(n) { pl.week = Math.max(0, Math.min(pl.plan.weeks - 1, pl.week + n)); plRender() }
 async function plArchive() {
@@ -4163,6 +4182,17 @@ function plItems(date) {
       label: plCampLabel(c.title) + ': ' + c.title, staff: e.staff ?? s.k.camp.staff, booked: c.booked,
       // children planned for: what this day is set to, else the studio's expected number or what's booked, whichever is more
       people: e.people ?? Math.max(Number(s.k.camp.people) || 0, c.booked || 0), price: e.price ?? (Number(s.k.camp.price) || 0) })
+  })
+  ;(pl.wheels || []).filter(w => w.date === date).forEach(w => {
+    // a running wheel class imported with Running classes is already on the grid
+    if (adds.some(a => a.existing && a.start === w.start && /wheel/i.test(a.name || ''))) return
+    const id = 'W|' + w.id + '|' + date, e = d.edits[id] || {}, k = s.k[w.kind]
+    const b = (pl.bk || {})[date + '|' + plHM(w.start) + '|wheel'], booked = b ? b.n : 0, series = w.kind === 'wheel_session'
+    items.push({ id, date, kind: w.kind, start: w.start, dur: 90, col: e.col ?? 2, src: 'wheel', title: w.title,
+      state: d.removed[id] ? 'removed' : d.closed[date] ? 'closed' : 'on', by: d.closed[date] ? plClosedText(d.closed[date]) : '',
+      label: w.title + (series ? '' : ''), staff: e.staff ?? k.staff, booked,
+      // a wheel workshop counts its expected people (or what's booked); a session week is already paid for
+      people: e.people ?? Math.max(series ? 0 : Number(k.people) || 0, booked), price: e.price ?? (series ? 0 : Number(k.price) || 0) })
   })
   ;(pl.bookedSess || []).filter(x => x.date === date && !plBookedMatches(x, items)).forEach(x => {
     const id = 'E|' + x.id + '|' + date, e = d.edits[id] || {}, drop = PL_KINDS[x.kind] && PL_KINDS[x.kind].dropin
@@ -4738,6 +4768,22 @@ function plItemClick(ev, id, date) {
       '<div class="row"><span class="muted small">Column</span>' + [0, 1, 2].map(c => '<button class="btn small' + (c === it.col ? ' primary' : '') + '" onclick="plItemCol(\'' + id + '\',' + c + ')">' + (c + 1) + '</button>').join('') + '</div>'
     plShowMenu(ev, h); return
   }
+  if (it.src === 'wheel') {
+    if (it.state === 'removed') h += '<button onclick="plRestore(\'' + id + '\',false)">Put back on this date</button>'
+    else if (it.state === 'closed') h += '<div class="row muted small">' + esc(it.by) + '. Click the day heading to reopen it.</div>'
+    else {
+      h += '<div class="row muted small">Already in Shopify' + (it.kind === 'wheel_session' ? ' (a week of a wheel session)' : '') + '.</div>' +
+        '<div class="row"><label>Staff<input class="input" type="number" min="0" step="1" id="pl-m-staff" value="' + it.staff + '"></label>' +
+        '<label>Expected people<input class="input" type="number" min="0" step="1" id="pl-m-people" value="' + it.people + '"></label>' +
+        '<label>Price each<input class="input" type="number" min="0" step="1" id="pl-m-price" value="' + it.price + '"></label></div>' +
+        '<div class="row"><button class="btn small primary" onclick="plItemSave(\'' + id + '\',false)">Save this date</button></div>' +
+        '<div class="row"><span class="muted small">Column</span>' + [0, 1, 2].map(c => '<button class="btn small' + (c === it.col ? ' primary' : '') + '" onclick="plItemCol(\'' + id + '\',' + c + ')">' + (c + 1) + '</button>').join('') + '</div><hr>' +
+        '<button onclick="plItemDelete(\'' + id + '\',false)" style="color:var(--bad)">Close this one (take out)</button>' +
+        '<div class="row muted small">' + (it.kind === 'wheel_session' && /class\s+([2-9]|\d{2,})\s+of/i.test(it.title || '') ? 'Later weeks of a session aren\'t sold on their own, so Set plan lists it to do by hand. ' : '') +
+        'Set plan closes it in Shopify' + (it.booked ? ' at −' + it.booked + ' and lists the ' + it.booked + ' booked to contact' : '') + '.</div>'
+    }
+    plShowMenu(ev, h); return
+  }
   if (it.state === 'closed') {
     h += '<div class="row muted small">' + esc(it.by) + '. Click the day heading to reopen it.</div>'
   } else if (it.state === 'replaced') {
@@ -4795,7 +4841,7 @@ function plCampStaff(id) {
 }
 function plItemCol(id, c) {
   const d = pl.plan.data
-  if (id.startsWith('C|') || id.startsWith('E|')) d.edits[id] = Object.assign(d.edits[id] || {}, { col: c })
+  if (id.startsWith('C|') || id.startsWith('E|') || id.startsWith('W|')) d.edits[id] = Object.assign(d.edits[id] || {}, { col: c })
   else if (id.startsWith('A|')) d.adds.find(a => a.id === id.split('|')[1]).col = c
   else plSameDowIds(id).forEach(x => { d.edits[x] = Object.assign(d.edits[x] || {}, { col: c }) })
   plCloseMenu(); plTouch()
@@ -5083,7 +5129,7 @@ async function plResolve(list, studioId) {
       const best = sellable.slice().sort((a, b) => (Number(b.spaces_left_cache) || 0) - (Number(a.spaces_left_cache) || 0))[0]
       if (best) { r.session = best; r.partyShared = true }
       else { r.session = null; r.partyNone = true }
-    } else r.session = cands[0] || null
+    } else r.session = (r.sessionId && sess.find(x => String(x.id) === String(r.sessionId))) || cands[0] || null
     r.shopifyTitle = r.session ? buildShopifyTitle(r.session.session_date, r.session.session_time || '00:00:00', r.session.title) : null
   })
   const titles = [...new Set(list.map(r => r.shopifyTitle).filter(t => t && t !== 'OVERRIDE'))]
@@ -5188,7 +5234,7 @@ async function plOpenSet() {
   plModal('<h2>Set plan</h2><div class="loading">Checking sessions, Shopify and bookings…</div>', true)
   const list = []
   plDates().forEach(date => plItems(date).filter(i => i.src !== 'add' && i.src !== 'camp' && i.src !== 'event' && i.state !== 'on').forEach(i =>
-    list.push({ date, time: plHM(i.start), kind: i.kind, slot: i.slot || 0, partyType: i.partyType || null, label: i.kind === 'party' && i.partyType && i.partyType !== 'any' ? i.partyType + ' Party slot' : PL_KINDS[i.kind].label, why: i.state === 'closed' ? i.by : i.state === 'replaced' ? 'Replaced by ' + i.by : 'Taken out' })))
+    list.push({ date, time: plHM(i.start), kind: i.src === 'wheel' ? 'wheel' : i.kind, sessionId: i.src === 'wheel' ? i.id.split('|')[1] : null, slot: i.slot || 0, partyType: i.partyType || null, label: i.src === 'wheel' ? i.title : i.kind === 'party' && i.partyType && i.partyType !== 'any' ? i.partyType + ' Party slot' : PL_KINDS[i.kind].label, why: i.state === 'closed' ? i.by : i.state === 'replaced' ? 'Replaced by ' + i.by : 'Taken out' })))
   let rows, prev
   try {
     rows = await plResolve(list)
