@@ -5658,7 +5658,7 @@ function plRenderAll() {
   if (!list.length) h += '<div class="empty">No additions yet' + (plAllState.drafts ? '' : ' in set plans') + '.</div>'
   else {
     const toCheck = list.filter(g => plMissingStudios(g).length || !(plAllState.inShop[g.title] || new Set()).size).length
-    if (toCheck || list.length) h += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">' + (toCheck ? '<button class="btn small" onclick="plAllRecheckShop(null)">↻ Re-check Shopify (' + toCheck + ')</button>' : '') +
+    if (toCheck || list.length) h += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">' + '<button class="btn small" onclick="plAllRecheckShop(null)">↻ Re-check Shopify (all ' + list.length + ')</button>' +
       '<button class="btn small bad" onclick="plAllCleanup()" title="Removes variants like AB / ON / ERIN that an earlier version added the wrong way">Fix wrongly added variants</button>' +
       '<span class="muted small" id="pl-recheck-msg">Re-reads the products that aren\'t all in yet, in case variants were added by hand or the sync hasn\'t caught up.</span></div>'
     const canAdd = list.filter(g => plMissingStudios(g).length && (plAllState.inShop[g.title] || new Set()).size)
@@ -5669,7 +5669,7 @@ function plRenderAll() {
     list.map((g, gi) => {
       const have = plAllState.inShop[g.title] || new Set(), miss = plMissingStudios(g)
       const shop = !have.size ? '<span class="pl-st pending">Not created yet</span> <button class="btn small" title="Re-check Shopify" onclick="plAllRecheckShop(' + gi + ')">↻</button><div class="muted small">Create it by hand first</div>'
-        : !miss.length ? '<span class="pl-st removed">All ' + Object.keys(g.studios).length + ' in</span>'
+        : !miss.length ? '<span class="pl-st removed">All ' + Object.keys(g.studios).length + ' in</span> <button class="btn small" title="Re-check Shopify" onclick="plAllRecheckShop(' + gi + ')">↻</button>'
         : '<span class="pl-st manual">' + (Object.keys(g.studios).length - miss.length) + ' of ' + Object.keys(g.studios).length + ' in</span> <button class="btn small" onclick="plAllAddStudios(' + gi + ')">Add ' + miss.length + '</button> <button class="btn small" title="Re-check Shopify" onclick="plAllRecheckShop(' + gi + ')">↻</button>'
       return plTypeHead(list, gi, 4) + '<tr><td class="wrap">' + esc(g.title) + '</td><td class="wrap small">' + (g.series ? g.dates.map(plShortDate).join(', ') : plShortDate(g.dates[0])) + '</td>' +
         '<td class="wrap small" title="' + esc(Object.keys(g.studios).map(id => STUDIO_NAMES[id] + ': ' + g.studios[id].join(', ')).join('\n')) + '"><b>' + Object.keys(g.studios).length + '</b> ' +
@@ -5748,7 +5748,7 @@ async function plAllRecheck() {
 const plStudioOfVariant = name => Object.keys(PL_VARIANT_NAMES).find(k => PL_VARIANT_NAMES[k].replace(/\s+/g, ' ').trim().toUpperCase() === String(name || '').replace(/\s+/g, ' ').trim().toUpperCase())
 async function plRecheckShopify(groups, quiet) {
   const odd = [], gone = []
-  let checked = 0
+  let checked = 0, pruned = 0
   for (const g of groups) {
     const el = document.getElementById('pl-recheck-msg'); if (el) el.textContent = 'Checking ' + (++checked) + ' of ' + groups.length + '…'
     let d
@@ -5761,12 +5761,22 @@ async function plRecheckShopify(groups, quiet) {
       else odd.push('"' + v.variant_title + '" on ' + g.title)
     })
     if (rows.length) await sb.rpc('upsert_shopify_variants', { p_shopify_title: g.title, p_product_handle: d.handle, p_product_id: d.product_id, p_status: d.status || 'active', p_variants: rows })
+    // and forget studios Shopify no longer has on this product (variants deleted or trimmed by hand)
+    const live = new Set(d.variants.map(v => String(v.inventory_item_id)))
+    const { data: cached } = await sb.from('shopify_variants').select('studio_id, inventory_item_id').eq('shopify_title', g.title)
+    const stale = (cached || []).filter(c => !live.has(String(c.inventory_item_id)))
+    if (stale.length) {
+      const { error } = await sb.from('shopify_variants').delete().eq('shopify_title', g.title).in('inventory_item_id', stale.map(c => c.inventory_item_id))
+      if (error) odd.push('couldn\'t clear ' + stale.length + ' old studio record' + (stale.length === 1 ? '' : 's') + ' on ' + g.title + ' (' + error.message + ')')
+      else pruned += stale.length
+    }
     plAllState.inShop[g.title] = new Set(rows.map(r => r.studio_id))
   }
   if (!quiet) {
     plRenderAll()
     const box = document.querySelector('#pl-modal .pl-modal')
     if (box) box.insertAdjacentHTML('afterbegin', '<div class="note ' + (odd.length ? 'warn' : 'info') + '">Checked ' + groups.length + ' product' + (groups.length === 1 ? '' : 's') + ' in Shopify.' +
+      (pruned ? ' Cleared ' + pruned + ' old studio record' + (pruned === 1 ? '' : 's') + ' Shopify no longer has.' : '') +
       (gone.length ? ' ' + gone.length + ' not found in Shopify yet (they stay "Not created yet").' : '') +
       (odd.length ? '<br><b>Variant names that don\'t match a studio</b> (rename them in Shopify to the studio\'s exact name, e.g. ' + esc(PL_VARIANT_NAMES['ON-ERN-ERN']) + '): ' + esc(odd.join('; ')) : '') + '</div>')
   }
@@ -5797,7 +5807,7 @@ async function plAllCleanup() {
 }
 async function plAllRecheckShop(gi) {
   const list = plAllGroups().list
-  const groups = gi == null ? list.filter(g => plMissingStudios(g).length || !(plAllState.inShop[g.title] || new Set()).size) : [list[gi]]
+  const groups = gi == null ? list : [list[gi]]
   if (!groups.length) return
   await plRecheckShopify(groups)
 }
