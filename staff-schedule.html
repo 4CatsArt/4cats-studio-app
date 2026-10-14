@@ -3975,6 +3975,11 @@ async function plLoadBookings() {
     pl.bookedSess.push({ id: x.id, date: x.session_date, start: toMin(t), title, kind, n })
   })
 }
+// "Make the Gift (Ages 5-10) | 3 Week Session" (or "| Class 2 of 3") is the planned "Make the Gift (Ages 5-10)"
+function plSameClass(title, name) {
+  const a = classLabel(title || '').toLowerCase().replace(/\s+/g, ' ').trim(), b = String(name || '').toLowerCase().replace(/\s+/g, ' ').trim()
+  return !!a && !!b && (a === b || a.startsWith(b) || b.startsWith(a))
+}
 // Kids or Splatter, from a party title
 function plPartyType(title) { return /splatter/i.test(title || '') ? 'Splatter' : 'Kids' }
 
@@ -3986,7 +3991,7 @@ function plBookedMatches(s, items) {
     if (i.start !== s.start) return false
     if (i.kind === s.kind) return true
     if (s.kind === 'wheel') return i.kind === 'wheel_workshop' || i.kind === 'wheel_session'
-    if (s.kind === 'series') return !!i.existing
+    if (s.kind === 'series' || s.kind === 'wheel') return !!i.existing || (i.src === 'add' && plSameClass(s.title, i.name))
     return false
   })
 }
@@ -4182,7 +4187,8 @@ function plItems(date) {
     const ds = a.dates.slice().sort(), closed = d.closed[date]
     if (closed && a.existing) return   // running class on a day the studio is closed: not on at all
     items.push({ id: 'A|' + a.id + '|' + date, addId: a.id, date, kind: a.kind, start: a.start, dur: a.dur, col: a.col, src: 'add', state: closed ? 'closed' : 'on', by: closed ? plClosedText(closed) : '',
-      label: plAddLabel(a) + (a.existing ? ' (running)' : ''), existing: !!a.existing, booked: a.existing ? a.people : 0, staff: a.staff, people: a.people, price: a.price, nth: ds.indexOf(date) + 1, of: ds.length })
+      label: plAddLabel(a) + (a.existing ? ' (running)' : ''), existing: !!a.existing, name: plAddLabel(a),
+      booked: a.existing ? a.people : (pl.bookedSess || []).filter(x => x.date === date && x.start === a.start && (x.kind === 'series' || x.kind === 'wheel') && plSameClass(x.title, plAddLabel(a))).reduce((t, x) => t + x.n, 0), staff: a.staff, people: a.people, price: a.price, nth: ds.indexOf(date) + 1, of: ds.length })
   })
   pl.camps.filter(c => c.date === date).forEach(c => {
     const id = 'C|' + c.id + '|' + date, e = d.edits[id] || {}
@@ -5606,7 +5612,7 @@ let plAllState = null
 async function plOpenAll() {
   await plFlush()
   plModal('<h2>All studios</h2><div class="loading">Loading every studio\'s plans…</div>', true)
-  const { data, error } = await sb.from('schedule_plans').select('id, studio_id, name, status, week_start, weeks, data, updated_at').neq('status', 'archived')
+  const { data, error } = await sb.from('schedule_plans').select('id, studio_id, name, status, week_start, weeks, data, updated_at, set_at').neq('status', 'archived')
   if (error) { plModal('<h2>All studios</h2><div class="note bad">' + esc(error.message) + '</div>', true); return }
   let removals = []
   try { removals = await plFetchAll(() => sb.from('schedule_plan_removals').select('*').gte('session_date', todayStr()).order('session_date').order('session_time').order('id')) }
@@ -5638,10 +5644,49 @@ function plAllTabs(nAdd) {
   const nRem = plAllRemoveGroups().length
   return '<div style="display:flex;gap:6px;margin:4px 0 12px">' +
     '<button class="btn small' + (plAllState.tab !== 'remove' ? ' primary' : '') + '" onclick="plAllState.tab=\'add\';plRenderAll()">To add (' + nAdd + ')</button>' +
-    '<button class="btn small' + (plAllState.tab === 'remove' ? ' primary' : '') + '" onclick="plAllState.tab=\'remove\';plRenderAll()">To remove (' + nRem + ')</button></div>'
+    '<button class="btn small' + (plAllState.tab === 'remove' ? ' primary' : '') + '" onclick="plAllState.tab=\'remove\';plRenderAll()">To remove (' + nRem + ')</button>' +
+    '<button class="btn small' + (plAllState.tab === 'status' ? ' primary' : '') + '" onclick="plAllState.tab=\'status\';plRenderAll()">Plan status</button></div>'
+}
+
+/* ---------- Plan status: which weeks have a set plan, studio by studio ---------- */
+// Set = a set plan covers the week. Set, changed = edited after it was set (set it again to send the changes).
+// Draft = only a plan that isn't set. Click a cell to open that studio's plan at that week.
+function plRenderAllStatus() {
+  const plans = plAllState.plans, first = sundayOf(todayStr())
+  const lastEnd = plans.reduce((m, p) => { const e = addDays(p.week_start, p.weeks * 7 - 1); return e > m ? e : m }, addDays(first, 7 * 8 - 1))
+  const weeks = []
+  for (let w = first; w <= lastEnd && weeks.length < 16; w = addDays(w, 7)) weeks.push(w)
+  const cell = (st, w) => {
+    const cover = plans.filter(p => p.studio_id === st && p.week_start <= w && addDays(p.week_start, p.weeks * 7 - 1) >= w)
+    const set = cover.filter(p => p.status === 'set'), draft = cover.filter(p => p.status !== 'set')
+    const p = set[0] || draft[0]
+    if (!p) return '<td style="text-align:center;color:var(--muted)">–</td>'
+    const changed = set.length && set.some(x => x.set_at && x.updated_at && new Date(x.updated_at) - new Date(x.set_at) > 60000)
+    const cls = set.length ? (changed ? 'manual' : 'removed') : 'pending', txt = set.length ? (changed ? 'Set, changed' : 'Set') : 'Draft'
+    const wk = Math.floor(daysBetween(p.week_start, w) / 7)
+    const tip = cover.map(x => x.name + ' (' + (x.status === 'set' ? 'set ' + String(x.set_at || '').slice(0, 10) : 'not set') + ')').join(', ') +
+      (changed ? ' · edited after it was set: set it again to send the changes' : '') + (cover.length > 1 ? ' · more than one plan covers this week' : '')
+    return '<td style="text-align:center;cursor:pointer" title="' + esc(tip) + '" onclick="plJumpTo(\'' + st + '\',\'' + p.id + '\',' + wk + ')"><span class="pl-st ' + cls + '">' + txt + (cover.length > 1 ? ' ×' + cover.length : '') + '</span></td>'
+  }
+  const studios = Object.keys(STUDIO_NAMES)
+  const setCount = w => studios.filter(st => plans.some(p => p.studio_id === st && p.status === 'set' && p.week_start <= w && addDays(p.week_start, p.weeks * 7 - 1) >= w)).length
+  let h = '<h2>All studios: plan status</h2>' + plAllTabs(plAllGroups().list.length) +
+    '<div class="sub">Which weeks each studio has a set plan for. <b>Set, changed</b> means the plan was edited after it was set, so set it again to send the changes to Shopify and Build schedule. Click a cell to open that plan at that week.</div>' +
+    '<div class="pl-tbl-wrap" style="max-height:60vh"><table class="list"><tr><th>Studio</th>' + weeks.map(w => '<th style="text-align:center">' + plShortDate(w) + '<div class="muted small" style="font-weight:400">' + setCount(w) + '/' + studios.length + ' set</div></th>').join('') + '</tr>' +
+    studios.map(st => '<tr><td>' + esc(STUDIO_NAMES[st]) + '</td>' + weeks.map(w => cell(st, w)).join('') + '</tr>').join('') + '</table></div>' +
+    '<div class="pl-actions"><button class="btn" onclick="plCloseModal()">Close</button></div>'
+  plModal(h, true)
+}
+async function plJumpTo(studio, planId, week) {
+  plCloseModal()
+  document.getElementById('pl-studio').value = studio
+  await plLoadStudio()
+  if (pl.plan && pl.plan.id !== planId) await plOpenPlan(planId)
+  if (pl.plan) { pl.week = Math.max(0, Math.min(pl.plan.weeks - 1, week)); plRender() }
 }
 function plRenderAll() {
   if (plAllState.tab === 'remove') { plRenderAllRemove(); return }
+  if (plAllState.tab === 'status') { plRenderAllStatus(); return }
   const { plans, list } = plAllGroups(), all = Object.keys(STUDIO_NAMES)
   const studiosIn = new Set(plans.map(p => p.studio_id))
   const drafts = plAllState.plans.filter(p => p.status !== 'set')
