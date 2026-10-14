@@ -5657,6 +5657,9 @@ function plRenderAll() {
   if (missing.length && studiosIn.size) h += '<div class="muted small" style="margin-bottom:8px">Nothing yet from: ' + missing.map(id => esc(STUDIO_NAMES[id])).join(', ') + '</div>'
   if (!list.length) h += '<div class="empty">No additions yet' + (plAllState.drafts ? '' : ' in set plans') + '.</div>'
   else {
+    const toCheck = list.filter(g => plMissingStudios(g).length || !(plAllState.inShop[g.title] || new Set()).size).length
+    if (toCheck) h += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px"><button class="btn small" onclick="plAllRecheckShop(null)">↻ Re-check Shopify (' + toCheck + ')</button>' +
+      '<span class="muted small" id="pl-recheck-msg">Re-reads the products that aren\'t all in yet, in case variants were added by hand or the sync hasn\'t caught up.</span></div>'
     const canAdd = list.filter(g => plMissingStudios(g).length && (plAllState.inShop[g.title] || new Set()).size)
     if (canAdd.length) h += '<div class="note info" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">' + canAdd.length + ' product' + (canAdd.length === 1 ? ' is' : 's are') +
       ' in Shopify but missing some planned studios. <label class="small">Spaces for each new studio <input class="input" id="pl-add-qty" type="number" min="0" style="width:80px;height:28px" placeholder="same"></label>' +
@@ -5664,9 +5667,9 @@ function plRenderAll() {
     h += '<div class="pl-tbl-wrap"><table class="list"><tr><th>Shopify title</th><th>Dates</th><th>Studios (variants)</th><th>In Shopify</th></tr>' +
     list.map((g, gi) => {
       const have = plAllState.inShop[g.title] || new Set(), miss = plMissingStudios(g)
-      const shop = !have.size ? '<span class="pl-st pending">Not created yet</span><div class="muted small">Create it by hand first</div>'
+      const shop = !have.size ? '<span class="pl-st pending">Not created yet</span> <button class="btn small" title="Re-check Shopify" onclick="plAllRecheckShop(' + gi + ')">↻</button><div class="muted small">Create it by hand first</div>'
         : !miss.length ? '<span class="pl-st removed">All ' + Object.keys(g.studios).length + ' in</span>'
-        : '<span class="pl-st manual">' + (Object.keys(g.studios).length - miss.length) + ' of ' + Object.keys(g.studios).length + ' in</span> <button class="btn small" onclick="plAllAddStudios(' + gi + ')">Add ' + miss.length + '</button>'
+        : '<span class="pl-st manual">' + (Object.keys(g.studios).length - miss.length) + ' of ' + Object.keys(g.studios).length + ' in</span> <button class="btn small" onclick="plAllAddStudios(' + gi + ')">Add ' + miss.length + '</button> <button class="btn small" title="Re-check Shopify" onclick="plAllRecheckShop(' + gi + ')">↻</button>'
       return plTypeHead(list, gi, 4) + '<tr><td class="wrap">' + esc(g.title) + '</td><td class="wrap small">' + (g.series ? g.dates.map(plShortDate).join(', ') : plShortDate(g.dates[0])) + '</td>' +
         '<td class="wrap small" title="' + esc(Object.keys(g.studios).map(id => STUDIO_NAMES[id] + ': ' + g.studios[id].join(', ')).join('\n')) + '"><b>' + Object.keys(g.studios).length + '</b> ' +
         Object.keys(g.studios).map(id => '<span style="' + (have.size && !have.has(id) ? 'color:var(--bad);font-weight:600' : '') + '">' + esc(STUDIO_NAMES[id]) + '</span>').join(', ') + '</td><td class="small">' + shop + '</td></tr>'
@@ -5738,14 +5741,53 @@ async function plAllRecheck() {
 // Uses shopify-variant-remove's "restore" action: adds a variant for the studio (same price as the
 // product's other variants) with that many spaces. Session rows come from admin's Discover from
 // Shopify, which creates every studio's sessions; anything missing is listed afterwards.
+// Re-read products from Shopify (same lookup admin uses) and refresh shopify_variants with the same
+// upsert_shopify_variants call, so the list sees variants added by hand or here. Variant names that
+// don't match a studio exactly are reported.
+const plStudioOfVariant = name => Object.keys(PL_VARIANT_NAMES).find(k => PL_VARIANT_NAMES[k].replace(/\s+/g, ' ').trim().toUpperCase() === String(name || '').replace(/\s+/g, ' ').trim().toUpperCase())
+async function plRecheckShopify(groups, quiet) {
+  const odd = [], gone = []
+  let checked = 0
+  for (const g of groups) {
+    const el = document.getElementById('pl-recheck-msg'); if (el) el.textContent = 'Checking ' + (++checked) + ' of ' + groups.length + '…'
+    let d
+    try { d = await bdInvCall({ action: 'get_all', product_title: g.title }) } catch (e) { continue }
+    if (!d || d.error || !d.variants) { gone.push(g.title); continue }
+    const rows = []
+    d.variants.forEach(v => {
+      const st = plStudioOfVariant(v.variant_title)
+      if (st) rows.push({ studio_id: st, variant_id: v.variant_id, inventory_item_id: v.inventory_item_id })
+      else odd.push('"' + v.variant_title + '" on ' + g.title)
+    })
+    if (rows.length) await sb.rpc('upsert_shopify_variants', { p_shopify_title: g.title, p_product_handle: d.handle, p_product_id: d.product_id, p_status: d.status || 'active', p_variants: rows })
+    plAllState.inShop[g.title] = new Set(rows.map(r => r.studio_id))
+  }
+  if (!quiet) {
+    plRenderAll()
+    const box = document.querySelector('#pl-modal .pl-modal')
+    if (box) box.insertAdjacentHTML('afterbegin', '<div class="note ' + (odd.length ? 'warn' : 'info') + '">Checked ' + groups.length + ' product' + (groups.length === 1 ? '' : 's') + ' in Shopify.' +
+      (gone.length ? ' ' + gone.length + ' not found in Shopify yet (they stay "Not created yet").' : '') +
+      (odd.length ? '<br><b>Variant names that don\'t match a studio</b> (rename them in Shopify to the studio\'s exact name, e.g. ' + esc(PL_VARIANT_NAMES['ON-ERN-ERN']) + '): ' + esc(odd.join('; ')) : '') + '</div>')
+  }
+}
+async function plAllRecheckShop(gi) {
+  const list = plAllGroups().list
+  const groups = gi == null ? list.filter(g => plMissingStudios(g).length || !(plAllState.inShop[g.title] || new Set()).size) : [list[gi]]
+  if (!groups.length) return
+  await plRecheckShopify(groups)
+}
+
 function plMissingStudios(g) {
   const have = plAllState.inShop[g.title] || new Set()
   return have.size ? Object.keys(g.studios).filter(id => !have.has(id)) : []
 }
 async function plAllAddStudios(gi) {
   const list = plAllGroups().list
-  const groups = (gi == null ? list : [list[gi]]).filter(g => plMissingStudios(g).length)
+  let groups = (gi == null ? list : [list[gi]]).filter(g => plMissingStudios(g).length)
   if (!groups.length) return
+  await plRecheckShopify(groups, true)   // variants added by hand since the last sync don't get added twice
+  groups = groups.filter(g => plMissingStudios(g).length)
+  if (!groups.length) { plRenderAll(); toast('Those studios are already in Shopify'); return }
   const qtyEl = document.getElementById('pl-add-qty'), fixed = qtyEl && qtyEl.value !== '' ? Number(qtyEl.value) : null
   const n = groups.reduce((t, g) => t + plMissingStudios(g).length, 0)
   if (!confirm('Add ' + n + ' studio variant' + (n === 1 ? '' : 's') + ' to ' + groups.length + ' Shopify product' + (groups.length === 1 ? '' : 's') + '?\n\n' +
@@ -5780,6 +5822,7 @@ async function plAllAddStudios(gi) {
       } catch (e) { fails.push((STUDIO_NAMES[st] || st) + ' on ' + g.title + ': ' + e.message) }
     }
   }
+  await plRecheckShopify(groups, true)
   plRenderAll()
   const box = document.querySelector('#pl-modal .pl-modal')
   if (box) box.insertAdjacentHTML('afterbegin', '<div class="note ' + (fails.length || noSessions.length ? 'warn' : 'info') + '">' + ok + ' studio variant' + (ok === 1 ? '' : 's') + ' added in Shopify.' +
