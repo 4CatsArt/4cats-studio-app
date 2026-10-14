@@ -4188,7 +4188,8 @@ function plItems(date) {
     const ds = a.dates.slice().sort(), closed = d.closed[date]
     if (closed && a.existing) return   // running class on a day the studio is closed: not on at all
     items.push({ id: 'A|' + a.id + '|' + date, addId: a.id, date, kind: a.kind, start: a.start, dur: a.dur, col: a.col, src: 'add', state: closed ? 'closed' : 'on', by: closed ? plClosedText(closed) : '',
-      label: plAddLabel(a) + (a.existing ? ' (running)' : ''), existing: !!a.existing, name: plAddLabel(a),
+      label: plAddLabel(a) + (a.existing ? ' (running)' : ''), existing: !!a.existing, name: plAddLabel(a), makeup: (a.makeup || []).includes(date),
+      classNo: a.classFrom ? a.classFrom + ds.indexOf(date) : ds.indexOf(date) + 1, classOf: a.classTotal || (a.classFrom ? a.classFrom + ds.length - 1 : ds.length),
       booked: a.existing ? a.people : (pl.bookedSess || []).filter(x => x.date === date && x.start === a.start && (x.kind === 'series' || x.kind === 'wheel') && plSameClass(x.title, plAddLabel(a))).reduce((t, x) => t + x.n, 0), staff: a.staff, people: a.people, price: a.price, nth: ds.indexOf(date) + 1, of: ds.length })
   })
   pl.camps.filter(c => c.date === date).forEach(c => {
@@ -4248,15 +4249,19 @@ function plDayClick(ev, date) {
     (off.length ? off.length + ' off: ' + esc(off.map(p => p.display_name).join(', ')) : 'Nobody has time off') + '</div>'
   if (c) {
     h += '<div class="row small">' + esc(plClosedText(c)) + '</div>' +
+      (c.applied && Object.keys(c.applied).length ? '<div class="row small" style="color:var(--warn)">The running classes were already renumbered in Supabase for this day. Reopening here doesn\'t undo that.</div>' : '') +
       (c.shifted.length ? '<div class="row muted small">Reopening puts ' + c.shifted.length + ' session class' + (c.shifted.length > 1 ? 'es' : '') + ' back on this date and takes off the week added on the end.</div>' : '') +
       '<button onclick="plReopenDay(\'' + date + '\')">Reopen this day</button>'
   } else {
-    const series = pl.plan.data.adds.filter(a => PL_KINDS[a.kind].series && a.dates.includes(date)).length
+    const series = pl.plan.data.adds.filter(a => PL_KINDS[a.kind].series && !a.existing && a.dates.includes(date)).length
+    const running = pl.plan.data.adds.filter(a => a.existing && a.dates.includes(date))
     h += '<div class="row">' + PL_CLOSE_REASONS.map((r, i) => '<label style="flex-direction:row;align-items:center;gap:4px;color:var(--ink);font-size:12px"><input type="radio" name="pl-close-why" value="' + r + '"' +
       ((off.length ? r === 'Short staffed' : i === 0) ? ' checked' : '') + '>' + r + '</label>').join('') + '</div>' +
       '<div class="row"><input class="input" id="pl-close-note" placeholder="Note (optional), e.g. Remembrance Day" style="width:100%"></div>' +
       '<div class="row"><label style="flex-direction:row;align-items:center;gap:4px;color:var(--ink);font-size:12px"><input type="checkbox" id="pl-close-staff" checked> Clear planned staff that day</label></div>' +
-      (series ? '<div class="row muted small">' + series + ' session class' + (series > 1 ? 'es skip' : ' skips') + ' this date and get' + (series > 1 ? '' : 's') + ' a week added on the end.</div>' : '') +
+      (series ? '<div class="row muted small">' + series + ' planned session class' + (series > 1 ? 'es skip' : ' skips') + ' this date and get' + (series > 1 ? '' : 's') + ' a week added on the end.</div>' : '') +
+      (running.length ? '<div class="row"><label style="flex-direction:row;align-items:center;gap:4px;color:var(--ink);font-size:12px"><input type="checkbox" id="pl-close-makeup" checked> Add a make-up week on the end for ' +
+        esc(running.map(a => plAddLabel(a)).join(', ')) + ' (running)</label></div>' : '') +
       (pl.camps.some(x => x.date === date) ? '<div class="row small" style="color:var(--warn)">A camp or PA day is booked this day. It stays on the plan and still needs its staff.</div>' : '') +
       '<div class="row"><button class="btn small bad" onclick="plCloseDay(\'' + date + '\')">Close this day</button></div>'
   }
@@ -4273,10 +4278,17 @@ function plCloseDay(date) {
     else toast(plAddLabel(a) + ': no room for another week inside 12 weeks', true)
     rec.shifted.push({ id: a.id, added: next })
   })
-  // running classes don't run that day (their dates are fixed, so no week is added on the end)
+  // running classes don't run that day; with "make-up week" ticked they get a week on the end, like new sessions
+  const makeup = !!(document.getElementById('pl-close-makeup') || {}).checked
   d.adds.filter(a => a.existing && a.dates.includes(date)).forEach(a => {
     a.dates = a.dates.filter(x => x !== date)
-    rec.shifted.push({ id: a.id, added: null })
+    let next = null
+    if (makeup) {
+      next = plNextWeek(a, date)
+      if (next) { a.dates.push(next); (a.makeup = a.makeup || []).push(next); plGrowTo(next) }
+      else toast(plAddLabel(a) + ': no room for a make-up week inside 12 weeks', true)
+    }
+    rec.shifted.push({ id: a.id, added: next })
   })
   if (document.getElementById('pl-close-staff').checked && d.shifts[date] && Object.keys(d.shifts[date]).length) { rec.shifts = d.shifts[date]; delete d.shifts[date] }
   plCloseMenu(); plTouch()
@@ -4287,7 +4299,7 @@ function plReopenDay(date) {
   rec.shifted.forEach(x => {
     const a = d.adds.find(y => y.id === x.id)
     if (!a) return
-    if (x.added) a.dates = a.dates.filter(y => y !== x.added)
+    if (x.added) { a.dates = a.dates.filter(y => y !== x.added); if (a.makeup) a.makeup = a.makeup.filter(y => y !== x.added) }
     if (!a.dates.includes(date)) a.dates.push(date)
   })
   if (rec.shifts && !(d.shifts[date] && Object.keys(d.shifts[date]).length)) d.shifts[date] = rec.shifts
@@ -4507,8 +4519,8 @@ function plColItems(items, lo) {
     const w = ghost ? 100 : 100 / i.lanes, left = ghost ? 0 : i.lane * w
     const long = i.dur >= 45
     const tip = i.label + ', ' + bdFmtShort(i.start) + '–' + bdFmtShort(i.start + i.dur) +
-      (i.state === 'closed' ? ' (' + i.by + ')' : i.state === 'replaced' ? ' (replaced by ' + i.by + ')' : i.state === 'removed' ? ' (taken out)' : '') + (i.of ? ', ' + i.nth + ' of ' + i.of : '') + (bk ? ', ' + (i.kind === 'party' ? 'booked' : i.booked + ' booked') : '')
-    const meta = long && !ghost ? '<span class="meta">' + bdFmtShort(i.start) + '–' + bdFmtShort(i.start + i.dur) + (i.staff ? ', ' + i.staff + ' staff' : '') + (i.of > 1 ? ', ' + i.nth + '/' + i.of : '') + (bk ? ', <b>' + (i.kind === 'party' ? 'booked' : i.booked + ' booked') + '</b>' : '') + '</span>' : ''
+      (i.state === 'closed' ? ' (' + i.by + ')' : i.state === 'replaced' ? ' (replaced by ' + i.by + ')' : i.state === 'removed' ? ' (taken out)' : '') + (i.classOf > 1 ? ', Class ' + i.classNo + ' of ' + i.classOf : i.of ? ', ' + i.nth + ' of ' + i.of : '') + (bk ? ', ' + (i.kind === 'party' ? 'booked' : i.booked + ' booked') : '')
+    const meta = long && !ghost ? '<span class="meta">' + bdFmtShort(i.start) + '–' + bdFmtShort(i.start + i.dur) + (i.staff ? ', ' + i.staff + ' staff' : '') + (i.classOf > 1 ? ', Class ' + i.classNo + ' of ' + i.classOf : i.of > 1 ? ', ' + i.nth + '/' + i.of : '') + (bk ? ', <b>' + (i.kind === 'party' ? 'booked' : i.booked + ' booked') + '</b>' : '') + '</span>' : ''
     return '<div class="pl-it' + (long ? ' long' : '') + (ghost ? ' ghost' : '') + (bk ? ' booked' : '') + '" style="top:' + top + 'px;height:' + h + 'px;left:calc(' + left + '% + 1px);width:calc(' + w + '% - 2px);background:' +
       (bk ? K.bgB || K.bg : K.bg) + ';border-left-color:' + K.ink + ';color:' + K.ink + (warnBk ? ';border:1.5px solid var(--bad);opacity:.9' : '') + '" title="' + esc(tip + (warnBk ? ' · has bookings: move or refund them before it comes out' : '')) + '" onclick="plItemClick(event,\'' + i.id + '\',\'' + i.date + '\')">' +
       (long ? '<b>' + esc(i.label) + '</b>' + meta : '<b>' + bdFmtShort(i.start) + '</b> ' + esc(K.short) + (bk && i.kind !== 'party' ? ' <b>·' + i.booked + '</b>' : '') + (warnBk ? ' ⚠' : '')) + '</div>'
@@ -4772,7 +4784,7 @@ function plItemClick(ev, id, date) {
   if (!it) return
   const range = bdFmtShort(it.start) + '–' + bdFmtShort(it.start + it.dur)
   const every = 'every ' + DAY_NAMES[plDow(date)] + ' at ' + bdFmtShort(it.start)
-  let h = '<div class="pl-menu-h"><b>' + esc(it.label) + '</b>' + plDayLabel(date) + ', ' + range + (it.of ? ' (' + it.nth + ' of ' + it.of + ')' : '') + '</div>'
+  let h = '<div class="pl-menu-h"><b>' + esc(it.label) + '</b>' + plDayLabel(date) + ', ' + range + (it.classOf > 1 ? ' (Class ' + it.classNo + ' of ' + it.classOf + ')' : it.of ? ' (' + it.nth + ' of ' + it.of + ')' : '') + '</div>'
   if (bk = (it.booked || 0) > 0) h += '<div class="row small" style="color:var(--good);font-weight:600">' + (it.kind === 'party' ? 'Booked' : it.booked + ' booked') + (it.state !== 'on' ? ' <span style="color:var(--bad)">· taken out, so move or refund them first</span>' : '') + '</div>'
   if (it.src === 'camp' || it.src === 'event') {
     h += '<div class="row small">' + (it.src === 'event' ? 'Booked at the studio' : 'Already scheduled at the studio') + ', so it can\'t be changed here.</div>' +
@@ -5031,12 +5043,22 @@ async function plFindRunning() {
   if (r.error) { msg.textContent = 'Could not load: ' + r.error.message; return }
   const groups = {}
   const closed = pl.plan.data.closed || {}
+  // the real session titles carry "Class 9 of 12" (the staffing data may give the bare class name)
+  const realTitle = {}
+  const sids = [...new Set((r.data || []).filter(x => x.rule_kind === 'one_per_session').map(x => x.session_id).filter(Boolean))]
+  for (let i = 0; i < sids.length; i += 200) {
+    const { data } = await sb.from('sessions').select('id, title').in('id', sids.slice(i, i + 200))
+    ;(data || []).forEach(x => { realTitle[x.id] = x.title })
+  }
   ;(r.data || []).filter(x => x.rule_kind === 'one_per_session' && (x.booked || 0) > 0 && x.start_time && x.end_time && !closed[x.session_date]).forEach(x => {
     const dow = plDow(x.session_date), key = classKey(x.title) + '|' + dow + '|' + x.start_time.slice(0, 5)
     const g = groups[key] || (groups[key] = { key, title: classLabel(x.title), kind: /wheel/i.test(x.title) ? 'wheel_session' : 'session_class', dow,
       start: toMin(x.start_time), dur: Math.max(15, toMin(x.end_time) - toMin(x.start_time)), dates: [], enrolled: 0 })
     if (!g.dates.includes(x.session_date)) g.dates.push(x.session_date)
     g.enrolled = Math.max(g.enrolled, x.booked || 0)
+    const tt = realTitle[x.session_id] || x.title || ''
+    const m = /\bclass\s+(\d+)\s+of\s+(\d+)/i.exec(tt), w = /(\d+)\s*week session/i.exec(tt)
+    ;(g.nums = g.nums || {})[x.session_date] = m ? [Number(m[1]), Number(m[2])] : w ? [1, Number(w[1])] : null
   })
   const list = Object.values(groups).sort((a, b) => ((a.dow + 6) % 7) - ((b.dow + 6) % 7) || a.start - b.start)
   list.forEach(g => {
@@ -5066,9 +5088,16 @@ function plConfirmImport() {
   const d = pl.plan.data, picked = plImport.list.filter(g => g.pick)
   let added = 0, updated = 0
   picked.forEach(g => {
-    const vals = { kind: g.kind, name: g.title, start: g.start, dur: g.dur, dates: g.dates.slice(), people: g.enrolled, price: g.rate * g.dates.length }
+    const first = (g.nums || {})[g.dates[0]]
+    const vals = { kind: g.kind, name: g.title, start: g.start, dur: g.dur, dates: g.dates.slice(), people: g.enrolled, price: g.rate * g.dates.length,
+      classFrom: first ? first[0] : null, classTotal: first ? first[1] : null }
     const a = d.adds.find(x => x.sourceKey === g.key)
-    if (a) { Object.assign(a, vals); updated++; return }
+    if (a) {
+      // keep make-up weeks added in the plan, and leave closed days out
+      const keep = (a.makeup || []).filter(x => !vals.dates.includes(x))
+      vals.dates = vals.dates.filter(x => !(pl.plan.data.closed || {})[x]).concat(keep)
+      Object.assign(a, vals); updated++; return
+    }
     d.adds.push(Object.assign({ id: plId(), existing: true, sourceKey: g.key, audience: '', catalog_id: null, col: 1,
       replace: plImport.repl, replaceKinds: plImport.repl ? PL_DROPINS.slice() : [], staff: Number(pl.plan.settings.k[g.kind].staff) || 1, added_at: todayStr() }, vals))
     added++
@@ -5282,7 +5311,113 @@ async function plOpenSet() {
                  drop: notTaken.filter(x => ['pending', 'blocked', 'manual', 'failed'].includes(x.status)), done: null }
   pl.setShiftsDone = null
   try { pl.setShifts = await plShiftPreview() } catch (e) { pl.setShifts = { error: e.message || String(e) } }
+  pl.setSkipsDone = null
+  try { pl.setSkips = await plSkipPreview() } catch (e) { pl.setSkips = [] }
   plRenderSet()
+}
+
+/* ---------- running classes: skipped week → renumber the later weeks and add the make-up week ---------- */
+// For each running class whose date was closed in this plan with a make-up week ticked:
+//   the closed week is hidden, each later week's "Class N of M" goes down by 1, and a new session row is
+//   added on the make-up date with the last number (copied from the class's last week, so enrolment,
+//   age group and everything else match). Without a make-up week, the closed week is only hidden.
+// Only runs when the class's numbering in Supabase is clean (1, 2, 3 … with no gaps). Done once per closure.
+function plClassNum(title) {
+  const m = /\bclass\s+(\d+)\s+of\s+(\d+)/i.exec(title || ''), w = /(\d+)\s*week session/i.exec(title || '')
+  return m ? { n: Number(m[1]), m: Number(m[2]) } : w ? { n: 1, m: Number(w[1]), week1: true } : null
+}
+const plSetClassNum = (title, n) => String(title).replace(/\bclass\s+\d+\s+of/i, 'Class ' + n + ' of')
+async function plSkipPreview() {
+  const d = pl.plan.data, out = []
+  // closures per running class, oldest first, not yet applied
+  const byAdd = {}
+  Object.keys(d.closed || {}).sort().forEach(date => {
+    const rec = d.closed[date]
+    ;(rec.shifted || []).forEach(x => {
+      const a = d.adds.find(y => y.id === x.id)
+      if (!a || !a.existing || (rec.applied || {})[a.id]) return
+      ;(byAdd[a.id] = byAdd[a.id] || { a, closures: [] }).closures.push({ date, makeup: x.added || null })
+    })
+  })
+  for (const { a, closures } of Object.values(byAdd)) {
+    const key = (a.sourceKey || '').split('|')[0] || classKey(a.name), dow = plDow(closures[0].date)
+    const lastDate = closures.reduce((m, c) => (c.makeup && c.makeup > m ? c.makeup : c.date > m ? c.date : m), closures[0].date)
+    const { data: rows, error } = await sb.from('sessions').select('id, title, session_date, show').eq('studio_id', pl.studio).eq('session_time', fromMin(a.start))
+      .gte('session_date', addDays(closures[0].date, -210)).lte('session_date', addDays(lastDate, 120)).order('session_date')
+    const item = { a, label: plAddLabel(a), closures, pick: true, hide: [], rename: [], insert: [], notes: [] }
+    out.push(item)
+    if (error) { item.bad = 'Could not read its sessions: ' + error.message; item.pick = false; continue }
+    const mine = (rows || []).filter(r => plDow(r.session_date) === dow && classKey(r.title) === key)
+    const work = mine.map(r => Object.assign({ id: r.id, date: r.session_date, title: r.title, show: r.show !== false, orig: r.title, origShow: r.show !== false }, plClassNum(r.title) || {}))
+    // numbering check: visible weeks go 1, 2, 3 … of the same total
+    const vis = work.filter(w => w.show && w.n != null)
+    const clean = vis.length && vis[0].n === 1 && vis.every((w, i) => w.m === vis[0].m && (i === 0 || w.n === vis[i - 1].n + 1))
+    if (!clean) { item.bad = 'Its numbering in Supabase isn\'t 1, 2, 3 … in order, so it\'s left for you to fix by hand'; item.pick = false; continue }
+    closures.forEach(c => {
+      const sk = work.find(w => w.date === c.date)
+      if (!sk) { item.notes.push('No class on ' + plShortDate(c.date)); return }
+      if (!sk.show) { item.notes.push(plShortDate(c.date) + ' was already skipped'); return }
+      sk.show = false
+      if (!c.makeup) return
+      const later = work.filter(w => w.show && w.date > c.date && w.n != null).sort((x, y) => x.date.localeCompare(y.date))
+      const lastN = later.length ? later[later.length - 1].n : sk.n
+      const from = later.length ? later[later.length - 1] : sk
+      later.forEach(w => { w.n -= 1; w.title = plSetClassNum(w.title, w.n) })
+      if (!work.some(w => w.date === c.makeup)) work.push({ id: null, date: c.makeup, title: plSetClassNum(from.orig, lastN), show: true, n: lastN, m: sk.m, copyId: from.id })
+      else item.notes.push('There\'s already a session on ' + plShortDate(c.makeup))
+    })
+    item.hide = work.filter(w => w.id && w.origShow && !w.show)
+    item.rename = work.filter(w => w.id && w.title !== w.orig)
+    item.insert = work.filter(w => !w.id)
+    if (!item.hide.length && !item.rename.length && !item.insert.length) item.pick = false
+  }
+  return out
+}
+function plSkipHtml(result) {
+  const list = pl.setSkips
+  if (!list || !list.length) return ''
+  const n = s => String((plClassNum(s) || {}).n || '')
+  let h = '<h3>Running classes: skipped weeks (' + list.length + ')</h3>'
+  if (pl.setSkipsDone) h += '<div class="note ' + (pl.setSkipsDone.fails.length ? 'warn' : 'info') + '">' + esc(pl.setSkipsDone.msg) + '</div>'
+  h += '<div class="pl-tbl-wrap"><table class="list"><tr><th></th><th>Class</th><th>What changes in Supabase (studio dashboard and class lists)</th></tr>' +
+    list.map((x, i) => {
+      const ch = x.bad ? '<span style="color:var(--bad)">' + esc(x.bad) + '</span>' : [].concat(
+        x.hide.map(w => plDayLabel(w.date) + ': hidden'),
+        x.rename.map(w => plDayLabel(w.date) + ': Class ' + n(w.orig) + ' → <b>Class ' + w.n + '</b>'),
+        x.insert.map(w => '<b>new ' + plDayLabel(w.date) + ': Class ' + w.n + ' of ' + w.m + '</b>'),
+        x.notes.map(esc)).join('<br>') || '<span class="muted">Nothing to change</span>'
+      return '<tr><td>' + (result || x.bad || !(x.hide.length + x.rename.length + x.insert.length) ? '' : '<input type="checkbox"' + (x.pick ? ' checked' : '') + ' onchange="pl.setSkips[' + i + '].pick=this.checked;plRenderSet()">') + '</td>' +
+        '<td class="wrap">' + esc(x.label) + '<div class="muted small">' + DAY_SHORT[plDow(x.closures[0].date)] + ' ' + bdFmtShort(x.a.start) + '</div></td><td class="wrap small">' + ch + '</td></tr>'
+    }).join('') + '</table></div>' +
+    '<div class="muted small" style="margin-top:4px">From the days you closed in this plan. With a make-up week, the later weeks move down one so the curriculum stays in order, and the last class is added on the make-up date. Enrolled students and the term teacher carry over. Nothing changes in Shopify.</div>'
+  return h
+}
+async function plApplySkips(msg) {
+  const list = (pl.setSkips || []).filter(x => x.pick && !x.bad)
+  if (!list.length) return
+  const fails = []
+  let done = 0
+  for (const x of list) {
+    if (msg) msg.textContent = 'Updating ' + x.label + '…'
+    try {
+      for (const w of x.hide) { const r = await sb.from('sessions').update({ show: false, publish: false }).eq('id', w.id); if (r.error) throw r.error }
+      for (const w of x.rename) { const r = await sb.from('sessions').update({ title: w.title }).eq('id', w.id); if (r.error) throw r.error }
+      for (const w of x.insert) {
+        const { data: src, error } = await sb.from('sessions').select('*').eq('id', w.copyId).single()
+        if (error) throw error
+        const row = Object.assign({}, src, { session_date: w.date, title: w.title, show: true })
+        delete row.id; delete row.created_at
+        let r = await sb.from('sessions').insert(row)
+        if (r.error) r = await sb.from('sessions').insert({ studio_id: src.studio_id, session_date: w.date, session_time: src.session_time, title: w.title,
+          session_type: src.session_type, capacity: src.capacity, show: true, publish: src.publish })
+        if (r.error) throw r.error
+      }
+      x.closures.forEach(c => { const rec = pl.plan.data.closed[c.date]; if (rec) (rec.applied = rec.applied || {})[x.a.id] = true })
+      done++
+    } catch (e) { fails.push(x.label + ': ' + (e.message || e)) }
+  }
+  pl.plan.dirty = true
+  pl.setSkipsDone = { fails, msg: done + ' class' + (done === 1 ? '' : 'es') + ' renumbered in Supabase.' + (fails.length ? ' Not done: ' + fails.join('; ') : '') }
 }
 
 /* ---------- planned staff → Build schedule drafts ---------- */
@@ -5364,6 +5499,8 @@ function plSetLabel(toRemove) {
   const parts = []
   if (toRemove) parts.push('hide ' + toRemove + ' variant' + (toRemove > 1 ? 's' : ''))
   if (back) parts.push('put back ' + back)
+  const skips = (pl.setSkips || []).filter(x => x.pick && !x.bad).length
+  if (skips) parts.push('renumber ' + skips + ' class' + (skips > 1 ? 'es' : ''))
   if (n) parts.push('send ' + n + ' shift' + (n > 1 ? 's' : ''))
   if (!parts.length) return 'Set plan'
   const t = parts.join(', ') + ' and set plan'
@@ -5383,6 +5520,7 @@ function plRenderSet(result) {
         '<td><span class="pl-st ' + (r.skip ? 'skip' : r.status) + '">' + (r.skip ? 'Skip for now' : PL_STATUS_TEXT[r.status]) + '</span>' + (r.note ? ' <span class="muted small">' + esc(r.note) + '</span>' : '') + '</td></tr>').join('') +
       '</table></div><div class="muted small" style="margin-top:4px">Ticked rows are hidden: this studio\'s variant is set to 0 left in Shopify (below 0 if people are booked; never deleted) and taken off the customer calendar, so it can be put back from the Removal list. Everything that isn\'t in Shopify yet is saved to the Removal list for later.</div>'
   }
+  h += plSkipHtml(result)
   h += plSetBackHtml(result)
   h += plShiftPreviewHtml(pl.setShifts, pl.setShiftsDone)
   h += plContactsHtml(plContacts(rows.filter(r => (r.bookings || []).length && !r.skip && !r.partyShared).map(r => ({ date: r.date, time: r.time, what: r.session ? r.session.title : r.label, bookings: r.bookings }))))
@@ -5521,6 +5659,7 @@ async function plRunSet() {
     if (put.length || B.drop.length) B.done = { fails, msg: [put.length && ok + ' put back in Shopify', B.drop.length && B.drop.length + ' taken off the Removal list'].filter(Boolean).join(', ') + '.' +
       (fails.length ? ' Not put back (try again from the Removal list): ' + fails.join('; ') : '') }
   }
+  await plApplySkips(msg)
   msg.textContent = 'Sending draft shifts…'
   pl.setShiftsDone = await plSendShifts()
   pl.plan.status = 'set'; pl.plan.set_at = now; pl.plan.dirty = true
