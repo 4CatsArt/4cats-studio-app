@@ -5658,7 +5658,8 @@ function plRenderAll() {
   if (!list.length) h += '<div class="empty">No additions yet' + (plAllState.drafts ? '' : ' in set plans') + '.</div>'
   else {
     const toCheck = list.filter(g => plMissingStudios(g).length || !(plAllState.inShop[g.title] || new Set()).size).length
-    if (toCheck) h += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px"><button class="btn small" onclick="plAllRecheckShop(null)">↻ Re-check Shopify (' + toCheck + ')</button>' +
+    if (toCheck || list.length) h += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">' + (toCheck ? '<button class="btn small" onclick="plAllRecheckShop(null)">↻ Re-check Shopify (' + toCheck + ')</button>' : '') +
+      '<button class="btn small bad" onclick="plAllCleanup()" title="Removes variants like AB / ON / ERIN that an earlier version added the wrong way">Fix wrongly added variants</button>' +
       '<span class="muted small" id="pl-recheck-msg">Re-reads the products that aren\'t all in yet, in case variants were added by hand or the sync hasn\'t caught up.</span></div>'
     const canAdd = list.filter(g => plMissingStudios(g).length && (plAllState.inShop[g.title] || new Set()).size)
     if (canAdd.length) h += '<div class="note info" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">' + canAdd.length + ' product' + (canAdd.length === 1 ? ' is' : 's are') +
@@ -5769,6 +5770,30 @@ async function plRecheckShopify(groups, quiet) {
       (gone.length ? ' ' + gone.length + ' not found in Shopify yet (they stay "Not created yet").' : '') +
       (odd.length ? '<br><b>Variant names that don\'t match a studio</b> (rename them in Shopify to the studio\'s exact name, e.g. ' + esc(PL_VARIANT_NAMES['ON-ERN-ERN']) + '): ' + esc(odd.join('; ')) : '') + '</div>')
   }
+}
+// Earlier versions put "ON / ERIN" whole into "select studio" (making "AB / ON / ERIN"). Remove those
+// variants and option values from every product on the list, then re-check, so Add can do them properly.
+async function plAllCleanup() {
+  const groups = plAllGroups().list
+  if (!confirm('Check all ' + groups.length + ' products and remove studio variants added the wrong way (like "AB / ON / ERIN")?\n\nOnly variants whose studio value has a "/" in it are removed, and never a product\'s last variant. Then click Add again to add those studios properly.')) return
+  const { data: { session } } = await sb.auth.getSession()
+  const token = session ? session.access_token : SUPABASE_KEY
+  let cleaned = 0, n = 0
+  const fails = []
+  for (const g of groups) {
+    const el = document.getElementById('pl-recheck-msg'); if (el) el.textContent = 'Checking ' + (++n) + ' of ' + groups.length + '…'
+    try {
+      const res = await fetch(PL_VARIANT_FN, { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'cleanup', product_title: g.title }) })
+      const j = await res.json().catch(() => ({}))
+      if (j.error) fails.push(g.title + ': ' + j.error)
+      else { cleaned += j.cleaned || 0; if (j.warning) fails.push(g.title + ': ' + j.warning) }
+    } catch (e) { fails.push(g.title + ': ' + e.message) }
+  }
+  await plRecheckShopify(groups.filter(g => (plAllState.inShop[g.title] || new Set()).size || plMissingStudios(g).length), true)
+  plRenderAll()
+  const box = document.querySelector('#pl-modal .pl-modal')
+  if (box) box.insertAdjacentHTML('afterbegin', '<div class="note ' + (fails.length ? 'warn' : 'info') + '">Removed ' + cleaned + ' wrongly added variant' + (cleaned === 1 ? '' : 's') + '. Click <b>Add</b> to add those studios properly.' +
+    (fails.length ? '<br>' + esc(fails.join('; ')) : '') + '</div>')
 }
 async function plAllRecheckShop(gi) {
   const list = plAllGroups().list
