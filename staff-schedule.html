@@ -5389,7 +5389,7 @@ function plSkipHtml(result) {
       return '<tr><td>' + (result || x.bad || !(x.hide.length + x.rename.length + x.insert.length) ? '' : '<input type="checkbox"' + (x.pick ? ' checked' : '') + ' onchange="pl.setSkips[' + i + '].pick=this.checked;plRenderSet()">') + '</td>' +
         '<td class="wrap">' + esc(x.label) + '<div class="muted small">' + DAY_SHORT[plDow(x.closures[0].date)] + ' ' + bdFmtShort(x.a.start) + '</div></td><td class="wrap small">' + ch + '</td></tr>'
     }).join('') + '</table></div>' +
-    '<div class="muted small" style="margin-top:4px">From the days you closed in this plan. With a make-up week, the later weeks move down one so the curriculum stays in order, and the last class is added on the make-up date. Enrolled students and the term teacher carry over. Nothing changes in Shopify.</div>'
+    '<div class="muted small" style="margin-top:4px">From the days you closed in this plan. With a make-up week, the later weeks move down one so the curriculum stays in order, and the last class is added on the make-up date. Enrolled students and the teacher on the class schedule carry over. Nothing changes in Shopify.</div>'
   return h
 }
 async function plApplySkips(msg) {
@@ -5407,17 +5407,27 @@ async function plApplySkips(msg) {
         if (error) throw error
         const row = Object.assign({}, src, { session_date: w.date, title: w.title, show: true })
         delete row.id; delete row.created_at
-        let r = await sb.from('sessions').insert(row)
+        let r = await sb.from('sessions').insert(row).select('id').single()
         if (r.error) r = await sb.from('sessions').insert({ studio_id: src.studio_id, session_date: w.date, session_time: src.session_time, title: w.title,
-          session_type: src.session_type, capacity: src.capacity, show: true, publish: src.publish })
+          session_type: src.session_type, capacity: src.capacity, show: true, publish: src.publish }).select('id').single()
         if (r.error) throw r.error
+        // the class's regular teacher (and anything else on its staff row) carries over to the make-up week
+        const { data: st } = await sb.from('session_staff').select('*').eq('session_id', w.copyId).limit(1)
+        if (st && st[0]) {
+          const staffRow = Object.assign({}, st[0], { session_id: r.data.id, updated_at: new Date().toISOString() })
+          delete staffRow.id; delete staffRow.created_at
+          let sr = await sb.from('session_staff').insert(staffRow)
+          if (sr.error) sr = await sb.from('session_staff').insert({ session_id: r.data.id, studio_id: src.studio_id, teacher: st[0].teacher, updated_at: new Date().toISOString() })
+          if (sr.error) x.teacherNote = 'teacher not copied (' + sr.error.message + ')'
+        }
       }
       x.closures.forEach(c => { const rec = pl.plan.data.closed[c.date]; if (rec) (rec.applied = rec.applied || {})[x.a.id] = true })
       done++
     } catch (e) { fails.push(x.label + ': ' + (e.message || e)) }
   }
   pl.plan.dirty = true
-  pl.setSkipsDone = { fails, msg: done + ' class' + (done === 1 ? '' : 'es') + ' renumbered in Supabase.' + (fails.length ? ' Not done: ' + fails.join('; ') : '') }
+  const tn = list.filter(x => x.teacherNote).map(x => x.label + ': ' + x.teacherNote)
+  pl.setSkipsDone = { fails: fails.concat(tn), msg: done + ' class' + (done === 1 ? '' : 'es') + ' renumbered in Supabase, with the regular teacher on each make-up week.' + (fails.length ? ' Not done: ' + fails.join('; ') : '') + (tn.length ? ' ' + tn.join('; ') : '') }
 }
 
 /* ---------- planned staff → Build schedule drafts ---------- */
