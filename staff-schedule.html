@@ -5854,6 +5854,7 @@ function plRenderAll() {
   else {
     const toCheck = list.filter(g => plMissingStudios(g).length || !(plAllState.inShop[g.title] || new Set()).size).length
     if (toCheck || list.length) h += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">' + '<button class="btn small" onclick="plAllRecheckShop(null)">↻ Re-check Shopify (all ' + list.length + ')</button>' +
+      '<button class="btn small" onclick="plAllHideNoVariant()" title="Discover creates every studio\'s sessions; this hides them where the studio has no variant">Hide sessions at studios without a variant</button>' +
       '<button class="btn small bad" onclick="plAllCleanup()" title="Removes variants like AB / ON / ERIN that an earlier version added the wrong way">Fix wrongly added variants</button>' +
       '<span class="muted small" id="pl-recheck-msg">Re-reads the products that aren\'t all in yet, in case variants were added by hand or the sync hasn\'t caught up.</span></div>'
     const canAdd = list.filter(g => plMissingStudios(g).length && (plAllState.inShop[g.title] || new Set()).size)
@@ -5976,6 +5977,50 @@ async function plRecheckShopify(groups, quiet) {
       (odd.length ? '<br><b>Variant names that don\'t match a studio</b> (rename them in Shopify to the studio\'s exact name, e.g. ' + esc(PL_VARIANT_NAMES['ON-ERN-ERN']) + '): ' + esc(odd.join('; ')) : '') + '</div>')
   }
 }
+/* ---------- Discover creates every studio's sessions: hide them where the studio has no variant ---------- */
+// For each product on the list that's in Shopify: every studio WITHOUT a variant gets that class's sessions
+// (all its weeks, same time) hidden, so admin and the studio dashboards only show it where it's sold.
+// Sessions with bookings are never hidden. Adding a studio later turns its sessions back on.
+async function plClassSessions(g, studios) {
+  const key = classKey(g.name || g.title.split('|')[1] || '')
+  let q = sb.from('sessions').select('id, studio_id, title, show, session_date').in('session_date', g.dates).eq('session_time', fromMin(g.start))
+  if (studios) q = q.in('studio_id', studios)
+  const { data } = await q
+  return (data || []).filter(x => classKey(x.title) === key)
+}
+async function plAllHideNoVariant() {
+  const groups = plAllGroups().list.filter(g => (plAllState.inShop[g.title] || new Set()).size)
+  if (!groups.length) { toast('Nothing on the list is in Shopify yet', true); return }
+  const el = () => document.getElementById('pl-recheck-msg')
+  if (el()) el().textContent = 'Checking Shopify first…'
+  await plRecheckShopify(groups, true)
+  const hide = []
+  for (const g of groups) {
+    if (el()) el().textContent = 'Looking at ' + g.title + '…'
+    const have = plAllState.inShop[g.title] || new Set()
+    if (!have.size) continue
+    ;(await plClassSessions(g)).forEach(x => { if (x.show !== false && !have.has(x.studio_id)) hide.push(Object.assign({ product: g.title }, x)) })
+  }
+  // never hide anything someone has booked
+  const booked = new Set()
+  for (let i = 0; i < hide.length; i += 200) {
+    const { data } = await sb.from('bookings').select('session_id').in('session_id', hide.slice(i, i + 200).map(x => x.id)).gt('qty', 0).is('returned_at', null)
+    ;(data || []).forEach(b => booked.add(b.session_id))
+  }
+  const go = hide.filter(x => !booked.has(x.id))
+  plRenderAll()
+  if (!go.length) { toast('Every studio without a variant is already hidden'); return }
+  const studios = new Set(go.map(x => x.studio_id)), prods = new Set(go.map(x => x.product))
+  if (!confirm('Hide ' + go.length + ' session' + (go.length === 1 ? '' : 's') + ' at ' + studios.size + ' studio' + (studios.size === 1 ? '' : 's') + ', for ' + prods.size + ' product' + (prods.size === 1 ? '' : 's') + '?\n\n' +
+    'These are the class weeks Discover created at studios that don\'t have that product in Shopify. Studios that do sell it aren\'t touched' +
+    (booked.size ? ', and ' + booked.size + ' with bookings are left alone' : '') + '. Adding a studio later turns its sessions back on.')) return
+  for (let i = 0; i < go.length; i += 200) {
+    const { error } = await sb.from('sessions').update({ show: false, publish: false }).in('id', go.slice(i, i + 200).map(x => x.id))
+    if (error) { toast('Stopped: ' + error.message, true); return }
+  }
+  toast('Hidden ' + go.length + ' sessions at studios without a variant')
+}
+
 // Earlier versions put "ON / ERIN" whole into "select studio" (making "AB / ON / ERIN"). Remove those
 // variants and option values from every product on the list, then re-check, so Add can do them properly.
 async function plAllCleanup() {
@@ -6046,6 +6091,8 @@ async function plAllAddStudios(gi) {
         const j = await res.json().catch(() => ({}))
         if (j.restored || j.exists) {
           ok++; (plAllState.inShop[g.title] = plAllState.inShop[g.title] || new Set()).add(st)
+          const mine = (await plClassSessions(g, [st])).filter(x => x.show === false).map(x => x.id)
+          if (mine.length) await sb.from('sessions').update({ show: true }).in('id', mine)
           const { data: ss } = await sb.from('sessions').select('id').eq('studio_id', st).eq('session_date', g.dates[0]).eq('session_time', fromMin(g.start)).limit(1)
           if (!ss || !ss.length) noSessions.push((STUDIO_NAMES[st] || st) + ', ' + plShortDate(g.dates[0]) + ' ' + bdFmtShort(g.start))
         } else fails.push((STUDIO_NAMES[st] || st) + ' on ' + g.title + ': ' + (j.error || (j.not_found ? 'product not found in Shopify' : 'HTTP ' + res.status)))
