@@ -87,6 +87,20 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .modal-field textarea { resize: vertical; min-height: 60px; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 1.25rem; padding-top: 1.25rem; border-top: 0.5px solid #f0f0e8; }
 .add-section-bar { text-align: center; padding: 6px 0 20px; }
+.req-wrap { overflow-x: auto; background: white; border: 0.5px solid #e0e0d8; border-radius: 12px; }
+.req-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.req-table th, .req-table td { padding: 8px 12px; border-bottom: 0.5px solid #f0f0e8; text-align: left; white-space: nowrap; }
+.req-table th { font-size: 10px; text-transform: uppercase; letter-spacing: 0.3px; color: #888; background: #fafaf8; font-weight: 600; vertical-align: middle; }
+.req-table th.sec, .req-table td.sec { position: sticky; left: 0; background: white; z-index: 1; }
+.req-table th.sec { background: #fafaf8; }
+.req-table td.sec { font-weight: 600; color: #333; }
+.req-table tbody tr:last-child td { border-bottom: none; }
+.req-table tfoot td { font-weight: 700; background: #fafaf8; border-top: 1px solid #e0e0d8; border-bottom: none; }
+.req-table input { width: 110px; padding: 5px 7px; border: 0.5px solid #d0d0c8; border-radius: 6px; font-size: 12px; font-family: inherit; outline: none; }
+.req-table input:focus { border-color: #888; }
+.req-col-actions { margin-left: 8px; display: inline-flex; gap: 2px; vertical-align: middle; }
+.req-col-actions button { background: none; border: 0.5px solid #d0d0c8; border-radius: 4px; font-size: 10px; cursor: pointer; padding: 1px 5px; color: #666; }
+.req-col-actions button:hover:not([disabled]) { background: #f0f0e8; }
 </style>
 </head>
 <body>
@@ -107,6 +121,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
     <div class="top-bar-title">4CATS <span>2026 Studio Setup Rollout</span></div>
     <a class="link-btn" href="admin.html">← Back to Admin</a>
     <div class="top-bar-right">
+      <button class="manage-btn" onclick="openRequirements()">Requirements</button>
       <button class="manage-btn" id="manage-toggle" onclick="toggleManageMode()">Manage Checklist</button>
       <button class="signout-btn" onclick="signOut()">Sign out</button>
     </div>
@@ -140,6 +155,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
       <button class="btn" onclick="showSectionModal()">+ Add Section</button>
     </div>
   </div>
+
+  <!-- SETUP REQUIREMENTS -->
+  <div class="view" id="view-requirements" style="max-width:1300px">
+    <div class="studio-detail-header">
+      <span class="back-link" onclick="leaveRequirements()">← All Studios</span>
+      <h1>Setup Requirements</h1>
+    </div>
+    <div style="font-size:12px;color:#888;margin:-0.75rem 0 1rem">What every studio needs for each checklist section. Entries can be numbers or text (e.g. "Full set", "Half set") &mdash; numbers are totalled at the bottom. Click <b>Manage Checklist</b> to edit.</div>
+    <div id="req-body"><div class="loading">Loading…</div></div>
+  </div>
 </div>
 
 <div id="modal-root"></div>
@@ -166,6 +191,9 @@ let allStatusRows = []        // ALL studio_items rows (for overview progress ca
 let allPhotoRows = []         // ALL section_photos rows (for overview progress calc)
 let manageMode = false
 let currentStudioId = null
+let reqColumns = []      // setup requirement columns: [{id, label, sort_order}]
+let reqCells = {}        // 'sectionId|columnId' -> text value
+let reqDirty = false     // unsaved edits in the requirements table
 
 // ---------- SHELVING CALCULATOR CONFIG ----------
 // Fixed carts: always exactly 1 per studio. Bisque/pickup carts are variable and
@@ -270,6 +298,7 @@ function studioProgress(studioId) {
 function showOverview() {
   document.getElementById('view-overview').classList.add('active')
   document.getElementById('view-studio').classList.remove('active')
+  document.getElementById('view-requirements').classList.remove('active')
   loadAllData()
 }
 
@@ -348,6 +377,7 @@ function renderTemplateManager() {
 async function openStudio(studioId) {
   currentStudioId = studioId
   document.getElementById('view-overview').classList.remove('active')
+  document.getElementById('view-requirements').classList.remove('active')
   document.getElementById('view-studio').classList.add('active')
   const studio = allStudios.find(s => s.id === studioId)
   document.getElementById('studio-detail-name').textContent = studio ? studio.name : studioId
@@ -787,14 +817,243 @@ async function saveDualPhotoNotes(itemId) {
   else allStatusRows.push({ studio_id: currentStudioId, item_id: itemId, value: newValue, checked: false })
 }
 
+// ---------- SETUP REQUIREMENTS ----------
+async function openRequirements() {
+  document.getElementById('view-overview').classList.remove('active')
+  document.getElementById('view-studio').classList.remove('active')
+  document.getElementById('view-requirements').classList.add('active')
+  document.getElementById('req-body').innerHTML = '<div class="loading">Loading…</div>'
+  reqDirty = false
+  const ok = await loadRequirements()
+  if (ok) renderRequirements()
+}
+
+function leaveRequirements() {
+  if (reqDirty && !confirm('You have unsaved changes in the requirements table. Discard them?')) return
+  reqDirty = false
+  showOverview()
+}
+
+async function loadRequirements() {
+  const [colsRes, cellsRes] = await Promise.all([
+    fetch(REST + 'setup2026_req_columns?select=*&order=sort_order.asc', { headers: HEADERS }),
+    fetch(REST + 'setup2026_req_cells?select=*&limit=5000', { headers: HEADERS }),
+  ])
+  if (!colsRes.ok || !cellsRes.ok) {
+    document.getElementById('req-body').innerHTML = '<div class="empty">Could not load the requirements table. Make sure <b>migration-setup-requirements.sql</b> has been run in Supabase.</div>'
+    return false
+  }
+  reqColumns = await colsRes.json()
+  const cells = await cellsRes.json()
+  reqCells = {}
+  cells.forEach(c => { reqCells[c.section_id + '|' + c.column_id] = c.value || '' })
+  return true
+}
+
+function getReqValue(sectionId, columnId) {
+  if (manageMode) {
+    const el = document.getElementById('req-' + sectionId + '-' + columnId)
+    if (el) return el.value
+  }
+  return reqCells[sectionId + '|' + columnId] || ''
+}
+
+// Copy whatever is typed in the inputs into reqCells (does NOT save to the database)
+function captureReqInputs() {
+  if (!manageMode) return
+  sections.forEach(s => reqColumns.forEach(c => {
+    const el = document.getElementById('req-' + s.id + '-' + c.id)
+    if (el) reqCells[s.id + '|' + c.id] = el.value
+  }))
+}
+
+function onReqInput() {
+  reqDirty = true
+  updateReqTotals()
+}
+
+function updateReqTotals() {
+  reqColumns.forEach(c => {
+    const el = document.getElementById('req-total-' + c.id)
+    if (!el) return
+    let sum = 0, numCount = 0, textCount = 0
+    sections.forEach(s => {
+      const v = String(getReqValue(s.id, c.id)).trim()
+      if (!v) return
+      if (/^\d+(\.\d+)?$/.test(v)) { sum += Number(v); numCount++ } else { textCount++ }
+    })
+    if (!numCount && !textCount) { el.textContent = '—'; el.title = ''; return }
+    el.textContent = numCount ? (Math.round(sum * 100) / 100) + (textCount ? '*' : '') : '—'
+    el.title = textCount ? ('Total counts numbers only. ' + textCount + ' text ' + (textCount === 1 ? 'entry is' : 'entries are') + ' not included.') : ''
+  })
+}
+
+function renderRequirements() {
+  const body = document.getElementById('req-body')
+  if (!sections.length) {
+    body.innerHTML = '<div class="empty">No checklist sections yet. Click "Manage Checklist" to add your first section, then come back here.</div>'
+    return
+  }
+
+  const controls = manageMode
+    ? `<div style="display:flex;gap:10px;align-items:center;margin-bottom:10px">
+         <button class="btn" onclick="showReqColumnModal()">+ Add Column</button>
+         <button class="btn btn-primary" onclick="saveRequirements()">Save Changes</button>
+         <span id="req-save-status" style="font-size:11px;color:#2e7d32"></span>
+       </div>` : ''
+
+  if (!reqColumns.length) {
+    body.innerHTML = controls + '<div class="empty">No columns yet. ' + (manageMode ? 'Click "+ Add Column" to add one (e.g. Shelves).' : 'Click "Manage Checklist" to add some.') + '</div>'
+    return
+  }
+
+  const head = reqColumns.map((c, idx) => {
+    const actions = manageMode
+      ? `<span class="req-col-actions">
+           <button onclick="moveReqColumn('${c.id}', -1)" ${idx === 0 ? 'disabled style="opacity:0.3"' : ''} title="Move left">◀</button>
+           <button onclick="moveReqColumn('${c.id}', 1)" ${idx === reqColumns.length - 1 ? 'disabled style="opacity:0.3"' : ''} title="Move right">▶</button>
+           <button onclick="showReqColumnModal('${c.id}')" title="Rename">✎</button>
+           <button onclick="deleteReqColumn('${c.id}')" title="Delete column">×</button>
+         </span>` : ''
+    return `<th>${escText(c.label)}${actions}</th>`
+  }).join('')
+
+  const rows = sections.map(s => {
+    const cells = reqColumns.map(c => {
+      const v = reqCells[s.id + '|' + c.id] || ''
+      return manageMode
+        ? `<td><input type="text" id="req-${s.id}-${c.id}" value="${escText(v)}" oninput="onReqInput()"></td>`
+        : `<td>${v ? escText(v) : '<span style="color:#ccc">—</span>'}</td>`
+    }).join('')
+    return `<tr><td class="sec">${escText(s.title)}</td>${cells}</tr>`
+  }).join('')
+
+  const foot = reqColumns.map(c => `<td id="req-total-${c.id}">—</td>`).join('')
+
+  body.innerHTML = controls + `<div class="req-wrap"><table class="req-table">
+    <thead><tr><th class="sec">Section</th>${head}</tr></thead>
+    <tbody>${rows}</tbody>
+    <tfoot><tr><td class="sec">Total per studio</td>${foot}</tr></tfoot>
+  </table></div>`
+  updateReqTotals()
+}
+
+async function saveRequirements() {
+  const statusEl = document.getElementById('req-save-status')
+  captureReqInputs()
+  const now = new Date().toISOString()
+  const rows = []
+  sections.forEach(s => reqColumns.forEach(c => {
+    const key = s.id + '|' + c.id
+    const v = (reqCells[key] || '').trim()
+    reqCells[key] = v
+    rows.push({ section_id: s.id, column_id: c.id, value: v, updated_at: now })
+  }))
+  if (!rows.length) return
+  statusEl.textContent = 'Saving…'
+  statusEl.style.color = '#888'
+  const res = await fetch(REST + 'setup2026_req_cells?on_conflict=section_id,column_id', {
+    method: 'POST',
+    headers: Object.assign({}, HEADERS, { 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
+    body: JSON.stringify(rows)
+  })
+  if (!res.ok) {
+    console.error('Failed to save requirements', await res.text())
+    statusEl.textContent = ''
+    alert('Could not save — please try again. (' + res.status + ')')
+    return
+  }
+  reqDirty = false
+  statusEl.textContent = 'Saved ✓'
+  statusEl.style.color = '#2e7d32'
+  setTimeout(() => { if (statusEl.textContent === 'Saved ✓') statusEl.textContent = '' }, 3000)
+}
+
+function showReqColumnModal(columnId) {
+  const editing = reqColumns.find(c => c.id === columnId)
+  document.getElementById('modal-root').innerHTML = `
+    <div class="modal-overlay" onclick="if(event.target===this) closeModal()">
+      <div class="modal-box">
+        <div class="modal-title">${editing ? 'Rename Column' : 'Add Column'}</div>
+        <div class="modal-field">
+          <label>Column Name</label>
+          <input type="text" id="req-col-label" value="${editing ? escText(editing.label) : ''}" placeholder="e.g. Shelves, Hooks, Wheels">
+        </div>
+        <div class="modal-actions">
+          <button class="btn" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="saveReqColumn('${columnId || ''}')">Save</button>
+        </div>
+      </div>
+    </div>`
+}
+
+async function reloadReqColumns() {
+  const res = await fetch(REST + 'setup2026_req_columns?select=*&order=sort_order.asc', { headers: HEADERS })
+  if (!res.ok) { alert('Could not refresh columns. (' + res.status + ')'); return }
+  reqColumns = await res.json()
+  renderRequirements()
+}
+
+async function saveReqColumn(columnId) {
+  const label = document.getElementById('req-col-label').value.trim()
+  if (!label) return
+  captureReqInputs()   // keep anything typed but not yet saved
+  let res
+  if (columnId) {
+    res = await fetch(REST + 'setup2026_req_columns?id=eq.' + columnId, {
+      method: 'PATCH', headers: HEADERS, body: JSON.stringify({ label })
+    })
+  } else {
+    const sortOrder = reqColumns.length ? Math.max(...reqColumns.map(c => c.sort_order || 0)) + 1 : 0
+    res = await fetch(REST + 'setup2026_req_columns', {
+      method: 'POST', headers: Object.assign({}, HEADERS, { 'Prefer': 'return=minimal' }),
+      body: JSON.stringify({ label, sort_order: sortOrder })
+    })
+  }
+  if (!res.ok) { alert('Could not save the column. (' + res.status + ')'); return }
+  closeModal()
+  await reloadReqColumns()
+}
+
+async function deleteReqColumn(columnId) {
+  const col = reqColumns.find(c => c.id === columnId)
+  if (!confirm('Delete the "' + (col ? col.label : 'this') + '" column and everything entered in it? This cannot be undone.')) return
+  captureReqInputs()
+  const res = await fetch(REST + 'setup2026_req_columns?id=eq.' + columnId, { method: 'DELETE', headers: HEADERS })
+  if (!res.ok) { alert('Could not delete the column. (' + res.status + ')'); return }
+  Object.keys(reqCells).forEach(k => { if (k.endsWith('|' + columnId)) delete reqCells[k] })
+  await reloadReqColumns()
+}
+
+async function moveReqColumn(columnId, direction) {
+  const idx = reqColumns.findIndex(c => c.id === columnId)
+  const swapIdx = idx + direction
+  if (idx === -1 || swapIdx < 0 || swapIdx >= reqColumns.length) return
+  captureReqInputs()
+  const a = reqColumns[idx], b = reqColumns[swapIdx]
+  const results = await Promise.all([
+    fetch(REST + 'setup2026_req_columns?id=eq.' + a.id, { method: 'PATCH', headers: HEADERS, body: JSON.stringify({ sort_order: b.sort_order }) }),
+    fetch(REST + 'setup2026_req_columns?id=eq.' + b.id, { method: 'PATCH', headers: HEADERS, body: JSON.stringify({ sort_order: a.sort_order }) }),
+  ])
+  if (results.some(r => !r.ok)) { alert('Could not reorder the columns.'); return }
+  await reloadReqColumns()
+}
+
 // ---------- MANAGE MODE ----------
 function toggleManageMode() {
+  const reqActive = document.getElementById('view-requirements').classList.contains('active')
+  const discardedEdits = reqActive && manageMode && reqDirty
+  if (discardedEdits && !confirm('You have unsaved changes in the requirements table. Discard them?')) return
   manageMode = !manageMode
   document.getElementById('manage-toggle').classList.toggle('active', manageMode)
   document.getElementById('add-section-bar').style.display = manageMode ? '' : 'none'
   document.getElementById('template-manager').style.display = manageMode ? '' : 'none'
   if (manageMode) renderTemplateManager()
   if (document.getElementById('view-studio').classList.contains('active')) renderStudioDetail()
+  if (reqActive) {
+    if (discardedEdits) { reqDirty = false; loadRequirements().then(renderRequirements) }
+    else renderRequirements()
+  }
 }
 
 function closeModal() { document.getElementById('modal-root').innerHTML = '' }
