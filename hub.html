@@ -339,6 +339,13 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .plan-sess .nm { flex: 1 1 200px; font-weight: 700; color: var(--ink); }
 .plan-sess .sub { font-size: 12px; color: var(--ink-soft); font-weight: 500; }
 .plan-day.past { opacity: 0.6; }
+.pp-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.pp-total { font-size: 15px; color: var(--ink-soft); }
+.pp-total b { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 30px; font-weight: 600; color: var(--accent-deep); margin-right: 4px; }
+.pp-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.pp-chip { font-size: 13px; background: var(--accent-soft); color: var(--accent-deep); border-radius: 999px; padding: 4px 11px; }
+.pp-chip b { margin-left: 3px; }
+.pp-note { flex-basis: 100%; font-size: 12px; color: var(--ink-soft); }
 .plan-count { font-size: 12.5px; color: var(--ink-soft); white-space: nowrap; }
 .plan-count b { color: var(--ink); font-size: 14px; }
 .plan-closed { margin-top: 12px; }
@@ -2202,12 +2209,12 @@ async function loadPlanDay(date) {
   try {
     const [team, sess] = await Promise.all([
       sb.rpc('hub_team_on_date', { p_studio_id: st, p_date: date }),
-      sb.from('sessions').select('id, title, session_date, session_time, session_type, duration_minutes, capacity, spaces_left_cache').eq('studio_id', st).eq('session_date', date).order('session_time')
+      sb.from('sessions').select('id, title, session_date, session_time, session_type, duration_minutes, capacity, spaces_left_cache, show').eq('studio_id', st).eq('session_date', date).order('session_time')
     ]);
     if (team.error) throw team.error;
     if (sess.error) throw sess.error;
     const events = (sess.data || []).filter(x => x.session_type === 'festival');
-    const sessions = (sess.data || []).filter(x => x.session_type !== 'festival');
+    let sessions = (sess.data || []).filter(x => x.session_type !== 'festival');
     const ids = sessions.map(x => x.id);
     const partyIds = sessions.filter(x => x.session_type === 'party').map(x => x.id);
     const [ss, pb, allB] = await Promise.all([
@@ -2217,6 +2224,16 @@ async function loadPlanDay(date) {
     ]);
     const booked = {};
     (allB.data || []).forEach(b => { booked[b.session_id] = (booked[b.session_id] || 0) + (b.qty || 0); });
+    // Kids classes from week 2 on: the week's roster, same database function the Day view uses.
+    const week2 = sessions.filter(x => /\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(x.title || ''));
+    const rosters = await Promise.all(week2.map(x => sb.rpc('get_class_week_bookings', { p_session_id: x.id })));
+    week2.forEach((x, i) => { const r = rosters[i]; if (!r.error) booked[x.id] = (r.data || []).reduce((n, b) => n + (b.qty || 0), 0); });
+    // Catch-up classes: one per catch-up student (same as the Day view).
+    const cuIds = sessions.filter(x => x.title === 'Catch Up Class').map(x => x.id);
+    if (cuIds.length) {
+      const cu = await sb.from('class_catchups').select('target_session_id').in('target_session_id', cuIds);
+      (cu.data || []).forEach(r => { booked[r.target_session_id] = (booked[r.target_session_id] || 0) + 1; });
+    }
     const pbIds = (pb.data || []).map(b => b.id);
     const pd = pbIds.length ? await sb.from('party_details').select('booking_id, party_teacher1, party_teacher2, expected_guests').in('booking_id', pbIds) : { data: [] };
     const staffBy = {}; (ss.data || []).forEach(r => { staffBy[r.session_id] = r; });
@@ -2230,7 +2247,18 @@ async function loadPlanDay(date) {
       const sx = sessions.find(z => z.id === b.session_id) || {};
       return { booking_id: b.id, session: sx, guests: d.expected_guests || b.estimated_attendance || null, t1: d.party_teacher1 || '', t2: d.party_teacher2 || '' };
     });
-    _plan = { date, team: team.data || [], sessions, events, staffBy, booked, roles, wheel, parties, dirty: false, msg: '' };
+    // Same rows as the Day view: hidden sessions only if someone's booked, and
+    // capacity-0 rows only if booked (kids class weeks and catch-ups always).
+    const isWeek2 = x => /\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(x.title || '');
+    sessions = sessions.filter(x => (x.show !== false || booked[x.id] > 0) &&
+      (booked[x.id] > 0 || x.capacity === null || x.capacity > 0 || isWeek2(x) || x.title === 'Catch Up Class'));
+    // "Part 2 | 6 Week Session" sign-up rows are the same class as "Class 7 of 12"
+    // at the same time (their kids are in its roster), so show the class only.
+    const classTimes = new Set(sessions.filter(isWeek2).map(x => x.session_time));
+    sessions = sessions.filter(x => !(/\|\s*\d+\s*week\s*session/i.test(x.title || '') && classTimes.has(x.session_time)));
+    const kidsTeacher = {};
+    sessions.filter(planIsKids).forEach(x => { kidsTeacher[x.id] = (staffBy[x.id] || {}).teacher || ''; });
+    _plan = { date, team: team.data || [], sessions, events, staffBy, booked, kidsTeacher, roles, wheel, parties, dirty: false, msg: '' };
     renderPlanDay();
   } catch (e) {
     body.innerHTML = `<div class="ho-card">Couldn't load that day: ${esc(e.message || e)}</div>`;
@@ -2253,9 +2281,28 @@ function planNotRunning(x) {
   return !(_plan.booked[x.id] > 0) && x.spaces_left_cache === 0;
 }
 function planCount(x) {
-  if (planIsKids(x)) return '';
   const b = _plan.booked[x.id] || 0, left = x.spaces_left_cache;
+  if (planIsKids(x)) return `<span class="plan-count"><b>${b}</b> enrolled</span>`;
   return `<span class="plan-count"><b>${b}</b> booked${left !== null && left !== undefined ? ` · ${left} left` : ''}</span>`;
+}
+// Participants for the day, by kind. Parties count their expected guests
+// (a party is one booking), everything else counts people booked.
+function planParticipants() {
+  const P = _plan, groups = {};
+  let total = 0, missingGuests = 0;
+  const add = (label, n) => { groups[label] = (groups[label] || 0) + n; total += n; };
+  P.sessions.forEach(x => {
+    if (x.session_type === 'party') return;              // parties counted below
+    const n = P.booked[x.id] || 0;
+    if (!n) return;
+    add(planIsKids(x) ? 'Kids classes' : sessionKind(x.title)[0] === 'Workshop' ? 'Workshops' : sessionKind(x.title)[0], n);
+  });
+  let parties = 0;
+  P.parties.forEach(pt => {
+    parties++;
+    if (pt.guests) add('Party guests', Number(pt.guests) || 0); else missingGuests++;
+  });
+  return { total, groups, parties, missingGuests };
 }
 function renderPlanDay() {
   const body = document.getElementById('plan-body');
@@ -2297,9 +2344,12 @@ function renderPlanDay() {
     ...P.parties.map((pt, i) => [hmM(pt.session.session_time), `<div class="plan-sess"><span class="t">${esc(shortTime(pt.session.session_time || ''))}</span><span class="nm">${esc(pt.session.title || 'Party')}<div class="sub">${pt.guests ? esc(pt.guests) + ' kids · ' : ''}${pt.guests > 15 ? '2 teachers' : '1 teacher'}</div></span>
         ${pick(pt.t1, `planParty(${i}, 1, this.value)`)}
         ${edit || pt.t2 ? pick(pt.t2, `planParty(${i}, 2, this.value)`) : ''}</div>`]),
-    ...kids.map(x => [hmM(x.session_time), `<div class="plan-sess"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">Kids class teacher · set in the staff schedule</div></span>
-        <span>${(P.staffBy[x.id] || {}).teacher ? personChip(P.staffBy[x.id].teacher, '') : '<span class="sub">Not set</span>'}</span></div>`]),
-    ...others.map(x => [hmM(x.session_time), `<div class="plan-sess"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">${esc(x.session_type === 'party' ? 'Party slot, not booked yet' : dayCover)}</div></span>
+    ...kids.map(x => [hmM(x.session_time), `<div class="plan-sess"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">Kids class teacher${edit ? ' · changes here are for this day only (the term teacher is set in the staff schedule)' : ''}</div></span>
+        ${planCount(x)}${pick(P.kidsTeacher[x.id], `planKids('${escAttr(x.id)}', this.value)`)}</div>`]),
+    ...others.map(x => [hmM(x.session_time), `<div class="plan-sess"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">${
+          x.session_type === 'party' ? 'Party slot, not booked yet'
+          : !(P.booked[x.id] > 0) ? 'No one booked yet'
+          : demoers.length ? `<span class="floor-staff" style="margin-top:4px">${demoers.map(n => personChip(n, 'Demo')).join('')}</span>` : esc(dayCover)}</div></span>
         ${planCount(x)}<span class="kind-chip kind-${sessionKind(x.title)[1]}">${esc(sessionKind(x.title)[0])}</span></div>`]),
     ...(P.events || []).map(x => [-1, `<div class="plan-sess" style="background:#fff4dd;border-color:#ffd998"><span class="t">🎪</span><span class="nm">${esc(x.title)}<div class="sub">Event · staffing is set on the event</div></span></div>`])
   ].sort((a, b) => a[0] - b[0]).map(r => r[1]).join('');
@@ -2307,6 +2357,14 @@ function renderPlanDay() {
     <div class="ho-card">
       <div class="ho-title" style="font-size:18px;margin-bottom:8px">${esc(when)}</div>
       <div class="plan-shifts">${shifts}</div>
+      ${(() => {
+        const pp = planParticipants();
+        const chips = Object.keys(pp.groups).sort((a, b) => pp.groups[b] - pp.groups[a])
+          .map(k => `<span class="pp-chip">${esc(k)} <b>${pp.groups[k]}</b></span>`).join('');
+        return `<div class="pp-row"><div class="pp-total"><b>${pp.total}</b> participant${pp.total === 1 ? '' : 's'}</div>
+          <div class="pp-chips">${chips}${pp.parties ? `<span class="pp-chip">Parties <b>${pp.parties}</b></span>` : ''}${(P.events || []).length ? `<span class="pp-chip">Events <b>${P.events.length}</b></span>` : ''}</div>
+          ${pp.missingGuests ? `<div class="pp-note">${pp.missingGuests} part${pp.missingGuests === 1 ? 'y has' : 'ies have'}n't entered a guest count yet, so ${pp.missingGuests === 1 ? 'it isn’t' : 'they aren’t'} in the total.</div>` : ''}</div>`;
+      })()}
     </div>
     <div class="ho-section-head">Roles for the day</div>
     <div class="plan-grid">${roleCards}</div>
@@ -2324,6 +2382,7 @@ function renderPlanDay() {
 function planTouched(msg) { _plan.dirty = true; _plan.msg = ''; const m = document.getElementById('plan-msg'); if (m) m.textContent = msg || 'Unsaved changes'; }
 function planSet(f, v, typing) { _plan.roles[f] = v; planTouched(); if (!typing) renderPlanDay(); }
 function planWheel(id, v) { _plan.wheel[id] = v; planTouched(); }
+function planKids(id, v) { _plan.kidsTeacher[id] = v; planTouched(); }
 function planParty(i, n, v) { _plan.parties[i]['t' + n] = v; planTouched(); }
 
 function hmM(t) { const [h, m] = String(t || '0:0').split(':').map(Number); return h * 60 + (m || 0); }
@@ -2387,6 +2446,15 @@ async function planSave() {
       const row = P.staffBy[x.id];
       const r = row ? await sb.from('session_staff').update(patch).eq('session_id', x.id)
                     : await sb.from('session_staff').insert(Object.assign({ session_id: x.id, studio_id: _sessionStudioId }, patch));
+      if (r.error) throw r.error;
+    }
+    // Kids class teacher, this day only (only when it was changed here)
+    for (const x of P.sessions.filter(planIsKids)) {
+      const was = (P.staffBy[x.id] || {}).teacher || '', now = P.kidsTeacher[x.id] || '';
+      if (was === now) continue;
+      const r = P.staffBy[x.id]
+        ? await sb.from('session_staff').update({ teacher: now, updated_at: new Date().toISOString() }).eq('session_id', x.id)
+        : await sb.from('session_staff').insert({ session_id: x.id, studio_id: _sessionStudioId, teacher: now, updated_at: new Date().toISOString() });
       if (r.error) throw r.error;
     }
     for (const pt of P.parties) {
@@ -2858,7 +2926,9 @@ async function loadClassStaff(studioId) {
       };
     });
     // Roles for the day: the first session that has any set (same as the Day view).
-    const withRoles = (sess || []).map(x => staffBy[x.id]).filter(r => r && ROLE_FIELDS.some(([f]) => String(r[f] || '').trim()));
+    // (kids classes keep their own teacher in the same field, so they're skipped)
+    const isKidsRow = x => x.session_type === 'class' || x.session_type === 'series' || /class \d+ of \d+|week session/i.test(x.title || '');
+    const withRoles = (sess || []).filter(x => !isKidsRow(x)).map(x => staffBy[x.id]).filter(r => r && ROLE_FIELDS.some(([f]) => String(r[f] || '').trim()));
     const pick = withRoles.find(r => true) || {};
     _classInfo = { byKey, roles: pick, curriculum: cur.data || [] };
   } catch (e) {
@@ -2916,6 +2986,11 @@ function classStaffHtml(s) {
   if (info.type === 'party') info.party.forEach(n => chips.push(personChip(n, 'Party')));
   else if (/wheel/.test(title) && info.staff.wheel_teacher) chips.push(personChip(info.staff.wheel_teacher, 'Teacher'));
   else if ((info.type === 'series' || info.type === 'class' || /class \d+ of \d+|week session/.test(title)) && info.staff.teacher) chips.push(personChip(info.staff.teacher, 'Teacher'));
+  else if (!/wheel/.test(title) && info.type !== 'party' && Number(s.bookingCount || 0) > 0) {
+    // Workshops, glazing, Mini Make with people booked: the day's demoer(s)
+    const r = _classInfo.roles || {};
+    ['teacher', 'teacher2'].forEach(f => { if (String(r[f] || '').trim()) chips.push(personChip(r[f], 'Demo')); });
+  }
   return chips.length ? `<div class="floor-staff">${chips.join('')}</div>` : '';
 }
 
