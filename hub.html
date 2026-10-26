@@ -166,6 +166,34 @@ body.sc-mode .locked-teaser { display: none !important; }
 .floor-booked b { font-size: 17px; }
 .floor-empty { font-size: 14px; color: var(--ink-soft); padding: 6px 2px; }
 
+/* Announcements */
+#hub-announcements { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+#hub-announcements:empty { display: none; }
+.ann {
+  display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap;
+  padding: 16px 20px; border-radius: 18px; background: #fff4dd; border: 1px solid #ffd998; color: #3d2a00;
+}
+.ann.urgent { background: #fde8e8; border-color: #f5b5b5; color: #5c1010; }
+.ann-icon { width: 42px; height: 42px; border-radius: 12px; background: #ffb547; color: #211c49; display: flex; align-items: center; justify-content: center; font-size: 20px; flex: none; }
+.ann.urgent .ann-icon { background: #dc2626; color: #fff; }
+.ann-main { flex: 1 1 300px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.ann-eyebrow { font-size: 11px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: #8a4b00; }
+.ann.urgent .ann-eyebrow { color: #b91c1c; }
+.ann-title { font-size: 16px; font-weight: 700; }
+.ann-body { font-size: 14.5px; line-height: 1.5; white-space: pre-line; }
+.ann-btn { border: none; border-radius: 999px; min-height: 44px; padding: 0 20px; background: var(--sidebar-bg); color: #fff; font-weight: 700; font-size: 14px; align-self: center; }
+.ann-btn:disabled { opacity: 0.6; }
+.ann-read { font-size: 12.5px; font-weight: 700; color: #15803d; align-self: center; white-space: nowrap; }
+.ann-note { font-size: 12.5px; color: var(--ink-soft); align-self: center; }
+.ann-earlier { border: 1px solid var(--border); background: var(--card-bg); border-radius: 16px; }
+.ann-earlier summary { cursor: pointer; padding: 12px 18px; font-size: 13.5px; font-weight: 700; color: var(--ink); list-style: none; display: flex; align-items: center; gap: 8px; }
+.ann-earlier summary::-webkit-details-marker { display: none; }
+.ann-earlier summary::after { content: "▾"; margin-left: auto; color: var(--ink-soft); }
+.ann-earlier[open] summary::after { content: "▴"; }
+.ann-earlier .ann-item { padding: 10px 18px 12px; border-top: 1px solid var(--border); }
+.ann-earlier .ann-item .ann-title { font-size: 14.5px; }
+.ann-earlier .ann-item .ann-meta { font-size: 12px; color: var(--ink-soft); margin-top: 3px; }
+
 .today-row { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; margin-bottom: 14px; }
 .today-row > .floor-card { flex: 999 1 520px; min-width: 0; margin-bottom: 0; }
 .today-row > .team-card { flex: 1 1 280px; min-width: 0; margin-bottom: 0; padding: 20px 22px; }
@@ -876,6 +904,11 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
          guessing needed for this part). -->
     <div class="card hero-card" id="card-daily-hero"></div>
 
+    <!-- Announcements from home office (admin → Studio Ops → Announcements).
+         hub_announcements() / hub_ack_announcement(): the server decides the
+         studio from the login. "Got it" records a read for this studio. -->
+    <div id="hub-announcements"></div>
+
     <!-- Week info bar — theme name, Friday event, next week preview.
          Informational only for now, no real links (per explicit request). -->
     <div id="week-info-bar" class="week-info-bar" style="display:none"></div>
@@ -1170,6 +1203,68 @@ function renderDailyHero(data) {
     <div class="hero-greeting">${heroGreetingHtml(data.firstName)}</div>
     <div class="hero-sub">${sub}</div>`;
   renderFloorToday(data);
+}
+
+// ---------- Announcements from home office ----------
+// Unread: a full card with "Got it". Read here: tucked into "Earlier messages".
+// Urgent ones stay full-size until they expire, even once read.
+let _annData = [];
+async function loadAnnouncements(studioId) {
+  const { data, error } = await sb.rpc('hub_announcements', { p_studio_id: studioId || null });
+  if (error) { console.error('Announcements load failed:', error); _annData = []; renderAnnouncements(); return; }
+  _annData = Array.isArray(data) ? data : [];
+  renderAnnouncements();
+}
+function annReadLabel(iso) {
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ', ' +
+    d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }).toLowerCase().replace(' ', '');
+}
+function renderAnnouncements() {
+  const el = document.getElementById('hub-announcements');
+  if (!el) return;
+  // A home office login viewing a studio can read but not tick "Got it" for them.
+  const canAck = !(_studioData && _studioData.isAdmin);
+  const big = _annData.filter(a => !a.read_at || a.priority === 'urgent');
+  const earlier = _annData.filter(a => a.read_at && a.priority !== 'urgent');
+  const card = a => {
+    const urgent = a.priority === 'urgent';
+    const right = a.read_at
+      ? `<span class="ann-read">✓ Read ${esc(annReadLabel(a.read_at))}</span>`
+      : canAck ? `<button class="ann-btn" onclick="ackAnnouncement('${escAttr(a.id)}', this)">Got it</button>`
+      : '<span class="ann-note">Not read at this studio yet</span>';
+    return `<div class="ann${urgent ? ' urgent' : ''}">
+      <div class="ann-icon" aria-hidden="true">${urgent ? '!' : '📢'}</div>
+      <div class="ann-main">
+        <div class="ann-eyebrow">${urgent ? 'Urgent · from home office' : 'From home office'}</div>
+        <div class="ann-title">${esc(a.title)}</div>
+        ${a.body ? `<div class="ann-body">${esc(a.body)}</div>` : ''}
+      </div>
+      ${right}
+    </div>`;
+  };
+  let html = big.map(card).join('');
+  if (earlier.length) {
+    html += `<details class="ann-earlier"><summary>📢 Earlier messages from home office (${earlier.length})</summary>
+      ${earlier.map(a => `<div class="ann-item">
+        <div class="ann-title">${esc(a.title)}</div>
+        ${a.body ? `<div class="ann-body">${esc(a.body)}</div>` : ''}
+        <div class="ann-meta">Read ${esc(annReadLabel(a.read_at))}${a.show_until ? ` · showing until ${esc(a.show_until)}` : ''}</div>
+      </div>`).join('')}</details>`;
+  }
+  el.innerHTML = html;
+}
+async function ackAnnouncement(id, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  const { data, error } = await sb.rpc('hub_ack_announcement', { p_announcement_id: id, p_studio_id: _sessionStudioId || null });
+  if (error) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Got it'; }
+    alert("Couldn't save that just now: " + error.message);
+    return;
+  }
+  const a = _annData.find(x => x.id === id);
+  if (a) a.read_at = data || new Date().toISOString();
+  renderAnnouncements();
 }
 
 // ---------- Who's working today ----------
@@ -2919,6 +3014,9 @@ function resetToSignedOut() {
 function stopStudioTimers() {
   if (_teamTimer) { clearInterval(_teamTimer); _teamTimer = null; }
   _teamCount = 0;
+  _annData = [];
+  const annEl = document.getElementById('hub-announcements');
+  if (annEl) annEl.innerHTML = '';
   if (_fridayRefreshTimer) { clearInterval(_fridayRefreshTimer); _fridayRefreshTimer = null; }
   if (_goalRefreshTimer) { clearInterval(_goalRefreshTimer); _goalRefreshTimer = null; }
 }
@@ -3035,8 +3133,13 @@ async function claimFlashChallenge(id) {
 // unlocked so the greeting can use the coordinator's name.
 function loadStudioCards(studioId) {
   loadTeamToday(studioId);
+  loadAnnouncements(studioId);
   if (_teamTimer) clearInterval(_teamTimer);
-  _teamTimer = setInterval(() => { if (_studioViewStarted) loadTeamToday(_sessionStudioId); }, 5 * 60 * 1000);
+  _teamTimer = setInterval(() => {
+    if (!_studioViewStarted) return;
+    loadTeamToday(_sessionStudioId);
+    loadAnnouncements(_sessionStudioId);
+  }, 5 * 60 * 1000);
   loadFlashChallenges(studioId);
   loadDailyHero(_sessionPin, studioId);
   loadTodaysProjects(studioId);   // company-wide projects + this studio's forecast pills
