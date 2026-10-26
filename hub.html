@@ -176,6 +176,7 @@ body.sc-mode .locked-teaser { display: none !important; }
 .floor-booked b { font-size: 17px; }
 .floor-empty { font-size: 14px; color: var(--ink-soft); padding: 6px 2px; }
 .roles-strip { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 10px 12px; margin-bottom: 10px; background: var(--accent-soft); border-radius: 12px; }
+.roles-auto { flex-basis: 100%; font-size: 11.5px; color: var(--accent-deep); opacity: 0.85; }
 .roles-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .roles-label { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent-deep); }
 .role-chip { display: inline-flex; align-items: center; gap: 6px; background: #fff; border-radius: 999px; padding: 2px 10px 2px 3px; font-size: 13px; color: var(--ink); }
@@ -2425,6 +2426,12 @@ const ROLE_FIELDS = [['director', 'Director'], ['teacher', 'Demoer'], ['teacher2
 
 async function loadClassStaff(studioId) {
   const today = localDateStr(new Date());
+  // Fill today's blank roles from the staff schedule (once a day per studio,
+  // hub_auto_roles.sql). Quietly skipped if that SQL isn't run yet.
+  try {
+    const f = await sb.rpc('hub_fill_roles', { p_studio_id: studioId || null });
+    if (f.error && !/hub_fill_roles/i.test(f.error.message)) console.error('Role fill failed:', f.error);
+  } catch (e) { /* not set up yet */ }
   try {
     const { data: sess, error } = await sb.from('sessions').select('id, title, session_time, session_type')
       .eq('studio_id', studioId).eq('session_date', today);
@@ -2487,7 +2494,10 @@ function rolesStripHtml() {
   });
   const labels = Object.keys(groups);
   if (!labels.length) return '';
-  return `<div class="roles-strip">${labels.map(label => `<div class="roles-group"><span class="roles-label">${esc(label)}${groups[label].length > 1 ? 's' : ''}</span>
+  // Still exactly what was filled in automatically?
+  const auto = r.auto_roles || {};
+  const isAuto = ROLE_FIELDS.some(([f]) => auto[f]) && ROLE_FIELDS.every(([f]) => !String(r[f] || '').trim() || auto[f] === r[f]);
+  return `<div class="roles-strip">${isAuto ? '<div class="roles-auto">Filled in from the staff schedule · change them in the schedule’s Day view</div>' : ''}${labels.map(label => `<div class="roles-group"><span class="roles-label">${esc(label)}${groups[label].length > 1 ? 's' : ''}</span>
     ${groups[label].map(x => `<span class="role-chip">${hubAvatarHtml(teamMatch(x.n) || { staff_id: x.n, name: x.n }, 22)}${esc((teamMatch(x.n) || {}).name || x.n)}${x.brk ? `<small>break ${esc(x.brk)}</small>` : ''}</span>`).join('')}</div>`).join('')}</div>`;
 }
 // Same rules as index.html's getCurriculumLinks: a fixed link for the class type, else this week's.
@@ -2507,7 +2517,7 @@ function classStaffHtml(s) {
   const title = String(s.title || '').toLowerCase();
   if (info.type === 'party') info.party.forEach(n => chips.push(personChip(n, 'Party')));
   else if (/wheel/.test(title) && info.staff.wheel_teacher) chips.push(personChip(info.staff.wheel_teacher, 'Teacher'));
-  else if ((info.type === 'series' || /class \d+ of \d+|week session/.test(title)) && info.staff.teacher) chips.push(personChip(info.staff.teacher, 'Teacher'));
+  else if ((info.type === 'series' || info.type === 'class' || /class \d+ of \d+|week session/.test(title)) && info.staff.teacher) chips.push(personChip(info.staff.teacher, 'Teacher'));
   return chips.length ? `<div class="floor-staff">${chips.join('')}</div>` : '';
 }
 
