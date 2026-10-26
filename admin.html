@@ -4527,7 +4527,15 @@ function getStudioPickerSelection(containerId) {
 async function loadAnnouncementsTab() {
   const container = document.getElementById('announcements-container')
   const today = new Date().toISOString().slice(0, 10)
-  const { data, error } = await sb.from('announcements').select('*').order('created_at', { ascending: false })
+  const [{ data, error }, readsRes] = await Promise.all([
+    sb.from('announcements').select('*').order('created_at', { ascending: false }),
+    // "Got it" receipts from the 4Cats Hub (hub_announcements.sql). Missing
+    // table (SQL not run yet) → just no Read column.
+    sb.from('announcement_reads').select('announcement_id, studio_id, read_at')
+  ])
+  const readsOk = !readsRes.error
+  const readsBy = {}
+  ;(readsRes.data || []).forEach(r => { (readsBy[r.announcement_id] = readsBy[r.announcement_id] || []).push(r) })
   if (error || !data?.length) {
     container.innerHTML = '<div style="padding:2rem;text-align:center;color:#888;font-size:13px">No announcements yet. Create one to get started.</div>'
     return
@@ -4552,11 +4560,24 @@ async function loadAnnouncementsTab() {
       : ids.length <= 2 ? ids.map(studioName).join(', ')
       : `${ids.slice(0,2).map(studioName).join(', ')} +${ids.length-2} more`
     const dates = `${a.show_from}${a.show_until ? ' → ' + a.show_until : ' → ∞'}`
+    // Read receipts: which targeted studios tapped "Got it" in the Hub
+    const targetIds = ids.length ? ids : Object.keys(STUDIO_VARIANT_MAP)
+    const reads = (readsBy[a.id] || []).filter(r => targetIds.includes(r.studio_id))
+    const readAt = Object.fromEntries(reads.map(r => [r.studio_id, r.read_at]))
+    const fmtRead = iso => new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+    const notYet = targetIds.filter(id => !readAt[id])
+    const readCell = !readsOk ? '' : `<td style="padding:10px 14px;font-size:12px;vertical-align:top">
+        <details><summary style="cursor:pointer;white-space:nowrap"><strong>${reads.length}</strong> of ${targetIds.length} studios</summary>
+          <div style="margin-top:6px;font-size:11px;line-height:1.6;min-width:220px">
+            ${reads.length ? reads.sort((x, y) => x.read_at.localeCompare(y.read_at)).map(r => `<div><span style="color:#2e7d32">✓</span> ${escText(studioName(r.studio_id))} <span style="color:#aaa">${escText(fmtRead(r.read_at))}</span></div>`).join('') : ''}
+            ${notYet.length ? `<div style="margin-top:4px;color:#888">Not yet: ${notYet.map(id => escText(studioName(id))).join(', ')}</div>` : ''}
+          </div></details></td>`
     return `<tr style="border-bottom:0.5px solid #f5f5f0" onmouseover="this.style.background='#fafaf8'" onmouseout="this.style.background=''">
       <td style="padding:10px 14px">${statusDot}<strong style="font-size:13px">${escText(a.title)}</strong>${a.body ? `<div style="font-size:11px;color:#888;margin-top:2px">${escText(a.body.slice(0,80))}${a.body.length>80?'…':''}</div>` : ''}</td>
       <td style="padding:10px 14px;font-size:12px">${target}</td>
       <td style="padding:10px 14px">${priorityBadge}</td>
       <td style="padding:10px 14px;font-size:11px;color:#888;white-space:nowrap">${dates}</td>
+      ${readCell}
       <td style="padding:10px 14px;white-space:nowrap">
         <button class="btn" onclick="openAnnouncementModal('${a.id}')" style="font-size:11px;padding:4px 10px">Edit</button>
         <button class="btn" onclick="deleteAnnouncement('${a.id}')" style="font-size:11px;padding:4px 10px;color:#c0392b;border-color:#f5c6cb;margin-left:4px">Delete</button>
@@ -4571,6 +4592,7 @@ async function loadAnnouncementsTab() {
         <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Target</th>
         <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Priority</th>
         <th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase">Dates</th>
+        ${readsOk ? '<th style="padding:10px 14px;text-align:left;font-size:11px;color:#888;text-transform:uppercase" title="Studios that tapped Got it in the 4Cats Hub">Read in the Hub</th>' : ''}
         <th style="padding:10px 14px"></th>
       </tr></thead>
       <tbody>${rows}</tbody>
