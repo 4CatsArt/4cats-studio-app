@@ -261,8 +261,12 @@
         opt.selected = selectedStudio === s.studio_id
         select.appendChild(opt)
       })
+      if (selectedStudio) select.value = selectedStudio
       select.addEventListener('change', function () {
-        selectedStudio = select.value || null
+        // The theme's own studio picker can fire change events on every select
+        // on the page; ignore blank or unchanged values so a pre-chosen studio sticks.
+        if (!select.value || select.value === selectedStudio) return
+        selectedStudio = select.value
         selectedDate = null
         render()
       })
