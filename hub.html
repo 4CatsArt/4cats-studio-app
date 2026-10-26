@@ -142,6 +142,16 @@ body.sc-mode .locked-teaser { display: none !important; }
 }
 .floor-btn:hover { border-color: var(--accent); color: var(--accent-deep); }
 .floor-list { display: flex; flex-direction: column; gap: 8px; }
+.ev-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.ev-row { display: flex; gap: 14px; flex-wrap: wrap; padding: 14px 16px; border-radius: 14px; background: #fff4dd; border: 1px solid #ffd998; }
+.ev-tag { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: #8a4b00; background: #ffe2a8; border-radius: 999px; padding: 4px 10px; align-self: flex-start; white-space: nowrap; }
+.ev-main { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 4px; color: #3d2a00; }
+.ev-title { font-size: 16px; font-weight: 800; }
+.ev-time { font-weight: 600; font-size: 14px; color: #8a4b00; margin-left: 4px; }
+.ev-line { font-size: 13.5px; line-height: 1.45; }
+.ev-plan { white-space: pre-line; }
+.ev-staff { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 4px; font-size: 13px; }
+.ev-need { font-size: 12px; font-weight: 700; color: #8a4b00; }
 .floor-row {
   display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
   padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px; background: #fff;
@@ -1374,11 +1384,14 @@ function renderDailyHero(data) {
   }
 
   const studioName = STUDIO_NAMES[data.studioId] || data.studioId;
-  const n = Array.isArray(data.sessions) ? data.sessions.length : null;
+  const evTitles = new Set(_todayEvents.map(e => String(e.title || '').trim().toLowerCase()));
+  const n = Array.isArray(data.sessions) ? data.sessions.filter(x => !evTitles.has(String(x.title || '').trim().toLowerCase())).length : null;
+  const evText = _todayEvents.length ? `${_todayEvents.length === 1 ? 'an event' : _todayEvents.length + ' events'}` : '';
   const people = _teamCount ? ` and ${_teamCount} ${_teamCount === 1 ? 'person' : 'people'} on the team` : '';
   const sub = n === null ? `Here's what's happening at ${esc(studioName)} today`
+    : n === 0 && evText ? `${evText.charAt(0).toUpperCase() + evText.slice(1)}${people} at ${esc(studioName)} today`
     : n === 0 ? `Nothing booked at ${esc(studioName)} today${people ? ` · ${_teamCount} on the team` : ''}`
-    : `${n} session${n === 1 ? '' : 's'}${people} at ${esc(studioName)} today`;
+    : `${n} session${n === 1 ? '' : 's'}${evText ? ', ' + evText : ''}${people} at ${esc(studioName)} today`;
   container.innerHTML = `
     <div class="hero-greeting">${heroGreetingHtml(data.firstName)}</div>
     <div class="hero-sub">${sub}</div>`;
@@ -1914,27 +1927,37 @@ async function loadOcOverview() {
   if (error) { box.innerHTML = `<div class="ho-card">Couldn't load: ${esc(error.message)}</div>`; return; }
   const items = data.items || [];
   const found = items.find(i => i.key === 'found_studio');
-  const rows = (data.studios || []).slice().sort((a, b) => {
-    const rank = r => !r ? 0 : !r.finished_at ? 1 : 2;
-    return rank(a.run) - rank(b.run) || (STUDIO_NAMES[a.studio_id] || a.studio_id).localeCompare(STUDIO_NAMES[b.studio_id] || b.studio_id);
+  // A studio that's closed today (closure, or nothing scheduled) isn't expected
+  // to open, unless someone did the list anyway.
+  const isClosed = r => !r.run && r.day && r.day.status !== 'open';
+  const open = (data.studios || []).filter(r => !isClosed(r));
+  const closed = (data.studios || []).filter(isClosed);
+  const nm = id => STUDIO_NAMES[id] || id;
+  const rows = open.slice().sort((a, b) => {
+    const rank = r => !r.run ? 0 : !r.run.finished_at ? 1 : 2;
+    return rank(a) - rank(b) || nm(a.studio_id).localeCompare(nm(b.studio_id));
   });
   const done = rows.filter(r => r.run && r.run.finished_at).length;
-  box.innerHTML = `<div class="ho-intro"><b>${done} of ${rows.length}</b> studios have finished their opening list today. (Closed studios will show as not started.)</div>
+  box.innerHTML = `<div class="ho-intro"><b>${done} of ${rows.length}</b> open studios have finished their opening list today.</div>
     <div class="oc-wrap"><table class="oc-table"><thead><tr><th>Studio</th><th>Status</th><th>Who</th><th>Found the studio</th><th>Problems</th><th>Needs attention</th></tr></thead><tbody>
     ${rows.map(r => {
       const run = r.run;
       const answers = (run && run.answers) || {};
       const flags = items.filter(i => i.kind === 'choice' && typeof answers[i.id] === 'number' && i.options[answers[i.id]] && i.options[answers[i.id]].flag && i.key !== 'attention' && i.key !== 'found_studio');
       const f = found && typeof answers[found.id] === 'number' ? found.options[answers[found.id]] : null;
-      const status = !run ? '<span class="ho-pill ended">Not started</span>'
+      const why = r.day && r.day.status === 'open' && !r.day.shifts && !r.day.bookings && r.day.events ? ' <span style="color:var(--ink-soft)">(event only)</span>' : '';
+      const status = !run ? `<span class="ho-pill ended">Not started</span>${why}`
         : !run.finished_at ? '<span class="ho-pill soon">In progress</span>'
         : `<span class="ho-pill live">Done ${esc(dutyTime(run.finished_at))}</span>${clMinutes(run) ? ` <span style="color:var(--ink-soft)">${clMinutes(run)} min</span>` : ''}`;
-      return `<tr><td><b>${esc(STUDIO_NAMES[r.studio_id] || r.studio_id)}</b></td><td>${status}</td>
+      return `<tr><td><b>${esc(nm(r.studio_id))}</b></td><td>${status}</td>
         <td>${run && run.finished_by_names ? esc(run.finished_by_names.join(', ')) : ''}</td>
         <td>${f ? (f.flag ? `<span style="color:#b45309;font-weight:700">${esc(f.label)}</span>` : esc(f.label)) : ''}</td>
         <td>${flags.length ? flags.map(i => `<div>• ${esc(i.options[answers[i.id]].label)}</div>`).join('') : ''}</td>
         <td style="white-space:pre-line">${run && run.attention_note ? esc(run.attention_note) : ''}</td></tr>`;
-    }).join('')}</tbody></table></div>`;
+    }).join('') || '<tr><td colspan="6">No studios are open today.</td></tr>'}</tbody></table></div>
+    ${closed.length ? `<div class="ho-section-head">Closed today (${closed.length})</div>
+      <div class="ho-intro">${closed.sort((a, b) => nm(a.studio_id).localeCompare(nm(b.studio_id))).map(r =>
+        `${esc(nm(r.studio_id))} <span style="color:var(--ink-soft)">(${r.day.status === 'closed' ? (r.day.reason ? esc(r.day.reason) : 'closed') : 'nothing scheduled'})</span>`).join(' · ')}</div>` : ''}`;
 }
 
 // ---------- Today's duties ----------
@@ -2208,6 +2231,31 @@ function renderTeamToday(rows) {
   el.style.display = '';
 }
 
+// ---------- Today's events / festivals ----------
+// hub_today_events(): events coordinators added (index.html → Add Event), with
+// their details. Shown at the top of "On the floor today".
+let _todayEvents = [];
+async function loadTodayEvents(studioId) {
+  const { data, error } = await sb.rpc('hub_today_events', { p_studio_id: studioId || null });
+  _todayEvents = error ? [] : (Array.isArray(data) ? data : []);
+  if (error) console.error('Events load failed:', error);
+  if (_lastHeroData) renderDailyHero(_lastHeroData);   // redraws the floor card too
+}
+function eventBlockHtml(ev) {
+  const time = ev.start_time ? `${shortTime(ev.start_time)}${ev.end_time ? ' – ' + shortTime(ev.end_time) : ''}` : '';
+  const staff = (ev.staff || []);
+  return `<div class="ev-row">
+    <div class="ev-tag">🎪 Event</div>
+    <div class="ev-main">
+      <div class="ev-title">${esc(ev.title)}${time ? ` <span class="ev-time">${esc(time)}</span>` : ''}</div>
+      ${ev.project ? `<div class="ev-line"><b>Project:</b> ${esc(ev.project)}</div>` : ''}
+      ${ev.day_plan ? `<div class="ev-line ev-plan">${esc(ev.day_plan)}</div>` : ''}
+      ${staff.length || ev.staff_needed ? `<div class="ev-staff">${staff.map(p => `<span class="duty-who">${hubAvatarHtml(p, 22)} ${esc(p.name)}</span>`).join('')}
+        ${ev.staff_needed ? `<span class="ev-need">${ev.staff_needed} staff needed</span>` : ''}</div>` : ''}
+    </div>
+  </div>`;
+}
+
 // ---------- On the floor today ----------
 // Kind chip from the session title — display only, never used for logic.
 function sessionKind(title) {
@@ -2227,7 +2275,10 @@ function renderFloorToday(data) {
   if (!data || !Array.isArray(data.sessions)) { el.style.display = 'none'; el.innerHTML = ''; return; }
   const now = new Date();
   const nowHM = now.getHours() * 60 + now.getMinutes();
-  const sessions = data.sessions.slice().sort((a, b) => String(a.time).localeCompare(String(b.time)));
+  // Events are shown in their own block, so leave their placeholder session rows out.
+  const evTitles = new Set(_todayEvents.map(e => String(e.title || '').trim().toLowerCase()));
+  const sessions = data.sessions.filter(s => !evTitles.has(String(s.title || '').trim().toLowerCase()))
+    .sort((a, b) => String(a.time).localeCompare(String(b.time)));
   const rows = sessions.map(s => {
     const [h, m] = String(s.time || '00:00').split(':').map(Number);
     // Faded once it's more than 2 hours past the start time.
@@ -2250,11 +2301,12 @@ function renderFloorToday(data) {
   el.innerHTML = `
     <div class="floor-head">
       <div class="floor-title">On the floor today</div>
-      <div class="floor-count">${sessions.length} session${sessions.length === 1 ? '' : 's'}</div>
+      <div class="floor-count">${[sessions.length || !_todayEvents.length ? `${sessions.length} session${sessions.length === 1 ? '' : 's'}` : '', _todayEvents.length ? `${_todayEvents.length} event${_todayEvents.length === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ')}</div>
       <div class="spacer"></div>
       <button class="floor-btn" onclick="openSchedule()">📅 Open the schedule</button>
     </div>
-    <div class="floor-list">${rows || '<div class="floor-empty">Nothing booked today.</div>'}</div>`;
+    ${_todayEvents.length ? `<div class="ev-list">${_todayEvents.map(eventBlockHtml).join('')}</div>` : ''}
+    <div class="floor-list">${rows || `<div class="floor-empty">${_todayEvents.length ? 'No classes booked today.' : 'Nothing booked today.'}</div>`}</div>`;
   el.style.display = '';
 }
 
@@ -3875,7 +3927,7 @@ function stopStudioTimers() {
   if (_teamTimer) { clearInterval(_teamTimer); _teamTimer = null; }
   _teamCount = 0;
   _annData = []; _duties = []; _dutyTemplates = []; _dutiesLoaded = false; _teamPeople = [];
-  _oc = { open: null, close: null }; _cl = null;
+  _oc = { open: null, close: null }; _cl = null; _todayEvents = [];
   if (_clSaveTimer) { clearTimeout(_clSaveTimer); _clSaveTimer = null; }
   closeDutySheet();
   const annEl = document.getElementById('hub-announcements');
@@ -4000,6 +4052,7 @@ function loadStudioCards(studioId) {
   loadAnnouncements(studioId);
   loadDuties(studioId);
   loadOpenClose(studioId);
+  loadTodayEvents(studioId);
   if (_teamTimer) clearInterval(_teamTimer);
   _teamTimer = setInterval(() => {
     if (!_studioViewStarted) return;
@@ -4007,6 +4060,7 @@ function loadStudioCards(studioId) {
     loadAnnouncements(_sessionStudioId);
     if (!document.getElementById('duty-sheet-back')) loadDuties(_sessionStudioId); // not mid-edit
     if (!_cl) loadOpenClose(_sessionStudioId);                                     // not mid-list
+    loadTodayEvents(_sessionStudioId);
   }, 5 * 60 * 1000);
   loadFlashChallenges(studioId);
   loadDailyHero(_sessionPin, studioId);
