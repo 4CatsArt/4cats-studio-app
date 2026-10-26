@@ -284,6 +284,12 @@ body.sc-mode .locked-teaser { display: none !important; }
 .cl-foot .msg { flex: 1; font-size: 13px; color: var(--ink-soft); }
 .cl-foot button { min-height: 48px; border: none; border-radius: 999px; padding: 0 26px; background: var(--accent); color: #fff; font-weight: 800; font-size: 15px; }
 .cl-foot button:disabled { opacity: 0.45; }
+.cl-handoff { background: #fff4dd; color: #3d2a00; border: 1px solid #ffd998; border-radius: 14px; padding: 12px 16px; font-size: 14px; margin-top: 10px; white-space: pre-line; }
+.cl-item.cl-info { background: var(--accent-soft); border-color: transparent; }
+.cl-item.cl-info .cl-hint { white-space: pre-line; color: var(--ink); font-size: 14px; }
+.oc-tabs { display: inline-flex; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; background: #fff; }
+.oc-tabs button { border: none; background: none; padding: 8px 16px; font-weight: 700; font-size: 13.5px; color: var(--ink-soft); min-height: 38px; }
+.oc-tabs button.on { background: var(--accent); color: #fff; }
 .cl-done-banner { background: #e3f9ec; color: #14532d; border-radius: 14px; padding: 12px 16px; font-size: 14px; font-weight: 600; margin-top: 10px; }
 .oc-table { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--card-bg); border-radius: 14px; overflow: hidden; }
 .oc-table th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-soft); padding: 10px 12px; border-bottom: 1px solid var(--border); background: #faf9fe; }
@@ -1013,7 +1019,7 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
     <div class="nav-group" id="nav-group-homeoffice" style="display:none">
       <div class="nav-label">Home office</div>
       <button class="nav-item" id="nav-announce" onclick="openAnnouncePane()"><span class="ic">📢</span> Announcements</button>
-      <button class="nav-item" id="nav-oc-overview" onclick="openOcOverview()"><span class="ic">✅</span> Opening lists</button>
+      <button class="nav-item" id="nav-oc-overview" onclick="openOcOverview()"><span class="ic">✅</span> Open & close</button>
     </div>
 
     <!-- Coordinator section. Locked: one button that asks for the PIN.
@@ -1182,11 +1188,12 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
   <!-- Home office → Open & close: every studio's list today. -->
   <main class="main" id="oc-overview-pane" style="display:none">
     <div class="ho-head">
-      <div class="pts-page-title" style="margin:0">✅ Opening lists today</div>
+      <div class="pts-page-title" style="margin:0">✅ Open & close today</div>
+      <div class="oc-tabs" id="oc-tabs"><button class="on" onclick="setOcList('open')">Opening</button><button onclick="setOcList('close')">Closing</button></div>
       <span class="spacer"></span>
       <button class="ho-btn" onclick="loadOcOverview()">Refresh</button>
     </div>
-    <p class="ho-intro">Every studio's opening list for today: who opened, how long it took, how they found the studio, and anything that needs attention.</p>
+    <p class="ho-intro" id="oc-intro">Every open studio's list for today: who did it, how long it took, problems flagged, and anything that needs attention.</p>
     <div id="oc-overview"></div>
   </main>
 
@@ -1716,11 +1723,14 @@ function clItemDone(item, answers, notes) {
   if (typeof a !== 'number' || !item.options[a]) return false;
   return !item.options[a].note || !!String(notes[item.id] || '').trim();
 }
+// "info" items are notes to read, with nothing to tick: they don't count.
+function clTasks(items) { return (items || []).filter(i => i.kind !== 'info'); }
 function clProgress(data) {
   if (!data || !data.items) return { done: 0, total: 0 };
   const run = data.run || {};
   const answers = run.answers || {}, notes = run.notes || {};
-  return { done: data.items.filter(i => clItemDone(i, answers, notes)).length, total: data.items.length };
+  const tasks = clTasks(data.items);
+  return { done: tasks.filter(i => clItemDone(i, answers, notes)).length, total: tasks.length };
 }
 function clMinutes(run) {
   if (!run || !run.started_at || !run.finished_at) return null;
@@ -1742,7 +1752,7 @@ function renderOpenClose() {
   const el = document.getElementById('card-open-close');
   const ring = list => {
     const data = _oc[list];
-    if (!data || !data.items || !data.items.length) {
+    if (!data || !clTasks(data.items).length) {
       return `<button class="oc-ring" disabled>${ringSvg(0, 0, false)}<span class="nm">${OC_NAMES[list]}</span><span class="st">Coming soon</span></button>`;
     }
     const pr = clProgress(data), run = data.run;
@@ -1754,19 +1764,22 @@ function renderOpenClose() {
     else st = `<span class="st">Not started · tap to begin</span>`;
     return `<button class="oc-ring" onclick="openChecklist('${list}')">${ringSvg(pr.done, pr.total, !!(run && run.finished_at))}<span class="nm">${OC_NAMES[list]}</span>${st}</button>`;
   };
-  const alerts = ['open', 'close'].map(list => {
-    const run = _oc[list] && _oc[list].run;
-    return run && run.attention_note ? `<div class="oc-alert"><b>${OC_NAMES[list]} note:</b> ${esc(run.attention_note)}</div>` : '';
-  }).join('');
+  const ho = _oc.open && _oc.open.handoff;
+  const openDone = _oc.open && _oc.open.run && _oc.open.run.finished_at;
+  const alerts = (ho && ho.note && !openDone ? `<div class="oc-alert"><b>From last night's close:</b> ${esc(ho.note)}</div>` : '') +
+    ['open', 'close'].map(list => {
+      const run = _oc[list] && _oc[list].run;
+      return run && run.attention_note ? `<div class="oc-alert"><b>${OC_NAMES[list]} note:</b> ${esc(run.attention_note)}</div>` : '';
+    }).join('');
   el.innerHTML = `<div class="oc-title">Open & close</div><div class="oc-rings">${ring('open')}${ring('close')}</div>${alerts}`;
   el.style.display = '';
 }
 
 function openChecklist(list) {
   const data = _oc[list];
-  if (!data || !data.items || !data.items.length) return;
+  if (!data || !clTasks(data.items).length) return;
   const run = data.run || {};
-  _cl = { list, items: data.items, answers: JSON.parse(JSON.stringify(run.answers || {})), notes: JSON.parse(JSON.stringify(run.notes || {})), run: data.run || null, saving: false, saveMsg: '' };
+  _cl = { list, items: data.items, handoff: list === 'open' ? (data.handoff || null) : null, answers: JSON.parse(JSON.stringify(run.answers || {})), notes: JSON.parse(JSON.stringify(run.notes || {})), run: data.run || null, saving: false, saveMsg: '' };
   showOnlyPane('checklist-pane');
   setActiveNav('');
   renderChecklist();
@@ -1782,14 +1795,18 @@ function closeChecklist() {
 function renderChecklist() {
   const el = document.getElementById('cl-body');
   if (!_cl) { el.innerHTML = ''; return; }
-  const { items, answers, notes, run } = _cl;
-  const done = items.filter(i => clItemDone(i, answers, notes)).length;
+  const { answers, notes, run } = _cl;
+  const items = _cl.items;
+  const tasks = clTasks(items);
+  const done = tasks.filter(i => clItemDone(i, answers, notes)).length;
   const finished = run && run.finished_at;
+  const ho = _cl.handoff;
   let html = `<div class="cl-top">
     <div class="cl-head"><h1>${OC_NAMES[_cl.list]} list</h1><span class="spacer"></span>
       <button class="ho-btn" onclick="closeChecklist()">← Back to today</button></div>
-    <div class="cl-sub">${esc(STUDIO_NAMES[_sessionStudioId] || '')} · <span id="cl-count">${done} of ${items.length} done</span>${_cl.list === 'open' ? ' · aim to finish within 15 minutes' : ''}</div>
-    <div class="cl-bar"><div id="cl-bar-fill" style="width:${items.length ? Math.round(100 * done / items.length) : 0}%"></div></div>
+    <div class="cl-sub">${esc(STUDIO_NAMES[_sessionStudioId] || '')} · <span id="cl-count">${done} of ${tasks.length} done</span>${_cl.list === 'open' ? ' · aim to finish within 15 minutes' : ''}</div>
+    <div class="cl-bar"><div id="cl-bar-fill" style="width:${tasks.length ? Math.round(100 * done / tasks.length) : 0}%"></div></div>
+    ${ho && ho.note ? `<div class="cl-handoff"><b>From last night's close${ho.names && ho.names.length ? ' (' + esc(ho.names.join(' & ')) + ')' : ''}:</b> ${esc(ho.note)}</div>` : ''}
     ${finished ? `<div class="cl-done-banner">✓ Finished${clWho(run.finished_by).length ? ' by ' + esc(clWho(run.finished_by).join(' & ')) : ''} at ${esc(dutyTime(run.finished_at))}${clMinutes(run) ? ` · took ${clMinutes(run)} min` : ''}. You can still change answers.</div>` : ''}
   </div>`;
   let section = null;
@@ -1799,6 +1816,10 @@ function renderChecklist() {
     const a = answers[item.id];
     const weekly = item.weekly ? '<span class="cl-weekly">This week</span>' : '';
     let body = '';
+    if (item.kind === 'info') {
+      html += `<div class="cl-item cl-info"><div class="cl-q">${esc(item.label)}</div>${item.hint ? `<div class="cl-hint">${esc(item.hint)}</div>` : ''}</div>`;
+      return;
+    }
     if (item.kind === 'tick') {
       html += `<div class="cl-item${ok ? ' done' : ''}"><button class="cl-tick" onclick="clTick('${item.id}')">
         <span class="cl-box${a === true ? ' on' : ''}">${a === true ? '✓' : ''}</span>
@@ -1817,7 +1838,7 @@ function renderChecklist() {
     html += `<div class="cl-item${ok ? ' done' : ''}"><div class="cl-q">${esc(item.label)}${weekly}</div>
       ${item.hint ? `<div class="cl-hint">${esc(item.hint)}</div>` : ''}${body}</div>`;
   });
-  const left = items.length - done;
+  const left = tasks.length - done;
   html += `<div class="cl-foot"><span class="msg" id="cl-save-msg">${esc(_cl.saveMsg || (left ? `${left} to go` : 'All done!'))}</span>
     <button onclick="finishChecklist()" ${left ? 'disabled' : ''}>${finished ? 'Save changes' : `Finish ${OC_NAMES[_cl.list].toLowerCase()} list`}</button></div>`;
   el.innerHTML = html;
@@ -1839,13 +1860,14 @@ function clChoose(id, i) { _cl.answers[id] = i; clChanged(); }
 function clNote(id, v) {
   _cl.notes[id] = v;
   // keep typing smooth: update the counts without redrawing the text box
-  const done = _cl.items.filter(it => clItemDone(it, _cl.answers, _cl.notes)).length;
+  const tasks = clTasks(_cl.items);
+  const done = tasks.filter(it => clItemDone(it, _cl.answers, _cl.notes)).length;
   const btn = document.querySelector('.cl-foot button');
-  if (btn) btn.disabled = done < _cl.items.length;
+  if (btn) btn.disabled = done < tasks.length;
   const cnt = document.getElementById('cl-count');
-  if (cnt) cnt.textContent = `${done} of ${_cl.items.length} done`;
+  if (cnt) cnt.textContent = `${done} of ${tasks.length} done`;
   const bar = document.getElementById('cl-bar-fill');
-  if (bar) bar.style.width = Math.round(100 * done / _cl.items.length) + '%';
+  if (bar) bar.style.width = Math.round(100 * done / tasks.length) + '%';
   clChanged(false);
 }
 function flushChecklistSave() {
@@ -1859,8 +1881,10 @@ function clAttentionText() {
     const o = item.options[a];
     if (!o || !o.flag) return;
     const note = String(_cl.notes[item.id] || '').trim();
-    if (item.key === 'attention' && note) parts.push(note);
+    if (item.key === 'attention') { if (note) parts.push(note); }
     else if (item.key === 'found_studio') parts.push(`Found the studio: ${o.label}${note ? ' — ' + note : ''}`);
+    else if (item.key === 'prep_tomorrow') parts.push(`Prep for tomorrow: ${note || o.label}`);
+    else if (note) parts.push(`${item.label} ${o.label.toLowerCase()}: ${note}`);
   });
   return parts.join('\n');
 }
@@ -1882,7 +1906,7 @@ async function saveChecklist(finish, finishedBy) {
   if (_cl) {
     _cl.run = data;
     if (_oc[_cl.list]) _oc[_cl.list].run = data;
-    const left = _cl.items.length - _cl.items.filter(i => clItemDone(i, _cl.answers, _cl.notes)).length;
+    const left = clTasks(_cl.items).length - clTasks(_cl.items).filter(i => clItemDone(i, _cl.answers, _cl.notes)).length;
     _cl.saveMsg = '';
     if (msg && !finish) msg.textContent = left ? `Saved · ${left} to go` : 'Saved · all done!';
   }
@@ -1920,10 +1944,17 @@ function openOcOverview() {
   setActiveNav('nav-oc-overview');
   loadOcOverview();
 }
+let _ocList = 'open';
+function setOcList(list) {
+  _ocList = list;
+  document.querySelectorAll('#oc-tabs button').forEach((b, i) => b.classList.toggle('on', (i === 0) === (list === 'open')));
+  loadOcOverview();
+}
 async function loadOcOverview() {
   const box = document.getElementById('oc-overview');
   box.innerHTML = '<div class="ho-intro">Loading…</div>';
-  const { data, error } = await sb.rpc('hub_checklist_overview', { p_list: 'open' });
+  const isOpen = _ocList === 'open';
+  const { data, error } = await sb.rpc('hub_checklist_overview', { p_list: _ocList });
   if (error) { box.innerHTML = `<div class="ho-card">Couldn't load: ${esc(error.message)}</div>`; return; }
   const items = data.items || [];
   const found = items.find(i => i.key === 'found_studio');
@@ -1938,12 +1969,13 @@ async function loadOcOverview() {
     return rank(a) - rank(b) || nm(a.studio_id).localeCompare(nm(b.studio_id));
   });
   const done = rows.filter(r => r.run && r.run.finished_at).length;
-  box.innerHTML = `<div class="ho-intro"><b>${done} of ${rows.length}</b> open studios have finished their opening list today.</div>
-    <div class="oc-wrap"><table class="oc-table"><thead><tr><th>Studio</th><th>Status</th><th>Who</th><th>Found the studio</th><th>Problems</th><th>Needs attention</th></tr></thead><tbody>
+  box.innerHTML = `<div class="ho-intro"><b>${done} of ${rows.length}</b> open studios have finished their ${isOpen ? 'opening' : 'closing'} list today.</div>
+    <div class="oc-wrap"><table class="oc-table"><thead><tr><th>Studio</th><th>Status</th><th>Who</th>${isOpen ? '<th>Found the studio</th><th>Closed last night by</th>' : ''}<th>Problems</th><th>Needs attention</th></tr></thead><tbody>
     ${rows.map(r => {
       const run = r.run;
       const answers = (run && run.answers) || {};
-      const flags = items.filter(i => i.kind === 'choice' && typeof answers[i.id] === 'number' && i.options[answers[i.id]] && i.options[answers[i.id]].flag && i.key !== 'attention' && i.key !== 'found_studio');
+      const flags = items.filter(i => i.kind === 'choice' && typeof answers[i.id] === 'number' && i.options[answers[i.id]] && i.options[answers[i.id]].flag && i.key !== 'attention' && i.key !== 'found_studio')
+        .map(i => Object.assign({}, i, { options: i.options.map(o => Object.assign({}, o, { label: o.label })) }));
       const f = found && typeof answers[found.id] === 'number' ? found.options[answers[found.id]] : null;
       const why = r.day && r.day.status === 'open' && !r.day.shifts && !r.day.bookings && r.day.events ? ' <span style="color:var(--ink-soft)">(event only)</span>' : '';
       const status = !run ? `<span class="ho-pill ended">Not started</span>${why}`
@@ -1951,10 +1983,11 @@ async function loadOcOverview() {
         : `<span class="ho-pill live">Done ${esc(dutyTime(run.finished_at))}</span>${clMinutes(run) ? ` <span style="color:var(--ink-soft)">${clMinutes(run)} min</span>` : ''}`;
       return `<tr><td><b>${esc(nm(r.studio_id))}</b></td><td>${status}</td>
         <td>${run && run.finished_by_names ? esc(run.finished_by_names.join(', ')) : ''}</td>
-        <td>${f ? (f.flag ? `<span style="color:#b45309;font-weight:700">${esc(f.label)}</span>` : esc(f.label)) : ''}</td>
-        <td>${flags.length ? flags.map(i => `<div>• ${esc(i.options[answers[i.id]].label)}</div>`).join('') : ''}</td>
+        ${isOpen ? `<td>${f ? (f.flag ? `<span style="color:#b45309;font-weight:700">${esc(f.label)}</span>` : esc(f.label)) : ''}</td>
+        <td>${r.last_close && r.last_close.names && r.last_close.names.length ? esc(r.last_close.names.join(', ')) : ''}</td>` : ''}
+        <td>${flags.length ? flags.map(i => `<div>• ${isOpen ? '' : esc(i.label) + ': '}${esc(i.options[answers[i.id]].label)}</div>`).join('') : ''}</td>
         <td style="white-space:pre-line">${run && run.attention_note ? esc(run.attention_note) : ''}</td></tr>`;
-    }).join('') || '<tr><td colspan="6">No studios are open today.</td></tr>'}</tbody></table></div>
+    }).join('') || `<tr><td colspan="${isOpen ? 7 : 5}">No studios are open today.</td></tr>`}</tbody></table></div>
     ${closed.length ? `<div class="ho-section-head">Closed today (${closed.length})</div>
       <div class="ho-intro">${closed.sort((a, b) => nm(a.studio_id).localeCompare(nm(b.studio_id))).map(r =>
         `${esc(nm(r.studio_id))} <span style="color:var(--ink-soft)">(${r.day.status === 'closed' ? (r.day.reason ? esc(r.day.reason) : 'closed') : 'nothing scheduled'})</span>`).join(' · ')}</div>` : ''}`;
