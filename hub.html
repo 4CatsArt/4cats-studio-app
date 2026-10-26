@@ -595,6 +595,8 @@ body.preview-mode .card.admin-only { display: block !important; }
    .sc-only cards appear only after a coordinator PIN unlocks them; the
    server also refuses their data without the PIN, so this is not just hiding. */
 body:not(.sc-mode) .sc-only { display: none !important; }
+/* Admin logins: the Hub's own coordinator tabs (Parties, Notifications) show without a PIN */
+body.admin-login:not(.sc-mode) .sc-only.admin-ok { display: flex !important; }
 .view-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; font-size: 12.5px; color: var(--ink-soft); }
 .view-bar .who { font-weight: 700; color: var(--ink); }
 .view-bar .spacer { flex: 1; }
@@ -1211,8 +1213,8 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
     <div class="nav-group coord">
       <div class="nav-label">Coordinator</div>
       <button class="nav-item locked-teaser" onclick="openPinModal()"><span class="ic">🔒</span> Unlock coordinator view</button>
-      <button class="nav-item sc-only" id="nav-parties" onclick="openPartiesPane()"><span class="ic">🎉</span> Parties <span class="nav-badge" id="parties-badge" style="display:none"></span></button>
-      <button class="nav-item sc-only" id="nav-notif" onclick="openNotifPane()"><span class="ic">🔔</span> Notifications <span class="nav-badge" id="notif-badge" style="display:none"></span></button>
+      <button class="nav-item sc-only admin-ok" id="nav-parties" onclick="openPartiesPane()"><span class="ic">🎉</span> Parties <span class="nav-badge" id="parties-badge" style="display:none"></span></button>
+      <button class="nav-item sc-only admin-ok" id="nav-notif" onclick="openNotifPane()"><span class="ic">🔔</span> Notifications <span class="nav-badge" id="notif-badge" style="display:none"></span></button>
       <button class="nav-item sc-only" id="nav-points" onclick="openPoints()"><span class="ic">⭐</span> My Points</button>
       <button class="nav-item sc-only" id="nav-occupancy" onclick="openOccupancy()"><span class="ic">📊</span> Fill Rates</button>
       <button class="nav-item sc-only" id="nav-instagram" onclick="openInstagram()"><span class="ic">📷</span> Instagram</button>
@@ -2862,8 +2864,9 @@ function ptyStatus(pt) {
   if (d.contacted === 'Left message') return 'message';
   return 'new';
 }
+function coordOrAdmin() { return !!_sessionPin || !!(_studioData && _studioData.isAdmin); }
 function openPartiesPane() {
-  if (!_sessionPin) { openPinModal(); return; }
+  if (!coordOrAdmin()) { openPinModal(); return; }
   showOnlyPane('parties-pane'); setActiveNav('nav-parties');
   loadPartiesPane();
 }
@@ -2982,7 +2985,7 @@ function relTime(iso) {
   const d = Math.round(h / 24); return d === 1 ? 'yesterday' : d + ' days ago';
 }
 function openNotifPane() {
-  if (!_sessionPin) { openPinModal(); return; }
+  if (!coordOrAdmin()) { openPinModal(); return; }
   showOnlyPane('notif-pane'); setActiveNav('nav-notif');
   loadNotifPane();
 }
@@ -3034,7 +3037,7 @@ async function fetchRecentBookings() {
 // Sidebar counts: Parties = new bookings + cancellations + parties in the next
 // week not contacted; Notifications = new party items + recent bookings not seen yet.
 async function refreshCoordBadges(party, recent) {
-  if (!_sessionPin || !_sessionStudioId) return;
+  if (!coordOrAdmin() || !_sessionStudioId) return;
   try {
     party = party || (_pty && paneVisible('parties-pane') ? _pty : await fetchPartyData(_sessionStudioId));
     if (!recent) recent = await fetchRecentBookings();
@@ -5126,6 +5129,7 @@ function resetToSignedOut() {
   endCoordinatorView(false);
   stopStudioTimers();
   _studioViewStarted = false; _studioData = null; _sessionStudioId = null; _viewLevel = null;
+  document.body.classList.remove('admin-login');
   document.querySelectorAll('.main [id^="card-"]').forEach(el => { el.innerHTML = ''; });
   const sw = document.getElementById('admin-studio-switcher');
   if (sw) sw.remove();
@@ -5163,6 +5167,9 @@ async function startStudioView(studioId) {
     return;
   }
   _studioData = data;
+  // Home office (admin) logins see the Hub's own coordinator tabs without a PIN.
+  document.body.classList.toggle('admin-login', !!data.isAdmin);
+  if (data.isAdmin) setTimeout(refreshCoordBadges, 0);
   _studioViewStarted = true;
   _sessionStudioId = data.studioId;
   _viewLevel = 'studio';
@@ -5279,7 +5286,7 @@ function loadStudioCards(studioId) {
     if (!_cl) loadOpenClose(_sessionStudioId);                                     // not mid-list
     loadTodayEvents(_sessionStudioId);
     loadClassStaff(_sessionStudioId);
-    if (_sessionPin) refreshCoordBadges();
+    if (coordOrAdmin()) refreshCoordBadges();
   }, 5 * 60 * 1000);
   loadFlashChallenges(studioId);
   loadDailyHero(_sessionPin, studioId);
@@ -5400,8 +5407,10 @@ function endCoordinatorView(reload = true) {
     const el = document.getElementById(id);
     if (el) el.innerHTML = '';
   });
-  if (paneVisible('points-pane') || paneVisible('instagram-pane') || paneVisible('occupancy-pane') || paneVisible('parties-pane') || paneVisible('notif-pane')) showDashboardPane(); // coordinator-only pages
-  _pty = null;
+  const adminLogin = !!(_studioData && _studioData.isAdmin);
+  if (paneVisible('points-pane') || paneVisible('instagram-pane') || paneVisible('occupancy-pane') ||
+      (!adminLogin && (paneVisible('parties-pane') || paneVisible('notif-pane')))) showDashboardPane(); // coordinator-only pages
+  if (!adminLogin) _pty = null;
   if (paneVisible('plan-pane') && _plan) renderPlanDay();   // Schedule stays, read-only
   // Supplies: admin preview only while INVENTORY_LIVE is false, so locking
   // closes it. Once live, locking reloads it so the Counts tab locks again.
@@ -5459,6 +5468,9 @@ async function changeAdminStudio(studioId) {
     loadStudioCards(studioId);
     loadCoordinatorCards(studioId);
     if (_plan) _plan = Object.assign(_plan, { stale: true });   // Schedule reloads for the new studio
+    _pty = null; refreshCoordBadges();                            // Parties / Notifications for the new studio
+    if (paneVisible('parties-pane')) loadPartiesPane();
+    if (paneVisible('notif-pane')) loadNotifPane();
     if (paneVisible('plan-pane') && _plan) loadPlanDay(_plan.date);
   } catch (e) {
     console.error('Failed to switch studio view:', e);
