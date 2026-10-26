@@ -269,6 +269,15 @@ select:focus, input:focus { border-color: #888; }
 .st-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #ccc; margin-right: 6px; }
 .st-dot.on { background: #2e7d32; }
 .st-sub { font-size: 11px; color: #aaa; font-weight: 400; }
+/* Staff avatars (staff-avatars bucket) — also shown in the 4Cats Hub */
+.st-av { display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; overflow: hidden; vertical-align: middle; flex-shrink: 0; font-weight: 700; color: #fff; }
+.st-av img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.av-pick-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+.av-pick { width: 58px; height: 58px; padding: 0; border-radius: 50%; border: 2px solid transparent; background: none; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.av-pick:hover { border-color: #c8bce8; }
+.av-pick.sel { border-color: #5b4fcf; box-shadow: 0 0 0 2px #e6e0fb; }
+.av-pick.none { font-size: 11px; color: #888; border: 1px dashed #d0d0c8; }
+.av-pick.none.sel { border: 2px solid #5b4fcf; color: #5b4fcf; }
 .st-pill { font-size: 10px; padding: 2px 6px; border-radius: 4px; background: #f5f5f0; color: #888; }
 .st-pill.admin { background: #fdecea; color: #c0392b; }
 .st-pill.manager { background: #e8e8f0; color: #5b4fcf; }
@@ -5105,6 +5114,69 @@ function staffCols() {
   }
   return _staffColsPromise
 }
+// ── Staff avatars ────────────────────────────────────────────────
+// Avatar images live in the public 'staff-avatars' bucket (upload them in
+// Supabase → Storage). staff_profiles.avatar_key holds the chosen file name.
+// No avatar → a coloured circle with their first initial.
+const AVATAR_BUCKET = 'staff-avatars'
+const AVATAR_TINTS = ['#ece7ff', '#dbeafe', '#e3f9ec', '#fce7f3', '#fef3d6', '#e0f2fe', '#fde2e2', '#ede9fe']
+const AVATAR_INKS  = ['#5636c9', '#1d4ed8', '#15803d', '#be185d', '#b45309', '#0369a1', '#b91c1c', '#6d28d9']
+let _avatarOptions = null
+async function loadAvatarOptions() {
+  if (_avatarOptions) return _avatarOptions
+  const { data, error } = await sb.storage.from(AVATAR_BUCKET).list('', { limit: 500, sortBy: { column: 'name', order: 'asc' } })
+  if (error) { console.error('Could not list avatars', error); return [] }
+  _avatarOptions = (data || []).filter(f => f.id && /\.(png|jpe?g|webp)$/i.test(f.name)).map(f => f.name)
+  return _avatarOptions
+}
+function avatarUrl(key) {
+  return key ? sb.storage.from(AVATAR_BUCKET).getPublicUrl(key).data.publicUrl : ''
+}
+function avatarTintIndex(seed) {
+  let h = 0; const t = String(seed || '')
+  for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) >>> 0
+  return h % AVATAR_TINTS.length
+}
+function avatarHtml(s, size) {
+  const i = avatarTintIndex(s.id || s.display_name)
+  const name = s.preferred_name || s.display_name || ''
+  const inner = s.avatar_key
+    ? `<img src="${stEsc(avatarUrl(s.avatar_key))}" alt="">`
+    : `<span style="color:${AVATAR_INKS[i]};font-size:${Math.round(size * 0.45)}px">${stEsc(name.trim().charAt(0).toUpperCase() || '?')}</span>`
+  return `<span class="st-av" style="width:${size}px;height:${size}px;background:${AVATAR_TINTS[i]}">${inner}</span>`
+}
+let _avatarPickerSeed = ''
+async function setStaffAvatar(key, seed) {
+  document.getElementById('staff-avatar-key').value = key || ''
+  _avatarPickerSeed = seed || ''
+  await renderAvatarPicker()
+}
+async function renderAvatarPicker() {
+  const box = document.getElementById('staff-avatar-picker')
+  const current = document.getElementById('staff-avatar-key').value
+  const opts = await loadAvatarOptions()
+  if (!opts.length) {
+    box.innerHTML = '<span style="font-size:12px;color:#aaa">No avatars yet. Upload them to the staff-avatars bucket in Supabase → Storage.</span>'
+    return
+  }
+  const i = avatarTintIndex(_avatarPickerSeed)
+  box.innerHTML =
+    `<button type="button" class="av-pick none${current ? '' : ' sel'}" onclick="pickStaffAvatar('')" title="No avatar — show their initial">None</button>` +
+    opts.map(k => `<button type="button" class="av-pick${k === current ? ' sel' : ''}" onclick="pickStaffAvatar(${stEsc(JSON.stringify(k))})" title="${stEsc(k)}">
+        <span class="st-av" style="width:50px;height:50px;background:${AVATAR_TINTS[i]}"><img src="${stEsc(avatarUrl(k))}" alt="${stEsc(k)}"></span></button>`).join('')
+  // A saved avatar whose file was since deleted from the bucket
+  if (current && !opts.includes(current)) box.insertAdjacentHTML('beforeend', `<span style="font-size:11px;color:#c0392b;align-self:center">Current avatar (${stEsc(current)}) is no longer in the bucket</span>`)
+}
+function pickStaffAvatar(key) {
+  document.getElementById('staff-avatar-key').value = key || ''
+  renderAvatarPicker()
+}
+// Only send avatar_key once the column exists (run staff_avatars.sql first).
+async function avatarPatch() {
+  const cols = String(await staffCols()).split(',')
+  return cols.includes('avatar_key') ? { avatar_key: document.getElementById('staff-avatar-key').value || null } : {}
+}
+
 let staffPinLoaded = false   // true once the edit form holds the real current PIN
 
 let editingStaffId = null   // staff_profiles.id
@@ -5267,7 +5339,7 @@ function stColumns() {
   const studioName = id => STUDIO_VARIANT_MAP[id] || id
   const cols = [
     { key: 'name', label: 'Name', always: true, val: s => s.display_name || '',
-      html: s => `${s.is_active ? '<span class="st-dot on"></span>' : '<span class="st-dot"></span>'}<strong>${stEsc(s.display_name || '')}</strong>` +
+      html: s => `${avatarHtml(s, 26)} ${s.is_active ? '<span class="st-dot on"></span>' : '<span class="st-dot"></span>'}<strong>${stEsc(s.display_name || '')}</strong>` +
         (s.preferred_name ? ` <span class="st-sub">goes by ${stEsc(s.preferred_name)}</span>` : '') + (s.nickname ? ` <span class="st-sub">(${stEsc(s.nickname)})</span>` : '') + stLeavingTag(s) },
     { key: 'preferred', label: 'Preferred name', val: s => s.preferred_name || '', edit: { type: 'text', field: 'preferred_name' } },
     { key: 'nickname', label: '4CATS name', val: s => s.nickname || '', edit: { type: 'text', field: 'nickname' } },
@@ -5610,6 +5682,7 @@ async function openStaffModal(id = null) {
       document.getElementById('staff-name').value = data.display_name || ''
       document.getElementById('staff-nickname').value = data.nickname || ''
       document.getElementById('staff-preferred-name').value = data.preferred_name || ''
+      setStaffAvatar(data.avatar_key || '', data.id)
       // Load due dates for this staff member
       let dueDates = {}
       if (data.user_id) {
@@ -5687,6 +5760,7 @@ async function openStaffModal(id = null) {
     document.getElementById('staff-name').value = ''
     document.getElementById('staff-nickname').value = ''
     document.getElementById('staff-preferred-name').value = ''
+    setStaffAvatar('', '')
     document.getElementById('staff-email').value = ''
     populateStaffUnitList([])
     document.getElementById('staff-password').value = ''
@@ -5784,6 +5858,7 @@ async function saveStaff() {
     termination_date: termDate,
     birthday_month: bdayMonth,
     birthday_day: bdayDay,
+    ...(await avatarPatch()),
   }
   const wageInput = document.getElementById('staff-hourly-wage').value
   const wageVal = wageInput ? parseFloat(wageInput) : null
@@ -5847,7 +5922,7 @@ async function saveStaff() {
     {
       const { data: newRow3 } = await sb.from('staff_profiles').select('id').eq('email', email).maybeSingle()
       if (newRow3) {
-        const { error: sErr } = await sb.from('staff_profiles').update({ ...sched, hire_date: hireDate, termination_date: termDate, birthday_month: bdayMonth, birthday_day: bdayDay }).eq('id', newRow3.id)
+        const { error: sErr } = await sb.from('staff_profiles').update({ ...sched, hire_date: hireDate, termination_date: termDate, birthday_month: bdayMonth, birthday_day: bdayDay, ...(await avatarPatch()) }).eq('id', newRow3.id)
         const bErr = sErr ? null : (await saveStaffBadges(newRow3.id)) || (await saveStaffScheduleNotes(newRow3.id))
         if (sErr || bErr) alert('Staff member created, but the scheduling details were not saved (' + (sErr || bErr).message + '). Open them and save again.')
       }
@@ -9728,6 +9803,14 @@ function showAdminToast(msg, duration = 2500) {
         <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">4CATS Name / Nickname</label>
         <input id="staff-nickname" type="text" placeholder="e.g. Rainbow Ruby" style="width:100%;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none">
       </div>
+    </div>
+
+    <!-- Avatar — picked from the staff-avatars bucket (Supabase → Storage).
+         Shown in the 4Cats Hub (who's working today) and the staff table. -->
+    <div class="modal-field" style="margin-bottom:10px">
+      <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Avatar</label>
+      <input type="hidden" id="staff-avatar-key" value="">
+      <div id="staff-avatar-picker" class="av-pick-grid"><span style="font-size:12px;color:#aaa">Loading avatars…</span></div>
     </div>
 
     <div class="modal-field" style="margin-bottom:10px">
