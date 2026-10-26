@@ -434,6 +434,9 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 #plan-pane .pf-status.need, #parties-pane .pf-status.need { background: var(--amber-bg); color: #b45309; }
 #plan-pane .pf-status.ok, #parties-pane .pf-status.ok { background: var(--green-bg); color: #15803d; }
 .plan-day.past { opacity: 0.6; }
+.spots-btn { min-height: 34px !important; padding: 0 12px !important; font-size: 12.5px !important; }
+button.role-chip.shift-edit { border: 1px solid var(--border); font: inherit; font-size: 13px; cursor: pointer; }
+button.role-chip.shift-edit:hover { border-color: var(--accent); }
 .plan-sess.tap, .floor-row.tap { cursor: pointer; }
 .plan-sess.tap:hover, .floor-row.tap:hover { border-color: var(--accent); }
 .plan-sess.tap:focus-visible, .floor-row.tap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -2367,6 +2370,24 @@ const PLAN_ROLES = [['director', 'Director'], ['teacher', 'Demoer 1'], ['teacher
                     ['circler', 'Circler 1'], ['circler2', 'Circler 2'], ['circler3', 'Circler 3']];
 let _plan = null;   // { date, team, sessions, roles, wheel: {sid: name}, party: {bookingId: [n1, n2]}, ... }
 
+// Adjust spots: admin logins, or a coordinator whose staff profile has
+// "Can adjust spaces" (checked on the server by staff-pin, like the Day view).
+let _adjustStaff = null;   // { id, display_name, role } once the PIN passes
+function planCanAdjust() { return !!(_studioData && _studioData.isAdmin) || !!_adjustStaff; }
+async function checkAdjustPower() {
+  _adjustStaff = null;
+  if (!_sessionPin) return;
+  try {
+    const res = await fetch(SUPABASE_URL + '/functions/v1/staff-pin', {
+      method: 'POST',
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'adjust_spaces', pin: _sessionPin, studio_id: _sessionStudioId || '' })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.ok && !body.error && body.match) _adjustStaff = body.match;
+  } catch (e) { /* no power */ }
+  if (paneVisible('plan-pane') && _plan) renderPlanDay();
+}
 function planCanEdit() { return !!_sessionPin || !!(_studioData && _studioData.isAdmin); }
 function openPlanAhead() {
   showOnlyPane('plan-pane');
@@ -2514,7 +2535,7 @@ function planNoteHtml(x) {
 }
 function planRowTools(x) {
   const open = !!_plan.classLists[x.id];
-  return `<button class="icon-pencil" title="Add a note" aria-label="Add a note to ${escAttr(x.title)}" onclick="planEditNote('${escAttr(x.id)}')">✏️</button>
+  return `${planCanAdjust() ? `<button class="ho-btn spots-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Spots</button>` : ''}<button class="icon-pencil" title="Add a note" aria-label="Add a note to ${escAttr(x.title)}" onclick="planEditNote('${escAttr(x.id)}')">✏️</button>
     <button class="pf-btn cl${open ? ' open' : ''}" onclick="toggleClassList('${escAttr(x.id)}')">${open ? 'Close list' : 'Class list'}</button>`;
 }
 function planCount(x) {
@@ -2554,9 +2575,13 @@ function renderPlanDay() {
     : (current ? personChip(current, '') : '<span class="sub">Not set</span>');
   const [y, m, d] = P.date.split('-').map(Number);
   const when = new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
-  const shifts = P.team.length
-    ? P.team.map(p => `<span class="role-chip">${hubAvatarHtml(p, 22)}${esc(p.name)} <small>${esc(shortTime(p.start_time))}–${esc(shortTime(p.end_time))}</small></span>`).join('')
-    : '<span class="ho-intro" style="margin:0">No shifts posted for this day yet.</span>';
+  const canShifts = planCanShifts();
+  const shifts = (P.team.length
+    ? P.team.map(p => canShifts
+        ? `<button class="role-chip shift-edit" onclick="planEditShift('${escAttr(p.staff_id)}')" title="Change or remove this shift">${hubAvatarHtml(p, 22)}${esc(p.name)} <small>${esc(shortTime(p.start_time))}–${esc(shortTime(p.end_time))}</small> <span aria-hidden="true">✏️</span></button>`
+        : `<span class="role-chip">${hubAvatarHtml(p, 22)}${esc(p.name)} <small>${esc(shortTime(p.start_time))}–${esc(shortTime(p.end_time))}</small></span>`).join('')
+    : '<span class="ho-intro" style="margin:0">No shifts posted for this day yet.</span>')
+    + (canShifts ? '<button class="ho-btn" style="min-height:32px" onclick="planEditShift(null)">+ Add shift</button>' : '');
   const roleCards = PLAN_ROLES.filter(([f]) => edit || P.roles[f]).map(([f, label]) => `<div class="plan-role"><label>${esc(label)}</label>
       ${pick(P.roles[f], `planSet('${f}', this.value)`)}
       ${edit ? `<div class="brk">Break <input type="text" value="${escAttr(P.roles['break_' + f])}" placeholder="e.g. 12:30–1:00" oninput="planSet('break_${f}', this.value, true)"></div>`
@@ -2592,7 +2617,7 @@ function renderPlanDay() {
           x.session_type === 'party' ? 'Party slot, not booked yet'
           : !(P.booked[x.id] > 0) ? 'No one booked yet'
           : demoers.length ? `<span class="floor-staff" style="margin-top:4px">${demoers.map(n => personChip(n, 'Demo')).join('')}</span>` : esc(dayCover)}</div></span>
-        ${planRowExtras(x)}${planCount(x)}<span class="kind-chip kind-${sessionKind(x.title)[1]}">${esc(sessionKind(x.title)[0])}</span>${x.session_type === 'party' ? '' : planRowTools(x)}</div>${planNoteHtml(x)}<div class="pf-wrap" data-cl="${escAttr(x.id)}"></div>`]),
+        ${planRowExtras(x)}${planCount(x)}<span class="kind-chip kind-${sessionKind(x.title)[1]}">${esc(sessionKind(x.title)[0])}</span>${x.session_type === 'party' ? (planCanAdjust() ? `<button class="ho-btn spots-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Spots</button>` : '') : planRowTools(x)}</div>${planNoteHtml(x)}<div class="pf-wrap" data-cl="${escAttr(x.id)}"></div>`]),
     ...(P.events || []).map(x => [-1, `<div class="plan-sess" style="background:#fff4dd;border-color:#ffd998"><span class="t">🎪</span><span class="nm">${esc(x.title)}<div class="sub">Event · staffing is set on the event</div></span></div>`])
   ].sort((a, b) => a[0] - b[0]).map(r => r[1]).join('');
   // Party forms: keep the open forms' own elements (and anything typed) across redraws.
@@ -2624,7 +2649,7 @@ function renderPlanDay() {
     <div class="ho-section-head">Everything on this day</div>${sessRows || '<div class="ho-intro">Nothing running this day.</div>'}
     ${notRunning.length ? `<details class="plan-closed"><summary>Not running (${notRunning.length}) · 0 booked and no spots open</summary>
       ${notRunning.map(x => `<div class="plan-sess off"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}</span>
-        ${edit ? `<button class="ho-btn" onclick="planOpenSpots('${escAttr(x.id)}')">Open spots</button>` : ''}</div>`).join('')}</details>` : ''}
+        ${planCanAdjust() ? `<button class="ho-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Open spots</button>` : ''}</div>`).join('')}</details>` : ''}
     ${edit ? `<div class="plan-actions">
       <span class="plan-msg" id="plan-msg">${esc(P.msg || (P.dirty ? 'Unsaved changes' : ''))}</span>
       <button class="ho-btn" onclick="planFill()">Fill blanks from the schedule</button>
@@ -2798,45 +2823,129 @@ const STUDIO_VARIANT_MAP = {
   'ON-YYZ-LEA':'ON / TORONTO - LEASIDE','ON-YYZ-BEA':'ON / TORONTO - THE BEACHES',
   'ON-WTR-WTR':'ON / WATERLOO - UPTOWN'
 }
-async function planOpenSpots(sessionId) {
-  if (!planCanEdit()) { openPinModal(); return; }
+async function planAdjustSpots(sessionId) {
+  if (!planCanAdjust()) { alert('Adjusting spots needs an admin login, or a coordinator whose staff profile has “Can adjust spaces”.'); return; }
   const x = _plan.sessions.find(z => z.id === sessionId);
   if (!x) return;
-  openDutySheet(`<h3>Open spots</h3><p>${esc(x.title)} · ${esc(shortTime(x.session_time))}. This changes the live spots customers can book on the website.</p>
-    <label class="f">How many spots?<input type="number" id="plan-spots" min="1" max="200" value="${x.capacity > 0 ? x.capacity : 10}" style="font:inherit;font-size:16px;border:1px solid var(--border);border-radius:10px;padding:9px 11px"></label>
-    <div id="plan-spots-msg" class="ho-intro" style="margin:0"></div>
-    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="plan-spots-go" onclick="planOpenSpotsGo('${escAttr(sessionId)}')">Open spots</button></div>`);
+  const title = buildShopifyTitle(x.session_date, x.session_time || '00:00:00', x.title);
+  openDutySheet(`<h3>Spots</h3><p>${esc(shortTime(x.session_time || ''))} · ${esc(x.title)}</p>
+    <div id="spots-live" class="ho-intro" style="margin:0 0 10px">${title ? 'Checking Shopify…' : 'This session has no Shopify product of its own (for example, kids class weeks after the first), so its spots can’t be changed here.'}</div>
+    ${title ? `<label class="f">Spots left (what customers can still book online)<input type="number" id="plan-spots" min="0" max="500" style="font:inherit;font-size:16px;border:1px solid var(--border);border-radius:10px;padding:9px 11px"></label>
+    <div id="plan-spots-msg" class="ho-intro" style="margin:0"></div>` : ''}
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button>${title ? `<button class="primary" id="plan-spots-go" onclick="planAdjustSpotsGo('${escAttr(sessionId)}')" disabled>Save</button>` : ''}</div>`);
+  if (!title) return;
+  const call = async body => (await fetch(`${SUPABASE_URL}/functions/v1/shopify-inventory`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify(body) })).json();
+  let v = null;
+  try { const d = await call({ action: 'get_all', product_title: title }); if (!d.error && d.variants) v = d.variants.find(z => z.variant_title === STUDIO_VARIANT_MAP[_sessionStudioId]) || null; } catch (e) {}
+  const live = document.getElementById('spots-live');
+  if (!live) return;
+  if (!v) { live.textContent = 'Couldn’t find this studio on the Shopify product, so nothing can be changed here.'; return; }
+  _plan.spotVariant = { sessionId, v };
+  const booked = _plan.booked[x.id] || 0;
+  live.innerHTML = `<b>${booked}</b> booked · <b>${Number(v.inventory_quantity || 0)}</b> spot${Number(v.inventory_quantity) === 1 ? '' : 's'} left on Shopify right now.`;
+  const inp = document.getElementById('plan-spots');
+  inp.value = Number(v.inventory_quantity || 0); inp.focus(); inp.select();
+  document.getElementById('plan-spots-go').disabled = false;
 }
-async function planOpenSpotsGo(sessionId) {
+async function planAdjustSpotsGo(sessionId) {
   const x = _plan.sessions.find(z => z.id === sessionId);
+  const sv = _plan.spotVariant;
   const qty = parseInt(document.getElementById('plan-spots').value, 10);
   const msg = document.getElementById('plan-spots-msg'), btn = document.getElementById('plan-spots-go');
-  if (!x || isNaN(qty) || qty < 1) { msg.textContent = 'Enter how many spots to open.'; return; }
-  btn.disabled = true; msg.textContent = 'Checking Shopify…';
-  const title = buildShopifyTitle(x.session_date, x.session_time || '00:00:00', x.title);
-  if (!title) { msg.textContent = 'This session has no Shopify product of its own, so it can’t be opened here.'; btn.disabled = false; return; }
-  const call = async body => {
-    const r = await fetch(`${SUPABASE_URL}/functions/v1/shopify-inventory`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify(body) });
-    return r.json();
-  };
-  let variant = null;
-  try { const d = await call({ action: 'get_all', product_title: title }); if (!d.error && d.variants) variant = d.variants.find(v => v.variant_title === STUDIO_VARIANT_MAP[_sessionStudioId]) || null; } catch (e) {}
-  if (!variant) { msg.textContent = 'Couldn’t find this studio on the Shopify product, so nothing was changed.'; btn.disabled = false; return; }
-  msg.textContent = 'Saving…';
+  if (!x || !sv || sv.sessionId !== sessionId) return;
+  if (isNaN(qty) || qty < 0) { msg.textContent = 'Enter how many spots should be left (0 or more).'; return; }
+  btn.disabled = true; msg.textContent = 'Saving…';
+  const old = Number(sv.v.inventory_quantity || 0);
   let setData = null;
-  try { setData = await call({ action: 'set', inventory_item_id: variant.inventory_item_id, quantity: qty }); } catch (e) {}
+  try { setData = await (await fetch(`${SUPABASE_URL}/functions/v1/shopify-inventory`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify({ action: 'set', inventory_item_id: sv.v.inventory_item_id, quantity: qty }) })).json(); } catch (e) {}
   if (!setData || !setData.inventory_level) { msg.textContent = 'Shopify didn’t accept the change. Try again.'; btn.disabled = false; return; }
   const reg = _plan.booked[x.id] || 0;
   const up = await sb.from('sessions').update({ capacity: reg + qty, spaces_left_cache: qty }).eq('id', x.id);
-  // Same log as the Day view (best effort)
-  try { await sb.from('spaces_adjustment_log').insert({ session_id: x.id, studio_id: _sessionStudioId, session_title: x.title, session_date: x.session_date,
-    session_time: x.session_time, staff_name: 'Coordinator (Hub)', made_by_role: _viewLevel === 'admin' ? 'admin' : 'coordinator', old_spaces_left: 0, new_spaces_left: qty }); } catch (e) {}
-  if (up.error) { msg.textContent = 'Opened on Shopify, but the schedule didn’t update. Refresh to check.'; return; }
+  // Same log as the Day view's adjust spaces (best effort)
+  try {
+    await sb.from('spaces_adjustment_log').insert({ session_id: x.id, studio_id: _sessionStudioId, session_title: x.title, session_date: x.session_date,
+      session_time: x.session_time, staff_id: _adjustStaff ? _adjustStaff.id : null,
+      staff_name: _adjustStaff ? _adjustStaff.display_name : 'Home office (Hub)',
+      made_by_role: _adjustStaff ? (_adjustStaff.role || 'coordinator') : 'admin', old_spaces_left: old, new_spaces_left: qty });
+  } catch (e) {}
+  if (up.error) { msg.textContent = 'Saved on Shopify, but the schedule didn’t update. Refresh to check.'; return; }
   closeDutySheet();
   await loadPlanDay(_plan.date);
-  _plan.msg = `Opened ${qty} spot${qty === 1 ? '' : 's'} for ${x.title}.`; renderPlanDay();
+  _plan.msg = `${x.title} at ${shortTime(x.session_time)}: ${qty} spot${qty === 1 ? '' : 's'} left (was ${old}).`;
+  renderPlanDay();
   _planRunDays = null; planDayStrip(_plan.date);
   if (_plan.date === localDateStr(new Date()) && _lastHeroData) loadDailyHero(_sessionPin, _sessionStudioId);
+}
+function planOpenSpots(sessionId) { return planAdjustSpots(sessionId); }
+
+// ---------- Admin: shifts on the Schedule ----------
+// Admin logins can add, change or remove the day's shifts here. They save to
+// the staff schedule (staff_shifts) as APPROVED — what Who's working and labour
+// use. One shift per person, per studio, per day (same rule as staff-schedule).
+function planCanShifts() { return !!(_studioData && _studioData.isAdmin); }
+async function planLoadShiftRows() {
+  const { data } = await sb.from('staff_shifts').select('*').eq('studio_id', _sessionStudioId).eq('shift_date', _plan.date).order('start_time');
+  return data || [];
+}
+async function planEditShift(staffId) {
+  if (!planCanShifts()) return;
+  const rows = await planLoadShiftRows();
+  const cur = staffId ? rows.find(r => r.staff_id === staffId) : null;
+  const { data: people } = await sb.from('staff_profiles').select('id, display_name, preferred_name, nickname, studio_ids, is_active, termination_date').eq('is_active', true).order('display_name');
+  const here = (people || []).filter(p => (!p.studio_ids || !p.studio_ids.length || p.studio_ids.includes(_sessionStudioId)) &&
+    (!p.termination_date || p.termination_date >= _plan.date));
+  if (cur && !here.some(p => p.id === cur.staff_id)) here.unshift((people || []).find(p => p.id === cur.staff_id) || { id: cur.staff_id, display_name: 'Staff member' });
+  const nm = p => (p.preferred_name || '').trim() || p.display_name;
+  const hm = t => t ? String(t).slice(0, 5) : '';
+  openDutySheet(`<h3>${cur ? 'Change shift' : 'Add a shift'}</h3>
+    <p>${esc(STUDIO_NAMES[_sessionStudioId] || '')} · ${esc(ptyDayLabel(_plan.date))}. Saves to the staff schedule as approved.</p>
+    <label class="f">Who<select id="sh-who" ${cur ? 'disabled' : ''}>${cur ? '' : '<option value="">Choose…</option>'}${here.map(p => `<option value="${escAttr(p.id)}"${cur && p.id === cur.staff_id ? ' selected' : ''}>${esc(nm(p))}</option>`).join('')}</select></label>
+    <div style="display:flex;gap:10px"><label class="f" style="flex:1">Start<input type="time" id="sh-start" step="900" value="${escAttr(hm(cur && cur.start_time) || '08:30')}" style="font:inherit;font-size:15px;border:1px solid var(--border);border-radius:10px;padding:8px 10px"></label>
+      <label class="f" style="flex:1">End<input type="time" id="sh-end" step="900" value="${escAttr(hm(cur && cur.end_time) || '17:00')}" style="font:inherit;font-size:15px;border:1px solid var(--border);border-radius:10px;padding:8px 10px"></label></div>
+    <div id="sh-warn" class="ho-intro" style="margin:0"></div>
+    <div class="sheet-actions">${cur ? `<button class="danger" onclick="planRemoveShift('${escAttr(cur.staff_id)}')">Remove shift</button><span style="flex:1"></span>` : ''}
+      <button onclick="closeDutySheet()">Cancel</button><button class="primary" id="sh-go" onclick="planSaveShift(${cur ? `'${escAttr(cur.staff_id)}'` : 'null'})">Save</button></div>`);
+  const who = document.getElementById('sh-who');
+  if (who) who.addEventListener('change', () => planShiftWarnings(who.value));
+  if (cur) planShiftWarnings(cur.staff_id);
+}
+// Warnings, not blocks: approved time off that day, or a shift at another studio.
+async function planShiftWarnings(staffId) {
+  const box = document.getElementById('sh-warn');
+  if (!box || !staffId) { if (box) box.textContent = ''; return; }
+  const [other, off] = await Promise.all([
+    sb.from('staff_shifts').select('studio_id, start_time, end_time, status').eq('staff_id', staffId).eq('shift_date', _plan.date).neq('studio_id', _sessionStudioId),
+    sb.from('staff_time_off').select('start_date, end_date, start_time, end_time, status').eq('staff_id', staffId).eq('status', 'approved').lte('start_date', _plan.date).gte('end_date', _plan.date)
+  ]);
+  const w = [];
+  (other.data || []).filter(r => r.status !== 'draft').forEach(r => w.push(`Already working at ${STUDIO_NAMES[r.studio_id] || r.studio_id} that day (${shortTime(r.start_time)}–${shortTime(r.end_time)}).`));
+  (off.data || []).forEach(r => w.push(`Has approved time off that day${r.start_time ? ` (${shortTime(r.start_time)}–${shortTime(r.end_time)})` : ''}.`));
+  box.innerHTML = w.length ? `<div class="duty-note" style="margin-bottom:8px">⚠️ ${w.map(esc).join('<br>⚠️ ')}</div>` : '';
+}
+async function planSaveShift(existingStaffId) {
+  const staffId = existingStaffId || document.getElementById('sh-who').value;
+  const start = document.getElementById('sh-start').value, end = document.getElementById('sh-end').value;
+  if (!staffId) { alert('Choose who the shift is for.'); return; }
+  if (!start || !end || end <= start) { alert('The end time needs to be after the start time.'); return; }
+  const btn = document.getElementById('sh-go'); btn.disabled = true; btn.textContent = 'Saving…';
+  const row = { staff_id: staffId, studio_id: _sessionStudioId, shift_date: _plan.date,
+                start_time: start + ':00', end_time: end + ':00', status: 'approved' };
+  const { error } = await sb.from('staff_shifts').upsert(row, { onConflict: 'staff_id,studio_id,shift_date' });
+  if (error) { btn.disabled = false; btn.textContent = 'Save'; alert("Couldn't save the shift: " + error.message); return; }
+  closeDutySheet();
+  await planAfterShiftChange('Shift saved to the staff schedule.');
+}
+async function planRemoveShift(staffId) {
+  if (!confirm('Remove this shift from the staff schedule?')) return;
+  const { error } = await sb.from('staff_shifts').delete().eq('staff_id', staffId).eq('studio_id', _sessionStudioId).eq('shift_date', _plan.date);
+  if (error) { alert("Couldn't remove it: " + error.message); return; }
+  closeDutySheet();
+  await planAfterShiftChange('Shift removed from the staff schedule.');
+}
+async function planAfterShiftChange(msg) {
+  await loadPlanDay(_plan.date);
+  _plan.msg = msg; renderPlanDay();
+  if (_plan.date === localDateStr(new Date())) loadTeamToday(_sessionStudioId);
 }
 
 // Tap (or Enter) on a session row: class list, or the party form for a party.
@@ -5722,6 +5831,7 @@ async function submitCoordinatorPin() {
   loadCoordinatorCards(data.studioId);
   loadFlashChallenges(data.studioId); // the SC can now claim
   refreshCoordBadges();
+  checkAdjustPower();
   resetInactivityTimer();
   // The Schedule page switches to editing straight away.
   if (paneVisible('plan-pane') && _plan) {
@@ -5742,6 +5852,7 @@ function endCoordinatorView(reload = true) {
     const el = document.getElementById(id);
     if (el) el.innerHTML = '';
   });
+  _adjustStaff = null;
   const adminLogin = !!(_studioData && _studioData.isAdmin);
   if (paneVisible('points-pane') || paneVisible('instagram-pane') || paneVisible('occupancy-pane') ||
       (!adminLogin && (paneVisible('parties-pane') || paneVisible('notif-pane')))) showDashboardPane(); // coordinator-only pages
