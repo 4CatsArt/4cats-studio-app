@@ -434,6 +434,9 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 #plan-pane .pf-status.need, #parties-pane .pf-status.need { background: var(--amber-bg); color: #b45309; }
 #plan-pane .pf-status.ok, #parties-pane .pf-status.ok { background: var(--green-bg); color: #15803d; }
 .plan-day.past { opacity: 0.6; }
+.plan-day.idle { background: #eeedf3; border-color: #e3e1ec; color: #a9a6bb; }
+.plan-day.idle .dw { color: #b7b4c8; }
+.plan-day.idle.on { background: #8e8aa6; border-color: #8e8aa6; color: #fff; }
 .pty-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 16px; padding: 14px 16px; margin-bottom: 8px; }
 .pty-card.urgent { border-color: #f5b5b5; background: #fff7f7; }
 .pty-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
@@ -2328,13 +2331,39 @@ function openPlanAhead() {
   setActiveNav('nav-plan');
   loadPlanDay((_plan && _plan.date) || localDateStr(new Date()));
 }
+// Which days in the strip have anything running (looked up once per studio).
+// Running = a session with spots or bookings (capacity above 0, or not set),
+// a kids class week, a catch-up class, or an event. Hidden sessions don't count.
+let _planRunDays = null;   // { studio, days: Set }
+async function loadPlanRunDays() {
+  const st = _sessionStudioId;
+  if (_planRunDays && _planRunDays.studio === st) return;
+  const from = new Date(); from.setDate(from.getDate() - 7);
+  const to = new Date(); to.setDate(to.getDate() + 28);
+  const { data, error } = await sb.from('sessions').select('session_date, capacity, show, session_type, title')
+    .eq('studio_id', st).gte('session_date', localDateStr(from)).lte('session_date', localDateStr(to));
+  if (error) return;
+  const days = new Set();
+  (data || []).forEach(x => {
+    if (x.show === false) return;
+    if (x.session_type === 'festival' || x.capacity === null || x.capacity > 0 ||
+        /\bclass\s+\d+\s+of\s+\d+/i.test(x.title || '') || x.title === 'Catch Up Class') days.add(x.session_date);
+  });
+  _planRunDays = { studio: st, days };
+  if (_planStripSel) planDayStrip(_planStripSel);
+}
+let _planStripSel = null;
 function planDayStrip(sel) {
+  _planStripSel = sel;
   const el = document.getElementById('plan-days');
+  if (!_planRunDays || _planRunDays.studio !== _sessionStudioId) loadPlanRunDays();
+  const run = _planRunDays && _planRunDays.studio === _sessionStudioId ? _planRunDays.days : null;
   const out = [];
   for (let i = -7; i <= 28; i++) {
     const d = new Date(); d.setDate(d.getDate() + i);
     const ds = localDateStr(d);
-    out.push(`<button class="plan-day${ds === sel ? ' on' : ''}${i < 0 ? ' past' : ''}" onclick="loadPlanDay('${ds}')"><div class="dw">${i === 0 ? 'Today' : d.toLocaleDateString(undefined, { weekday: 'short' })}</div><div class="dn">${d.getDate()}</div></button>`);
+    const idle = run && !run.has(ds);
+    out.push(`<button class="plan-day${ds === sel ? ' on' : ''}${i < 0 ? ' past' : ''}${idle ? ' idle' : ''}" title="${idle ? 'Nothing running' : ''}" onclick="loadPlanDay('${ds}')"><div class="dw">${i === 0 ? 'Today' : d.toLocaleDateString(undefined, { weekday: 'short' })}</div><div class="dn">${d.getDate()}</div></button>`);
   }
   el.innerHTML = out.join('');
   const on = el.querySelector('.plan-day.on');
@@ -2732,6 +2761,7 @@ async function planOpenSpotsGo(sessionId) {
   closeDutySheet();
   await loadPlanDay(_plan.date);
   _plan.msg = `Opened ${qty} spot${qty === 1 ? '' : 's'} for ${x.title}.`; renderPlanDay();
+  _planRunDays = null; planDayStrip(_plan.date);
   if (_plan.date === localDateStr(new Date()) && _lastHeroData) loadDailyHero(_sessionPin, _sessionStudioId);
 }
 
