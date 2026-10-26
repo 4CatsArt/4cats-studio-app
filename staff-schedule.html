@@ -3577,7 +3577,7 @@ async function previewShiftImport() {
   const matches = await matchNames(parsed.names)
   const locMap = {}
   parsed.locations.forEach(l => { locMap[l] = slingLocationStudio(l) })
-  shiftImportPlan = { parsed, matches, locMap, existing: null }
+  shiftImportPlan = { parsed, matches, locMap, existingRows: [] }
   await loadShiftImportExisting()
   renderShiftPreview()
 }
@@ -3586,29 +3586,56 @@ async function previewShiftImport() {
 async function loadShiftImportExisting() {
   const { parsed, locMap } = shiftImportPlan
   const studios = Array.from(new Set(Object.values(locMap).filter(id => id && id !== '__skip')))
-  shiftImportPlan.existing = {}
+  shiftImportPlan.existingRows = []
   if (!studios.length) return
-  const { data, error } = await sb.from('staff_shifts').select('id, studio_id, status')
+  const { data, error } = await sb.from('staff_shifts').select('id, staff_id, studio_id, shift_date, status')
     .in('studio_id', studios).gte('shift_date', parsed.windowStart).lte('shift_date', parsed.windowEnd)
   if (error) { toast('Could not check existing shifts: ' + error.message, true); return }
-  ;(data || []).forEach(r => {
-    const e = shiftImportPlan.existing[r.studio_id] = shiftImportPlan.existing[r.studio_id] || { replace: [], drafts: 0 }
-    if (r.status === 'draft') e.drafts++; else e.replace.push(r.id)
-  })
+  shiftImportPlan.existingRows = data || []
 }
 
 function shiftImportRows() {
   const { parsed, matches, locMap } = shiftImportPlan
   const idFor = n => { const m = matches[n]; return m && m.staff_id && m.staff_id !== '__skip' ? m.staff_id : null }
   const postedAt = new Date().toISOString()
-  return parsed.shifts.filter(x => idFor(x.name) && locMap[x.location] && locMap[x.location] !== '__skip').map(x => ({
-    staff_id: idFor(x.name), studio_id: locMap[x.location], shift_date: x.date,
-    start_time: x.start, end_time: x.end, status: 'posted', posted_at: postedAt
-  }))
+  // staff_shifts allows one row per person, studio and day, so a split shift
+  // in Sling becomes one shift from the first start to the last end.
+  const byKey = new Map()
+  parsed.shifts.filter(x => idFor(x.name) && locMap[x.location] && locMap[x.location] !== '__skip').forEach(x => {
+    const r = { staff_id: idFor(x.name), studio_id: locMap[x.location], shift_date: x.date,
+      start_time: x.start, end_time: x.end, status: 'posted', posted_at: postedAt }
+    const k = r.staff_id + '|' + r.studio_id + '|' + r.shift_date
+    const had = byKey.get(k)
+    if (!had) { byKey.set(k, r); return }
+    if (r.start_time < had.start_time) had.start_time = r.start_time
+    if (r.end_time > had.end_time) had.end_time = r.end_time
+    had.merged = true
+  })
+  return Array.from(byKey.values())
+}
+
+// What the import does to the shifts already saved: the same person, studio and
+// day is updated in place (drafts too, since Sling is what staff were told);
+// other approved/posted shifts at these studios and dates are removed; other
+// drafts stay.
+function shiftImportEffect(rows) {
+  const keys = new Set(rows.map(r => r.staff_id + '|' + r.studio_id + '|' + r.shift_date))
+  const studios = new Set(rows.map(r => r.studio_id))
+  const per = {}
+  const removeIds = []
+  ;(shiftImportPlan.existingRows || []).forEach(e => {
+    if (!studios.has(e.studio_id)) return
+    const c = per[e.studio_id] = per[e.studio_id] || { updated: 0, removed: 0, draftsKept: 0 }
+    const k = e.staff_id + '|' + e.studio_id + '|' + e.shift_date
+    if (keys.has(k)) c.updated++
+    else if (e.status === 'draft') c.draftsKept++
+    else { c.removed++; removeIds.push(e.id) }
+  })
+  return { per, removeIds }
 }
 
 function renderShiftPreview() {
-  const { parsed: p, matches, locMap, existing } = shiftImportPlan
+  const { parsed: p, matches, locMap } = shiftImportPlan
   const out = document.getElementById('ims-preview')
   const needsName = p.names.filter(n => !matches[n].staff_id)
   const needsLoc = p.locations.filter(l => !locMap[l])
@@ -3654,11 +3681,14 @@ function renderShiftPreview() {
 
   // what happens per studio
   const studioIds = Object.keys(byStudio).sort((a, b) => (STUDIO_NAMES[a] || a).localeCompare(STUDIO_NAMES[b] || b))
+  const eff = shiftImportEffect(rows)
+  const merged = rows.filter(r => r.merged).length
+  if (merged) html += '<div class="note info">' + merged + ' split shift' + (merged === 1 ? '' : 's') + ' (two shifts for one person at one studio on one day) will be saved as one shift, first start to last end.</div>'
   html += '<div class="panel"><div class="panel-head"><h2>What changes, ' + fmtDate(p.windowStart) + ' to ' + fmtDate(p.windowEnd) + '</h2></div>' +
-    '<table class="list"><thead><tr><th>Studio</th><th>Sling shifts added</th><th>Approved / posted shifts replaced</th><th>Drafts left alone</th></tr></thead><tbody>' +
+    '<table class="list"><thead><tr><th>Studio</th><th>Sling shifts</th><th>Already saved, updated to Sling</th><th>Not in Sling, removed</th><th>Other drafts left alone</th></tr></thead><tbody>' +
     studioIds.map(id => {
-      const e = (existing && existing[id]) || { replace: [], drafts: 0 }
-      return '<tr><td class="person">' + esc(STUDIO_NAMES[id] || id) + '</td><td>' + byStudio[id] + '</td><td>' + e.replace.length + '</td><td>' + e.drafts + '</td></tr>'
+      const c = eff.per[id] || { updated: 0, removed: 0, draftsKept: 0 }
+      return '<tr><td class="person">' + esc(STUDIO_NAMES[id] || id) + '</td><td>' + byStudio[id] + '</td><td>' + c.updated + '</td><td>' + c.removed + '</td><td>' + c.draftsKept + '</td></tr>'
     }).join('') + '</tbody></table></div>'
 
   const blocked = needsName.length || needsLoc.length
@@ -3678,12 +3708,14 @@ async function setShiftLoc(loc, studioId) {
 }
 
 async function runShiftImport() {
-  const { parsed: p, matches, existing } = shiftImportPlan
+  const { parsed: p, matches } = shiftImportPlan
+  // Re-check what's saved now (someone may have changed the schedule since the preview).
+  await loadShiftImportExisting()
   const rows = shiftImportRows()
   const studios = Array.from(new Set(rows.map(r => r.studio_id)))
-  const replaceIds = [].concat(...studios.map(id => (existing[id] || { replace: [] }).replace))
+  const replaceIds = shiftImportEffect(rows).removeIds
   if (!confirm('Import ' + rows.length + ' Sling shifts at ' + studios.length + ' studios for ' + fmtDate(p.windowStart) + ' to ' + fmtDate(p.windowEnd) + '?' +
-    (replaceIds.length ? '\n\n' + replaceIds.length + ' approved or posted shifts already saved for those studios and dates will be replaced.' : ''))) return
+    (replaceIds.length ? '\n\n' + replaceIds.length + ' approved or posted shifts at those studios and dates aren\'t in Sling and will be removed.' : ''))) return
   const btn = document.getElementById('ims-go'); btn.disabled = true; btn.textContent = 'Importing…'
   try {
     // 1. remember picked name matches (shared with the availability import)
@@ -3692,9 +3724,11 @@ async function runShiftImport() {
       const { error } = await sb.from('sling_name_map').upsert(newMaps, { onConflict: 'sling_name' })
       if (error) throw error
     }
-    // 2. add the Sling shifts first, so nothing is lost if this stops partway
-    for (let i = 0; i < rows.length; i += 200) {
-      const { error } = await sb.from('staff_shifts').insert(rows.slice(i, i + 200))
+    // 2. save the Sling shifts first (same person + studio + day is updated in
+    //    place), so nothing is lost if this stops partway; safe to run again
+    const clean = rows.map(r => { const c = Object.assign({}, r); delete c.merged; return c })
+    for (let i = 0; i < clean.length; i += 200) {
+      const { error } = await sb.from('staff_shifts').upsert(clean.slice(i, i + 200), { onConflict: 'staff_id,studio_id,shift_date' })
       if (error) throw error
     }
     // 3. then remove the shifts they replace (only the ones counted in the preview)
@@ -3703,7 +3737,7 @@ async function runShiftImport() {
       if (error) throw new Error('The Sling shifts were added, but the old ones weren\'t all removed (' + error.message + '). Preview and import again to finish.')
     }
     document.getElementById('ims-preview').innerHTML = '<div class="note info">Imported ' + rows.length + ' shifts at ' + studios.length +
-      ' studios, ' + fmtDate(p.windowStart) + ' to ' + fmtDate(p.windowEnd) + '. Replaced ' + replaceIds.length + ' earlier shifts. They\'re marked posted.</div>'
+      ' studios, ' + fmtDate(p.windowStart) + ' to ' + fmtDate(p.windowEnd) + '. Removed ' + replaceIds.length + ' earlier shifts that aren\'t in Sling. They\'re all marked posted.</div>'
     toast('Shifts imported')
     shiftImportPlan = null
     if (typeof loadCoverage === 'function') loadCoverage()
