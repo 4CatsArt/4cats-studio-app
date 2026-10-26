@@ -481,6 +481,26 @@ table.pl-staff .bad { color: var(--bad); }
 
     <!-- ===== IMPORT ===== -->
     <div class="view" id="view-import">
+      <!-- Shifts from Sling (Oct 2026): until we're off Sling, the Sling schedule
+           export can be brought in so the Hub's "Who's working" and labour use
+           the real shifts. -->
+      <div class="panel">
+        <div class="panel-head"><h2>Import shifts from Sling</h2></div>
+        <div class="panel-body">
+          <div class="form-row">
+            <label class="field"><span>Sling shifts export (.csv)</span><input class="input" type="file" id="ims-file" accept=".csv,text/csv" style="height:auto"></label>
+            <button class="btn primary" onclick="previewShiftImport()">Preview</button>
+          </div>
+          <p class="muted small" style="margin-top:8px;line-height:1.5">
+            Nothing is saved until you confirm. For each studio in the file, the Sling shifts replace that studio's
+            approved and posted shifts on the export's dates; drafts are left alone. Imported shifts are marked
+            <b>posted</b> (in Sling). Importing the same dates again is safe, so if Sling changes, export and import again.
+            Time off and unavailability in the file are skipped here; use the import below for those.
+          </p>
+        </div>
+      </div>
+      <div id="ims-preview"></div>
+
       <div class="panel">
         <div class="panel-head"><h2>Import unavailability or time off from Sling</h2></div>
         <div class="panel-body">
@@ -3460,6 +3480,237 @@ function parseSlingExport(text) {
   })
   const names = Array.from(new Set(entries.map(e => e.name).concat(timeOffs.map(t => t.name)))).sort()
   return { windowStart, windowEnd, entries: entries.length, phantom, dstFixed, recurring, waitingInSling, oneOffs, names, unrecognized, timeOffs }
+}
+
+/* =====================================================================
+   SLING SHIFTS IMPORT
+   Same calendar grid as the availability export. A shift entry is
+     "8:30 AM - 5:00 PM • 8h" / "instruct • 4cats leaside" / "Name"
+   ===================================================================== */
+// Sling location → studio. Matched on whole words, longest first, after
+// dropping "4cats". Unknown locations are picked in the preview.
+const SLING_LOCATION_KEYS = [
+  ['kingston gardiners', 'ON-KGN-AP'], ['arlington park', 'ON-KGN-AP'], ['kingston', 'ON-KGN-AP'],
+  ['the beaches', 'ON-YYZ-BEA'], ['beaches', 'ON-YYZ-BEA'],
+  ['ottawa the glebe', 'ON-YOW-GLB'], ['the glebe', 'ON-YOW-GLB'], ['glebe', 'ON-YOW-GLB'],
+  ['ottawa street', 'ON-HAM-OS'],
+  ['st catharines', 'ON-STC-STC'],
+  ['waterloo uptown', 'ON-WTR-WTR'], ['waterloo', 'ON-WTR-WTR'],
+  ['victoria uptown', 'BC-YYJ-VIC'],
+  ['leaside', 'ON-YYZ-LEA'], ['avenue road', 'ON-YYZ-AVE'], ['baby point', 'ON-YYZ-BP'],
+  ['erin', 'ON-ERN-ERN'], ['burlington', 'ON-BRL-BRL'],
+  ['byron', 'ON-LDN-BYR'], ['wortley village', 'ON-LDN-WVG'], ['wortley', 'ON-LDN-WVG'],
+  ['galt', 'ON-CMB-GLT'], ['cambridge', 'ON-CMB-GLT'],
+  ['port credit', 'ON-MIS-PC'],
+  ['west oakville', 'ON-OAK-WST'], ['oakville west', 'ON-OAK-WST'],
+  ['oakville north', 'ON-OAK-OAK'], ['oakville trafalgar', 'ON-OAK-OAK'], ['trafalgar', 'ON-OAK-OAK'], ['oakville', 'ON-OAK-OAK'],
+  ['waterdown', 'ON-HAM-WD'], ['west harbour', 'ON-HAM-WH'],
+  ['garden city', 'BC-RICH-GC'], ['steveston', 'BC-RICH-STV'], ['surrey', 'BC-SUR-SSR'],
+  ['kitsilano', 'BC-YVR-KIT'], ['kits', 'BC-YVR-KIT'], ['main street', 'BC-YVR-MS'], ['main st', 'BC-YVR-MS'], ['ubc', 'BC-YVR-UBC'],
+  ['cook street village', 'BC-YYJ-CSV'], ['cook street', 'BC-YYJ-CSV'], ['esquimalt', 'BC-YYJ-ESQ'], ['oak bay', 'BC-YYJ-OB'],
+  ['inglewood', 'AB-YYC-ING'], ['st albert', 'AB-STA-STA'],
+  ['home office', '__skip']
+].sort((a, b) => b[0].length - a[0].length)
+
+function slingLocationStudio(loc) {
+  const n = normName(loc).replace(/\b4\s*cats\b/g, ' ').replace(/\bcats\b/g, ' ').replace(/\s+/g, ' ').trim()
+  for (const [key, id] of SLING_LOCATION_KEYS) {
+    if (new RegExp('(^| )' + key.replace(/ /g, ' ') + '( |$)').test(n)) return id
+  }
+  return ''
+}
+
+function parseSlingShifts(text) {
+  const grid = parseCsv(text).filter(r => r.some(c => c.trim() !== ''))
+  const header = grid.shift() || []
+  if (!header.length || header[0].trim().toUpperCase() !== 'SUNDAY') throw new Error('This does not look like a Sling export (expected a SUNDAY…SATURDAY calendar grid).')
+  const now = new Date()
+  let year = null, prevMonth = null
+  const shifts = [], allDates = []
+  let otherEntries = 0
+  grid.forEach(r => r.forEach(cell => {
+    cell = (cell || '').replace(/\r/g, '').trim()
+    if (!cell) return
+    const blocks = cell.split(/\n\s*\n/)
+    const dm = blocks[0].trim().match(/^(\d{1,2})\s+([A-Za-z]{3})/)
+    if (!dm || !MONTHS[dm[2]]) return
+    const month = MONTHS[dm[2]]
+    if (year === null) {
+      year = now.getFullYear()
+      if (month - (now.getMonth() + 1) > 6) year--
+      else if ((now.getMonth() + 1) - month > 6) year++
+    } else if (month < prevMonth) year++
+    prevMonth = month
+    const date = year + '-' + String(month).padStart(2, '0') + '-' + String(Number(dm[1])).padStart(2, '0')
+    allDates.push(date)
+    blocks.slice(1).forEach(b => {
+      const lines = b.split('\n').map(l => l.trim()).filter(Boolean)
+      if (lines.length < 3) return
+      const timeLine = lines[0], posLine = lines[1]
+      const tm = timeLine.match(/^(\d{1,2}:\d{2}\s*[AP]M)\s*-\s*(\d{1,2}:\d{2}\s*[AP]M)/i)
+      if (!tm || /time off|unavailable/i.test(posLine) || posLine.indexOf('•') < 0) { otherEntries++; return }
+      const start = time12to24(tm[1]), end = time12to24(tm[2])
+      if (!start || !end || end <= start) { otherEntries++; return }
+      const parts = posLine.split('•').map(x => x.trim())
+      const position = parts[0], location = parts.slice(1).join(' • ')
+      const name = lines.slice(2).join(' ').replace(/^zz\s*-?\s*/i, '').replace(/\s+/g, ' ').trim()
+      shifts.push({ name, date, start, end, position, location })
+    })
+  }))
+  allDates.sort()
+  const names = Array.from(new Set(shifts.map(x => x.name))).sort()
+  const locations = Array.from(new Set(shifts.map(x => x.location))).sort()
+  return { windowStart: allDates[0], windowEnd: allDates[allDates.length - 1], shifts, names, locations, otherEntries }
+}
+
+let shiftImportPlan = null
+
+async function previewShiftImport() {
+  const file = document.getElementById('ims-file').files[0]
+  if (!file) { toast('Choose the Sling shifts export.', true); return }
+  const out = document.getElementById('ims-preview')
+  out.innerHTML = '<div class="panel"><div class="loading">Reading the export…</div></div>'
+  let parsed
+  try { parsed = parseSlingShifts(await file.text()) }
+  catch (e) { out.innerHTML = '<div class="note bad">' + esc(e.message) + '</div>'; return }
+  if (!parsed.shifts.length) { out.innerHTML = '<div class="note bad">No shifts found in this file. Is it the schedule export (not availability)?</div>'; return }
+  const matches = await matchNames(parsed.names)
+  const locMap = {}
+  parsed.locations.forEach(l => { locMap[l] = slingLocationStudio(l) })
+  shiftImportPlan = { parsed, matches, locMap, existing: null }
+  await loadShiftImportExisting()
+  renderShiftPreview()
+}
+
+// The shifts already saved for these studios and dates (what the import replaces).
+async function loadShiftImportExisting() {
+  const { parsed, locMap } = shiftImportPlan
+  const studios = Array.from(new Set(Object.values(locMap).filter(id => id && id !== '__skip')))
+  shiftImportPlan.existing = {}
+  if (!studios.length) return
+  const { data, error } = await sb.from('staff_shifts').select('id, studio_id, status')
+    .in('studio_id', studios).gte('shift_date', parsed.windowStart).lte('shift_date', parsed.windowEnd)
+  if (error) { toast('Could not check existing shifts: ' + error.message, true); return }
+  ;(data || []).forEach(r => {
+    const e = shiftImportPlan.existing[r.studio_id] = shiftImportPlan.existing[r.studio_id] || { replace: [], drafts: 0 }
+    if (r.status === 'draft') e.drafts++; else e.replace.push(r.id)
+  })
+}
+
+function shiftImportRows() {
+  const { parsed, matches, locMap } = shiftImportPlan
+  const idFor = n => { const m = matches[n]; return m && m.staff_id && m.staff_id !== '__skip' ? m.staff_id : null }
+  const postedAt = new Date().toISOString()
+  return parsed.shifts.filter(x => idFor(x.name) && locMap[x.location] && locMap[x.location] !== '__skip').map(x => ({
+    staff_id: idFor(x.name), studio_id: locMap[x.location], shift_date: x.date,
+    start_time: x.start, end_time: x.end, status: 'posted', posted_at: postedAt
+  }))
+}
+
+function renderShiftPreview() {
+  const { parsed: p, matches, locMap, existing } = shiftImportPlan
+  const out = document.getElementById('ims-preview')
+  const needsName = p.names.filter(n => !matches[n].staff_id)
+  const needsLoc = p.locations.filter(l => !locMap[l])
+  const activeOpts = staff.filter(s => s.is_active).map(s => '<option value="' + s.id + '">' + esc(s.display_name) + '</option>').join('')
+  const studioOpts = Object.keys(STUDIO_NAMES).map(id => '<option value="' + id + '">' + esc(STUDIO_NAMES[id]) + '</option>').join('')
+  const rows = shiftImportRows()
+  const byStudio = {}
+  rows.forEach(r => { byStudio[r.studio_id] = (byStudio[r.studio_id] || 0) + 1 })
+  const skippedLoc = p.shifts.filter(x => locMap[x.location] === '__skip').length
+
+  let html = '<div class="panel"><div class="summary">' +
+    '<div><b>' + fmtDate(p.windowStart) + '</b>export starts</div>' +
+    '<div><b>' + fmtDate(p.windowEnd) + '</b>export ends</div>' +
+    '<div><b>' + p.shifts.length + '</b>shifts in Sling</div>' +
+    '<div><b>' + p.names.length + '</b>people</div>' +
+    '<div><b>' + Object.keys(byStudio).length + '</b>studios</div>' +
+    '<div><b>' + rows.length + '</b>ready to import</div></div></div>'
+  if (p.otherEntries) html += '<div class="note info">' + p.otherEntries + ' time off and unavailability entries in this file are skipped here.</div>'
+  if (skippedLoc) html += '<div class="note info">' + skippedLoc + ' shift' + (skippedLoc === 1 ? '' : 's') + ' at locations set to skip (like Home Office) won\'t be imported.</div>'
+
+  // locations
+  html += '<div class="panel"><div class="panel-head"><h2>Sling locations</h2><span class="muted small">' +
+    (needsLoc.length ? needsLoc.length + ' need a studio before importing' : 'All matched') + '</span></div><table class="list"><thead><tr><th>Location in Sling</th><th>Studio</th><th>Shifts</th></tr></thead><tbody>' +
+    p.locations.map(l => {
+      const v = locMap[l] || ''
+      const sel = '<select class="input" data-loc="' + esc(l) + '" onchange="setShiftLoc(this.dataset.loc, this.value)"><option value="">Choose a studio…</option>' +
+        '<option value="__skip"' + (v === '__skip' ? ' selected' : '') + '>Skip (not a studio)</option>' +
+        studioOpts.replace('value="' + v + '"', 'value="' + v + '" selected') + '</select>'
+      return '<tr><td class="person">' + esc(l) + '</td><td>' + sel + '</td><td>' + p.shifts.filter(x => x.location === l).length + '</td></tr>'
+    }).join('') + '</tbody></table></div>'
+
+  // people
+  html += '<div class="panel"><div class="panel-head"><h2>People</h2><span class="muted small">' +
+    (needsName.length ? needsName.length + ' need a match before importing' : 'All matched') + '</span></div><table class="list"><thead><tr><th>Name in Sling</th><th>Matched to</th><th></th></tr></thead><tbody>' +
+    p.names.map(n => {
+      const m = matches[n]
+      const sel = '<select class="input" onchange="setShiftMatch(this.dataset.name, this.value)" data-name="' + esc(n) + '"><option value="">' +
+        (m.how === 'ambiguous' ? 'More than one match, choose…' : 'No match, choose…') + '</option><option value="__skip"' + (m.staff_id === '__skip' ? ' selected' : '') + '>Skip this person</option>' +
+        activeOpts.replace('value="' + m.staff_id + '"', 'value="' + m.staff_id + '" selected') + '</select>'
+      const how = m.how === 'saved' ? 'Matched before' : m.how === 'name' ? 'Same name' : m.how === 'picked' ? 'Your choice' : ''
+      return '<tr><td class="person">' + esc(n) + '</td><td>' + sel + '</td><td class="muted small">' + how + '</td></tr>'
+    }).join('') + '</tbody></table></div>'
+
+  // what happens per studio
+  const studioIds = Object.keys(byStudio).sort((a, b) => (STUDIO_NAMES[a] || a).localeCompare(STUDIO_NAMES[b] || b))
+  html += '<div class="panel"><div class="panel-head"><h2>What changes, ' + fmtDate(p.windowStart) + ' to ' + fmtDate(p.windowEnd) + '</h2></div>' +
+    '<table class="list"><thead><tr><th>Studio</th><th>Sling shifts added</th><th>Approved / posted shifts replaced</th><th>Drafts left alone</th></tr></thead><tbody>' +
+    studioIds.map(id => {
+      const e = (existing && existing[id]) || { replace: [], drafts: 0 }
+      return '<tr><td class="person">' + esc(STUDIO_NAMES[id] || id) + '</td><td>' + byStudio[id] + '</td><td>' + e.replace.length + '</td><td>' + e.drafts + '</td></tr>'
+    }).join('') + '</tbody></table></div>'
+
+  const blocked = needsName.length || needsLoc.length
+  html += '<div class="toolbar"><span class="muted">' + (blocked ? 'Match or skip every location and person to continue.' : 'Ready to import.') + '</span>' +
+    '<button class="btn primary spacer" id="ims-go" onclick="runShiftImport()"' + (blocked ? ' disabled' : '') + '>Import shifts</button></div>'
+  out.innerHTML = html
+}
+
+function setShiftMatch(name, staffId) {
+  shiftImportPlan.matches[name] = { staff_id: staffId, how: staffId && staffId !== '__skip' ? 'picked' : (staffId === '__skip' ? 'skip' : 'none') }
+  renderShiftPreview()
+}
+async function setShiftLoc(loc, studioId) {
+  shiftImportPlan.locMap[loc] = studioId
+  await loadShiftImportExisting()
+  renderShiftPreview()
+}
+
+async function runShiftImport() {
+  const { parsed: p, matches, existing } = shiftImportPlan
+  const rows = shiftImportRows()
+  const studios = Array.from(new Set(rows.map(r => r.studio_id)))
+  const replaceIds = [].concat(...studios.map(id => (existing[id] || { replace: [] }).replace))
+  if (!confirm('Import ' + rows.length + ' Sling shifts at ' + studios.length + ' studios for ' + fmtDate(p.windowStart) + ' to ' + fmtDate(p.windowEnd) + '?' +
+    (replaceIds.length ? '\n\n' + replaceIds.length + ' approved or posted shifts already saved for those studios and dates will be replaced.' : ''))) return
+  const btn = document.getElementById('ims-go'); btn.disabled = true; btn.textContent = 'Importing…'
+  try {
+    // 1. remember picked name matches (shared with the availability import)
+    const newMaps = p.names.filter(n => matches[n].how === 'picked').map(n => ({ sling_name: n, staff_id: matches[n].staff_id }))
+    if (newMaps.length) {
+      const { error } = await sb.from('sling_name_map').upsert(newMaps, { onConflict: 'sling_name' })
+      if (error) throw error
+    }
+    // 2. add the Sling shifts first, so nothing is lost if this stops partway
+    for (let i = 0; i < rows.length; i += 200) {
+      const { error } = await sb.from('staff_shifts').insert(rows.slice(i, i + 200))
+      if (error) throw error
+    }
+    // 3. then remove the shifts they replace (only the ones counted in the preview)
+    for (let i = 0; i < replaceIds.length; i += 200) {
+      const { error } = await sb.from('staff_shifts').delete().in('id', replaceIds.slice(i, i + 200))
+      if (error) throw new Error('The Sling shifts were added, but the old ones weren\'t all removed (' + error.message + '). Preview and import again to finish.')
+    }
+    document.getElementById('ims-preview').innerHTML = '<div class="note info">Imported ' + rows.length + ' shifts at ' + studios.length +
+      ' studios, ' + fmtDate(p.windowStart) + ' to ' + fmtDate(p.windowEnd) + '. Replaced ' + replaceIds.length + ' earlier shifts. They\'re marked posted.</div>'
+    toast('Shifts imported')
+    shiftImportPlan = null
+    if (typeof loadCoverage === 'function') loadCoverage()
+  } catch (e) {
+    toast('Import stopped: ' + (e.message || e), true)
+    btn.disabled = false; btn.textContent = 'Import shifts'
+  }
 }
 
 /* ---------- name matching ---------- */
