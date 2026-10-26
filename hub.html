@@ -175,6 +175,15 @@ body.sc-mode .locked-teaser { display: none !important; }
 .floor-booked { font-size: 13px; color: var(--ink); white-space: nowrap; }
 .floor-booked b { font-size: 17px; }
 .floor-empty { font-size: 14px; color: var(--ink-soft); padding: 6px 2px; }
+.roles-strip { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 10px 12px; margin-bottom: 10px; background: var(--accent-soft); border-radius: 12px; }
+.roles-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.roles-label { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent-deep); }
+.role-chip { display: inline-flex; align-items: center; gap: 6px; background: #fff; border-radius: 999px; padding: 2px 10px 2px 3px; font-size: 13px; color: var(--ink); }
+.role-chip small { color: var(--ink-soft); font-size: 11px; margin-left: 2px; }
+.role-chip b { font-weight: 700; color: var(--ink-soft); font-size: 11.5px; }
+.floor-staff { display: flex; flex-wrap: wrap; gap: 6px; }
+.floor-staff .role-chip { background: #f3f1fb; }
+a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: center; background: var(--accent-soft); border-color: transparent; color: var(--accent-deep); }
 
 /* Announcements */
 #hub-announcements { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
@@ -2337,7 +2346,7 @@ function renderTeamToday(rows) {
   // One entry per person (someone can have a split shift).
   const byPerson = new Map();
   rows.forEach(r => {
-    const p = byPerson.get(r.staff_id) || { staff_id: r.staff_id, name: r.name, avatar_key: r.avatar_key, role_tag: r.role_tag, shifts: [] };
+    const p = byPerson.get(r.staff_id) || { staff_id: r.staff_id, name: r.name, avatar_key: r.avatar_key, role_tag: r.role_tag, nickname: r.nickname || null, full_name: r.full_name || null, shifts: [] };
     p.shifts.push({ start: r.start_time, end: r.end_time });
     byPerson.set(r.staff_id, p);
   });
@@ -2345,6 +2354,7 @@ function renderTeamToday(rows) {
   _teamPeople = people;
   _teamCount = people.length;
   if (_dutiesLoaded) renderDuties(); // duty pickers use today's team
+  if (_classInfo && _lastHeroData) renderFloorToday(_lastHeroData); // role chips use avatars
   if (_lastHeroData) renderDailyHero(_lastHeroData); // hero line includes the team count
 
   if (!people.length) {
@@ -2405,6 +2415,102 @@ function eventBlockHtml(ev) {
   </div>`;
 }
 
+// ---------- Who's teaching + lesson plans ----------
+// Read the same way the schedule's Day view does (studio login): today's
+// sessions, session_staff (Director / Demoers / Circlers for the day, the
+// wheel teacher, and kids class teachers from the staff schedule),
+// party_details (party teachers) and curriculum_weeks (lesson plan links).
+let _classInfo = null;   // { byKey: { 'HH:MM:SS|title': {...} }, roles: {...}, curriculum: [] }
+const ROLE_FIELDS = [['director', 'Director'], ['teacher', 'Demoer'], ['teacher2', 'Demoer'], ['circler', 'Circler'], ['circler2', 'Circler'], ['circler3', 'Circler']];
+
+async function loadClassStaff(studioId) {
+  const today = localDateStr(new Date());
+  try {
+    const { data: sess, error } = await sb.from('sessions').select('id, title, session_time, session_type')
+      .eq('studio_id', studioId).eq('session_date', today);
+    if (error) throw error;
+    const ids = (sess || []).map(x => x.id);
+    const partyIds = (sess || []).filter(x => x.session_type === 'party').map(x => x.id);
+    const [st, cur, pb] = await Promise.all([
+      ids.length ? sb.from('session_staff').select('*').in('session_id', ids) : Promise.resolve({ data: [] }),
+      sb.from('curriculum_weeks').select('*'),
+      partyIds.length ? sb.from('bookings').select('id, session_id').in('session_id', partyIds).gt('qty', 0).is('returned_at', null) : Promise.resolve({ data: [] })
+    ]);
+    const pbIds = (pb.data || []).map(b => b.id);
+    const pd = pbIds.length ? await sb.from('party_details').select('booking_id, party_teacher1, party_teacher2').in('booking_id', pbIds) : { data: [] };
+    const staffBy = {}; (st.data || []).forEach(r => { staffBy[r.session_id] = r; });
+    const partyTeachers = {};
+    (pb.data || []).forEach(b => {
+      const d = (pd.data || []).find(x => x.booking_id === b.id);
+      if (!d) return;
+      const list = partyTeachers[b.session_id] = partyTeachers[b.session_id] || [];
+      [d.party_teacher1, d.party_teacher2].forEach(n => { n = String(n || '').trim(); if (n && !list.includes(n)) list.push(n); });
+    });
+    const byKey = {};
+    (sess || []).forEach(x => {
+      byKey[String(x.session_time || '').slice(0, 8) + '|' + x.title] = {
+        type: x.session_type, staff: staffBy[x.id] || {}, party: partyTeachers[x.id] || []
+      };
+    });
+    // Roles for the day: the first session that has any set (same as the Day view).
+    const withRoles = (sess || []).map(x => staffBy[x.id]).filter(r => r && ROLE_FIELDS.some(([f]) => String(r[f] || '').trim()));
+    const pick = withRoles.find(r => true) || {};
+    _classInfo = { byKey, roles: pick, curriculum: cur.data || [] };
+  } catch (e) {
+    console.error('Class staff load failed:', e);
+    _classInfo = null;
+  }
+  if (_lastHeroData) renderFloorToday(_lastHeroData);
+}
+
+// A typed name ("Rainbow Ruby", "Ruby Smith", "Ruby") → today's team member, if one matches.
+function teamMatch(typed) {
+  const t = String(typed || '').trim().toLowerCase();
+  if (!t) return null;
+  return _teamPeople.find(p => [p.name, p.nickname, p.full_name].some(n => n && String(n).trim().toLowerCase() === t))
+    || _teamPeople.find(p => p.full_name && String(p.full_name).toLowerCase().split(' ')[0] === t)
+    || null;
+}
+function personChip(typed, role) {
+  const p = teamMatch(typed);
+  const who = p || { staff_id: typed, name: typed, avatar_key: null };
+  return `<span class="role-chip">${hubAvatarHtml(who, 20)}${role ? `<b>${esc(role)}</b> ` : ''}${esc(p ? p.name : typed)}</span>`;
+}
+function rolesStripHtml() {
+  const r = (_classInfo && _classInfo.roles) || {};
+  const groups = {};
+  ROLE_FIELDS.forEach(([f, label]) => {
+    const n = String(r[f] || '').trim();
+    if (!n) return;
+    const brk = String(r['break_' + f] || '').trim();
+    (groups[label] = groups[label] || []).push({ n, brk });
+  });
+  const labels = Object.keys(groups);
+  if (!labels.length) return '';
+  return `<div class="roles-strip">${labels.map(label => `<div class="roles-group"><span class="roles-label">${esc(label)}${groups[label].length > 1 ? 's' : ''}</span>
+    ${groups[label].map(x => `<span class="role-chip">${hubAvatarHtml(teamMatch(x.n) || { staff_id: x.n, name: x.n }, 22)}${esc((teamMatch(x.n) || {}).name || x.n)}${x.brk ? `<small>break ${esc(x.brk)}</small>` : ''}</span>`).join('')}</div>`).join('')}</div>`;
+}
+// Same rules as index.html's getCurriculumLinks: a fixed link for the class type, else this week's.
+function lessonPlanFor(title, date) {
+  const list = (_classInfo && _classInfo.curriculum) || [];
+  const t = String(title || '').toLowerCase();
+  const fixed = list.find(r => r.session_type_key && !r.week_start && t.includes(String(r.session_type_key).toLowerCase()));
+  const row = (fixed && (fixed.website_url || fixed.curriculum_url)) ? fixed
+    : list.find(r => r.week_start && r.week_end && date >= r.week_start && date <= r.week_end);
+  return row ? safeHttpUrl(row.curriculum_url) : null;
+}
+function classStaffHtml(s) {
+  if (!_classInfo) return '';
+  const info = _classInfo.byKey[String(s.time || '').slice(0, 8) + '|' + s.title];
+  if (!info) return '';
+  const chips = [];
+  const title = String(s.title || '').toLowerCase();
+  if (info.type === 'party') info.party.forEach(n => chips.push(personChip(n, 'Party')));
+  else if (/wheel/.test(title) && info.staff.wheel_teacher) chips.push(personChip(info.staff.wheel_teacher, 'Teacher'));
+  else if ((info.type === 'series' || /class \d+ of \d+|week session/.test(title)) && info.staff.teacher) chips.push(personChip(info.staff.teacher, 'Teacher'));
+  return chips.length ? `<div class="floor-staff">${chips.join('')}</div>` : '';
+}
+
 // ---------- On the floor today ----------
 // Kind chip from the session title — display only, never used for logic.
 function sessionKind(title) {
@@ -2442,8 +2548,10 @@ function renderFloorToday(data) {
         <div class="floor-main">
           <div class="floor-name">${esc(s.title)}</div>
           <span class="kind-chip kind-${kindCls}">${esc(kindLabel)}</span>
+          ${classStaffHtml(s)}
         </div>
         <div class="floor-booked"><b>${booked}</b> booked</div>
+        ${lessonPlanFor(s.title, localDateStr(new Date())) ? `<a class="floor-btn lp" href="${escAttr(lessonPlanFor(s.title, localDateStr(new Date())))}" target="_blank" rel="noopener">Lesson plan</a>` : ''}
         <button class="floor-btn" onclick="openSchedule()">Class list</button>
       </div>`;
   }).join('');
@@ -2454,6 +2562,7 @@ function renderFloorToday(data) {
       <div class="spacer"></div>
       <button class="floor-btn" onclick="openSchedule()">📅 Open the schedule</button>
     </div>
+    ${rolesStripHtml()}
     ${_todayEvents.length ? `<div class="ev-list">${_todayEvents.map(eventBlockHtml).join('')}</div>` : ''}
     <div class="floor-list">${rows || `<div class="floor-empty">${_todayEvents.length ? 'No classes booked today.' : 'Nothing booked today.'}</div>`}</div>`;
   el.style.display = '';
@@ -4076,7 +4185,7 @@ function stopStudioTimers() {
   if (_teamTimer) { clearInterval(_teamTimer); _teamTimer = null; }
   _teamCount = 0;
   _annData = []; _duties = []; _dutyTemplates = []; _dutiesLoaded = false; _teamPeople = [];
-  _oc = { open: null, close: null }; _cl = null; _todayEvents = [];
+  _oc = { open: null, close: null }; _cl = null; _todayEvents = []; _classInfo = null;
   if (_clSaveTimer) { clearTimeout(_clSaveTimer); _clSaveTimer = null; }
   closeDutySheet();
   const annEl = document.getElementById('hub-announcements');
@@ -4202,6 +4311,7 @@ function loadStudioCards(studioId) {
   loadDuties(studioId);
   loadOpenClose(studioId);
   loadTodayEvents(studioId);
+  loadClassStaff(studioId);
   if (_teamTimer) clearInterval(_teamTimer);
   _teamTimer = setInterval(() => {
     if (!_studioViewStarted) return;
@@ -4210,6 +4320,7 @@ function loadStudioCards(studioId) {
     if (!document.getElementById('duty-sheet-back')) loadDuties(_sessionStudioId); // not mid-edit
     if (!_cl) loadOpenClose(_sessionStudioId);                                     // not mid-list
     loadTodayEvents(_sessionStudioId);
+    loadClassStaff(_sessionStudioId);
   }, 5 * 60 * 1000);
   loadFlashChallenges(studioId);
   loadDailyHero(_sessionPin, studioId);
