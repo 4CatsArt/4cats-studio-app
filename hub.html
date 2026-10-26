@@ -2192,6 +2192,7 @@ async function loadPlanDay(date) {
     ]);
     if (team.error) throw team.error;
     if (sess.error) throw sess.error;
+    const events = (sess.data || []).filter(x => x.session_type === 'festival');
     const sessions = (sess.data || []).filter(x => x.session_type !== 'festival');
     const ids = sessions.map(x => x.id);
     const partyIds = sessions.filter(x => x.session_type === 'party').map(x => x.id);
@@ -2212,7 +2213,7 @@ async function loadPlanDay(date) {
       const sx = sessions.find(z => z.id === b.session_id) || {};
       return { booking_id: b.id, session: sx, guests: d.expected_guests || b.estimated_attendance || null, t1: d.party_teacher1 || '', t2: d.party_teacher2 || '' };
     });
-    _plan = { date, team: team.data || [], sessions, staffBy, roles, wheel, parties, dirty: false, msg: '' };
+    _plan = { date, team: team.data || [], sessions, events, staffBy, roles, wheel, parties, dirty: false, msg: '' };
     renderPlanDay();
   } catch (e) {
     body.innerHTML = `<div class="ho-card">Couldn't load that day: ${esc(e.message || e)}</div>`;
@@ -2241,6 +2242,16 @@ function renderPlanDay() {
       <div class="brk">Break <input type="text" value="${escAttr(P.roles['break_' + f])}" placeholder="e.g. 12:30–1:00" oninput="planSet('break_${f}', this.value, true)"></div></div>`).join('');
   const kids = P.sessions.filter(planIsKids);
   const wheels = P.sessions.filter(x => P.wheel[x.id] !== undefined);
+  const partySessionIds = new Set(P.parties.map(pt => pt.session.id));
+  // Everything else (workshops, glazing, Mini Make, camps, parties with no booking yet):
+  // covered by the day's Demoers and Circlers.
+  const others = P.sessions.filter(x => !planIsKids(x) && P.wheel[x.id] === undefined && !partySessionIds.has(x.id));
+  const demoers = [P.roles.teacher, P.roles.teacher2].filter(Boolean);
+  const circlers = [P.roles.circler, P.roles.circler2, P.roles.circler3].filter(Boolean);
+  const nameOf = n => { const t = P.team.find(p => planWriteName(p) === n); return t ? t.name : n; };
+  const dayCover = demoers.length || circlers.length
+    ? `${demoers.length ? 'Demo: ' + demoers.map(nameOf).join(', ') : ''}${demoers.length && circlers.length ? ' · ' : ''}${circlers.length ? 'Circle: ' + circlers.map(nameOf).join(', ') : ''}`
+    : 'Covered by the day’s Demoers and Circlers (none set yet)';
   const sessRows = [
     ...wheels.map(x => [hmM(x.session_time), `<div class="plan-sess"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">Wheel teacher (needs Wheel ready)</div></span>
         <select onchange="planWheel('${escAttr(x.id)}', this.value)">${planOptions(P.wheel[x.id])}</select></div>`]),
@@ -2248,7 +2259,10 @@ function renderPlanDay() {
         <select onchange="planParty(${i}, 1, this.value)">${planOptions(pt.t1)}</select>
         <select onchange="planParty(${i}, 2, this.value)">${planOptions(pt.t2)}</select></div>`]),
     ...kids.map(x => [hmM(x.session_time), `<div class="plan-sess"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">Kids class teacher · set in the staff schedule</div></span>
-        <span>${(P.staffBy[x.id] || {}).teacher ? personChip(P.staffBy[x.id].teacher, '') : '<span class="sub">Not set</span>'}</span></div>`])
+        <span>${(P.staffBy[x.id] || {}).teacher ? personChip(P.staffBy[x.id].teacher, '') : '<span class="sub">Not set</span>'}</span></div>`]),
+    ...others.map(x => [hmM(x.session_time), `<div class="plan-sess"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">${esc(x.session_type === 'party' ? 'Party slot, not booked yet' : dayCover)}</div></span>
+        <span class="kind-chip kind-${sessionKind(x.title)[1]}">${esc(sessionKind(x.title)[0])}</span></div>`]),
+    ...(P.events || []).map(x => [-1, `<div class="plan-sess" style="background:#fff4dd;border-color:#ffd998"><span class="t">🎪</span><span class="nm">${esc(x.title)}<div class="sub">Event · staffing is set on the event</div></span></div>`])
   ].sort((a, b) => a[0] - b[0]).map(r => r[1]).join('');
   body.innerHTML = `
     <div class="ho-card">
@@ -2257,7 +2271,7 @@ function renderPlanDay() {
     </div>
     <div class="ho-section-head">Roles for the day</div>
     <div class="plan-grid">${roleCards}</div>
-    ${sessRows ? `<div class="ho-section-head">Classes, wheel and parties</div>${sessRows}` : ''}
+    <div class="ho-section-head">Everything on this day</div>${sessRows || '<div class="ho-intro">Nothing on the schedule for this day.</div>'}
     <div class="plan-actions">
       <span class="plan-msg" id="plan-msg">${esc(P.msg || (P.dirty ? 'Unsaved changes' : ''))}</span>
       <button class="ho-btn" onclick="planFill()">Fill blanks from the schedule</button>
