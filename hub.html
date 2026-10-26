@@ -166,6 +166,27 @@ body.sc-mode .locked-teaser { display: none !important; }
 .floor-booked b { font-size: 17px; }
 .floor-empty { font-size: 14px; color: var(--ink-soft); padding: 6px 2px; }
 
+.today-row { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; margin-bottom: 14px; }
+.today-row > .floor-card { flex: 999 1 520px; min-width: 0; margin-bottom: 0; }
+.today-row > .team-card { flex: 1 1 280px; min-width: 0; margin-bottom: 0; padding: 20px 22px; }
+
+/* Who's working today */
+.team-title { font-family: 'Fredoka', 'Inter', sans-serif; font-weight: 600; font-size: 22px; color: var(--ink); margin-bottom: 12px; }
+.team-list { display: flex; flex-direction: column; gap: 12px; }
+.team-row { display: flex; align-items: center; gap: 12px; }
+.team-row.done { opacity: 0.5; }
+.hub-av { position: relative; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; flex-shrink: 0; font-weight: 800; }
+.hub-av img { width: 100%; height: 100%; object-fit: contain; border-radius: 50%; display: block; }
+.hub-av .on-now { position: absolute; right: -1px; bottom: -1px; width: 12px; height: 12px; border-radius: 50%; background: var(--green); border: 2px solid #fff; }
+.team-who { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.team-name { font-size: 15px; font-weight: 700; color: var(--ink); }
+.team-shift { font-size: 13px; color: var(--ink-soft); }
+.team-tags { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.team-tag { font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-deep); white-space: nowrap; }
+.team-tag.open  { background: #fff4dd; color: #8a4b00; }
+.team-tag.close { background: #e0e7ff; color: #3730a3; }
+.team-empty { font-size: 14px; color: var(--ink-soft); line-height: 1.45; }
+
 /* ---------- main column ---------- */
 .main { flex: 1; min-width: 0; padding: 22px 26px 60px; }
 
@@ -862,7 +883,15 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
     <!-- On the floor today — every staff member. Today's sessions and how many
          are booked, from community-daily-snapshot (studio login is enough).
          Who's teaching each one comes later, with the staff schedule. -->
-    <div class="card floor-card" id="card-floor-today" style="display:none"></div>
+    <div class="today-row">
+      <div class="card floor-card" id="card-floor-today" style="display:none"></div>
+
+      <!-- Who's working today — every staff member. From the staff schedule
+           (staff_shifts, approved/posted only — never Sling) via the
+           hub_today_team() SQL function, which decides the studio from the
+           login on the server. Avatars from staff-avatars (admin → Staff). -->
+      <div class="card team-card" id="card-team-today" style="display:none"></div>
+    </div>
 
     <!-- Today's Projects — live for everyone. Company-wide (same plan at every
          studio), so it doesn't change with the admin studio switcher. Reads
@@ -1133,13 +1162,99 @@ function renderDailyHero(data) {
 
   const studioName = STUDIO_NAMES[data.studioId] || data.studioId;
   const n = Array.isArray(data.sessions) ? data.sessions.length : null;
+  const people = _teamCount ? ` and ${_teamCount} ${_teamCount === 1 ? 'person' : 'people'} on the team` : '';
   const sub = n === null ? `Here's what's happening at ${esc(studioName)} today`
-    : n === 0 ? `Nothing booked at ${esc(studioName)} today`
-    : `${n} session${n === 1 ? '' : 's'} at ${esc(studioName)} today`;
+    : n === 0 ? `Nothing booked at ${esc(studioName)} today${people ? ` · ${_teamCount} on the team` : ''}`
+    : `${n} session${n === 1 ? '' : 's'}${people} at ${esc(studioName)} today`;
   container.innerHTML = `
     <div class="hero-greeting">${heroGreetingHtml(data.firstName)}</div>
     <div class="hero-sub">${sub}</div>`;
   renderFloorToday(data);
+}
+
+// ---------- Who's working today ----------
+// Same colours and file names as admin.html's staff avatars.
+const AVATAR_BUCKET = 'staff-avatars';
+const AVATAR_TINTS = ['#ece7ff', '#dbeafe', '#e3f9ec', '#fce7f3', '#fef3d6', '#e0f2fe', '#fde2e2', '#ede9fe'];
+const AVATAR_INKS  = ['#5636c9', '#1d4ed8', '#15803d', '#be185d', '#b45309', '#0369a1', '#b91c1c', '#6d28d9'];
+let _teamCount = 0;
+let _teamTimer = null;
+function avatarTintIndex(seed) {
+  let h = 0; const t = String(seed || '');
+  for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) >>> 0;
+  return h % AVATAR_TINTS.length;
+}
+function hubAvatarHtml(p, size, onNow) {
+  const i = avatarTintIndex(p.staff_id);
+  const inner = p.avatar_key
+    ? `<img src="${escAttr(`${SUPABASE_URL}/storage/v1/object/public/${AVATAR_BUCKET}/${encodeURIComponent(p.avatar_key)}`)}" alt="">`
+    : `<span style="color:${AVATAR_INKS[i]};font-size:${Math.round(size * 0.42)}px">${esc(String(p.name || '?').charAt(0).toUpperCase())}</span>`;
+  return `<span class="hub-av" style="width:${size}px;height:${size}px;background:${AVATAR_TINTS[i]}">${inner}${onNow ? '<span class="on-now" title="On shift now"></span>' : ''}</span>`;
+}
+function shortTime(t) {
+  const [h, m] = String(t || '00:00').split(':').map(Number);
+  const ap = h >= 12 ? 'pm' : 'am';
+  const h12 = h % 12 || 12;
+  return m ? `${h12}:${String(m).padStart(2, '0')}${ap}` : `${h12}${ap}`;
+}
+function hmToMin(t) { const [h, m] = String(t || '0:0').split(':').map(Number); return h * 60 + m; }
+
+async function loadTeamToday(studioId) {
+  const el = document.getElementById('card-team-today');
+  if (!el) return;
+  const { data, error } = await sb.rpc('hub_today_team', { p_studio_id: studioId || null });
+  if (error) {
+    // Not set up yet (SQL not run) or not allowed — leave the card out.
+    console.error('Who\'s working load failed:', error);
+    el.style.display = 'none'; el.innerHTML = ''; _teamCount = 0;
+    return;
+  }
+  renderTeamToday(data || []);
+}
+function renderTeamToday(rows) {
+  const el = document.getElementById('card-team-today');
+  // One entry per person (someone can have a split shift).
+  const byPerson = new Map();
+  rows.forEach(r => {
+    const p = byPerson.get(r.staff_id) || { staff_id: r.staff_id, name: r.name, avatar_key: r.avatar_key, role_tag: r.role_tag, shifts: [] };
+    p.shifts.push({ start: r.start_time, end: r.end_time });
+    byPerson.set(r.staff_id, p);
+  });
+  const people = [...byPerson.values()];
+  _teamCount = people.length;
+  if (_lastHeroData) renderDailyHero(_lastHeroData); // hero line includes the team count
+
+  if (!people.length) {
+    el.innerHTML = `<div class="team-title">Who's working</div>
+      <div class="team-empty">No shifts posted for today yet. They show here once they're approved in the staff schedule.</div>`;
+    el.style.display = '';
+    return;
+  }
+  const now = new Date();
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const firstStart = Math.min(...people.map(p => Math.min(...p.shifts.map(s => hmToMin(s.start)))));
+  const lastEnd = Math.max(...people.map(p => Math.max(...p.shifts.map(s => hmToMin(s.end)))));
+  el.innerHTML = `<div class="team-title">Who's working</div>
+    <div class="team-list">${people.map(p => {
+      const onNow = p.shifts.some(s => hmToMin(s.start) <= nowMin && nowMin < hmToMin(s.end));
+      const done = p.shifts.every(s => hmToMin(s.end) <= nowMin);
+      const opens = p.shifts.some(s => hmToMin(s.start) === firstStart);
+      const closes = p.shifts.some(s => hmToMin(s.end) === lastEnd);
+      const tags = [
+        p.role_tag ? `<span class="team-tag">${esc(p.role_tag)}</span>` : '',
+        opens ? '<span class="team-tag open">Opening</span>' : '',
+        closes ? '<span class="team-tag close">Closing</span>' : '',
+      ].join('');
+      return `<div class="team-row${done ? ' done' : ''}">
+        ${hubAvatarHtml(p, 44, onNow)}
+        <div class="team-who">
+          <span class="team-name">${esc(p.name)}</span>
+          <span class="team-shift">${p.shifts.map(s => `${shortTime(s.start)} – ${shortTime(s.end)}`).join(', ')}</span>
+        </div>
+        ${tags ? `<div class="team-tags">${tags}</div>` : ''}
+      </div>`;
+    }).join('')}</div>`;
+  el.style.display = '';
 }
 
 // ---------- On the floor today ----------
@@ -2802,6 +2917,8 @@ function resetToSignedOut() {
 }
 
 function stopStudioTimers() {
+  if (_teamTimer) { clearInterval(_teamTimer); _teamTimer = null; }
+  _teamCount = 0;
   if (_fridayRefreshTimer) { clearInterval(_fridayRefreshTimer); _fridayRefreshTimer = null; }
   if (_goalRefreshTimer) { clearInterval(_goalRefreshTimer); _goalRefreshTimer = null; }
 }
@@ -2917,6 +3034,9 @@ async function claimFlashChallenge(id) {
 // Studio-level cards (studio login is enough). _sessionPin is passed when
 // unlocked so the greeting can use the coordinator's name.
 function loadStudioCards(studioId) {
+  loadTeamToday(studioId);
+  if (_teamTimer) clearInterval(_teamTimer);
+  _teamTimer = setInterval(() => { if (_studioViewStarted) loadTeamToday(_sessionStudioId); }, 5 * 60 * 1000);
   loadFlashChallenges(studioId);
   loadDailyHero(_sessionPin, studioId);
   loadTodaysProjects(studioId);   // company-wide projects + this studio's forecast pills
