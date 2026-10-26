@@ -338,6 +338,13 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .plan-sess .t { font-family: 'Fredoka', 'Inter', sans-serif; font-weight: 600; width: 64px; }
 .plan-sess .nm { flex: 1 1 200px; font-weight: 700; color: var(--ink); }
 .plan-sess .sub { font-size: 12px; color: var(--ink-soft); font-weight: 500; }
+.plan-day.past { opacity: 0.6; }
+.plan-count { font-size: 12.5px; color: var(--ink-soft); white-space: nowrap; }
+.plan-count b { color: var(--ink); font-size: 14px; }
+.plan-closed { margin-top: 12px; }
+.plan-closed summary { cursor: pointer; font-size: 13px; font-weight: 700; color: var(--ink-soft); padding: 8px 2px; }
+.plan-sess.off { background: #f6f5fa; color: var(--ink-soft); }
+.plan-sess.off .nm { color: var(--ink-soft); font-weight: 600; }
 .plan-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 14px; position: sticky; bottom: 0; background: var(--page-bg); padding: 10px 0; }
 .plan-msg { flex: 1; font-size: 13px; color: var(--ink-soft); align-self: center; }
 .cl-done-banner { background: #e3f9ec; color: #14532d; border-radius: 14px; padding: 12px 16px; font-size: 14px; font-weight: 600; margin-top: 10px; }
@@ -1055,7 +1062,8 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
     <div class="nav-group">
       <div class="nav-label">Today</div>
       <button class="nav-item active" id="nav-dashboard" onclick="goToDashboard()"><span class="ic">🏠</span> Today</button>
-      <button class="nav-item" id="nav-schedule" onclick="openSchedule()"><span class="ic">📅</span> Schedule &amp; class lists</button>
+      <button class="nav-item" id="nav-plan" onclick="openPlanAhead()"><span class="ic">🗓️</span> Schedule</button>
+      <button class="nav-item" id="nav-schedule" onclick="openSchedule()"><span class="ic">📋</span> Class lists (old view)</button>
     </div>
 
     <!-- Supplies: studio level (everyone). INVENTORY_LIVE = false makes it admin preview only -->
@@ -1077,7 +1085,6 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
     <div class="nav-group coord">
       <div class="nav-label">Coordinator</div>
       <button class="nav-item locked-teaser" onclick="openPinModal()"><span class="ic">🔒</span> Unlock coordinator view</button>
-      <button class="nav-item sc-only" id="nav-plan" onclick="openPlanAhead()"><span class="ic">🗓️</span> Plan ahead</button>
       <button class="nav-item sc-only" id="nav-points" onclick="openPoints()"><span class="ic">⭐</span> My Points</button>
       <button class="nav-item sc-only" id="nav-occupancy" onclick="openOccupancy()"><span class="ic">📊</span> Fill Rates</button>
       <button class="nav-item sc-only" id="nav-instagram" onclick="openInstagram()"><span class="ic">📷</span> Instagram</button>
@@ -1235,11 +1242,11 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
        next two weeks. Writes the same fields as the schedule's Day view. -->
   <main class="main" id="plan-pane" style="display:none">
     <div class="ho-head">
-      <div class="pts-page-title" style="margin:0">🗓️ Plan ahead</div>
+      <div class="pts-page-title" style="margin:0">🗓️ Schedule</div>
       <span class="spacer"></span>
       <button class="ho-btn" onclick="goToDashboard()">← Today</button>
     </div>
-    <p class="ho-intro">Check who's doing what on the days ahead, change roles, and add break times. Roles start from the staff schedule; anything you set here wins.</p>
+    <p class="ho-intro" id="plan-intro"></p>
     <div class="plan-days" id="plan-days"></div>
     <div id="plan-body"></div>
   </main>
@@ -1456,7 +1463,12 @@ function renderDailyHero(data) {
 
   const studioName = STUDIO_NAMES[data.studioId] || data.studioId;
   const evTitles = new Set(_todayEvents.map(e => String(e.title || '').trim().toLowerCase()));
-  const n = Array.isArray(data.sessions) ? data.sessions.filter(x => !evTitles.has(String(x.title || '').trim().toLowerCase())).length : null;
+  const n = Array.isArray(data.sessions) ? data.sessions.filter(x => !evTitles.has(String(x.title || '').trim().toLowerCase()))
+    .filter(x => {
+      if (!_classInfo || Number(x.bookingCount || 0) > 0) return true;
+      const info = _classInfo.byKey[String(x.time || '').slice(0, 8) + '|' + x.title];
+      return !(info && info.spaces === 0 && !(info.type === 'class' || info.type === 'series' || /class \d+ of \d+|week session/i.test(x.title || '')));
+    }).length : null;
   const evText = _todayEvents.length ? `${_todayEvents.length === 1 ? 'an event' : _todayEvents.length + ' events'}` : '';
   const people = _teamCount ? ` and ${_teamCount} ${_teamCount === 1 ? 'person' : 'people'} on the team` : '';
   const sub = n === null ? `Here's what's happening at ${esc(studioName)} today`
@@ -2161,8 +2173,8 @@ const PLAN_ROLES = [['director', 'Director'], ['teacher', 'Demoer 1'], ['teacher
                     ['circler', 'Circler 1'], ['circler2', 'Circler 2'], ['circler3', 'Circler 3']];
 let _plan = null;   // { date, team, sessions, roles, wheel: {sid: name}, party: {bookingId: [n1, n2]}, ... }
 
+function planCanEdit() { return !!_sessionPin || !!(_studioData && _studioData.isAdmin); }
 function openPlanAhead() {
-  if (!_sessionPin) { openPinModal(); return; }
   showOnlyPane('plan-pane');
   setActiveNav('nav-plan');
   loadPlanDay((_plan && _plan.date) || localDateStr(new Date()));
@@ -2170,12 +2182,14 @@ function openPlanAhead() {
 function planDayStrip(sel) {
   const el = document.getElementById('plan-days');
   const out = [];
-  for (let i = 0; i < 14; i++) {
+  for (let i = -7; i <= 28; i++) {
     const d = new Date(); d.setDate(d.getDate() + i);
     const ds = localDateStr(d);
-    out.push(`<button class="plan-day${ds === sel ? ' on' : ''}" onclick="loadPlanDay('${ds}')"><div class="dw">${i === 0 ? 'Today' : d.toLocaleDateString(undefined, { weekday: 'short' })}</div><div class="dn">${d.getDate()}</div></button>`);
+    out.push(`<button class="plan-day${ds === sel ? ' on' : ''}${i < 0 ? ' past' : ''}" onclick="loadPlanDay('${ds}')"><div class="dw">${i === 0 ? 'Today' : d.toLocaleDateString(undefined, { weekday: 'short' })}</div><div class="dn">${d.getDate()}</div></button>`);
   }
   el.innerHTML = out.join('');
+  const on = el.querySelector('.plan-day.on');
+  if (on) el.scrollLeft = Math.max(0, on.offsetLeft - el.offsetLeft - 120);
 }
 const planWriteName = p => p.nickname || p.full_name || p.name;   // the way the Day view writes names
 function planIsKids(x) { return x.session_type === 'class' || x.session_type === 'series' || /class \d+ of \d+|week session/i.test(x.title || ''); }
@@ -2188,7 +2202,7 @@ async function loadPlanDay(date) {
   try {
     const [team, sess] = await Promise.all([
       sb.rpc('hub_team_on_date', { p_studio_id: st, p_date: date }),
-      sb.from('sessions').select('id, title, session_time, session_type, duration_minutes').eq('studio_id', st).eq('session_date', date).order('session_time')
+      sb.from('sessions').select('id, title, session_date, session_time, session_type, duration_minutes, capacity, spaces_left_cache').eq('studio_id', st).eq('session_date', date).order('session_time')
     ]);
     if (team.error) throw team.error;
     if (sess.error) throw sess.error;
@@ -2196,10 +2210,13 @@ async function loadPlanDay(date) {
     const sessions = (sess.data || []).filter(x => x.session_type !== 'festival');
     const ids = sessions.map(x => x.id);
     const partyIds = sessions.filter(x => x.session_type === 'party').map(x => x.id);
-    const [ss, pb] = await Promise.all([
+    const [ss, pb, allB] = await Promise.all([
       ids.length ? sb.from('session_staff').select('*').in('session_id', ids) : Promise.resolve({ data: [] }),
-      partyIds.length ? sb.from('bookings').select('id, session_id, estimated_attendance, qty').in('session_id', partyIds).gt('qty', 0).is('returned_at', null) : Promise.resolve({ data: [] })
+      partyIds.length ? sb.from('bookings').select('id, session_id, estimated_attendance, qty').in('session_id', partyIds).gt('qty', 0).is('returned_at', null) : Promise.resolve({ data: [] }),
+      ids.length ? sb.from('bookings').select('session_id, qty').in('session_id', ids).gt('qty', 0).is('returned_at', null) : Promise.resolve({ data: [] })
     ]);
+    const booked = {};
+    (allB.data || []).forEach(b => { booked[b.session_id] = (booked[b.session_id] || 0) + (b.qty || 0); });
     const pbIds = (pb.data || []).map(b => b.id);
     const pd = pbIds.length ? await sb.from('party_details').select('booking_id, party_teacher1, party_teacher2, expected_guests').in('booking_id', pbIds) : { data: [] };
     const staffBy = {}; (ss.data || []).forEach(r => { staffBy[r.session_id] = r; });
@@ -2213,7 +2230,7 @@ async function loadPlanDay(date) {
       const sx = sessions.find(z => z.id === b.session_id) || {};
       return { booking_id: b.id, session: sx, guests: d.expected_guests || b.estimated_attendance || null, t1: d.party_teacher1 || '', t2: d.party_teacher2 || '' };
     });
-    _plan = { date, team: team.data || [], sessions, events, staffBy, roles, wheel, parties, dirty: false, msg: '' };
+    _plan = { date, team: team.data || [], sessions, events, staffBy, booked, roles, wheel, parties, dirty: false, msg: '' };
     renderPlanDay();
   } catch (e) {
     body.innerHTML = `<div class="ho-card">Couldn't load that day: ${esc(e.message || e)}</div>`;
@@ -2229,23 +2246,45 @@ function planOptions(current) {
   if (current && !known) opts.unshift(`<option value="${escAttr(current)}" selected>${esc(current)} (not on the schedule)</option>`);
   return `<option value="">—</option>${opts.join('')}`;
 }
+// 0 booked and 0 spaces left = not running (kids classes and catch-ups are
+// counted differently, so they always show).
+function planNotRunning(x) {
+  if (planIsKids(x) || x.title === 'Catch Up Class') return false;
+  return !(_plan.booked[x.id] > 0) && x.spaces_left_cache === 0;
+}
+function planCount(x) {
+  if (planIsKids(x)) return '';
+  const b = _plan.booked[x.id] || 0, left = x.spaces_left_cache;
+  return `<span class="plan-count"><b>${b}</b> booked${left !== null && left !== undefined ? ` · ${left} left` : ''}</span>`;
+}
 function renderPlanDay() {
   const body = document.getElementById('plan-body');
   const P = _plan;
+  const edit = planCanEdit();
+  document.getElementById('plan-intro').innerHTML = edit
+    ? 'Who’s doing what each day. Change roles, wheel and party teachers, and add break times. Roles start from the staff schedule; anything you set here wins.'
+    : 'Who’s doing what each day, from the staff schedule. Coordinators can change roles and breaks: <button class="ho-btn" style="min-height:30px;padding:0 12px" onclick="openPinModal()">🔒 Unlock coordinator view</button>';
+  const nameOfW = n => { const t = P.team.find(p => planWriteName(p) === n); return t ? t.name : n; };
+  const pick = (current, onchange) => edit
+    ? `<select onchange="${onchange}">${planOptions(current)}</select>`
+    : (current ? personChip(current, '') : '<span class="sub">Not set</span>');
   const [y, m, d] = P.date.split('-').map(Number);
   const when = new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
   const shifts = P.team.length
     ? P.team.map(p => `<span class="role-chip">${hubAvatarHtml(p, 22)}${esc(p.name)} <small>${esc(shortTime(p.start_time))}–${esc(shortTime(p.end_time))}</small></span>`).join('')
     : '<span class="ho-intro" style="margin:0">No shifts posted for this day yet.</span>';
-  const roleCards = PLAN_ROLES.map(([f, label]) => `<div class="plan-role"><label>${esc(label)}</label>
-      <select onchange="planSet('${f}', this.value)">${planOptions(P.roles[f])}</select>
-      <div class="brk">Break <input type="text" value="${escAttr(P.roles['break_' + f])}" placeholder="e.g. 12:30–1:00" oninput="planSet('break_${f}', this.value, true)"></div></div>`).join('');
+  const roleCards = PLAN_ROLES.filter(([f]) => edit || P.roles[f]).map(([f, label]) => `<div class="plan-role"><label>${esc(label)}</label>
+      ${pick(P.roles[f], `planSet('${f}', this.value)`)}
+      ${edit ? `<div class="brk">Break <input type="text" value="${escAttr(P.roles['break_' + f])}" placeholder="e.g. 12:30–1:00" oninput="planSet('break_${f}', this.value, true)"></div>`
+        : (P.roles['break_' + f] ? `<div class="brk">Break ${esc(P.roles['break_' + f])}</div>` : '')}</div>`).join('')
+    || '<div class="ho-intro">No roles set for this day yet.</div>';
   const kids = P.sessions.filter(planIsKids);
-  const wheels = P.sessions.filter(x => P.wheel[x.id] !== undefined);
+  const wheels = P.sessions.filter(x => P.wheel[x.id] !== undefined && !planNotRunning(x));
   const partySessionIds = new Set(P.parties.map(pt => pt.session.id));
   // Everything else (workshops, glazing, Mini Make, camps, parties with no booking yet):
   // covered by the day's Demoers and Circlers.
-  const others = P.sessions.filter(x => !planIsKids(x) && P.wheel[x.id] === undefined && !partySessionIds.has(x.id));
+  const others = P.sessions.filter(x => !planIsKids(x) && P.wheel[x.id] === undefined && !partySessionIds.has(x.id) && !planNotRunning(x));
+  const notRunning = P.sessions.filter(planNotRunning);
   const demoers = [P.roles.teacher, P.roles.teacher2].filter(Boolean);
   const circlers = [P.roles.circler, P.roles.circler2, P.roles.circler3].filter(Boolean);
   const nameOf = n => { const t = P.team.find(p => planWriteName(p) === n); return t ? t.name : n; };
@@ -2253,15 +2292,15 @@ function renderPlanDay() {
     ? `${demoers.length ? 'Demo: ' + demoers.map(nameOf).join(', ') : ''}${demoers.length && circlers.length ? ' · ' : ''}${circlers.length ? 'Circle: ' + circlers.map(nameOf).join(', ') : ''}`
     : 'Covered by the day’s Demoers and Circlers (none set yet)';
   const sessRows = [
-    ...wheels.map(x => [hmM(x.session_time), `<div class="plan-sess"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">Wheel teacher (needs Wheel ready)</div></span>
-        <select onchange="planWheel('${escAttr(x.id)}', this.value)">${planOptions(P.wheel[x.id])}</select></div>`]),
+    ...wheels.map(x => [hmM(x.session_time), `<div class="plan-sess"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">Wheel teacher${edit ? ' (needs Wheel ready)' : ''}</div></span>
+        ${planCount(x)}${pick(P.wheel[x.id], `planWheel('${escAttr(x.id)}', this.value)`)}</div>`]),
     ...P.parties.map((pt, i) => [hmM(pt.session.session_time), `<div class="plan-sess"><span class="t">${esc(shortTime(pt.session.session_time || ''))}</span><span class="nm">${esc(pt.session.title || 'Party')}<div class="sub">${pt.guests ? esc(pt.guests) + ' kids · ' : ''}${pt.guests > 15 ? '2 teachers' : '1 teacher'}</div></span>
-        <select onchange="planParty(${i}, 1, this.value)">${planOptions(pt.t1)}</select>
-        <select onchange="planParty(${i}, 2, this.value)">${planOptions(pt.t2)}</select></div>`]),
+        ${pick(pt.t1, `planParty(${i}, 1, this.value)`)}
+        ${edit || pt.t2 ? pick(pt.t2, `planParty(${i}, 2, this.value)`) : ''}</div>`]),
     ...kids.map(x => [hmM(x.session_time), `<div class="plan-sess"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">Kids class teacher · set in the staff schedule</div></span>
         <span>${(P.staffBy[x.id] || {}).teacher ? personChip(P.staffBy[x.id].teacher, '') : '<span class="sub">Not set</span>'}</span></div>`]),
     ...others.map(x => [hmM(x.session_time), `<div class="plan-sess"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">${esc(x.session_type === 'party' ? 'Party slot, not booked yet' : dayCover)}</div></span>
-        <span class="kind-chip kind-${sessionKind(x.title)[1]}">${esc(sessionKind(x.title)[0])}</span></div>`]),
+        ${planCount(x)}<span class="kind-chip kind-${sessionKind(x.title)[1]}">${esc(sessionKind(x.title)[0])}</span></div>`]),
     ...(P.events || []).map(x => [-1, `<div class="plan-sess" style="background:#fff4dd;border-color:#ffd998"><span class="t">🎪</span><span class="nm">${esc(x.title)}<div class="sub">Event · staffing is set on the event</div></span></div>`])
   ].sort((a, b) => a[0] - b[0]).map(r => r[1]).join('');
   body.innerHTML = `
@@ -2271,13 +2310,16 @@ function renderPlanDay() {
     </div>
     <div class="ho-section-head">Roles for the day</div>
     <div class="plan-grid">${roleCards}</div>
-    <div class="ho-section-head">Everything on this day</div>${sessRows || '<div class="ho-intro">Nothing on the schedule for this day.</div>'}
-    <div class="plan-actions">
+    <div class="ho-section-head">Everything on this day</div>${sessRows || '<div class="ho-intro">Nothing running this day.</div>'}
+    ${notRunning.length ? `<details class="plan-closed"><summary>Not running (${notRunning.length}) · 0 booked and no spots open</summary>
+      ${notRunning.map(x => `<div class="plan-sess off"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}</span>
+        ${edit ? `<button class="ho-btn" onclick="planOpenSpots('${escAttr(x.id)}')">Open spots</button>` : ''}</div>`).join('')}</details>` : ''}
+    ${edit ? `<div class="plan-actions">
       <span class="plan-msg" id="plan-msg">${esc(P.msg || (P.dirty ? 'Unsaved changes' : ''))}</span>
       <button class="ho-btn" onclick="planFill()">Fill blanks from the schedule</button>
       <button class="ho-btn" onclick="planSuggestBreaks()">Suggest breaks</button>
       <button class="ho-btn primary" onclick="planSave()">Save</button>
-    </div>`;
+    </div>` : ''}`;
 }
 function planTouched(msg) { _plan.dirty = true; _plan.msg = ''; const m = document.getElementById('plan-msg'); if (m) m.textContent = msg || 'Unsaved changes'; }
 function planSet(f, v, typing) { _plan.roles[f] = v; planTouched(); if (!typing) renderPlanDay(); }
@@ -2332,6 +2374,7 @@ function planSuggestBreaks() {
 }
 
 async function planSave() {
+  if (!planCanEdit()) { openPinModal(); return; }
   const P = _plan;
   const m = document.getElementById('plan-msg'); if (m) m.textContent = 'Saving…';
   try {
@@ -2361,12 +2404,117 @@ async function planSave() {
   }
 }
 async function planFill() {
+  if (!planCanEdit()) { openPinModal(); return; }
   if (_plan.dirty && !confirm('You have unsaved changes on this day. Fill blanks anyway? (Unsaved changes will be lost.)')) return;
   const { data, error } = await sb.rpc('hub_fill_roles', { p_studio_id: _sessionStudioId, p_date: _plan.date, p_force: true });
   if (error) { alert("Couldn't fill roles: " + error.message); return; }
   await loadPlanDay(_plan.date);
   _plan.msg = data && data.skipped === 'no shifts posted yet' ? 'No shifts posted for this day yet.' : 'Filled the blanks from the schedule. Anything already set was kept.';
   renderPlanDay();
+}
+
+// Bring a 0/0 session back: set its live Shopify spots (same Edge Function and
+// title rules as the Day view's adjust spaces, copied as-is), then the session.
+function buildShopifyTitle(sessionDate, sessionTime, sessionTitle) {
+  const d = new Date(sessionDate + 'T12:00:00')
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  const day = days[d.getDay()], month = months[d.getMonth()], date = d.getDate()
+  const suffix = date===1||date===21||date===31?'st':date===2||date===22?'nd':date===3||date===23?'rd':'th'
+  const [h, m] = sessionTime.split(':').map(Number)
+  const hour = h===0?12:h>12?h-12:h
+  const ampm = h<12?'am':'pm'
+  const timeStr = m===0?`${hour}${ampm}`:`${hour}:${String(m).padStart(2,'0')}${ampm}`
+  const starPrefix = (h===9&&m===0)?'*':''
+  const titleLower = sessionTitle.toLowerCase().trim()
+  const TITLE_MAP = {
+    // New clean titles (Supabase = Shopify)
+    'kids party':'Kids Party','splatter party':'Splatter Party','field trip':'Field Trip',
+    'thursday clay night':'Thursday Clay Night',
+    // Legacy mappings for backward compatibility
+    'party time slot':null,'splatter party time slot':null,'field trip time slot':null,
+    'adult get-together time slot':'Adult Get Togethers, Parties & Group Booking',
+    'wheel workshop (adult & teen)':'Wheel Workshop','wheel workshop':'Wheel Workshop',
+    'friday night mixer':'Friday Night Mixer','friday night mixer (ages 16+)':'Friday Night Mixer',
+    'sunday morning family time mixer':'Sunday Morning Family Time Mixer',
+    'sunday early bird workshop':'Sunday Early Bird Workshop',
+    'mixed media class for kids ($10 for members)':'Mixed Media Class',
+    'thursdays: clay night':'Thursday Clay Night','natureware mugs':'Natureware Mug',
+    'summer camp half day morning':'Summer Camp Half Day','summer camp half day afternoon':'Summer Camp Half Day',
+    'no school day camp (ages 6-12)':'PA/PD Day','pd day':'PA/PD Day','pa day':'PA/PD Day','pa/pd day':'PA/PD Day',
+    "mother's day celebration":"Mother's Day",'afternoon art meetup':'Afternoon Art Meetup',
+    'saturday early bird workshop':'Saturday Early Bird Workshop',
+    'dragons session (ages 5-12) class 1 of 5':'Dragons 5 Week Kids Session',
+    'early drop off (mixed media class)':null,
+  }
+  if (/\b(class|week|session|part)\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(sessionTitle)) return null
+  if (titleLower in TITLE_MAP && TITLE_MAP[titleLower] === null) return null
+  if (titleLower === 'weekend workshop') return null
+  if (/^weekend workshop:\s*/i.test(sessionTitle)) return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${sessionTitle.replace(/^weekend workshop:\s*/i,'').trim()}`
+  if (titleLower.includes('wednesday paint night')) return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | Wednesday Paint Night`
+  if (TITLE_MAP[titleLower]) return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${TITLE_MAP[titleLower]}`
+  const seriesMatch = sessionTitle.match(/(\|\s*\d+\s+Week\s+Session.*)/i)
+  const seriesSuffix = seriesMatch ? ` ${seriesMatch[1].trim()}` : ''
+  let cleanTitle = sessionTitle.replace(/\s*\|.*$/, '').trim()
+  return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${cleanTitle}${seriesSuffix}`
+}
+
+const STUDIO_VARIANT_MAP = {
+  'AB-YYC-ING':'AB / CALGARY - INGLEWOOD','AB-STA-STA':'AB / ST ALBERT',
+  'BC-RICH-GC':'BC / RICHMOND - GARDEN CITY','BC-RICH-STV':'BC / RICHMOND - STEVESTON',
+  'BC-SUR-SSR':'BC / SURREY - SOUTH','BC-YVR-KIT':'BC / VANCOUVER - KITSILANO',
+  'BC-YVR-MS':'BC / VANCOUVER - MAIN STREET','BC-YVR-UBC':'BC / VANCOUVER - UBC',
+  'BC-YYJ-CSV':'BC / VICTORIA - COOK STREET VILLAGE','BC-YYJ-ESQ':'BC / VICTORIA - ESQUIMALT',
+  'BC-YYJ-OB':'BC / VICTORIA - OAK BAY','BC-YYJ-VIC':'BC / VICTORIA - UPTOWN',
+  'ON-BRL-BRL':'ON / BURLINGTON - SOUTH','ON-CMB-GLT':'ON / CAMBRIDGE - GALT',
+  'ON-ERN-ERN':'ON / ERIN','ON-HAM-OS':'ON / HAMILTON - OTTAWA STREET',
+  'ON-HAM-WD':'ON / HAMILTON - WATERDOWN','ON-HAM-WH':'ON / HAMILTON - WEST HARBOUR',
+  'ON-KGN-AP':'ON / KINGSTON - ARLINGTON PARK','ON-LDN-BYR':'ON / LONDON - BYRON',
+  'ON-LDN-WVG':'ON / LONDON - WORTLEY VILLAGE','ON-MIS-PC':'ON / MISSISSAUGA - PORT CREDIT',
+  'ON-OAK-OAK':'ON / OAKVILLE - NORTH','ON-OAK-WST':'ON / OAKVILLE - WEST',
+  'ON-YOW-GLB':'ON / OTTAWA - THE GLEBE','ON-STC-STC':'ON / ST CATHARINES',
+  'ON-YYZ-AVE':'ON / TORONTO - AVENUE ROAD','ON-YYZ-BP':'ON / TORONTO - BABY POINT',
+  'ON-YYZ-LEA':'ON / TORONTO - LEASIDE','ON-YYZ-BEA':'ON / TORONTO - THE BEACHES',
+  'ON-WTR-WTR':'ON / WATERLOO - UPTOWN'
+}
+async function planOpenSpots(sessionId) {
+  if (!planCanEdit()) { openPinModal(); return; }
+  const x = _plan.sessions.find(z => z.id === sessionId);
+  if (!x) return;
+  openDutySheet(`<h3>Open spots</h3><p>${esc(x.title)} · ${esc(shortTime(x.session_time))}. This changes the live spots customers can book on the website.</p>
+    <label class="f">How many spots?<input type="number" id="plan-spots" min="1" max="200" value="${x.capacity > 0 ? x.capacity : 10}" style="font:inherit;font-size:16px;border:1px solid var(--border);border-radius:10px;padding:9px 11px"></label>
+    <div id="plan-spots-msg" class="ho-intro" style="margin:0"></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="plan-spots-go" onclick="planOpenSpotsGo('${escAttr(sessionId)}')">Open spots</button></div>`);
+}
+async function planOpenSpotsGo(sessionId) {
+  const x = _plan.sessions.find(z => z.id === sessionId);
+  const qty = parseInt(document.getElementById('plan-spots').value, 10);
+  const msg = document.getElementById('plan-spots-msg'), btn = document.getElementById('plan-spots-go');
+  if (!x || isNaN(qty) || qty < 1) { msg.textContent = 'Enter how many spots to open.'; return; }
+  btn.disabled = true; msg.textContent = 'Checking Shopify…';
+  const title = buildShopifyTitle(x.session_date, x.session_time || '00:00:00', x.title);
+  if (!title) { msg.textContent = 'This session has no Shopify product of its own, so it can’t be opened here.'; btn.disabled = false; return; }
+  const call = async body => {
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/shopify-inventory`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify(body) });
+    return r.json();
+  };
+  let variant = null;
+  try { const d = await call({ action: 'get_all', product_title: title }); if (!d.error && d.variants) variant = d.variants.find(v => v.variant_title === STUDIO_VARIANT_MAP[_sessionStudioId]) || null; } catch (e) {}
+  if (!variant) { msg.textContent = 'Couldn’t find this studio on the Shopify product, so nothing was changed.'; btn.disabled = false; return; }
+  msg.textContent = 'Saving…';
+  let setData = null;
+  try { setData = await call({ action: 'set', inventory_item_id: variant.inventory_item_id, quantity: qty }); } catch (e) {}
+  if (!setData || !setData.inventory_level) { msg.textContent = 'Shopify didn’t accept the change. Try again.'; btn.disabled = false; return; }
+  const reg = _plan.booked[x.id] || 0;
+  const up = await sb.from('sessions').update({ capacity: reg + qty, spaces_left_cache: qty }).eq('id', x.id);
+  // Same log as the Day view (best effort)
+  try { await sb.from('spaces_adjustment_log').insert({ session_id: x.id, studio_id: _sessionStudioId, session_title: x.title, session_date: x.session_date,
+    session_time: x.session_time, staff_name: 'Coordinator (Hub)', made_by_role: _viewLevel === 'admin' ? 'admin' : 'coordinator', old_spaces_left: 0, new_spaces_left: qty }); } catch (e) {}
+  if (up.error) { msg.textContent = 'Opened on Shopify, but the schedule didn’t update. Refresh to check.'; return; }
+  closeDutySheet();
+  await loadPlanDay(_plan.date);
+  _plan.msg = `Opened ${qty} spot${qty === 1 ? '' : 's'} for ${x.title}.`; renderPlanDay();
+  if (_plan.date === localDateStr(new Date()) && _lastHeroData) loadDailyHero(_sessionPin, _sessionStudioId);
 }
 
 // ---------- Today's duties ----------
@@ -2683,7 +2831,7 @@ async function loadClassStaff(studioId) {
     if (f.error && !/hub_fill_roles/i.test(f.error.message)) console.error('Role fill failed:', f.error);
   } catch (e) { /* not set up yet */ }
   try {
-    const { data: sess, error } = await sb.from('sessions').select('id, title, session_time, session_type')
+    const { data: sess, error } = await sb.from('sessions').select('id, title, session_time, session_type, spaces_left_cache')
       .eq('studio_id', studioId).eq('session_date', today);
     if (error) throw error;
     const ids = (sess || []).map(x => x.id);
@@ -2706,7 +2854,7 @@ async function loadClassStaff(studioId) {
     const byKey = {};
     (sess || []).forEach(x => {
       byKey[String(x.session_time || '').slice(0, 8) + '|' + x.title] = {
-        type: x.session_type, staff: staffBy[x.id] || {}, party: partyTeachers[x.id] || []
+        type: x.session_type, spaces: x.spaces_left_cache, staff: staffBy[x.id] || {}, party: partyTeachers[x.id] || []
       };
     });
     // Roles for the day: the first session that has any set (same as the Day view).
@@ -2717,7 +2865,7 @@ async function loadClassStaff(studioId) {
     console.error('Class staff load failed:', e);
     _classInfo = null;
   }
-  if (_lastHeroData) renderFloorToday(_lastHeroData);
+  if (_lastHeroData) renderDailyHero(_lastHeroData);   // hero line + floor list
 }
 
 // A typed name ("Rainbow Ruby", "Ruby Smith", "Ruby") → today's team member, if one matches.
@@ -2792,8 +2940,17 @@ function renderFloorToday(data) {
   const nowHM = now.getHours() * 60 + now.getMinutes();
   // Events are shown in their own block, so leave their placeholder session rows out.
   const evTitles = new Set(_todayEvents.map(e => String(e.title || '').trim().toLowerCase()));
-  const sessions = data.sessions.filter(s => !evTitles.has(String(s.title || '').trim().toLowerCase()))
+  const allSessions = data.sessions.filter(s => !evTitles.has(String(s.title || '').trim().toLowerCase()))
     .sort((a, b) => String(a.time).localeCompare(String(b.time)));
+  // 0 booked and 0 spots open = not running today (kids classes always show).
+  const notRunning = s => {
+    if (!_classInfo || Number(s.bookingCount || 0) > 0) return false;
+    const info = _classInfo.byKey[String(s.time || '').slice(0, 8) + '|' + s.title];
+    if (!info || info.spaces !== 0) return false;
+    return !(info.type === 'class' || info.type === 'series' || /class \d+ of \d+|week session/i.test(s.title || '') || s.title === 'Catch Up Class');
+  };
+  const sessions = allSessions.filter(s => !notRunning(s));
+  const offToday = allSessions.filter(notRunning);
   const rows = sessions.map(s => {
     const [h, m] = String(s.time || '00:00').split(':').map(Number);
     // Faded once it's more than 2 hours past the start time.
@@ -2824,7 +2981,10 @@ function renderFloorToday(data) {
     </div>
     ${rolesStripHtml()}
     ${_todayEvents.length ? `<div class="ev-list">${_todayEvents.map(eventBlockHtml).join('')}</div>` : ''}
-    <div class="floor-list">${rows || `<div class="floor-empty">${_todayEvents.length ? 'No classes booked today.' : 'Nothing booked today.'}</div>`}</div>`;
+    <div class="floor-list">${rows || `<div class="floor-empty">${_todayEvents.length ? 'No classes booked today.' : 'Nothing booked today.'}</div>`}</div>
+    ${offToday.length ? `<details class="plan-closed"><summary>Not running today (${offToday.length}) · 0 booked and no spots open</summary>
+      ${offToday.map(s => `<div class="plan-sess off"><span class="t">${esc(shortTime(s.time))}</span><span class="nm">${esc(s.title)}</span></div>`).join('')}
+      <div class="goal-note" style="margin:6px 2px">A coordinator can open spots from the Schedule.</div></details>` : ''}`;
   el.style.display = '';
 }
 
@@ -4696,7 +4856,8 @@ function endCoordinatorView(reload = true) {
     const el = document.getElementById(id);
     if (el) el.innerHTML = '';
   });
-  if (paneVisible('points-pane') || paneVisible('instagram-pane') || paneVisible('occupancy-pane') || paneVisible('plan-pane')) showDashboardPane(); // coordinator-only pages
+  if (paneVisible('points-pane') || paneVisible('instagram-pane') || paneVisible('occupancy-pane')) showDashboardPane(); // coordinator-only pages
+  if (paneVisible('plan-pane') && _plan) renderPlanDay();   // Schedule stays, read-only
   // Supplies: admin preview only while INVENTORY_LIVE is false, so locking
   // closes it. Once live, locking reloads it so the Counts tab locks again.
   if (!INVENTORY_LIVE) {
