@@ -7176,7 +7176,8 @@ function recalcOutcome(uid, subtype) {
   const metaText = blockEl?.querySelector('.party-booking-meta')?.textContent || ''
   const metaParts = metaText.split('·').map(s => s.trim())
   const customerEmail = metaParts[0] || ''
-  const orderName = metaParts.find(p => p.startsWith('Order '))?.replace('Order ','') || ''
+  // Hub fix: the form shows the order as "#4011" (the Day view looked for "Order 4011", so it was always blank)
+  const orderName = (metaParts.find(p => /^#\d/.test(p)) || metaParts.find(p => p.startsWith('Order '))?.replace('Order ','') || '').split(/\s/)[0]
   const customerName = blockEl?.querySelector('.party-booking-name')?.textContent?.split('(')[0]?.trim() || ''
   // Get session info from nearest session card
   const sessionCard = blockEl?.closest('[id^="card-"]')
@@ -7545,6 +7546,47 @@ function getOrderNote(booking) {
     return p?.note || ''
   } catch { return '' }
 }
+
+// ── Hub additions to the gift card (credit for overpaid parties):
+//  • as soon as the gift card is sent, it's written to the party's details
+//    (outcome "Issue credit", the amount, and the note), so it's on record even
+//    if nobody presses Save afterwards;
+//  • once a gift card has been sent for a party, the calculator shows
+//    "already sent" instead of the button, so it can't be sent twice.
+(function () {
+  const originalIssue = issueGiftCard;
+  issueGiftCard = async function (uid, email, name, amount) {
+    const btn = document.getElementById(`gc-btn-${uid}`);
+    const holder = btn && btn.closest('[id^="card-party-"]');
+    const bookingId = holder ? holder.id.replace('card-party-', '') : null;
+    if (bookingId) {
+      const { data: pd } = await sb.from('party_details').select('outcome, outcome_notes').eq('booking_id', bookingId).maybeSingle();
+      if (pd && /gift card sent/i.test(pd.outcome_notes || '')) {
+        alert('A gift card has already been sent for this party:\n\n' + pd.outcome_notes);
+        return;
+      }
+    }
+    await originalIssue.apply(this, arguments);
+    if (!btn || !bookingId || !/gift card sent/i.test(btn.textContent)) return;
+    const notes = (document.getElementById(`${uid}-outcome_notes`) || {}).value || `Gift card sent to ${email}`;
+    const now = new Date().toISOString();
+    const patch = { outcome: 'Issue credit', outcome_amount: Number(amount).toFixed(2), outcome_notes: notes, updated_at: now };
+    const { data: ex } = await sb.from('party_details').select('booking_id').eq('booking_id', bookingId).maybeSingle();
+    const r = ex ? await sb.from('party_details').update(patch).eq('booking_id', bookingId)
+                 : await sb.from('party_details').insert(Object.assign({ booking_id: bookingId, studio_id: _sessionStudioId }, patch));
+    if (r.error) alert('The gift card was sent, but saving that to the party didn’t work: ' + r.error.message + '\nPress Save on the form to record it.');
+  };
+  const originalRecalc = recalcOutcome;
+  recalcOutcome = function (uid) {
+    originalRecalc.apply(this, arguments);
+    const notesEl = document.getElementById(`${uid}-outcome_notes`);
+    const btn = document.getElementById(`gc-btn-${uid}`);
+    if (btn && notesEl && /gift card sent/i.test(notesEl.value || '')) {
+      btn.disabled = true; btn.style.background = '#2e7d32';
+      btn.textContent = '✓ Gift card already sent — ' + notesEl.value.replace(/^gift card sent to /i, '');
+    }
+  };
+})();
 
 // After a save on the Schedule: refresh the day's numbers (guests, closed / contacted).
 (function () {
