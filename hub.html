@@ -451,6 +451,15 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .cl-head .spacer { flex: 1; }
 .cl-table td { font-size: 13px; }
 .cl-kids { font-size: 12px; color: #7a5800; margin-top: 2px; }
+.mv-note { font-size: 12px; color: #1e3a8a; margin-top: 2px; }
+.mv-btn { min-height: 32px !important; padding: 0 12px !important; font-size: 12.5px !important; }
+.mv-opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+.mv-opt { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; border: 1.5px solid var(--border); background: #fff; border-radius: 12px; padding: 10px 12px; font: inherit; color: var(--ink); text-align: left; }
+.mv-opt b { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 17px; font-weight: 600; }
+.mv-opt span { font-size: 12px; color: var(--ink-soft); }
+.mv-opt:hover { border-color: var(--accent); }
+.mv-opt.full { border-color: #f5c38a; background: #fff8ec; }
+.mv-opt.full span { color: #b45309; font-weight: 700; }
 /* Kids class table — the Day view's own table and styles */
 #plan-pane .edit-input { border: none; border-bottom: 1px solid #ccc; width: 100%; font-size: 13px; outline: none; background: transparent; padding: 2px 0; font-family: inherit; }
 #plan-pane .edit-input:focus { border-bottom-color: #1a1a1a; }
@@ -2843,6 +2852,77 @@ function sessionRowOpen(e) {
 document.addEventListener('click', sessionRowOpen);
 document.addEventListener('keydown', sessionRowOpen);
 
+// ---------- Move a booking to another time, same day ----------
+// hub_move_booking.sql enforces: same studio, same day, same kind of session,
+// never parties / kids classes / camps / events. Moving into a full time asks
+// for an OK first. Then live Shopify spots are adjusted for both times.
+function planMovable(x) {
+  return !planIsKids(x) && !['party', 'festival', 'camp'].includes(x.session_type) &&
+    !/camp|pa day|pd day|pa\/pd|no school|catch up/i.test(x.title || '');
+}
+let _mv = null;
+async function planMoveBooking(bookingId, fromSessionId, name) {
+  const { data, error } = await sb.rpc('hub_move_options', { p_booking_id: bookingId });
+  if (error) { alert(/hub_move_options/i.test(error.message) ? 'Moving bookings needs hub_move_booking.sql run in Supabase first.' : error.message); return; }
+  _mv = { bookingId, fromSessionId, name, data, who: '' };
+  const opts = data.options || [];
+  const people = _teamPeople.map(p => `<option value="${escAttr(p.name)}">${esc(p.name)}</option>`).join('');
+  openDutySheet(`<h3>Move ${esc(name)}</h3>
+    <p>${esc(data.qty)} ${data.qty === 1 ? 'person' : 'people'} · now at ${esc(shortTime(data.from.session_time))} ${esc(data.from.title)}. Same day only.</p>
+    ${opts.length ? `<div class="mv-opts">${opts.map(o => {
+        const left = o.spaces_left === null || o.spaces_left === undefined ? null : Number(o.spaces_left);
+        const full = left !== null && left < data.qty;
+        return `<button class="mv-opt${full ? ' full' : ''}" onclick="planMoveTo('${escAttr(o.id)}')">
+          <b>${esc(shortTime(o.session_time))}</b><span>${left === null ? '' : left <= 0 ? 'Full' : left + ' spot' + (left === 1 ? '' : 's') + ' left'}${full && left > 0 ? ' · not enough' : ''}</span></button>`;
+      }).join('')}</div>` : '<div class="ho-intro">There’s no other time for this on the same day.</div>'}
+    ${opts.length && people ? `<label class="f" style="margin-top:12px">Who’s moving it?<select id="mv-who"><option value="">—</option>${people}</select></label>` : ''}
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button></div>`);
+}
+async function planMoveTo(toId, allowFull) {
+  const who = (document.getElementById('mv-who') || {}).value || _mv.who || '';
+  _mv.who = who;
+  const { data, error } = await sb.rpc('hub_move_booking', { p_booking_id: _mv.bookingId, p_to_session_id: toId, p_allow_full: !!allowFull, p_staff_name: who || null });
+  if (error) { alert("Couldn't move it: " + error.message); return; }
+  if (data && data.needs_ok) {
+    const o = (_mv.data.options || []).find(z => String(z.id) === String(toId)) || {};
+    const over = data.qty - Math.max(0, data.spaces_left);
+    openDutySheet(`<h3>⚠️ ${esc(shortTime(o.session_time || ''))} is ${data.spaces_left > 0 ? 'nearly full' : 'full'}</h3>
+      <p>It has ${Math.max(0, data.spaces_left)} spot${data.spaces_left === 1 ? '' : 's'} left. Moving ${data.qty} ${data.qty === 1 ? 'person' : 'people'} puts it <b>${over} over</b>. Make sure the studio can fit them (tables, materials, staff) before you say yes.</p>
+      <div class="sheet-actions"><button onclick="planMoveBooking('${escAttr(_mv.bookingId)}','${escAttr(_mv.fromSessionId)}',${escAttr(JSON.stringify(_mv.name))})">Back</button>
+        <button class="primary" onclick="planMoveTo('${escAttr(toId)}', true)">Move anyway</button></div>`);
+    return;
+  }
+  closeDutySheet();
+  // Live Shopify spots: give the earlier time its spot(s) back, take them from the new time.
+  const shopMsg = await planMoveShopify(data.from, data.to, data.qty);
+  const fromId = String(data.from.id), toSid = String(data.to.id);
+  delete _plan.classLists[fromId]; delete _plan.classLists[toSid];
+  await loadPlanDay(_plan.date);
+  _plan.msg = `Moved ${_mv.name} to ${shortTime(data.to.session_time)}.${data.over_capacity ? ' (Over the limit.)' : ''}${shopMsg ? ' ' + shopMsg : ''}`;
+  renderPlanDay();
+  const m = document.getElementById('plan-msg');
+  if (!m) alert(_plan.msg);
+  if (shopMsg) alert(shopMsg);
+  if (_plan.date === localDateStr(new Date()) && _lastHeroData) loadDailyHero(_sessionPin, _sessionStudioId);
+}
+async function planMoveShopify(from, to, qty) {
+  const variantName = STUDIO_VARIANT_MAP[_sessionStudioId];
+  const call = async body => (await fetch(`${SUPABASE_URL}/functions/v1/shopify-inventory`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify(body) })).json();
+  const adjust = async (sess, delta) => {
+    const title = buildShopifyTitle(sess.session_date, sess.session_time || '00:00:00', sess.title);
+    if (!title) return `no Shopify product for ${shortTime(sess.session_time)}`;
+    const d = await call({ action: 'get_all', product_title: title });
+    const v = d && d.variants && d.variants.find(x => x.variant_title === variantName);
+    if (!v) return `couldn't find ${shortTime(sess.session_time)} on Shopify`;
+    const r = await call({ action: 'set', inventory_item_id: v.inventory_item_id, quantity: Math.max(0, Number(v.inventory_quantity || 0) + delta) });
+    return r && r.inventory_level ? null : `Shopify didn't update ${shortTime(sess.session_time)}`;
+  };
+  try {
+    const problems = [await adjust(from, qty), await adjust(to, -qty)].filter(Boolean);
+    return problems.length ? `Moved, but please check Shopify spots by hand: ${problems.join('; ')}.` : '';
+  } catch (e) { return 'Moved, but Shopify spots couldn’t be updated. Please check both times in Shopify.'; }
+}
+
 // Today screen → "Class list": open today on the Schedule with that class's list open.
 async function openTodayClassList(key) {
   const info = _classInfo && _classInfo.byKey[key];
@@ -2878,8 +2958,14 @@ async function toggleClassList(sessionId) {
       const ids = ((r.data) || []).map(z => z.booking_id).filter(Boolean);
       q = q.in('id', ids.length ? ids : ['00000000-0000-0000-0000-000000000000']);
     } else q = q.eq('session_id', x.id);
-    const { data, error } = await q.order('booked_at');
+    let { data, error } = await q.order('booked_at');
     if (error) throw error;
+    // move notes (hub_move_booking.sql); quietly skipped if that column isn't there yet
+    const ids0 = (data || []).map(b => b.id);
+    if (ids0.length) {
+      const mv = await sb.from('bookings').select('id, move_note').in('id', ids0);
+      if (!mv.error) { const m = {}; (mv.data || []).forEach(r => { m[r.id] = r.move_note; }); data = data.map(b => Object.assign({}, b, { move_note: m[b.id] || null })); }
+    }
     const seen = new Set();
     const rows = (data || []).filter(b => (b.qty || 0) > 0 && !b.returned_at).filter(b => {
       if (!b.shopify_order_name) return true;
@@ -2893,13 +2979,15 @@ async function toggleClassList(sessionId) {
     el.innerHTML = `<div class="cl-head"><b>${total}</b> ${planIsKids(x) ? 'enrolled' : 'booked'}
         <span class="spacer"></span><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button>
 </div>
-      ${rows.length ? `<div class="oc-wrap"><table class="oc-table cl-table"><thead><tr><th>Name</th><th>Qty</th>${glazing ? '<th>Glazing</th>' : ''}<th>Extras</th><th>Phone</th><th>Order</th><th>Notes</th></tr></thead><tbody>
+      ${rows.length ? `<div class="oc-wrap"><table class="oc-table cl-table"><thead><tr><th>Name</th><th>Qty</th>${glazing ? '<th>Glazing</th>' : ''}<th>Extras</th><th>Phone</th><th>Order</th><th>Notes</th>${planMovable(x) ? '<th></th>' : ''}</tr></thead><tbody>
       ${rows.map(b => {
         const ex = [b.hot_chocolate_qty ? `☕ ${b.hot_chocolate_qty}` : '', b.candy_bag_qty ? `🍬 ${b.candy_bag_qty}` : '', b.aftercare ? 'Aftercare' : '', b.early_arrival ? 'Early arrival' : ''].filter(Boolean).join(' · ');
         const note = esc((typeof getOrderNote === 'function' ? getOrderNote(b) : b.order_note) || '');
         return `<tr><td><b>${esc(b.customer_name || '—')}</b>${(kids[b.id] || []).length ? `<div class="cl-kids">🧒 ${esc(kids[b.id].join(', '))}</div>` : ''}</td>
           <td>${esc(b.qty)}</td>${glazing ? `<td>${esc(getGlazingPiece(b.raw_payload, b.event_date) || '') || '<span class="goal-note">not specified</span>'}</td>` : ''}
-          <td>${esc(ex)}</td><td>${esc(b.customer_phone || '')}</td><td>${b.shopify_order_name ? shopifyOrderLink(esc(b.shopify_order_name)) : ''}</td><td>${note}</td></tr>`;
+          <td>${esc(ex)}</td><td>${esc(b.customer_phone || '')}</td><td>${b.shopify_order_name ? shopifyOrderLink(esc(b.shopify_order_name)) : ''}</td>
+          <td>${note}${b.move_note ? `<div class="mv-note">↪ ${esc(b.move_note)}</div>` : ''}</td>
+          ${planMovable(x) ? `<td><button class="ho-btn mv-btn" onclick="planMoveBooking('${escAttr(b.id)}', '${escAttr(x.id)}', ${escAttr(JSON.stringify(b.customer_name || 'this booking'))})">Move</button></td>` : ''}</tr>`;
       }).join('')}</tbody></table></div>` : '<div class="goal-note" style="padding:8px 2px">No one booked yet.</div>'}`;
     el.dataset.title = x.title; el.dataset.time = x.session_time || '';
   } catch (e) {
