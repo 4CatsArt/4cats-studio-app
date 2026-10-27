@@ -53,7 +53,6 @@
       '.pb-slot { display: flex; flex-direction: column; align-items: center; padding: 16px 12px 14px; border: 1.5px solid #e0e0e0; border-radius: 10px; background: #fff; gap: 10px; text-align: center; }',
       '.pb-slot.pb-preselected { border-color: #c3090c !important; box-shadow: 0 0 0 2px rgba(195,9,12,0.15) !important; }',
       '.pb-slot-time { font-size: 18px; font-weight: 700; color: #1a1a1a; }',
-      '.pb-lineup-tag { font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 100px; background: #fdecec; color: #c3090c; }',
       '.pb-qty-caption { font-size: 10px; font-weight: 700; letter-spacing: 0.04em; color: #999; }',
       '.pb-qty { display: flex; align-items: center; border: 1.5px solid #ddd; border-radius: 8px; overflow: hidden; }',
       '.pb-root .pb-qty-btn { width: 34px !important; height: 34px !important; min-width: 0 !important; padding: 0 !important; background: #f7f7f7 !important; border: none !important; border-radius: 0 !important; font-size: 18px !important; cursor: pointer; color: #444 !important; display: flex; align-items: center; justify-content: center; }',
@@ -361,9 +360,6 @@
 
         card.appendChild(el('span', 'pb-slot-time', slot.time))
 
-        if (slot.kind === 'lineup') {
-          card.appendChild(el('span', 'pb-lineup-tag', 'Lineup day'))
-        }
 
         if (!qty[key]) qty[key] = 1
         card.appendChild(el('span', 'pb-qty-caption', 'How many people?'))
