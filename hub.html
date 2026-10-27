@@ -5854,7 +5854,10 @@ function tsDaySheet(i, date) {
   _tsPerson = x.staff_id; window._tsDay = date;
   const d = (x.days || []).find(z => z.date === date) || { date, shifts: [], punches: [], notes: [], minutes: { worked: 0, break: 0, open_days: 0 } };
   const studio = ((d.shifts || [])[0] || {}).studio_id || ((d.punches || [])[0] || {}).studio_id || x.home_studio_id || '';
-  window._tsEdit = { staff: x.staff_id, date, studio, punches: (d.punches || []).map(p => ({ id: p.id, kind: p.kind, orig: tsHHMM(p.at, p.studio_id || studio), time: tsHHMM(p.at, p.studio_id || studio), remove: false })), adds: [] };
+  // the scheduled shift (first start, last end), for "Add punch" / "Add break" defaults
+  const shs = (d.shifts || []).filter(z => z.start && z.end);
+  const shift = shs.length ? { start: shs.map(z => String(z.start).slice(0, 5)).sort()[0], end: shs.map(z => String(z.end).slice(0, 5)).sort().slice(-1)[0] } : null;
+  window._tsEdit = { shift, staff: x.staff_id, date, studio, punches: (d.punches || []).map(p => ({ id: p.id, kind: p.kind, orig: tsHHMM(p.at, p.studio_id || studio), time: tsHHMM(p.at, p.studio_id || studio), remove: false })), adds: [] };
   const appr = d.approval && d.approval.status;
   const tz = tsTz(studio), tzName = tz ? tz.split('/')[1].replace('_', ' ') : '';
   openDutySheet(`<h3>${esc(x.full_name)}</h3>
@@ -5889,11 +5892,26 @@ function tsEditRender() {
   ];
   box.innerHTML = rows.join('') || '<div class="goal-note">No punches this day. Add them below.</div>';
 }
+// Defaults come from the scheduled shift: in at the start, out at the end, and a
+// 30-minute break in the middle when the shift is longer than 5 hours.
+const tsMin = t => { const [h, m] = String(t).split(':').map(Number); return h * 60 + m; };
+const tsHM = n => { n = ((Math.round(n / 15) * 15) % 1440 + 1440) % 1440; return String(Math.floor(n / 60)).padStart(2, '0') + ':' + String(n % 60).padStart(2, '0'); };
+function tsMidBreak(sh) { const mid = (tsMin(sh.start) + tsMin(sh.end)) / 2; return [tsHM(mid - 15), tsHM(mid + 15)]; }
 function tsEditAdd(what) {
   const e = window._tsEdit; if (!e) return;
-  if (what === 'break') { e.adds.push({ kind: 'break_out', time: '12:00' }, { kind: 'break_in', time: '12:30' }); }
-  else { const has = k => e.punches.some(p => p.kind === k && !p.remove) || e.adds.some(a => a.kind === k);
-    e.adds.push({ kind: !has('in') ? 'in' : !has('out') ? 'out' : 'break_out', time: !has('in') ? '09:00' : '17:00' }); }
+  const sh = e.shift;
+  const has = k => e.punches.some(p => p.kind === k && !p.remove) || e.adds.some(a => a.kind === k);
+  if (what === 'break') {
+    const [a, b] = sh ? tsMidBreak(sh) : ['12:00', '12:30'];
+    e.adds.push({ kind: 'break_out', time: a }, { kind: 'break_in', time: b });
+  } else if (sh && !has('in') && !has('out') && !has('break_out')) {
+    // nothing punched: the whole shift, plus a break if it's over 5 hours
+    e.adds.push({ kind: 'in', time: sh.start });
+    if (tsMin(sh.end) - tsMin(sh.start) > 300) { const [a, b] = tsMidBreak(sh); e.adds.push({ kind: 'break_out', time: a }, { kind: 'break_in', time: b }); }
+    e.adds.push({ kind: 'out', time: sh.end });
+  } else if (!has('in')) e.adds.push({ kind: 'in', time: sh ? sh.start : '09:00' });
+  else if (!has('out')) e.adds.push({ kind: 'out', time: sh ? sh.end : '17:00' });
+  else e.adds.push({ kind: 'break_out', time: sh ? tsMidBreak(sh)[0] : '12:00' });
   tsEditRender();
 }
 // in → (break start → break end)* → out, in time order
