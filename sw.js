@@ -10,7 +10,7 @@ self.addEventListener('push', (e) => {
   e.waitUntil(self.registration.showNotification(d.title || '4Cats Hub', {
     body: d.body || '',
     icon: 'hub-icon-192.png',
-    badge: 'hub-icon-192.png',
+    badge: 'hub-badge-96.png',       // Android's small status bar icon: a white shape on transparent (Android only uses the shape)
     tag: d.tag || undefined,          // one notification per chat; a new message replaces the last
     renotify: !!d.tag,
     data: { url: d.url || 'hub.html' }
