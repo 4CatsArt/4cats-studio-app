@@ -609,6 +609,8 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .chat-wrap.phone.room-open .chat-room { display: flex; }
 .chat-wrap.phone .chat-back { display: inline-flex; }
 @media (max-width: 760px) { .chat-wrap { grid-template-columns: 1fr; } .chat-wrap .chat-room { display: none; } .chat-wrap.room-open .chat-list { display: none; } .chat-wrap.room-open .chat-room { display: flex; } .chat-back { display: inline-flex; } }
+.me-offer { margin-top: 8px; background: #f1edff; border-radius: 10px; padding: 8px 10px; font-size: 13.5px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.me-offer .ho-btn { min-height: 30px; padding: 0 10px; margin-left: auto; }
 .glz-edit { display: flex; gap: 6px; align-items: center; }
 .glz-edit input { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; min-width: 160px; }
 .glz-edit .ho-btn { min-height: 30px; padding: 0 10px; }
@@ -1605,6 +1607,7 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
       <button class="nav-item" id="nav-sick" onclick="openSickPane()"><span class="ic">🤒</span> Sick calls</button>
       <button class="nav-item" id="nav-ts" onclick="openTsPane()"><span class="ic">🕒</span> Timesheets</button>
       <button class="nav-item" id="nav-rules" onclick="openRulesPane()"><span class="ic">📋</span> Staff request rules</button>
+      <button class="nav-item" id="nav-swaps" onclick="openSwapsPane()"><span class="ic">🔁</span> Shift swaps <span class="nav-badge" id="swaps-badge" style="display:none"></span></button>
       <button class="nav-item" id="nav-devices" onclick="openDevicesPane()"><span class="ic">🖥</span> Devices <span class="nav-badge" id="devices-badge" style="display:none"></span></button>
     </div>
 
@@ -1826,6 +1829,12 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
   <main class="main" id="chat-pane" style="display:none">
     <div class="ho-head"><div class="pts-page-title" style="margin:0">💬 Chat</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
     <div id="hub-chat" class="chat-host"></div>
+  </main>
+
+  <main class="main" id="swaps-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">🔁 Shift swaps</div><span class="spacer"></span><button class="ho-btn" onclick="loadSwapsPane()">Refresh</button></div>
+    <p class="ho-intro">Staff offer a shift; someone at the same or a nearby studio takes it; you approve. Approving moves the shift to them and tells them both.</p>
+    <div id="swaps-body"></div>
   </main>
 
   <main class="main" id="duties-pane" style="display:none">
@@ -3634,6 +3643,7 @@ async function planRemoveShift(staffId) {
   await planAfterShiftChange('Shift removed from the staff schedule.');
 }
 async function planAfterShiftChange(msg) {
+  fnHeaders().then(h => fetch(`${SUPABASE_URL}/functions/v1/hub-push`, { method: 'POST', headers: h, body: JSON.stringify({ action: 'shifts' }) })).catch(() => {});   // schedule notifications
   await loadPlanDay(_plan.date);
   _plan.msg = msg; renderPlanDay();
   if (_plan.date === localDateStr(new Date())) loadTeamToday(_sessionStudioId);
@@ -5826,6 +5836,11 @@ async function ackSick(id) {
 // Sidebar counts: Parties = new bookings + cancellations + parties in the next
 // week not contacted; Notifications = new party items + recent bookings not seen yet.
 async function refreshCoordBadges(party, recent) {
+  // home office: shift swaps waiting (hub_shift_offers.sql)
+  if (_studioData && _studioData.isAdmin) sb.rpc('hub_offers_admin').then(r => {
+    const b = document.getElementById('swaps-badge'); if (!b || r.error) return;
+    const n = (r.data || []).filter(o => o.status === 'taken').length; b.textContent = n; b.style.display = n ? '' : 'none';
+  }).catch(() => {});
   // home office: computers waiting for approval (hub_devices.sql)
   if (_studioData && _studioData.isAdmin) sb.rpc('hub_devices_list').then(r => {
     const b = document.getElementById('devices-badge'); if (!b || r.error) return;
@@ -5866,9 +5881,9 @@ function startStaffView(me) {
   document.getElementById('staff-shell').style.display = '';
   document.getElementById('me-avatar').innerHTML = hubAvatarHtml(me, 48);
   document.getElementById('me-hi').textContent = `Hi ${me.name || ''}!`;
-  const openChat = new URLSearchParams(location.search).get('chat');   // tapped a chat notification
+  const qs = new URLSearchParams(location.search), openChat = qs.get('chat');   // tapped a notification
   if (openChat) { meTab('chat'); chatOpenWhenReady(openChat); history.replaceState(null, '', location.pathname + location.hash); }
-  else meTab('shifts');
+  else { meTab('shifts'); if (qs.get('tab')) history.replaceState(null, '', location.pathname + location.hash); }
   meCheckTeam();
   if (_meTeamTimer) clearInterval(_meTeamTimer);
   _meTeamTimer = setInterval(() => { if (_me) { meCheckTeam(); if (_meTab === 'team') meLoadTeam(true); } }, 2 * 60 * 1000);
@@ -5908,7 +5923,8 @@ async function meLoadShifts() {
   _meReq = req.data || null;
   const d = sched.data, rules = (_meReq && _meReq.rules) || { sick_window_hours: 24 };
   const shifts = d.shifts || [];
-  const coverHtml = meCoverHtml() + (await mePunchCardHtml()) + (await meLockboxHtml());
+  await meLoadOffers();
+  const coverHtml = meCoverHtml() + meOffersHtml() + (await mePunchCardHtml()) + (await meLockboxHtml());
   if (!shifts.length) {
     body.innerHTML = coverHtml + `<div class="me-card"><h3>No shifts in the next ${_meWeeks} weeks</h3><div class="me-rules">Shifts show here once they’re approved in the staff schedule.</div></div>`;
     return;
@@ -5931,7 +5947,8 @@ async function meLoadShifts() {
       <div class="me-studio">📍 ${esc(studio)}</div>
       ${roles || teach || sh.sick ? `<div class="me-chips">${sh.sick ? '<span class="me-chip sick">🤒 You called in sick</span>' : ''}${roles}${teach}</div>` : ''}
       ${team ? `<div class="me-team">Working with ${team}</div>` : '<div class="me-team">No one else is on yet.</div>'}
-      ${canSick ? `<div class="me-actions"><button class="ho-btn" onclick="meSick(${i})">🤒 Call in sick</button></div>` : ''}
+      ${meOfferLine(sh) || (canSick ? `<div class="me-actions"><button class="ho-btn" onclick="meSick(${i})">🤒 Call in sick</button>${meCanGive(sh) ? `<button class="ho-btn" onclick="meGiveAway(${i})">🔁 Give away</button>` : ''}</div>`
+        : meCanGive(sh) ? `<div class="me-actions"><button class="ho-btn" onclick="meGiveAway(${i})">🔁 Give away</button></div>` : '')}
     </div>`;
   });
   html += `<div style="text-align:center;margin-top:8px"><button class="ho-btn" onclick="_meWeeks += 4; meLoadShifts()">Show 4 more weeks</button></div>`;
@@ -5939,6 +5956,56 @@ async function meLoadShifts() {
   _meShifts = shifts;
 }
 let _meShifts = [];
+// ---- 🔁 Shift give-aways (hub_shift_offers.sql) ----
+let _meOffers = null;
+async function meLoadOffers() {
+  try { const r = await sb.rpc('hub_offers_mine'); _meOffers = r.error ? null : r.data; } catch (e) { _meOffers = null; }
+}
+function meOfferFor(sh) { return ((_meOffers && _meOffers.mine) || []).find(o => o.shift_date === sh.shift_date && o.studio_id === sh.studio_id && ['open', 'taken'].includes(o.status)); }
+function meCanGive(sh) { return !!_meOffers && !sh.sick && sh.shift_date >= localDateStr(new Date()) && !meOfferFor(sh); }
+function meOfferLine(sh) {
+  const o = meOfferFor(sh); if (!o) return '';
+  return `<div class="me-offer">${o.status === 'open' ? '🔁 Up for grabs. Waiting for someone to take it.' : `🔁 <b>${esc(String(o.taker_name || '').split(' ')[0])}</b> will take it. Waiting for home office to approve.`}
+    <button class="ho-btn" onclick="meOfferCancel('${escAttr(o.id)}')">Withdraw</button></div>`;
+}
+function meOffersHtml() {
+  if (!_meOffers) return '';
+  const av = _meOffers.available || [], tk = (_meOffers.taken || []).filter(o => o.status === 'taken');
+  const when = o => `${esc(meDateLabel(o.shift_date, localDateStr(new Date())))} · ${esc(shortTime(o.start_time))}–${esc(shortTime(o.end_time))} · ${esc(o.studio_name)}`;
+  return (tk.length ? `<div class="me-card"><h3>🔁 Waiting for approval</h3>${tk.map(o => `<div class="me-list-row"><div class="what">${when(o)}<div class="goal-note">from ${esc(o.from_name)}</div></div></div>`).join('')}</div>` : '')
+    + (av.length ? `<div class="me-card cover-ask"><h3>🔁 Shifts up for grabs (${av.length})</h3>
+        ${av.map(o => `<div class="me-list-row"><div class="what"><b>${when(o)}</b><div class="goal-note">${esc(o.from_name)}${o.note ? ' · ' + esc(o.note) : ''}</div></div>
+          <button class="ho-btn primary" onclick="meOfferTake('${escAttr(o.id)}')">I’ll take it</button></div>`).join('')}
+        <div class="me-small">Home office approves every swap. It stays theirs until then.</div></div>` : '');
+}
+function meOfferPush(id, event) { fnHeaders().then(h => fetch(`${SUPABASE_URL}/functions/v1/hub-push`, { method: 'POST', headers: h, body: JSON.stringify({ action: 'offer', offer_id: id, event }) })).catch(() => {}); }
+function meGiveAway(i) {
+  const sh = _meShifts[i]; if (!sh) return;
+  openDutySheet(`<h3>🔁 Give away this shift?</h3><p>${esc(meDateLabel(sh.shift_date, localDateStr(new Date())))} · ${esc(shortTime(sh.start_time))}–${esc(shortTime(sh.end_time))}</p>
+    <div class="me-form"><label>Note for whoever takes it (optional)<input id="go-note" maxlength="300" placeholder="e.g. Dentist appointment, happy to take a shift back"></label></div>
+    <div class="me-small" style="margin-top:6px">Staff at your studio and nearby studios who are free then can take it. <b>It stays your shift until home office approves the swap.</b></div>
+    <div id="go-msg"></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="meGiveAwaySave(${i})">Offer it</button></div>`);
+}
+async function meGiveAwaySave(i) {
+  const sh = _meShifts[i];
+  const { data, error } = await sb.rpc('hub_offer_shift', { p_date: sh.shift_date, p_studio: sh.studio_id, p_note: document.getElementById('go-note').value || null });
+  if (error) { document.getElementById('go-msg').innerHTML = `<div class="me-msg err">${esc(error.message)}</div>`; return; }
+  meOfferPush(data.id, 'offered');
+  closeDutySheet(); meLoadShifts();
+}
+async function meOfferCancel(id) {
+  if (!confirm('Withdraw this offer? The shift stays yours.')) return;
+  const { error } = await sb.rpc('hub_offer_cancel', { p_id: id });
+  if (error) { alert(error.message); return; }
+  meLoadShifts();
+}
+async function meOfferTake(id) {
+  const { error } = await sb.rpc('hub_offer_take', { p_id: id });
+  if (error) { alert(error.message); meLoadShifts(); return; }
+  meOfferPush(id, 'taken');
+  meLoadShifts();
+}
 let _meCover = [];
 // 🔑 Lockbox codes for the studios this person works at (hub_my_lockboxes.sql). Closed until tapped.
 async function meLockboxHtml() {
@@ -6148,6 +6215,48 @@ async function tsLoadMe() {
   return _tsMe;
 }
 function tsByName() { return _tsMe || ''; }
+// ---------- Home office: shift swaps (hub_shift_offers.sql) ----------
+async function openSwapsPane() {
+  if (!(_studioData && _studioData.isAdmin)) return;
+  showOnlyPane('swaps-pane'); setActiveNav('nav-swaps'); loadSwapsPane();
+}
+async function loadSwapsPane() {
+  const body = document.getElementById('swaps-body'); if (!body) return;
+  body.innerHTML = '<div class="ho-intro">Loading…</div>';
+  const { data, error } = await sb.rpc('hub_offers_admin');
+  if (error) { body.innerHTML = `<div class="ho-card"><div class="goal-note">${esc(/hub_offers_admin/i.test(error.message) ? 'Run hub_shift_offers.sql to set up shift swaps.' : error.message)}</div></div>`; return; }
+  const list = data || [], waiting = list.filter(o => o.status === 'taken'), open = list.filter(o => o.status === 'open'), done = list.filter(o => !['taken', 'open'].includes(o.status));
+  const badge = document.getElementById('swaps-badge'); if (badge) { badge.textContent = waiting.length; badge.style.display = waiting.length ? '' : 'none'; }
+  const when = o => `${esc(tsDayLabel(o.shift_date))} · ${esc(shortTime(o.start_time))}–${esc(shortTime(o.end_time))} · ${esc(o.studio_name)}`;
+  const STATUS = { approved: '✅ Approved', cancelled: 'Withdrawn', ended: 'Ended (shift changed or passed)' };
+  body.innerHTML = `
+    <div class="ho-card"><div class="ho-title" style="font-size:17px">Waiting for you${waiting.length ? ` (${waiting.length})` : ''}</div>
+      ${waiting.length ? waiting.map(o => { const over = o.weekly_limit && o.week_hours > o.weekly_limit;
+        return `<div class="dev-row pending"><div class="dev-main"><b>${when(o)}</b>
+            <div>${esc(o.from_name)} → <b>${esc(o.taker_name)}</b>${o.note ? ` <span class="goal-note">· “${esc(o.note)}”</span>` : ''}</div>
+            <div class="goal-note">${esc(String(o.taker_name).split(' ')[0])} would have ${o.week_hours}h that week${o.weekly_limit ? ` (overtime after ${o.weekly_limit}h)` : ''}</div>
+            ${over ? `<div class="camp-short">⚠ That’s overtime for ${esc(String(o.taker_name).split(' ')[0])}</div>` : ''}
+            ${o.still_ok ? `<div style="color:#b91c1c;font-weight:600">Can’t approve: ${esc(String(o.taker_name).split(' ')[0])} is ${esc(o.still_ok)}</div>` : ''}</div>
+          <button class="ho-btn primary" onclick="swapDecide('${escAttr(o.id)}', true)"${o.still_ok ? ' disabled' : ''}>Approve</button>
+          <button class="ho-btn" onclick="swapDecide('${escAttr(o.id)}', false)">Decline</button></div>`; }).join('')
+        : '<div class="goal-note">Nothing waiting.</div>'}</div>
+    <div class="ho-card" style="margin-top:14px"><div class="ho-title" style="font-size:17px">Up for grabs</div>
+      ${open.length ? open.map(o => `<div class="dev-row"><div class="dev-main">${when(o)}<div class="goal-note">${esc(o.from_name)} is offering it${o.note ? ' · “' + esc(o.note) + '”' : ''}</div></div></div>`).join('')
+        : '<div class="goal-note">No shifts offered right now.</div>'}</div>
+    ${done.length ? `<details class="me-more" style="margin-top:14px;background:#fff"><summary>Recent (${done.length})</summary>
+      ${done.map(o => `<div class="dev-row"><div class="dev-main">${when(o)}<div class="goal-note">${esc(o.from_name)}${o.taker_name ? ' → ' + esc(o.taker_name) : ''} · ${esc(STATUS[o.status] || o.status)}${o.decided_by_name ? ' by ' + esc(o.decided_by_name) : ''}</div></div></div>`).join('')}</details>` : ''}`;
+}
+async function swapDecide(id, approve) {
+  let note = null;
+  if (!approve) { note = prompt('Decline this swap. A short reason for them (optional):', ''); if (note === null) return; }
+  else if (!confirm('Approve this swap? The shift moves to them, and both are told.')) return;
+  await tsLoadMe();
+  const { error } = await sb.rpc('hub_offer_decide', { p_id: id, p_approve: approve, p_by_name: tsByName() || null, p_note: note });
+  if (error) { alert(error.message); loadSwapsPane(); return; }
+  meOfferPush(id, approve ? 'approved' : 'declined');
+  loadSwapsPane();
+}
+
 // ---------- Home office: studio computers ----------
 async function openDevicesPane() {
   if (!(_studioData && _studioData.isAdmin)) return;
@@ -8299,7 +8408,7 @@ async function requestPrize(prizeId) {
 
 // The page panes: only one shows at a time. Points + Instagram are
 // coordinator-only (their sidebar buttons only appear when unlocked).
-const PANES = ['dashboard-main', 'chat-pane', 'dm-pane', 'devices-pane', 'etpl-pane', 'tickets-pane', 'moments-pane', 'info-pane', 'duties-pane', 'schedule-pane', 'points-pane', 'instagram-pane', 'occupancy-pane', 'inventory-pane', 'announce-pane', 'checklist-pane', 'oc-overview-pane', 'plan-pane', 'parties-pane', 'notif-pane', 'rules-pane', 'sick-pane', 'punch-pane', 'ts-pane'];
+const PANES = ['dashboard-main', 'swaps-pane', 'chat-pane', 'dm-pane', 'devices-pane', 'etpl-pane', 'tickets-pane', 'moments-pane', 'info-pane', 'duties-pane', 'schedule-pane', 'points-pane', 'instagram-pane', 'occupancy-pane', 'inventory-pane', 'announce-pane', 'checklist-pane', 'oc-overview-pane', 'plan-pane', 'parties-pane', 'notif-pane', 'rules-pane', 'sick-pane', 'punch-pane', 'ts-pane'];
 function showOnlyPane(id) {
   if (id !== 'chat-pane' && _chat && _chat.mode !== 'staff') chatStop();   // leaving Chat: stop checking for messages
   PANES.forEach(p => {
@@ -9780,7 +9889,8 @@ let _pushReg = null;
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').then(r => { _pushReg = r; }).catch(() => {});
   navigator.serviceWorker.addEventListener('message', e => {   // a notification tapped while the Hub is open
-    if (e.data && e.data.type === 'open-chat') { const id = new URL(e.data.url).searchParams.get('chat'); if (id && _me) { meTab('chat'); chatOpenWhenReady(id); } }
+    if (e.data && e.data.type === 'open-chat') { const u = new URL(e.data.url), id = u.searchParams.get('chat');
+      if (id && _me) { meTab('chat'); chatOpenWhenReady(id); } else if (u.searchParams.get('tab') === 'shifts' && _me) meTab('shifts'); }
   });
 }
 function chatOpenWhenReady(id, tries) {
