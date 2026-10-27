@@ -491,6 +491,9 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .me-tally b { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 22px; font-weight: 600; color: var(--accent-deep); }
 .me-bar { height: 10px; border-radius: 999px; background: #ece9f5; overflow: hidden; margin-bottom: 8px; }
 .me-bar span { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+.me-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.me-file { border: 1px solid var(--border); background: #fff; border-radius: 999px; padding: 5px 11px; font: inherit; font-size: 12.5px; color: var(--ink); cursor: pointer; display: inline-flex; align-items: center; }
+.me-file.add { color: var(--accent-deep); border-style: dashed; }
 .me-star { font-size: 12.5px; color: var(--ink-soft); margin-top: 10px; font-style: italic; }
 .me-msg { font-size: 13.5px; padding: 10px 12px; border-radius: 12px; }
 .me-msg.ok { background: var(--green-bg); color: #14532d; }
@@ -3711,6 +3714,8 @@ async function meLoadShifts() {
   _meShifts = shifts;
 }
 let _meShifts = [];
+let _meFiles = null;
+const MED_BUCKET = 'staff-medical-notes';
 function meSick(i) {
   const sh = _meShifts[i]; if (!sh) return;
   const need = _meReq && _meReq.rules && _meReq.rules.sick_reason_required;
@@ -3732,9 +3737,10 @@ async function meSickGo(i) {
 async function meLoadRequests() {
   const body = document.getElementById('me-body');
   body.innerHTML = '<div class="ho-intro">Loading…</div>';
-  const { data, error } = await sb.rpc('hub_my_requests');
+  const [{ data, error }, files] = await Promise.all([sb.rpc('hub_my_requests'), sb.rpc('hub_my_time_off_files')]);
   if (error) { body.innerHTML = `<div class="me-msg err">Couldn't load: ${esc(error.message)}</div>`; return; }
   _meReq = data;
+  _meFiles = files.error ? null : (files.data || []);   // null = uploads not set up yet
   if (_meTab === 'off') meRenderTimeOff(); else meRenderAvail();
 }
 // "Ask 14 days ahead for 1–3 days off, 60 days ahead for 4–10 days off"
@@ -3771,7 +3777,10 @@ function meRenderTimeOff(msg) {
     const dates = t.start_date === t.end_date ? meFmtDate(t.start_date) : `${meFmtDate(t.start_date)} – ${meFmtDate(t.end_date)}`;
     const times = t.start_time ? ` · ${shortTime(t.start_time)}–${shortTime(t.end_time)}` : '';
     const flags = (t.flags || []).length && t.status === 'pending' ? `<div>⚑ ${esc(t.flags.join(' · '))}</div>` : '';
-    return `<div class="me-list-row"><div class="what"><b>${esc(dates)}</b>${esc(times)}<div>${esc(meTypeLabel(t))}${t.note ? ' · ' + esc(t.note) : ''}</div>${flags}</div>
+    const files = t.type === 'medical' && _meFiles ? _meFiles.filter(f => String(f.time_off_id) === String(t.id)) : [];
+    const fileHtml = t.type === 'medical' && _meFiles ? `<div class="me-files">${files.map(f => `<button class="me-file" onclick="meOpenFile('${escAttr(f.path)}')">📎 ${esc(f.file_name || 'Doctor’s note')}</button>`).join('')}
+        ${!['denied', 'cancelled'].includes(t.status) ? `<label class="me-file add">＋ Add doctor’s note<input type="file" accept="application/pdf,image/*" style="display:none" onchange="meUploadNote('${escAttr(t.id)}', this)"></label>` : ''}</div>` : '';
+    return `<div class="me-list-row"><div class="what"><b>${esc(dates)}</b>${esc(times)}<div>${esc(meTypeLabel(t))}${t.note ? ' · ' + esc(t.note) : ''}</div>${flags}${fileHtml}</div>
       <span class="me-pill ${esc(t.status)}">${esc(t.status === 'pending' ? 'waiting' : t.status)}</span>
       ${t.status === 'pending' ? `<button class="ho-btn" onclick="meCancelOff('${escAttr(t.id)}')">Cancel</button>` : ''}</div>`;
   }).join('');
@@ -3803,6 +3812,8 @@ function meRenderTimeOff(msg) {
         <div class="two" id="me-off-times" style="display:none"><label>From<input type="time" id="me-off-from" step="900"></label><label>Until<input type="time" id="me-off-until" step="900"></label></div>
         <div id="me-off-preview"></div>
         <label><span id="me-off-note-label">Note for your manager (optional)</span><textarea id="me-off-note" maxlength="500" placeholder="e.g. Family wedding"></textarea></label>
+        <label id="me-off-file-row" style="display:none">Doctor’s note (optional — you can also add it later)<input type="file" id="me-off-file" accept="application/pdf,image/*">
+          <span class="me-rules" style="font-weight:400">A PDF or a photo, up to 10 MB. Only you and home office can see it.</span></label>
         <button class="ho-btn primary" style="min-height:46px" onclick="meRequestOff()">Send request</button>
       </div></div>
     <div class="me-card"><h3>Your requests</h3>${list || '<div class="me-rules">No time off requests yet.</div>'}</div>`;
@@ -3814,6 +3825,7 @@ function mePreviewOff() {
   const st = document.getElementById('me-off-start').value, en = document.getElementById('me-off-end').value || st;
   const kind = document.getElementById('me-off-type').value, sick = kind === 'sick_leave';
   const lbl = document.getElementById('me-off-note-label');
+  const fr = document.getElementById('me-off-file-row'); if (fr) fr.style.display = kind === 'medical_leave' && _meFiles ? '' : 'none';
   if (lbl) lbl.textContent = kind === 'medical_leave' ? 'Note for your manager (needed: what it’s for, and when you expect to be back)' : 'Note for your manager (optional)';
   if (!st || en < st) { box.innerHTML = kind === 'medical_leave' ? '<div class="me-msg warn">Medical leave goes to your manager to approve. It doesn’t need 14 or 60 days’ notice and doesn’t use your time off.</div>' : ''; return; }
   const part = document.getElementById('me-off-part').checked;
@@ -3846,12 +3858,44 @@ async function meRequestOff() {
     p_start_time: part ? v('me-off-from') || null : null, p_end_time: part ? v('me-off-until') || null : null,
     p_type: v('me-off-type'), p_note: v('me-off-note') || null });
   if (error) { const box = document.getElementById('me-body'); box.insertAdjacentHTML('afterbegin', `<div class="me-msg err" style="margin-bottom:10px">${esc(error.message)}</div>`); box.scrollIntoView({ behavior: 'smooth' }); return; }
+  const fileEl = document.getElementById('me-off-file');
+  let upMsg = '';
+  if (v('me-off-type') === 'medical_leave' && fileEl && fileEl.files && fileEl.files[0]) {
+    const err = await meUploadFile(data.id, fileEl.files[0]);
+    upMsg = err ? `<div class="me-msg err" style="margin-bottom:10px">The request was sent, but the doctor’s note didn’t upload: ${esc(err)} You can add it from “Your requests”.</div>` : '';
+  }
   await meLoadRequests();
-  meRenderTimeOff(data.over_allowance
+  meRenderTimeOff(upMsg + (data.over_allowance
     ? '<div class="me-msg err" style="margin-bottom:10px">Request sent, but you’re over your time off for the year, so it may not be approved. Your manager has been told.</div>'
     : (data.flags || []).length
       ? `<div class="me-msg warn" style="margin-bottom:10px">Request sent. Your manager will take a closer look because: ${esc(data.flags.join('; '))}.</div>`
-      : '<div class="me-msg ok" style="margin-bottom:10px">Request sent. You’ll see it here as approved or not once your manager has looked at it.</div>');
+      : '<div class="me-msg ok" style="margin-bottom:10px">Request sent. You’ll see it here as approved or not once your manager has looked at it.</div>'));
+}
+// Doctor's notes: private bucket, own folder (<staff_id>/<request id>/…), then recorded on the request.
+async function meUploadFile(timeOffId, file) {
+  const okType = /^(application\/pdf|image\/)/.test(file.type || '') || /\.(pdf|heic|heif|jpe?g|png|webp)$/i.test(file.name);
+  if (!okType) return 'Choose a PDF or a photo.';
+  if (file.size > 10 * 1024 * 1024) return 'That file is bigger than 10 MB.';
+  const safe = String(file.name || 'note').replace(/[^\w.\-]+/g, '_').slice(-80);
+  const path = `${_me.staff_id}/${timeOffId}/${Date.now()}-${safe}`;
+  const up = await sb.storage.from(MED_BUCKET).upload(path, file, { contentType: file.type || undefined, upsert: false });
+  if (up.error) return up.error.message;
+  const at = await sb.rpc('hub_attach_time_off_file', { p_time_off_id: String(timeOffId), p_path: path, p_file_name: file.name || safe, p_size: file.size });
+  if (at.error) { await sb.storage.from(MED_BUCKET).remove([path]); return at.error.message; }
+  return null;
+}
+async function meUploadNote(timeOffId, input) {
+  const file = input.files && input.files[0]; if (!file) return;
+  input.closest('label').firstChild.textContent = 'Uploading… ';
+  const err = await meUploadFile(timeOffId, file);
+  await meLoadRequests();
+  meRenderTimeOff(err ? `<div class="me-msg err" style="margin-bottom:10px">The doctor’s note didn’t upload: ${esc(err)}</div>`
+                      : '<div class="me-msg ok" style="margin-bottom:10px">Doctor’s note added. Only you and home office can see it.</div>');
+}
+async function meOpenFile(path) {
+  const { data, error } = await sb.storage.from(MED_BUCKET).createSignedUrl(path, 300);   // 5-minute link
+  if (error || !data) { alert('Couldn’t open the file: ' + (error ? error.message : '')); return; }
+  window.open(data.signedUrl, '_blank', 'noopener');
 }
 async function meCancelOff(id) {
   if (!confirm('Cancel this request?')) return;
