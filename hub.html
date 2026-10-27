@@ -554,6 +554,8 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .et-who input, .et-who select { font: inherit; font-size: 14px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; }
 .pe-list { max-height: 160px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; margin: 8px 0 12px; }
 .pe-list label { display: flex; gap: 8px; align-items: center; padding: 6px 10px; font-size: 14px; border-bottom: 1px solid #f1f0f5; cursor: pointer; }
+.camp-short { color: #b45309; font-weight: 700; margin-left: 6px; }
+.camp-ok { color: #15803d; font-weight: 600; margin-left: 6px; }
 .glz-edit { display: flex; gap: 6px; align-items: center; }
 .glz-edit input { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; min-width: 160px; }
 .glz-edit .ho-btn { min-height: 30px; padding: 0 10px; }
@@ -2842,7 +2844,8 @@ function planDayStrip(sel) {
   if (on) el.scrollLeft = Math.max(0, on.offsetLeft - el.offsetLeft - 120);
 }
 const planWriteName = p => p.nickname || p.full_name || p.name;   // the way the Day view writes names
-function planIsKids(x) { return x.session_type === 'class' || x.session_type === 'series' || /class \d+ of \d+|week session/i.test(x.title || ''); }
+function planIsKids(x) { if (planIsCamp(x)) return false;   // camps and PA/PD days are camps, even when set up as type "class"
+  return x.session_type === 'class' || x.session_type === 'series' || /class \d+ of \d+|week session/i.test(x.title || ''); }
 
 async function loadPlanDay(date) {
   if (!_plan || _plan.date !== date) { const fl = document.getElementById('plan-floor'); if (fl) fl.style.display = 'none'; }   // a new day: close the floor plan
@@ -2942,10 +2945,14 @@ async function loadPlanDay(date) {
     } catch (e) { /* no slot schedule: show party products as before */ }
     const kidsTeacher = {};
     sessions.filter(planIsKids).forEach(x => { kidsTeacher[x.id] = (staffBy[x.id] || {}).teacher || ''; });
+    // Camp teams (hub_camp_team.sql): one lead + teachers per camp day
+    let campTeam = {};
+    const campIds = sessions.filter(planIsCamp).map(x => x.id);
+    if (campIds.length) { try { const ct = await sb.rpc('hub_camp_team', { p_session_ids: campIds }); if (!ct.error) campTeam = ct.data || {}; } catch (e) {} }
     // Party forms already open stay open (and keep what's typed) when the day reloads.
     const keepForms = (_plan && _plan.date === date && _plan.partyForms) || {};
     const keepLists = (_plan && _plan.date === date && _plan.classLists) || {};
-    _plan = { date, team: team.data || [], sessions, events, staffBy, booked, extras, signins, kidsTeacher, partyForms: keepForms, classLists: keepLists, roles, wheel, parties, dirty: false, msg: '' };
+    _plan = { date, team: team.data || [], sessions, events, staffBy, booked, extras, signins, kidsTeacher, campTeam, partyForms: keepForms, classLists: keepLists, roles, wheel, parties, dirty: false, msg: '' };
     renderPlanDay();
   } catch (e) {
     body.innerHTML = `<div class="ho-card">Couldn't load that day: ${esc(e.message || e)}</div>`;
@@ -3131,6 +3138,7 @@ function renderPlanDay() {
           x.partySlot ? `${x.spaces_left_cache} party slot${x.spaces_left_cache === 1 ? '' : 's'} open, not booked yet`
           : x.session_type === 'party' ? 'Not booked yet'
           : !(P.booked[x.id] > 0) ? 'No one booked yet'
+          : planIsCamp(x) ? planCampLine(x)
           : (demoers.length || P.roles.director) && demoPlan[x.id] ? `<span class="floor-staff" style="margin-top:4px">${hubDemoChips(demoPlan[x.id])}</span>` : esc(dayCover)}</div></span>
         ${planRowExtras(x)}${planCount(x)}<span class="kind-chip kind-${sessionKind(x.title)[1]}">${esc(sessionKind(x.title)[0])}</span>${x.session_type === 'party' ? (planCanAdjust() && !x.partySlot ? `<button class="ho-btn spots-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Spots</button>` : '') : planRowTools(x)}</div>${planNoteHtml(x)}<div class="pf-wrap" data-cl="${escAttr(x.id)}"></div>`]),
     ...(P.events || []).map(x => [-1, `<div class="plan-sess" style="background:#fff4dd;border-color:#ffd998"><span class="t">🎪</span><span class="nm">${esc(x.title)}<div class="sub">Event · staffing is set on the event</div></span></div>`])
@@ -3179,6 +3187,44 @@ function renderPlanDay() {
 function planTouched(msg) { _plan.dirty = true; _plan.msg = ''; const m = document.getElementById('plan-msg'); if (m) m.textContent = msg || 'Unsaved changes'; }
 function planSet(f, v, typing) { _plan.roles[f] = v; planTouched(); if (!typing) renderPlanDay(); }
 function planWheel(id, v) { _plan.wheel[id] = v; planTouched(); }
+// ---------- Camp teachers: one Lead + teachers per camp day, 1 per 15 campers ----------
+const CAMP_RATIO = 15;
+function planCampNeed(x) { const n = (_plan.booked || {})[x.id] || 0; return n > 0 ? Math.ceil(n / CAMP_RATIO) : 0; }
+function planCampLine(x) {
+  const team = (_plan.campTeam || {})[x.id] || [], need = planCampNeed(x), have = team.length;
+  const day = (_plan.staffBy[x.id] || {}).camp_day;
+  const chips = team.map(t => personChip(t.full_name || t.name, t.role === 'lead' ? 'Lead' : 'Teacher')).join('');
+  const count = !need ? '' : have < need
+    ? `<span class="camp-short">⚠ ${have} of ${need} teacher${need === 1 ? '' : 's'}</span>`
+    : `<span class="camp-ok">✓ ${have} teacher${have === 1 ? '' : 's'} (${need} needed)</span>`;
+  return `Camp${day ? ' · ' + esc(day) : ''} ${count}
+    <div class="floor-staff" style="margin-top:4px">${chips}${planCanEdit() ? `<button class="ho-btn" style="min-height:30px" onclick="event.stopPropagation(); planCampTeam('${escAttr(x.id)}')">${team.length ? 'Change teachers' : '+ Teachers'}</button>` : (team.length ? '' : '<span class="sub">No teachers yet</span>')}</div>`;
+}
+function planCampTeam(id) {
+  const x = (_plan.sessions || []).find(z => z.id === id) || {}, team = (_plan.campTeam || {})[id] || [];
+  const lead = (team.find(t => t.role === 'lead') || {}).staff_id || '';
+  const on = new Set(team.filter(t => t.role !== 'lead').map(t => t.staff_id));
+  const people = (_plan.team || []).slice();
+  team.forEach(t => { if (!people.some(p => p.staff_id === t.staff_id)) people.push({ staff_id: t.staff_id, name: t.full_name || t.name, start_time: null }); });   // keep anyone already on it
+  const need = planCampNeed(x);
+  openDutySheet(`<h3>Camp teachers</h3><p>${esc(shortTime(x.session_time || ''))} ${esc(x.title || '')}${need ? ` · ${_plan.booked[id]} campers, so <b>${need}</b> teacher${need === 1 ? '' : 's'} (1 per ${CAMP_RATIO})` : ''}</p>
+    ${people.length ? `<div class="me-form"><label>Lead<select id="ct-lead"><option value="">— No lead —</option>${people.map(p => `<option value="${escAttr(p.staff_id)}"${p.staff_id === lead ? ' selected' : ''}>${esc(p.name)}${p.start_time ? ' · ' + esc(shortTime(p.start_time)) + '–' + esc(shortTime(p.end_time)) : ''}</option>`).join('')}</select></label>
+      <div class="me-sub-title">Teachers</div>
+      <div class="pe-list">${people.map(p => `<label><input type="checkbox" class="ct-t" value="${escAttr(p.staff_id)}"${on.has(p.staff_id) ? ' checked' : ''}> ${esc(p.name)}${p.start_time ? ` <span class="goal-note">${esc(shortTime(p.start_time))}–${esc(shortTime(p.end_time))}</span>` : ''}</label>`).join('')}</div></div>`
+      : '<div class="goal-note">No one is on the schedule this day yet. Post shifts first, then choose the camp teachers.</div>'}
+    <div id="ct-msg"></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button>${people.length ? `<button class="primary" onclick="planCampSave('${escAttr(id)}')">Save</button>` : ''}</div>`);
+}
+async function planCampSave(id) {
+  const lead = document.getElementById('ct-lead').value || null;
+  const teachers = [...document.querySelectorAll('.ct-t:checked')].map(c => c.value).filter(v => v !== lead);
+  const { error } = await sb.rpc('hub_set_camp_team', { p_session_id: id, p_lead: lead, p_teachers: teachers });
+  if (error) { document.getElementById('ct-msg').innerHTML = `<div class="me-msg err">${esc(/hub_set_camp_team/i.test(error.message) ? 'Camp teachers need hub_camp_team.sql' : error.message)}</div>`; return; }
+  const ct = await sb.rpc('hub_camp_team', { p_session_ids: [id] });
+  _plan.campTeam[id] = (ct.data || {})[id] || [];
+  closeDutySheet(); renderPlanDay();
+}
+
 // Kids class teacher: the same choice as staff-schedule — just this day (a substitute)
 // or from this day on (the term teacher). Saved straight away with hub_set_class_teacher,
 // so staff-schedule sees it too.
@@ -3220,7 +3266,7 @@ function planDemoPlan() {
   const P = _plan;
   const kids = P.sessions.filter(planIsKids), wheels = P.sessions.filter(x => P.wheel[x.id] !== undefined && !planNotRunning(x));
   const partyIds = new Set(P.parties.map(pt => pt.session.id));
-  const others = P.sessions.filter(x => !planIsKids(x) && P.wheel[x.id] === undefined && !partyIds.has(x.id) && !planNotRunning(x));
+  const others = P.sessions.filter(x => !planIsKids(x) && !planIsCamp(x) && P.wheel[x.id] === undefined && !partyIds.has(x.id) && !planNotRunning(x));   // camps have their own staff
   const partyBy = {}, partyBusy = {};
   P.parties.forEach(pt => {
     const l = partyBy[pt.session.id] = partyBy[pt.session.id] || [];
@@ -3230,6 +3276,10 @@ function planDemoPlan() {
   return hubDemoPlan([
     ...kids.filter(x => !planNotRunning(x)).map(x => ({ key: x.id, start: hubMin(x.session_time), kind: 'kids', teachers: [P.kidsTeacher[x.id]] })),
     ...wheels.map(x => ({ key: x.id, start: hubMin(x.session_time), kind: 'wheel', teachers: [P.wheel[x.id]] })),
+    // camp teachers: busy for the whole camp (its length, else 6 hours)
+    ...P.sessions.filter(planIsCamp).filter(x => ((P.campTeam || {})[x.id] || []).length).map(x => ({ key: x.id, start: hubMin(x.session_time), kind: 'camp',
+      busy: x.duration_minutes || 360,
+      teachers: P.campTeam[x.id].map(t => { const p = (P.team || []).find(z => z.staff_id === t.staff_id); return p ? planWriteName(p) : (t.full_name || t.name); }) })),
     ...Object.keys(partyBy).map(id => { const x = P.sessions.find(z => z.id === id) || {}; return { key: id, start: hubMin(x.session_time), kind: 'party', teachers: partyBy[id], busy: partyBusy[id] }; }),
     ...others.filter(x => x.session_type !== 'party' && P.booked[x.id] > 0).map(x => ({ key: x.id, start: hubMin(x.session_time), kind: 'other', teachers: [] }))
   ], P.roles);
@@ -3761,7 +3811,8 @@ async function buildCampList(x, el) {
     const { data, error } = await sb.from('bookings').select('*').eq('session_id', x.id).order('booked_at');
     if (error) throw error;
     const seen = new Set();
-    const bookings = (data || []).filter(b => !b.returned_at).filter(b => {
+    const cancelled = (data || []).filter(b => b.returned_at || !(b.qty > 0));
+    const bookings = (data || []).filter(b => !b.returned_at && b.qty > 0).filter(b => {   // cancelled / refunded campers are listed under the table instead
       if (!b.shopify_order_name) return true;
       const k = b.shopify_order_name + '|' + (b.shopify_line_item_id || b.id);
       if (seen.has(k)) return false; seen.add(k); return true;
@@ -3776,12 +3827,13 @@ async function buildCampList(x, el) {
     const tallyData = {}; (tally.data || []).forEach(t => { (tallyData[t.shopify_order_name] = tallyData[t.shopify_order_name] || []).push(t); });
     const childrenData = {}; (kids.data || []).forEach(c => { (childrenData[c.booking_id] = childrenData[c.booking_id] || []).push(c); });
     const attendanceData = {}; (att.data || []).forEach(a => { attendanceData[`${a.shopify_order_name}|${(a.camper_name || '').toLowerCase().trim()}`] = a; });
-    const campers = bookings.reduce((n, b) => n + (b.qty || 0), 0);
+    const campers = bookings.reduce((n, b) => (!b.returned_at && (b.qty || 0) > 0) ? n + b.qty : n, 0);
     const campDay = day && day.data && day.data.camp_day ? day.data.camp_day : '';
     el.innerHTML = `<div class="cl-head"><b>${campers}</b> campers${campDay ? ' · ' + esc(campDay) : ''} · tick ✓ for attendance, and Save after changing a camper's details
         <span class="spacer"></span><button class="ho-btn" onclick="planEmail('${escAttr(x.id)}')">✉️ Email this class</button><button class="ho-btn" onclick="planEmailHistory('${escAttr(x.id)}')">Sent</button><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button></div>
       ${bookings.length ? `<div class="booking-table-wrap">${buildCampTable(bookings, tallyData, attendanceData, x.id, _plan.date, childrenData)}</div>`
-                        : '<div class="goal-note" style="padding:8px 2px">No campers booked yet.</div>'}`;
+                        : '<div class="goal-note" style="padding:8px 2px">No campers booked yet.</div>'}
+      ${cancelled.length ? `<div class="goal-note" style="padding:6px 2px">Cancelled / refunded: ${cancelled.map(b => esc(b.customer_name || '—') + (b.shopify_order_name ? ' (' + esc(b.shopify_order_name) + ')' : '')).join(', ')}</div>` : ''}`;
     el.dataset.title = x.title; el.dataset.time = x.session_time || '';
   } catch (e) {
     el.innerHTML = `<div class="goal-note" style="padding:10px">Couldn't load the camp list: ${esc(e.message || e)}</div>`;
@@ -7365,7 +7417,10 @@ async function loadClassStaff(studioId) {
     const rosters = await Promise.all(kidsWeeks.map(x => sb.rpc('get_class_week_bookings', { p_session_id: x.id })));
     const kidsRows = kidsWeeks.map((x, i) => ({ time: x.session_time, title: x.title,
       bookingCount: rosters[i].error ? 0 : (rosters[i].data || []).reduce((n, b) => n + (b.qty || 0), 0) }));
-    _classInfo = { byKey, roles: pick, curriculum: cur.data || [], kidsRows };
+    let campTeam = {};
+    const campIds = (sess || []).filter(x => /camp|pa day|pd day|pa\/pd|no school/i.test(x.title || '')).map(x => x.id);
+    if (campIds.length) { try { const ct = await sb.rpc('hub_camp_team', { p_session_ids: campIds }); if (!ct.error) campTeam = ct.data || {}; } catch (e) {} }
+    _classInfo = { byKey, roles: pick, curriculum: cur.data || [], kidsRows, campTeam };
   } catch (e) {
     console.error('Class staff load failed:', e);
     _classInfo = null;
@@ -7421,6 +7476,9 @@ function classStaffHtml(s) {
   const title = String(s.title || '').toLowerCase();
   if (info.type === 'party') info.party.forEach(n => chips.push(personChip(n, 'Party')));
   else if (/wheel/.test(title) && info.staff.wheel_teacher) chips.push(personChip(info.staff.wheel_teacher, 'Teacher'));
+  else if (/camp|pa day|pd day|pa\/pd|no school/.test(title)) {   // camps: their own lead + teachers
+    (((_classInfo.campTeam || {})[info.id]) || []).forEach(t => chips.push(personChip(t.full_name || t.name, t.role === 'lead' ? 'Lead' : 'Teacher')));
+  }
   else if (info.type === 'series' || info.type === 'class' || /class \d+ of \d+|week session/.test(title)) {
     const pl = (_floorDemo || {})[String(s.time || '').slice(0, 8) + '|' + s.title];
     (pl && pl.teachers || []).forEach(n => chips.push(personChip(n, 'Teacher')));
@@ -7535,7 +7593,8 @@ function renderFloorToday(data) {
   // who demos what (teaching blocks: kids classes, wheel, party art time)
   _floorDemo = hubDemoPlan(sessions.map(s => {
     const key = keyOf(s), info = (_classInfo && _classInfo.byKey[key]) || null, title = String(s.title || '').toLowerCase();
-    const kind = !info ? 'other' : info.type === 'party' ? (Number(s.bookingCount || 0) > 0 ? 'party' : 'skip')
+    const kind = !info ? 'other' : /camp|pa day|pd day|pa\/pd|no school/i.test(s.title || '') ? 'skip'   // camps have their own staff
+      : info.type === 'party' ? (Number(s.bookingCount || 0) > 0 ? 'party' : 'skip')
       : /wheel/.test(title) ? 'wheel'
       : (info.type === 'series' || info.type === 'class' || /class \d+ of \d+|week session/.test(title)) ? 'kids' : 'other';
     const teachers = !info ? [] : kind === 'party' ? (info.party || []) : kind === 'wheel' ? [info.staff.wheel_teacher] : kind === 'kids' ? [info.staff.teacher] : [];
