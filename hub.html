@@ -533,6 +533,9 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .pc-acts { display: grid; gap: 8px; margin-top: 12px; }
 .pc-acts button { min-height: 56px; font: inherit; font-size: 18px; font-weight: 800; border-radius: 14px; border: none; color: #fff; }
 .pc-acts .in { background: #16a34a; } .pc-acts .break_out { background: #d97706; } .pc-acts .break_in { background: #16a34a; } .pc-acts .out { background: #6d4aff; }
+.pe-list { max-height: 160px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; margin: 8px 0 12px; }
+.pe-list label { display: flex; gap: 8px; align-items: center; padding: 6px 10px; font-size: 14px; border-bottom: 1px solid #f1f0f5; cursor: pointer; }
+.plan-ci { border: none; background: #e3f9ec; color: #15803d; border-radius: 999px; padding: 3px 10px; font: inherit; font-size: 12.5px; font-weight: 700; cursor: pointer; margin-left: 6px; }
 .pc-today { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 10px; }
 .pc-today span { background: #f6f5fb; border-radius: 999px; padding: 5px 11px; font-size: 13.5px; color: var(--ink); }
 .pc-done { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 26px; font-weight: 600; text-align: center; padding: 18px 6px; }
@@ -627,7 +630,7 @@ button.role-chip.shift-edit:hover { border-color: var(--accent); }
 #plan-pane .cl-list .booking-table-wrap { overflow-x: auto; }
 #plan-pane .booking-table td { font-size: 13px; }
 /* Catch-up transfers aren't in the Hub yet: hide those buttons (existing catch-ups still show) */
-#plan-pane button[onclick^="openCatchupModal"], #plan-pane button[onclick^="removeCatchupTransfer"] { display: none; }
+
 .plan-day.idle { background: #eeedf3; border-color: #e3e1ec; color: #a9a6bb; }
 .plan-day.idle .dw { color: #b7b4c8; }
 .plan-day.idle.on { background: #8e8aa6; border-color: #8e8aa6; color: #fff; }
@@ -2681,6 +2684,12 @@ async function loadPlanDay(date) {
       partyIds.length ? sb.from('bookings').select('id, session_id, customer_name, customer_email, customer_phone, shopify_order_name, qty, estimated_attendance, raw_payload, booked_at, project_preference, reason_for_gathering, customer_booking_number').in('session_id', partyIds).gt('qty', 0).is('returned_at', null) : Promise.resolve({ data: [] }),
       ids.length ? sb.from('bookings').select('session_id, qty, hot_chocolate_qty, candy_bag_qty').in('session_id', ids).gt('qty', 0).is('returned_at', null) : Promise.resolve({ data: [] })
     ]);
+    // Checked in on the studio's sign-in iPad (signin.html), same count as the Day view's ✅ (drop-ins left out)
+    const signins = {};
+    if (ids.length) {
+      const si = await sb.from('signin_entries').select('session_id, name, mode, signed_in_at').in('session_id', ids);
+      (si.data || []).filter(e => e.mode !== 'dropin').forEach(e => { (signins[e.session_id] = signins[e.session_id] || []).push(e); });
+    }
     const booked = {}, extras = {};
     (allB.data || []).forEach(b => {
       booked[b.session_id] = (booked[b.session_id] || 0) + (b.qty || 0);
@@ -2729,7 +2738,7 @@ async function loadPlanDay(date) {
     // Party forms already open stay open (and keep what's typed) when the day reloads.
     const keepForms = (_plan && _plan.date === date && _plan.partyForms) || {};
     const keepLists = (_plan && _plan.date === date && _plan.classLists) || {};
-    _plan = { date, team: team.data || [], sessions, events, staffBy, booked, extras, kidsTeacher, partyForms: keepForms, classLists: keepLists, roles, wheel, parties, dirty: false, msg: '' };
+    _plan = { date, team: team.data || [], sessions, events, staffBy, booked, extras, signins, kidsTeacher, partyForms: keepForms, classLists: keepLists, roles, wheel, parties, dirty: false, msg: '' };
     renderPlanDay();
   } catch (e) {
     body.innerHTML = `<div class="ho-card">Couldn't load that day: ${esc(e.message || e)}</div>`;
@@ -2765,10 +2774,22 @@ function planRowTools(x) {
   return `${planCanAdjust() ? `<button class="ho-btn spots-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Spots</button>` : ''}<button class="icon-pencil" title="Add a note" aria-label="Add a note to ${escAttr(x.title)}" onclick="planEditNote('${escAttr(x.id)}')">✏️</button>
     <button class="pf-btn cl${open ? ' open' : ''}" onclick="toggleClassList('${escAttr(x.id)}')">${open ? 'Close list' : 'Class list'}</button>`;
 }
+function planCheckedIn(x) {
+  const n = ((_plan.signins || {})[x.id] || []).length;
+  return n ? ` <button class="plan-ci" onclick="event.stopPropagation(); planShowSignins('${escAttr(x.id)}')" title="Checked in on the sign-in iPad">✅ ${n} checked in</button>` : '';
+}
+function planShowSignins(id) {
+  const x = (_plan.sessions || []).find(z => z.id === id) || {}, list = ((_plan.signins || {})[id] || []).slice()
+    .sort((a, b) => String(a.signed_in_at).localeCompare(String(b.signed_in_at)));
+  openDutySheet(`<h3>✅ Checked in</h3><p>${esc(shortTime(x.session_time || ''))} ${esc(x.title || '')} · ${list.length} on the sign-in iPad</p>
+    <div style="max-height:50vh;overflow:auto">${list.map(e => `<div class="me-list-row"><div class="what"><b>${esc(e.name || '—')}</b></div>
+      <span class="goal-note">${e.signed_in_at ? esc(new Date(e.signed_in_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })) : ''}</span></div>`).join('')}</div>
+    <div class="sheet-actions"><button class="primary" onclick="closeDutySheet()">Close</button></div>`);
+}
 function planCount(x) {
   const b = _plan.booked[x.id] || 0, left = x.spaces_left_cache;
-  if (planIsKids(x)) return `<span class="plan-count"><b>${b}</b> enrolled</span>`;
-  return `<span class="plan-count"><b>${b}</b> booked${left !== null && left !== undefined ? (Number(left) < 0 ? ` · closed (${left})` : ` · ${left} left`) : ''}</span>`;
+  if (planIsKids(x)) return `<span class="plan-count"><b>${b}</b> enrolled</span>${planCheckedIn(x)}`;
+  return `<span class="plan-count"><b>${b}</b> booked${left !== null && left !== undefined ? (Number(left) < 0 ? ` · closed (${left})` : ` · ${left} left`) : ''}</span>${planCheckedIn(x)}`;
 }
 // Participants for the day, by kind. Parties count their expected guests
 // (a party is one booking), everything else counts people booked.
@@ -2867,7 +2888,8 @@ function renderPlanDay() {
             return `<div class="pp-extras">
               ${hc || cb ? `<span class="pp-chip ex">☕ Hot chocolate <b>${hc}</b></span><span class="pp-chip ex">🍬 Candy bags <b>${cb}</b></span>
                 <button class="ho-btn" onclick="planPrintExtras()">🖨 Print extras list</button>` : '<span class="goal-note">No hot chocolate or candy pre-orders.</span>'}
-              ${glazing ? '<button class="ho-btn" onclick="planPrintGlazing()">🖨 Print all glazing</button>' : ''}</div>`;
+              ${glazing ? '<button class="ho-btn" onclick="planPrintGlazing()">🖨 Print all glazing</button>' : ''}
+              <button class="ho-btn" onclick="planEmail(null)">✉️ Email everyone booked today</button></div>`;
           })()}
           ${pp.missingGuests ? `<div class="pp-note">${pp.missingGuests} part${pp.missingGuests === 1 ? 'y has' : 'ies have'}n't entered a guest count yet, so ${pp.missingGuests === 1 ? 'it isn’t' : 'they aren’t'} in the total.</div>` : ''}</div>`;
       })()}
@@ -3301,6 +3323,7 @@ async function toggleClassList(sessionId) {
   el.className = 'cl-list'; el.innerHTML = '<div class="goal-note" style="padding:10px">Loading class list…</div>';
   _plan.classLists[sessionId] = el;
   renderPlanDay();
+  if (planIsCamp(x)) { await buildCampList(x, el); return; }
   if (planIsKids(x)) { await buildKidsClassList(x, el); return; }
   try {
     let q = sb.from('bookings').select('id, customer_name, customer_email, customer_phone, qty, shopify_order_name, shopify_line_item_id, booked_at, raw_payload, event_date, order_note, returned_at, hot_chocolate_qty, candy_bag_qty, aftercare, early_arrival');
@@ -3384,7 +3407,7 @@ async function buildKidsClassList(x, el) {
     const attendanceData = {}; (att.data || []).forEach(a => { attendanceData[`${a.shopify_order_name}|${(a.camper_name || '').toLowerCase().trim()}`] = a; });
     const enrolled = bookings.filter(b => (b.qty || 0) > 0).reduce((n, b) => n + (b.qty || 0), 0) + (cuTo || []).length;
     el.innerHTML = `<div class="cl-head"><b>${enrolled}</b> enrolled · tick ✓ for attendance, and Save after changing a child's details
-        <span class="spacer"></span><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button></div>
+        <span class="spacer"></span><button class="ho-btn" onclick="planEmail('${escAttr(x.id)}')">✉️ Email this class</button><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button></div>
       ${bookings.length || (cuTo || []).length
         ? `<div class="booking-table-wrap">${buildSeriesTable(bookings, tallyData, attendanceData, x.id, _plan.date, _sessionStudioId, x.session_time || '', childrenData, cuFrom || {}, cuTo || [], x.title)}</div>`
         : '<div class="goal-note" style="padding:8px 2px">No one enrolled yet.</div>'}`;
@@ -3394,6 +3417,430 @@ async function buildKidsClassList(x, el) {
   }
   renderPlanDay();
 }
+// Camps and PA/PD days: the Day view's camp roster (child, age, walk home,
+// medical, parent phone, emergency contact, aftercare, early arrival, ✓).
+function planIsCamp(x) {
+  const t = String(x.title || '').toLowerCase();
+  return x.session_type !== 'party' && x.session_type !== 'glazing' && /camp|pa day|pd day|pa\/pd|no school/.test(t);
+}
+async function buildCampList(x, el) {
+  Object.keys(_plan.classLists).forEach(id => {
+    if (id !== x.id && _plan.classLists[id] && _plan.classLists[id].dataset.kids === '1') delete _plan.classLists[id];
+  });
+  el.dataset.kids = '1';
+  window.currentStudioId = _sessionStudioId;
+  try {
+    const { data, error } = await sb.from('bookings').select('*').eq('session_id', x.id).order('booked_at');
+    if (error) throw error;
+    const seen = new Set();
+    const bookings = (data || []).filter(b => !b.returned_at).filter(b => {
+      if (!b.shopify_order_name) return true;
+      const k = b.shopify_order_name + '|' + (b.shopify_line_item_id || b.id);
+      if (seen.has(k)) return false; seen.add(k); return true;
+    });
+    const orders = bookings.map(b => b.shopify_order_name).filter(Boolean), bIds = bookings.map(b => b.id);
+    const [tally, kids, att, day] = await Promise.all([
+      orders.length ? sb.from('tally_registrations').select('*').in('shopify_order_name', orders) : Promise.resolve({ data: [] }),
+      bIds.length ? sb.from('booking_children').select('*').in('booking_id', bIds).order('child_index') : Promise.resolve({ data: [] }),
+      orders.length ? sb.from('attendance').select('*').eq('session_id', x.id).in('shopify_order_name', orders) : Promise.resolve({ data: [] }),
+      sb.from('session_staff').select('camp_day').eq('session_id', x.id).maybeSingle()
+    ]);
+    const tallyData = {}; (tally.data || []).forEach(t => { (tallyData[t.shopify_order_name] = tallyData[t.shopify_order_name] || []).push(t); });
+    const childrenData = {}; (kids.data || []).forEach(c => { (childrenData[c.booking_id] = childrenData[c.booking_id] || []).push(c); });
+    const attendanceData = {}; (att.data || []).forEach(a => { attendanceData[`${a.shopify_order_name}|${(a.camper_name || '').toLowerCase().trim()}`] = a; });
+    const campers = bookings.reduce((n, b) => n + (b.qty || 0), 0);
+    const campDay = day && day.data && day.data.camp_day ? day.data.camp_day : '';
+    el.innerHTML = `<div class="cl-head"><b>${campers}</b> campers${campDay ? ' · ' + esc(campDay) : ''} · tick ✓ for attendance, and Save after changing a camper's details
+        <span class="spacer"></span><button class="ho-btn" onclick="planEmail('${escAttr(x.id)}')">✉️ Email this class</button><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button></div>
+      ${bookings.length ? `<div class="booking-table-wrap">${buildCampTable(bookings, tallyData, attendanceData, x.id, _plan.date, childrenData)}</div>`
+                        : '<div class="goal-note" style="padding:8px 2px">No campers booked yet.</div>'}`;
+    el.dataset.title = x.title; el.dataset.time = x.session_time || '';
+  } catch (e) {
+    el.innerHTML = `<div class="goal-note" style="padding:10px">Couldn't load the camp list: ${esc(e.message || e)}</div>`;
+  }
+  renderPlanDay();
+}
+
+/* ==========================================================================
+   CAMP ROSTERS — copied as-is from index.html (the schedule's Day view):
+   buildCampTable and what it uses. One camp list at a time (its table body has
+   a fixed id). Change: "Send camp info form" sends the signed-in login.
+   ========================================================================== */
+let campTableRows = []
+let campTableSort = { col: null, dir: 1 }
+function sortCampTable(col) {
+  if (campTableSort.col === col) campTableSort.dir *= -1
+  else { campTableSort.col = col; campTableSort.dir = 1 }
+  const sorted = [...campTableRows].sort((a, b) => (a[col]||'').toLowerCase().localeCompare((b[col]||'').toLowerCase()) * campTableSort.dir)
+  document.getElementById('camp-table-body').innerHTML = sorted.map(r => r.html).join('')
+  document.querySelectorAll('.camp-sort-btn').forEach(btn => {
+    const isActive = btn.dataset.col === col
+    btn.textContent = isActive ? (campTableSort.dir === 1 ? ' ↑' : ' ↓') : ' ⇅'
+    btn.style.opacity = isActive ? '1' : '0.3'
+  })
+}
+
+async function sendCampInfoForm(orderName, customerEmail, customerName, numChildren, btn) {
+  const origText = btn?.textContent || '📧 Send Form'
+  if (btn) { btn.textContent = 'Sending…'; btn.disabled = true }
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/send-camp-form`, {
+      method: 'POST',
+      headers: await fnHeaders(),   // Hub: the signed-in studio login, not just the public key
+      body: JSON.stringify({ orders: [{ shopify_order_name: orderName, studio_id: currentStudioId,
+        customer_email: customerEmail, customer_name: customerName, num_children: numChildren }] })
+    })
+    const result = await res.json()
+    if (!result.success) throw new Error(result.error || 'Unknown error')
+    if (btn) { btn.textContent = '📧 Resent'; btn.classList.add('sent'); btn.disabled = false }
+  } catch(e) {
+    alert('Error sending form: ' + e.message)
+    if (btn) { btn.textContent = origText; btn.disabled = false }
+  }
+}
+
+async function saveCampRow(tallyId, orderName, uid, sessionId) {
+  const btn = document.querySelector(`button[onclick="saveCampRow('${tallyId}','${orderName}','${uid}','${sessionId}')"]`)
+  const camper_name = document.getElementById(`cn-${uid}`)?.value?.trim()
+  if (!camper_name) { alert('Please enter a child name'); return }
+  const ecRaw = document.getElementById(`ec-${uid}`)?.value?.trim()||''
+  const ecParts = ecRaw.split(' ')
+  const lastPart = ecParts[ecParts.length-1]||''
+  const ecPhone = lastPart.match(/[\d\+\-\(\)]{7,}/) ? lastPart : null
+  const ecName = ecPhone ? ecParts.slice(0,-1).join(' ') : ecRaw
+  const payload = { shopify_order_name: orderName, camper_name, camper_age: document.getElementById(`ca-${uid}`)?.value?.trim()||null, walk_home: document.getElementById(`wh-${uid}`)?.checked||false, medical_notes: document.getElementById(`mn-${uid}`)?.value?.trim()||null, aftercare: document.getElementById(`ac-${uid}`)?.checked||false, parent_phone: document.getElementById(`pp-${uid}`)?.value?.trim()||null, emergency_contact_name: ecName||null, emergency_contact_phone: ecPhone||null, table_num: document.getElementById(`tn-${uid}`)?.value?.trim()||null }
+  let error
+  if (tallyId && tallyId !== 'null') { ;({ error } = await sb.from('tally_registrations').update(payload).eq('id', tallyId)) }
+  else { ;({ error } = await sb.from('tally_registrations').insert(payload)) }
+  if (error) { alert('Error saving: ' + error.message); return }
+  if (btn) { btn.textContent = 'Saved ✓'; btn.classList.add('saved'); setTimeout(() => { btn.textContent = 'Save'; btn.classList.remove('saved') }, 2000) }
+}
+
+function getAllMatchingLineItemProps(rawPayload, sessionDate) {
+  try {
+    const payload = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload
+    if (!payload?.line_items) return []
+    const items = payload.line_items
+    let matches = []
+    if (sessionDate) {
+      const d = new Date(sessionDate + 'T12:00:00')
+      const monthDay = d.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }).replace('.', '').toLowerCase()
+      const day = d.getDate()
+      const suffix = day===1||day===21||day===31?'st':day===2||day===22?'nd':day===3||day===23?'rd':'th'
+      matches = items.filter(li => {
+        const t = (li.title || li.name || '').toLowerCase()
+        return t.includes(monthDay) || t.includes(monthDay + suffix)
+      })
+    }
+    if (!matches.length) matches = [items[0]]
+    return matches.flatMap(m => m?.properties || [])
+  } catch(e) { return [] }
+}
+
+function editTableNum(id, value) {
+  return `<input type="number" id="${id}" value="${value||''}" min="1" max="30" placeholder="—" style="width:48px;padding:4px 6px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;text-align:center">`
+}
+
+function buildCampTable(bookings, tallyData, attendanceData, sessionId, dateLabel, childrenData = {}) {
+  campTableRows = []
+  campTableSort = { col: null, dir: 1 }
+  bookings.forEach(b => {
+    const note = getOrderNote(b)
+    const orderUid = (b.shopify_order_name || '').replace('#','') || Math.random().toString(36).slice(2)
+    const isCancelled = (b.qty || 0) === 0
+    const cancelStyle = isCancelled ? ' style="opacity:0.4;text-decoration:line-through;color:#888"' : ''
+    const props = getAllMatchingLineItemProps(b.raw_payload, b.event_date)
+    let participants = props.filter(p => p.name?.toLowerCase().startsWith('participant')).sort((a,z) => a.name.localeCompare(z.name)).map(p => {
+      const name = p.value.split('|')[0]?.trim() || p.value
+      const dobMatch = p.value.match(/DOB:\s*(\d{4}-\d{2}-\d{2})/)
+      const dob = dobMatch ? dobMatch[1] : null
+      const tally = (tallyData[b.shopify_order_name]||[]).find(t => t.camper_name?.toLowerCase().trim() === name.toLowerCase().trim())
+      return { name, dob, tally, source: 'shopify' }
+    })
+    if (participants.length === 0) {
+      const tallyRows = (tallyData[b.shopify_order_name]||[]).filter((t,idx,arr) => arr.findIndex(x => x.camper_name?.toLowerCase().trim() === t.camper_name?.toLowerCase().trim()) === idx)
+      participants = tallyRows.map(t => ({ name: t.camper_name, dob: null, age: t.camper_age, tally: t, source: 'tally' }))    }
+    if (participants.length === 0) {
+      const uid = orderUid
+      const attKey = `${b.shopify_order_name}|`
+      const att = attendanceData[attKey]
+      campTableRows.push({ name:'', age:'', registeredBy: b.customer_name||'', html: `<tr${cancelStyle}>
+        <td style="text-align:center"><input type="checkbox" class="attended-check" ${att?.attended?'checked':''} onchange="saveAttendance('${sessionId}','${b.shopify_order_name}','',this.checked)"></td>
+        <td>${editInput('cn-'+uid,'','Child name')}</td><td>${editInput('ca-'+uid,'','Age','short')}</td>
+        <td>${editTableNum('tn-'+uid,'')}</td>
+        <td>${editCheck('wh-'+uid,false)}</td><td>${editInput('mn-'+uid,'','Medical notes')}</td>
+        <td>${editCheck('ac-'+uid,b.aftercare||false)}</td><td>${editInput('pp-'+uid,b.customer_phone||getPayloadPhone(b.raw_payload),'Phone')}</td>
+        <td>${editInput('ec-'+uid,'','Emergency contact')}</td>
+        <td style="color:#888">${escText(b.customer_name) || '&mdash;'}${bookingCountBadge(b)}</td><td style="text-align:center">${b.qty}</td>
+        <td style="color:#888">${shopifyOrderLink(b.shopify_order_name)}</td><td class="note-cell">${note||''}</td>
+        <td class="no-print" style="white-space:nowrap">
+          <button class="row-save-btn" onclick="saveCampRow(null,'${b.shopify_order_name}','${uid}','${sessionId}')">Save</button>
+          ${b.customer_email ? `<button class="send-form-btn no-print" onclick="sendCampInfoForm(${jsArg(b.shopify_order_name)},${jsArg((b.customer_email||''))},${jsArg((b.customer_name||''))},${b.qty||1},this)" title="Email parent a link to fill in child info" style="margin-left:4px">📧 Send Form</button>` : ''}
+        </td>
+      </tr>` })
+      return
+    }
+    participants.forEach((p, i) => {
+      const t = p.tally
+      const uid = `${orderUid}-${i}`
+      const camperName = p.name || ''
+      const attKey = `${b.shopify_order_name}|${camperName.toLowerCase().trim()}`
+      const att = attendanceData[attKey]
+      const ageDisplay = p.dob ? formatDOB(p.dob, dateLabel) : (p.age ? `Age ${p.age}` : '')
+      const ageSortVal = p.dob ? p.dob : (p.age ? String(p.age).padStart(3,'0') : '')
+      campTableRows.push({ name: camperName, age: ageSortVal, registeredBy: i===0?(b.customer_name||''):'', html: `<tr${cancelStyle}>
+        <td style="text-align:center"><input type="checkbox" class="attended-check" ${att?.attended?'checked':''} onchange="saveAttendance('${sessionId}','${b.shopify_order_name}',${jsArg(camperName)},this.checked)"></td>
+        <td>${editInput('cn-'+uid,camperName,'Child name')}</td><td style="font-size:12px;color:#666">${ageDisplay}</td>
+        <td>${editTableNum('tn-'+uid,t?.table_num||'')}</td>
+        <td>${editCheck('wh-'+uid,t?.walk_home||false)}</td><td>${editInput('mn-'+uid,t?.medical_notes||'','Medical notes')}</td>
+        <td>${editCheck('ac-'+uid,t?.aftercare||b.aftercare||false)}</td><td>${editInput('pp-'+uid,t?.parent_phone||b.customer_phone||getPayloadPhone(b.raw_payload)||'','Phone')}</td>
+        <td>${editInput('ec-'+uid,t?(t.emergency_contact_name||'')+(t.emergency_contact_phone?' '+t.emergency_contact_phone:''):'','Emergency contact')}</td>
+        <td style="color:#888">${i===0?(b.customer_name||'&mdash;')+bookingCountBadge(b):''}</td><td style="text-align:center">1</td>
+        <td style="color:#888">${shopifyOrderLink(b.shopify_order_name)}</td><td class="note-cell">${i===0?(note||''):''}</td>
+        <td class="no-print"><button class="row-save-btn" onclick="saveCampRow('${t?.id||null}','${b.shopify_order_name}','${uid}','${sessionId}')">Save</button></td>
+      </tr>` })
+    })
+    const existingChildren = childrenData[b.id] || []
+    const extraCount = Math.max(0, (b.qty||1) - participants.length)
+    for (let i = 0; i < extraCount; i++) {
+      const childIndex = participants.length + i + 1
+      const existing = existingChildren.find(c => c.child_index === childIndex)
+      const cid = `${b.id}-child-${childIndex}`
+      const attKey = `${b.shopify_order_name}|${(existing?.child_name||'').toLowerCase().trim()}`
+      const att = existing?.child_name ? attendanceData[attKey] : null
+      campTableRows.push({ name: existing?.child_name||'', age: existing?.child_age||'', registeredBy: b.customer_name||'', html: `<tr style="background:#fafaf8${isCancelled ? ';opacity:0.4;text-decoration:line-through;color:#888' : ''}">
+        <td style="text-align:center"><input type="checkbox" class="attended-check" ${att?.attended?'checked':''} onchange="saveAttendance('${sessionId}','${b.shopify_order_name}',${jsArg((existing?.child_name||''))},this.checked)"></td>
+        <td>${editInput('cn-'+cid,existing?.child_name||'','Child name')}</td><td>${editInput('ca-'+cid,existing?.child_age||'','Age','short')}</td>
+        <td>${editTableNum('tn-'+cid,existing?.table_num||'')}</td>
+        <td>${editCheck('wh-'+cid,existing?.walk_home||false)}</td><td>${editInput('mn-'+cid,existing?.medical||'','Medical notes')}</td>
+        <td>${editCheck('ac-'+cid,false)}</td><td>${editInput('pp-'+cid,existing?.parent_phone||'','Phone')}</td>
+        <td>${editInput('ec-'+cid,existing?.emergency_contact||'','Emergency contact')}</td>
+        <td style="color:#888">${escText(b.customer_name) || '&mdash;'}${bookingCountBadge(b)}</td><td style="text-align:center"></td>
+        <td style="color:#888">${shopifyOrderLink(b.shopify_order_name)}</td><td></td>
+        <td class="no-print"><button class="row-save-btn" onclick="saveChildRow('${existing?.id||null}','${b.id}',${childIndex},'${cid}')">Save</button></td>
+      </tr>` })
+    }
+  })
+  const sortBtn = col => `<button class="camp-sort-btn no-print" data-col="${col}" onclick="sortCampTable('${col}')" style="background:none;border:none;cursor:pointer;font-size:10px;color:#888;padding:0;margin-left:2px;opacity:0.3"> ⇅</button>`
+  return `<table class="booking-table"><thead><tr><th>✓</th><th>Participant${sortBtn('name')}</th><th>Age / DOB${sortBtn('age')}</th><th>Table</th><th>Walk home?</th><th>Medical</th><th>Aftercare</th><th>Parent phone</th><th>Emergency contact</th><th>Registered by${sortBtn('registeredBy')}</th><th style="text-align:center">Qty</th><th>Order</th><th>Notes</th><th class="no-print"></th></tr></thead><tbody id="camp-table-body">${campTableRows.map(r=>r.html).join('')}</tbody></table>`
+}
+/* ======================= end of camp roster copy ======================= */
+
+/* ==========================================================================
+   CATCH-UP TRANSFERS — copied from index.html (the schedule's Day view):
+   one-week transfers of a child into another class (or a staff-only "Catch Up
+   Class"). Changes for the Hub: the Schedule's date, who made it, and the
+   Hub's own refresh (planAfterCatchup) instead of the Day view's.
+   ========================================================================== */
+function openCatchupModal(originSessionId, bookingId, camperName, dateLabel, originSessionTime) {
+  document.getElementById('catchup-modal')?.remove()
+  const modal = document.createElement('div')
+  modal.id = 'catchup-modal'
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9500;display:flex;align-items:center;justify-content:center;padding:1rem'
+  modal.innerHTML = `
+    <div style="background:#fff;border-radius:12px;padding:1.8rem;width:420px;max-width:95vw;max-height:88vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,0.2)">
+      <h3 style="margin:0 0 4px;font-size:16px;font-weight:700;color:#2d6a9f">🔁 Catch-up: ${camperName || 'this child'}</h3>
+      <div style="font-size:12px;color:#888;margin-bottom:16px">Move them into another class for one date only — their regular class will show them as absent and note where they went.</div>
+      <input type="hidden" id="cu-origin-session" value="${originSessionId}">
+      <input type="hidden" id="cu-booking-id" value="${bookingId}">
+      <input type="hidden" id="cu-camper-name" value="${(camperName||'').replace(/"/g,'&quot;')}">
+      <div style="margin-bottom:12px">
+        <label style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.4px">Date they're catching up</label><br>
+        <input type="date" id="cu-date" value="${(_plan && _plan.date) || dateStr(new Date())}" onchange="cuLoadSessionsForDate()" style="width:100%;box-sizing:border-box;border:0.5px solid #d0d0c8;border-radius:6px;padding:8px 10px;font-size:13px;margin-top:4px;outline:none">
+      </div>
+      <div style="margin-bottom:8px">
+        <label style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.4px">Join which class</label><br>
+        <select id="cu-target-session" style="width:100%;box-sizing:border-box;border:0.5px solid #d0d0c8;border-radius:6px;padding:8px 10px;font-size:13px;margin-top:4px;outline:none">
+          <option value="">Loading sessions...</option>
+        </select>
+      </div>
+      <button onclick="cuCreateCatchupClass()" style="margin-bottom:14px;padding:6px 12px;background:#f0f6ff;border:0.5px solid #c5d8f0;border-radius:6px;font-size:12px;color:#2d6a9f;cursor:pointer">+ New Catch Up Class on this date</button>
+      <div style="margin-bottom:16px">
+        <label style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.4px">Note <span style="font-weight:400;color:#bbb;text-transform:none">(optional)</span></label><br>
+        <input type="text" id="cu-note" placeholder="e.g. away for the weekend" style="width:100%;box-sizing:border-box;border:0.5px solid #d0d0c8;border-radius:6px;padding:8px 10px;font-size:13px;margin-top:4px;outline:none">
+      </div>
+      <div id="cu-error" style="color:#c00;font-size:12px;margin-bottom:10px;display:none"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn" onclick="document.getElementById('catchup-modal').remove()">Cancel</button>
+        <button class="btn btn-primary" id="cu-save-btn" onclick="saveCatchupTransfer()">Save Catch-up</button>
+      </div>
+    </div>`
+  document.body.appendChild(modal)
+  cuLoadSessionsForDate()
+}
+
+async function cuLoadSessionsForDate() {
+  const date = document.getElementById('cu-date')?.value
+  const sel = document.getElementById('cu-target-session')
+  const originSessionId = document.getElementById('cu-origin-session')?.value
+  if (!date || !sel) return
+  sel.innerHTML = '<option value="">Loading sessions...</option>'
+  const { data: sessions } = await sb.from('sessions')
+    .select('id, title, session_time, session_type')
+    .eq('studio_id', currentStudioId).eq('session_date', date)
+    .order('session_time')
+  const options = (sessions || [])
+    .filter(s => s.id !== originSessionId)
+    .map(s => `<option value="${s.id}">${fmtTime(s.session_time)} · ${getSeriesDisplayTitle(s.title)}${s.title === 'Catch Up Class' ? ' 🔁' : ''}</option>`)
+    .join('')
+  sel.innerHTML = `<option value="">Select a class...</option>${options}`
+}
+
+async function cuCreateCatchupClass() {
+  const date = document.getElementById('cu-date')?.value
+  if (!date) { alert('Pick a date first.'); return }
+  const time = prompt('What time is the Catch Up Class? (e.g. 4:00 PM)')
+  if (!time) return
+  // Normalize a few common formats to HH:MM:SS; fall back to raw entry if unparseable
+  let time24 = time.trim()
+  const m = time24.match(/^(\d{1,2}):?(\d{2})?\s*(am|pm)?$/i)
+  if (m) {
+    let h = parseInt(m[1], 10)
+    const min = m[2] || '00'
+    const ap = (m[3] || '').toLowerCase()
+    if (ap === 'pm' && h < 12) h += 12
+    if (ap === 'am' && h === 12) h = 0
+    time24 = `${String(h).padStart(2,'0')}:${min}:00`
+  } else if (!/^\d{2}:\d{2}(:\d{2})?$/.test(time24)) {
+    alert('Please enter a time like "4:00 PM" or "16:00".'); return
+  }
+  const { data: inserted, error } = await sb.from('sessions')
+    .insert({ studio_id: currentStudioId, session_date: date, session_time: time24, title: 'Catch Up Class', session_type: 'class', capacity: 0, show: true, is_staff_only: true, spaces_left_cache: null })
+    .select('id').single()
+  if (error) { alert('Error creating Catch Up Class: ' + error.message); return }
+  await cuLoadSessionsForDate()
+  const sel = document.getElementById('cu-target-session')
+  if (sel) sel.value = inserted.id
+}
+
+async function saveCatchupTransfer() {
+  const errEl = document.getElementById('cu-error')
+  errEl.style.display = 'none'
+  const originSessionId = document.getElementById('cu-origin-session').value
+  const bookingId = document.getElementById('cu-booking-id').value
+  const camperName = document.getElementById('cu-camper-name').value
+  const targetSessionId = document.getElementById('cu-target-session').value
+  const note = document.getElementById('cu-note').value.trim()
+
+  if (!targetSessionId) { errEl.textContent = 'Please pick which class they are joining.'; errEl.style.display = 'block'; return }
+
+  const btn = document.getElementById('cu-save-btn')
+  btn.disabled = true; btn.textContent = 'Saving...'
+
+  // Hub: who made it (the coordinator's name when unlocked, else the studio)
+  const userName = (_sessionPin && _lastHeroData && _lastHeroData.firstName && _lastHeroData.firstName !== 'team')
+    ? _lastHeroData.firstName + ' (Hub)' : ((STUDIO_NAMES[_sessionStudioId] || 'Studio') + ' (Hub)')
+
+  const { error } = await sb.from('class_catchups').insert({
+    studio_id: currentStudioId, origin_session_id: originSessionId, origin_booking_id: bookingId,
+    camper_name: camperName, target_session_id: targetSessionId, note: note || null, created_by: userName
+  })
+
+  if (error) {
+    btn.disabled = false; btn.textContent = 'Save Catch-up'
+    errEl.textContent = 'Error: ' + error.message
+    errEl.style.display = 'block'
+    return
+  }
+
+  document.getElementById('catchup-modal')?.remove()
+  planAfterCatchup()
+}
+
+async function removeCatchupTransfer(id, isCatchupClassView = false) {
+  if (!confirm('Remove this catch-up transfer?')) return
+  const { error } = await sb.from('class_catchups').delete().eq('id', id)
+  if (error) { alert('Error removing: ' + error.message); return }
+  planAfterCatchup()
+}
+// After a catch-up is added or removed: refresh the day's counts and the open kids list
+async function planAfterCatchup() {
+  const openId = Object.keys(_plan.classLists || {}).find(id => _plan.classLists[id] && _plan.classLists[id].dataset.kids === '1');
+  await loadPlanDay(_plan.date);
+  const x = openId && (_plan.sessions || []).find(z => z.id === openId);
+  if (x && _plan.classLists[openId]) { if (planIsCamp(x)) await buildCampList(x, _plan.classLists[openId]); else await buildKidsClassList(x, _plan.classLists[openId]); }
+}
+/* ======================= end of catch-up copy ======================= */
+// ---------- ✉️ Email the people booked (send-email-blast, same as the Day view) ----------
+// Coordinators (PIN) and home office. The function checks the signed-in login
+// and logs every send (email_sends).
+let _planEmail = null;
+async function planEmail(sessionId) {
+  if (!planCanEdit()) { openPinModal(); return; }
+  const list = sessionId ? (_plan.sessions || []).filter(x => x.id === sessionId) : (_plan.sessions || []).filter(x => (_plan.booked[x.id] || 0) > 0);
+  if (!list.length) { alert('No one is booked to email.'); return; }
+  openDutySheet('<h3>✉️ Email</h3><div class="goal-note">Loading who’s booked…</div>');
+  // booking ids: each session's own bookings, plus the series roster for kids class weeks 2+
+  const ids = list.map(x => x.id);
+  const week2 = list.filter(x => /\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(x.title || ''));
+  const extraIds = [];
+  for (const x of week2) { const r = await sb.rpc('get_class_week_bookings', { p_session_id: x.id }); (r.data || []).forEach(z => z.booking_id && extraIds.push(z.booking_id)); }
+  const [own, roster, tpl] = await Promise.all([
+    sb.from('bookings').select('customer_email, customer_name').in('session_id', ids).gt('qty', 0).is('returned_at', null),
+    extraIds.length ? sb.from('bookings').select('customer_email, customer_name').in('id', extraIds) : Promise.resolve({ data: [] }),
+    sb.from('email_templates').select('*').order('category').order('name')
+  ]);
+  const seen = {}, recips = [];
+  let noEmail = 0;
+  [...(own.data || []), ...(roster.data || [])].forEach(b => {
+    const k = String(b.customer_email || '').trim().toLowerCase();
+    if (!k) { noEmail++; return; }
+    if (!seen[k]) { seen[k] = 1; recips.push({ email: b.customer_email.trim(), name: b.customer_name || '' }); }
+  });
+  recips.sort((a, b) => a.name.localeCompare(b.name));
+  const templates = (tpl.data || []).filter(t => (!t.studio_ids || !t.studio_ids.length || t.studio_ids.includes(_sessionStudioId))
+    && t.category !== 'marketing_seasonal' && (!t.available_in || t.available_in.includes('blast')));
+  const dl = ptyDayLabel(_plan.date);
+  _planEmail = { recips, templates, sessionIds: ids, type: sessionId ? 'classes' : 'day',
+    className: sessionId ? `${dl} ${shortTime(list[0].session_time || '')} ${list[0].title}` : '' };
+  openDutySheet(`<h3>✉️ ${sessionId ? 'Email this class' : 'Email everyone booked today'}</h3>
+    <p>${sessionId ? esc(shortTime(list[0].session_time || '') + ' ' + list[0].title) + ' · ' : ''}${esc(dl)}</p>
+    <div class="goal-note"><b>${recips.length}</b> ${recips.length === 1 ? 'person' : 'people'}${noEmail ? ` · ${noEmail} booking${noEmail === 1 ? '' : 's'} with no email` : ''}
+      ${recips.length ? ' · <a href="#" onclick="planEmailAll(true);return false">all</a> / <a href="#" onclick="planEmailAll(false);return false">none</a>' : ''}</div>
+    <div class="pe-list">${recips.map((r, i) => `<label><input type="checkbox" class="pe-check" data-i="${i}" checked onchange="planEmailCount()"> ${esc(r.name)} <span class="goal-note">${esc(r.email)}</span></label>`).join('') || '<div class="goal-note" style="padding:8px">No emails on file.</div>'}</div>
+    <div class="me-form">
+      ${templates.length ? `<label>Template (optional)<select onchange="planEmailTemplate(this.value)"><option value="">Start from scratch…</option>${templates.map(t => `<option value="${escAttr(t.id)}">${esc(t.name)}</option>`).join('')}</select></label>` : ''}
+      <label>Subject<input id="pe-subject" value="A message from your 4Cats studio"></label>
+      <label>Message<textarea id="pe-message" style="min-height:150px">Hi {{first_name}},
+
+We wanted to reach out with a quick note.
+
+[Your message here]
+
+See you soon,
+The 4Cats Team</textarea></label>
+      <div class="goal-note">Blank lines become paragraphs, **text** is bold. Fill-ins: {{first_name}}, {{studio_name}}, {{date}}, {{class_name}}.</div>
+    </div>
+    <div id="pe-msg"></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="pe-send" onclick="planEmailSend()">Send to ${recips.length}</button></div>`);
+}
+function planEmailAll(on) { document.querySelectorAll('.pe-check').forEach(c => { c.checked = on; }); planEmailCount(); }
+function planEmailCount() { const n = document.querySelectorAll('.pe-check:checked').length; const b = document.getElementById('pe-send'); if (b) b.textContent = 'Send to ' + n; }
+function planEmailTemplate(id) {
+  const t = (_planEmail.templates || []).find(z => String(z.id) === String(id)); if (!t) return;
+  document.getElementById('pe-subject').value = t.subject || ''; document.getElementById('pe-message').value = t.body || '';
+}
+async function planEmailSend() {
+  const sel = [...document.querySelectorAll('.pe-check:checked')].map(c => _planEmail.recips[+c.dataset.i]);
+  const subject = document.getElementById('pe-subject').value.trim(), message = document.getElementById('pe-message').value.trim();
+  const msg = document.getElementById('pe-msg');
+  if (!sel.length) { msg.innerHTML = '<div class="me-msg err">Choose at least one person.</div>'; return; }
+  if (!message || /\[Your message here\]/.test(message)) { msg.innerHTML = '<div class="me-msg err">Write your message first.</div>'; return; }
+  if (!confirm(`Send this email to ${sel.length} ${sel.length === 1 ? 'person' : 'people'}?`)) return;
+  const btn = document.getElementById('pe-send'); btn.disabled = true; btn.textContent = 'Sending…';
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/send-email-blast`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify({
+      studio_id: _sessionStudioId, studio_name: STUDIO_NAMES[_sessionStudioId] || '', recipient_type: _planEmail.type, subject, message,
+      recipients: sel.map(r => ({ email: r.email, name: r.name })), session_ids: _planEmail.sessionIds, class_name: _planEmail.className }) });
+    const r = await res.json();
+    if (!r.success) throw new Error(r.error || 'The email didn’t send');
+    msg.innerHTML = `<div class="me-msg ok">Sent to ${r.sent != null ? r.sent : sel.length}.${r.failed ? ' ' + r.failed + ' didn’t go through.' : ''}</div>`;
+    btn.textContent = 'Sent ✓';
+  } catch (e) {
+    msg.innerHTML = `<div class="me-msg err">${esc(e.message)}</div>`; btn.disabled = false; planEmailCount();
+  }
+}
+
 function planPrintClassList(sessionId) {
   const el = _plan.classLists[sessionId];
   if (!el) return;
