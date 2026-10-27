@@ -1684,6 +1684,8 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // Studio email login (Supabase Auth). Same project and default storage as
 // index.html / schedule.html, so a studio device already signed in there
 // opens the dashboard without signing in again.
+// A "set your password" link from the Hub's email lands here with #…type=recovery
+const _isPasswordRecovery = /type=recovery/.test(location.hash || '');
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // (Copied from index.html.) The Hub sends the login itself for its own calls; this
@@ -6757,7 +6759,48 @@ function renderLoginGate(errorMsg) {
     <input type="email" id="login-email" class="gate-text-input" placeholder="Email" autocomplete="username" inputmode="email" autocapitalize="off" autocorrect="off" spellcheck="false" />
     <input type="password" id="login-password" class="gate-text-input" placeholder="Password" autocomplete="current-password"
            onkeydown="if(event.key==='Enter') submitStudioLogin()" />
-    <button class="gate-btn" id="login-btn" onclick="submitStudioLogin()">Sign in</button>`;
+    <button class="gate-btn" id="login-btn" onclick="submitStudioLogin()">Sign in</button>
+    <button class="gate-schedule-btn" style="margin-top:10px" onclick="renderResetRequest()">First time, or forgot your password?</button>`;
+}
+// Staff set (or reset) their own password: Supabase emails them a link when THEY ask.
+function renderResetRequest(msg) {
+  document.getElementById('dashboard-gate-body').innerHTML = `
+    <div class="gate-detail">Type the email on your 4Cats staff profile. We’ll email you a link to set your password.</div>
+    ${msg ? `<div class="gate-error" style="background:#e3f9ec;color:#14532d">${esc(msg)}</div>` : ''}
+    <input type="email" id="reset-email" class="gate-text-input" placeholder="Email" autocomplete="username" inputmode="email" autocapitalize="off" autocorrect="off" spellcheck="false"
+           onkeydown="if(event.key==='Enter') sendResetLink()">
+    <button class="gate-btn" id="reset-btn" onclick="sendResetLink()">Email me a link</button>
+    <button class="gate-schedule-btn" style="margin-top:10px" onclick="renderLoginGate()">← Back to sign in</button>`;
+}
+async function sendResetLink() {
+  const email = (document.getElementById('reset-email').value || '').trim();
+  if (!/.+@.+\..+/.test(email)) return;
+  const btn = document.getElementById('reset-btn'); btn.disabled = true; btn.textContent = 'Sending…';
+  const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname });
+  // Same message either way, so the page never reveals which emails have a login
+  renderResetRequest(error && /rate|limit/i.test(error.message)
+    ? 'Too many emails were sent just now. Please try again in a little while.'
+    : 'If that email has a 4Cats login, a link is on its way. Check your inbox (and junk folder).');
+}
+function renderSetPassword(msg) {
+  document.getElementById('dashboard-shell').style.display = 'none';
+  document.getElementById('dashboard-gate').style.display = 'flex';
+  document.getElementById('dashboard-gate-body').innerHTML = `
+    <div class="gate-detail">Choose your password (at least 8 characters).</div>
+    ${msg ? `<div class="gate-error">${esc(msg)}</div>` : ''}
+    <input type="password" id="new-pw1" class="gate-text-input" placeholder="New password" autocomplete="new-password">
+    <input type="password" id="new-pw2" class="gate-text-input" placeholder="Same again" autocomplete="new-password" onkeydown="if(event.key==='Enter') saveNewPassword()">
+    <button class="gate-btn" id="new-pw-btn" onclick="saveNewPassword()">Save password</button>`;
+}
+async function saveNewPassword() {
+  const a = document.getElementById('new-pw1').value, b = document.getElementById('new-pw2').value;
+  if (a.length < 8) { renderSetPassword('Use at least 8 characters.'); return; }
+  if (a !== b) { renderSetPassword('Those two don’t match.'); return; }
+  document.getElementById('new-pw-btn').disabled = true;
+  const { error } = await sb.auth.updateUser({ password: a });
+  if (error) { renderSetPassword(/session|expired|token/i.test(error.message) ? 'That link has expired. Go back and ask for a new one.' : error.message); return; }
+  history.replaceState(null, '', location.pathname);
+  startStudioView();
 }
 
 async function submitStudioLogin() {
@@ -7394,6 +7437,7 @@ function resetInactivityTimer() {
 // Signed out anywhere on this device (here, or in the schedule frame) →
 // back to the sign-in screen.
 sb.auth.onAuthStateChange((event) => {
+  if (event === 'PASSWORD_RECOVERY') { setTimeout(renderSetPassword, 0); return; }
   if (event === 'SIGNED_OUT' && (_studioViewStarted || _scheduleLoaded || _me)) resetToSignedOut();
 });
 
@@ -7944,6 +7988,7 @@ loadDashboardTheme();
   const punchoutToken = new URLSearchParams(location.search).get('punchout');
   if (punchoutToken) { renderPunchoutLink(punchoutToken); return; }
   const { data } = await sb.auth.getSession();
+  if (_isPasswordRecovery && data && data.session) { renderSetPassword(); return; }
   if (data && data.session) startStudioView();
   else renderLoginGate();
 })();
