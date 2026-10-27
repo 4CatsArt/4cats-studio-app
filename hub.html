@@ -2862,6 +2862,28 @@ async function loadPlanDay(date) {
     // at the same time (their kids are in its roster), so show the class only.
     const classTimes = new Set(sessions.filter(isWeek2).map(x => x.session_time));
     sessions = sessions.filter(x => !(/\|\s*\d+\s*week\s*session/i.test(x.title || '') && classTimes.has(x.session_time)));
+    // Parties: every party TYPE (Kids Party, Splatter Party, Party Time Slot…) is its own product,
+    // but they share the studio's party room slot. Booked parties show as themselves; unbooked
+    // party products become ONE "Open party slot" row per time, only where the party slot
+    // schedule (party_slot_schedule, what the booking widgets offer) has room left.
+    try {
+      const [y0, m0, d0] = date.split('-').map(Number), dow = new Date(y0, m0 - 1, d0).getDay();
+      const ps = await sb.from('party_slot_schedule').select('time_slot, slots').eq('studio_id', st).eq('day_of_week', dow);
+      if (!ps.error && (ps.data || []).length) {
+        const slotsAt = {}; ps.data.forEach(r => { slotsAt[String(r.time_slot).slice(0, 5)] = Number(r.slots) || 0; });
+        const party = sessions.filter(x => x.session_type === 'party');
+        const bookedAt = {};
+        party.filter(x => booked[x.id] > 0).forEach(x => { const t = String(x.session_time).slice(0, 5); bookedAt[t] = (bookedAt[t] || 0) + 1; });
+        const openRows = [];
+        [...new Set(party.filter(x => !(booked[x.id] > 0)).map(x => String(x.session_time).slice(0, 5)))].forEach(t => {
+          const open = (slotsAt[t] || 0) - (bookedAt[t] || 0);
+          if (open > 0) openRows.push({ id: 'slot-' + t, title: 'Open party slot', session_date: date, session_time: t + ':00', session_type: 'party',
+            capacity: open, spaces_left_cache: open, show: true, partySlot: true });
+        });
+        sessions = sessions.filter(x => x.session_type !== 'party' || booked[x.id] > 0).concat(openRows)
+          .sort((a, b) => String(a.session_time).localeCompare(String(b.session_time)));
+      }
+    } catch (e) { /* no slot schedule: show party products as before */ }
     const kidsTeacher = {};
     sessions.filter(planIsKids).forEach(x => { kidsTeacher[x.id] = (staffBy[x.id] || {}).teacher || ''; });
     // Party forms already open stay open (and keep what's typed) when the day reloads.
@@ -3050,10 +3072,11 @@ function renderPlanDay() {
     ...kids.map(x => [hmM(x.session_time), `<div class="plan-sess tap" data-open-cl="${escAttr(x.id)}" tabindex="0"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">Kids class teacher${!P.kidsTeacher[x.id] && demoPlan[x.id] && demoPlan[x.id].auto ? ` · none set, so <b>${esc(nameOf(demoPlan[x.id].teachers[0]))}</b> (the day’s demoer)` : ''}${edit ? ' · changes here are for this day only (the term teacher is set in the staff schedule)' : ''}</div></span>
         ${planRowExtras(x)}${planCount(x)}${pick(P.kidsTeacher[x.id], `planKids('${escAttr(x.id)}', this.value)`)}${planRowTools(x)}</div>${planNoteHtml(x)}<div class="pf-wrap" data-cl="${escAttr(x.id)}"></div>`]),
     ...others.map(x => [hmM(x.session_time), `<div class="plan-sess${x.session_type === 'party' ? '' : ' tap'}"${x.session_type === 'party' ? '' : ` data-open-cl="${escAttr(x.id)}" tabindex="0"`}><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">${
-          x.session_type === 'party' ? 'Party slot, not booked yet'
+          x.partySlot ? `${x.spaces_left_cache} party slot${x.spaces_left_cache === 1 ? '' : 's'} open, not booked yet`
+          : x.session_type === 'party' ? 'Party slot, not booked yet'
           : !(P.booked[x.id] > 0) ? 'No one booked yet'
           : (demoers.length || P.roles.director) && demoPlan[x.id] ? `<span class="floor-staff" style="margin-top:4px">${hubDemoChips(demoPlan[x.id])}</span>` : esc(dayCover)}</div></span>
-        ${planRowExtras(x)}${planCount(x)}<span class="kind-chip kind-${sessionKind(x.title)[1]}">${esc(sessionKind(x.title)[0])}</span>${x.session_type === 'party' ? (planCanAdjust() ? `<button class="ho-btn spots-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Spots</button>` : '') : planRowTools(x)}</div>${planNoteHtml(x)}<div class="pf-wrap" data-cl="${escAttr(x.id)}"></div>`]),
+        ${planRowExtras(x)}${planCount(x)}<span class="kind-chip kind-${sessionKind(x.title)[1]}">${esc(sessionKind(x.title)[0])}</span>${x.session_type === 'party' ? (planCanAdjust() && !x.partySlot ? `<button class="ho-btn spots-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Spots</button>` : '') : planRowTools(x)}</div>${planNoteHtml(x)}<div class="pf-wrap" data-cl="${escAttr(x.id)}"></div>`]),
     ...(P.events || []).map(x => [-1, `<div class="plan-sess" style="background:#fff4dd;border-color:#ffd998"><span class="t">🎪</span><span class="nm">${esc(x.title)}<div class="sub">Event · staffing is set on the event</div></span></div>`])
   ].sort((a, b) => a[0] - b[0]).map(r => r[1]).join('');
   // Party forms: keep the open forms' own elements (and anything typed) across redraws.
