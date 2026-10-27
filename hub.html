@@ -5962,7 +5962,8 @@ async function meLoadOffers() {
   try { const r = await sb.rpc('hub_offers_mine'); _meOffers = r.error ? null : r.data; } catch (e) { _meOffers = null; }
 }
 function meOfferFor(sh) { return ((_meOffers && _meOffers.mine) || []).find(o => o.shift_date === sh.shift_date && o.studio_id === sh.studio_id && ['open', 'taken'].includes(o.status)); }
-function meCanGive(sh) { return !!_meOffers && !sh.sick && sh.shift_date >= localDateStr(new Date()) && !meOfferFor(sh); }
+// Any shift on the schedule can be given away (staff-schedule's and Sling's), just not drafts
+function meCanGive(sh) { return !!_meOffers && sh.status !== 'draft' && !sh.sick && sh.shift_date >= localDateStr(new Date()) && !meOfferFor(sh); }
 function meOfferLine(sh) {
   const o = meOfferFor(sh); if (!o) return '';
   return `<div class="me-offer">${o.status === 'open' ? '🔁 Up for grabs. Waiting for someone to take it.' : `🔁 <b>${esc(String(o.taker_name || '').split(' ')[0])}</b> will take it. Waiting for home office to approve.`}
@@ -5982,15 +5983,22 @@ function meOfferPush(id, event) { fnHeaders().then(h => fetch(`${SUPABASE_URL}/f
 function meGiveAway(i) {
   const sh = _meShifts[i]; if (!sh) return;
   openDutySheet(`<h3>🔁 Give away this shift?</h3><p>${esc(meDateLabel(sh.shift_date, localDateStr(new Date())))} · ${esc(shortTime(sh.start_time))}–${esc(shortTime(sh.end_time))}</p>
+    <div id="go-msg"></div>
     <div class="me-form"><label>Note for whoever takes it (optional)<input id="go-note" maxlength="300" placeholder="e.g. Dentist appointment, happy to take a shift back"></label></div>
     <div class="me-small" style="margin-top:6px">Staff at your studio and nearby studios who are free then can take it. <b>It stays your shift until home office approves the swap.</b></div>
-    <div id="go-msg"></div>
-    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="meGiveAwaySave(${i})">Offer it</button></div>`);
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="go-btn" onclick="meGiveAwaySave(${i})">Offer it</button></div>`);
 }
 async function meGiveAwaySave(i) {
-  const sh = _meShifts[i];
-  const { data, error } = await sb.rpc('hub_offer_shift', { p_date: sh.shift_date, p_studio: sh.studio_id, p_note: document.getElementById('go-note').value || null });
-  if (error) { document.getElementById('go-msg').innerHTML = `<div class="me-msg err">${esc(error.message)}</div>`; return; }
+  const sh = _meShifts[i], btn = document.getElementById('go-btn'), msg = document.getElementById('go-msg');
+  if (btn) { btn.disabled = true; btn.textContent = 'Offering…'; }
+  let data, error;
+  try { ({ data, error } = await sb.rpc('hub_offer_shift', { p_date: sh.shift_date, p_studio: sh.studio_id, p_note: document.getElementById('go-note').value || null })); }
+  catch (e) { error = e; }
+  if (error || !data) {   // shown at the top of the pop-up, where it can't be missed
+    if (btn) { btn.disabled = false; btn.textContent = 'Offer it'; }
+    if (msg) { msg.innerHTML = `<div class="me-msg err" style="margin-bottom:10px">${esc((error && error.message) || 'Couldn’t offer the shift. Try again.')}</div>`; msg.scrollIntoView({ block: 'nearest' }); }
+    return;
+  }
   meOfferPush(data.id, 'offered');
   closeDutySheet(); meLoadShifts();
 }
