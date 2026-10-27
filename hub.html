@@ -9841,11 +9841,11 @@ async function hubDeviceGate(studioId) {
 
 // ---------- 💬 Staff chat (hub_chat.sql) ----------
 // One component for three places: staff phones (their studio chats + private messages),
-// the studio computer (that studio's chat; pick who's posting + their punch PIN, kept for
-// 3 minutes) and home office (every chat; private ones read-only). New messages are
+// the studio computer (that studio's chat; pick who's posting + their punch PIN, every
+// message — nothing is remembered, so the next person can't post as someone else) and home office (every chat; private ones read-only). New messages are
 // checked every 4 seconds while a chat is open; the list every 20.
 let _chat = null;
-function chatStop() { if (_chat) { clearInterval(_chat.poll); clearInterval(_chat.listPoll); } _chat = null; }
+function chatStop() { if (_chat) { clearInterval(_chat.poll); clearInterval(_chat.listPoll); clearTimeout(_chat.asTimer); } _chat = null; }
 async function openChatPane() { showOnlyPane('chat-pane'); setActiveNav('nav-chat'); chatMount('hub-chat', _studioData && _studioData.isAdmin ? 'admin' : 'studio'); }
 function chatAvatar(m, size) { return hubAvatarHtml({ name: m.author_name || 'Home office', avatar_key: m.avatar_key, staff_id: m.author_staff_id || m.author_name }, size); }
 async function chatMount(hostId, mode) {
@@ -9904,7 +9904,7 @@ async function chatOpen(id) {
   room.innerHTML = `<div class="chat-head"><button class="ho-btn chat-back" onclick="document.querySelector('#${_chat.host} .chat-wrap').classList.remove('room-open')">←</button><b>${esc(t.title || 'Chat')}</b></div>
     ${privacy}<div class="chat-msgs" id="chat-msgs"><div class="goal-note" style="padding:12px">Loading…</div></div>
     ${t.can_post ? `<div class="chat-compose">${_chat.mode === 'studio' ? '<div id="chat-as" class="chat-as"></div>' : ''}
-        <textarea id="chat-text" rows="1" maxlength="2000" placeholder="Write a message…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();chatSend()}" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,140)+'px'"></textarea>
+        <textarea id="chat-text" rows="1" maxlength="2000" placeholder="Write a message…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();chatSend()}" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,140)+'px';chatAsTouch()"></textarea>
         <button class="ho-btn primary" onclick="chatSend()">Send</button></div><div id="chat-msg"></div>` : ''}`;
   if (_chat.mode === 'studio') chatRenderAs();
   await chatFetch(true);
@@ -9941,11 +9941,20 @@ function chatRender() {
         ${m.deleted ? `<i class="goal-note">Message removed${m.deleted_by ? ' by ' + esc(m.deleted_by) : ''}</i>` : `<div class="chat-body">${esc(m.body).replace(/\n/g, '<br>')}</div>`}</div></div>`;
   }).join('');
 }
-// Studio computer: who's posting (their PIN is asked on the first message, then kept 3 minutes)
+// Studio computer: who's posting (name + PIN for every message; cleared after sending)
+// Walked away after choosing a name or typing a PIN, without sending: clear it after a
+// minute with no typing.
+function chatAsTouch() {
+  if (!_chat || _chat.mode !== 'studio') return;
+  clearTimeout(_chat.asTimer);
+  if (_chat.as) _chat.asTimer = setTimeout(() => { if (_chat && _chat.as) { _chat.as = null; _chat.pin = null; chatRenderAs(); } }, 60000);
+}
 async function chatRenderAs() {
   const el = document.getElementById('chat-as'); if (!el || !_chat) return;
   if (!_chat.people) { const r = await sb.rpc('hub_chat_people', { p_studio: _sessionStudioId }); _chat.people = r.error ? [] : (r.data || []); }
   if (_chat.pin && Date.now() > _chat.pinUntil) { _chat.pin = null; }
+  // walked away after choosing a name (or typing a PIN) without sending: clear it after a minute
+  chatAsTouch();
   el.innerHTML = `Posting as <select id="chat-as-sel" onchange="_chat.as = this.value || null; _chat.pin = null; chatRenderAs()"><option value="">— choose your name —</option>${_chat.people.map(p => `<option value="${escAttr(p.staff_id)}"${_chat.as === p.staff_id ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
     ${_chat.as && !_chat.pin ? '<input id="chat-pin" type="password" inputmode="numeric" maxlength="4" placeholder="PIN" autocomplete="off">' : ''}${_chat.as && _chat.pin ? '<span class="goal-note">✓ PIN entered</span>' : ''}`;
 }
@@ -9965,7 +9974,7 @@ async function chatSend() {
   const { data: posted, error } = await sb.rpc('hub_chat_post', args);
   if (!error && posted && posted.id) pushNotifyMessage(posted.id);
   if (error) { msg.innerHTML = `<div class="me-msg err">${esc(error.message)}</div>`; if (_chat.mode === 'studio') { _chat.pin = null; chatRenderAs(); } return; }
-  if (_chat.mode === 'studio') { _chat.pin = args.p_pin; _chat.pinUntil = Date.now() + 3 * 60000; chatRenderAs(); }
+  if (_chat.mode === 'studio') { _chat.as = null; _chat.pin = null; _chat.pinUntil = 0; chatRenderAs(); }   // forget who posted
   ta.value = ''; ta.style.height = 'auto';
   await chatFetch(false);
   const box = document.getElementById('chat-msgs'); if (box) box.scrollTop = box.scrollHeight;
