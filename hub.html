@@ -487,6 +487,11 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .me-pill.approved { background: var(--green-bg); color: #15803d; }
 .me-pill.denied, .me-pill.cancelled { background: #f1f0f5; color: #6b6880; }
 .me-rules { font-size: 13px; color: var(--ink-soft); line-height: 1.5; }
+.me-tally { font-size: 15px; color: var(--ink); margin-bottom: 6px; }
+.me-tally b { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 22px; font-weight: 600; color: var(--accent-deep); }
+.me-bar { height: 10px; border-radius: 999px; background: #ece9f5; overflow: hidden; margin-bottom: 8px; }
+.me-bar span { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+.me-star { font-size: 12.5px; color: var(--ink-soft); margin-top: 10px; font-style: italic; }
 .me-msg { font-size: 13.5px; padding: 10px 12px; border-radius: 12px; }
 .me-msg.ok { background: var(--green-bg); color: #14532d; }
 .me-msg.warn { background: var(--amber-bg); color: #7c2d12; }
@@ -3747,34 +3752,91 @@ function meNoticeText(ru) {
 }
 function meFmtDate(ds) { const [y, m, d] = String(ds).split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }); }
 function meAddDays(ds, n) { const [y, m, d] = ds.split('-').map(Number); const x = new Date(y, m - 1, d + n); return localDateStr(x); }
+function meTypeLabel(t) {
+  if (t.type === 'sick') return t.source === 'staff_sick' ? 'Called in sick' : 'Sick leave';
+  if (t.type === 'medical') return 'Medical leave';
+  return 'Time off';
+}
+function meNum(n) { n = Number(n || 0); return Number.isInteger(n) ? String(n) : n.toFixed(1).replace(/\.0$/, ''); }
 function meRenderTimeOff(msg) {
-  const R = _meReq, ru = R.rules || {};
+  const R = _meReq, ru = R.rules || {}, T = R.tally || {};
+  const used = Number(T.approved || 0) + Number(T.pending || 0), allow = Number(T.allowance || 10);
+  const over = used > allow;
+  const pct = Math.min(100, Math.round(used / Math.max(allow, 1) * 100));
+  const q = Math.floor(new Date().getMonth() / 3) + 1;
+  const wkThisQ = ((T.weekend_days || T.weekends || []).find(w => w.quarter === q) || {}).used || 0;
+  const wkMax = ru.weekend_days_per_quarter ?? 2;
   const blackouts = (R.blackouts || []).map(b => `<li><b>${esc(b.label)}</b> (${esc(meFmtDate(b.start_date))} – ${esc(meFmtDate(b.end_date))})${b.mode === 'block' ? ': no time off' : ': needs a good reason'}${b.note ? ' · ' + esc(b.note) : ''}</li>`).join('');
-  const list = (R.time_off || []).filter(t => t.type !== 'sick' || t.end_date >= R.today).map(t => {
+  const list = (R.time_off || []).filter(t => t.type !== 'sick' || t.end_date >= R.today || t.status === 'pending').map(t => {
     const dates = t.start_date === t.end_date ? meFmtDate(t.start_date) : `${meFmtDate(t.start_date)} – ${meFmtDate(t.end_date)}`;
     const times = t.start_time ? ` · ${shortTime(t.start_time)}–${shortTime(t.end_time)}` : '';
     const flags = (t.flags || []).length && t.status === 'pending' ? `<div>⚑ ${esc(t.flags.join(' · '))}</div>` : '';
-    return `<div class="me-list-row"><div class="what"><b>${esc(dates)}</b>${esc(times)}<div>${esc(t.type)}${t.note ? ' · ' + esc(t.note) : ''}</div>${flags}</div>
+    return `<div class="me-list-row"><div class="what"><b>${esc(dates)}</b>${esc(times)}<div>${esc(meTypeLabel(t))}${t.note ? ' · ' + esc(t.note) : ''}</div>${flags}</div>
       <span class="me-pill ${esc(t.status)}">${esc(t.status === 'pending' ? 'waiting' : t.status)}</span>
       ${t.status === 'pending' ? `<button class="ho-btn" onclick="meCancelOff('${escAttr(t.id)}')">Cancel</button>` : ''}</div>`;
   }).join('');
-  const minStart = R.today;
+  const sickLeave = T.sick_leave;
   document.getElementById('me-body').innerHTML = `
     ${msg || ''}
+    <div class="me-card">
+      <h3>Your ${esc(T.year || '')} time off</h3>
+      <div class="me-tally"><b>${meNum(used)}</b> of <b>${meNum(allow)}</b> days used${T.pending > 0 ? ` <span class="me-rules">(${meNum(T.pending)} waiting for approval)</span>` : ''}</div>
+      <div class="me-bar"><span style="width:${pct}%;${over ? 'background:#dc2626' : ''}"></span></div>
+      <div class="me-rules">${meNum(T.upcoming)} day${Number(T.upcoming) === 1 ? '' : 's'} still coming up · Weekend days off this quarter: <b>${wkThisQ} of ${esc(wkMax)}</b>
+        ${sickLeave ? `<br>Sick leave (medical appointments): <b>${meNum(sickLeave.used)} of ${esc(sickLeave.allowance)}</b> days used` : ''}
+        ${Number(T.medical) > 0 ? `<br>Medical leave this year: <b>${meNum(T.medical)}</b> day${Number(T.medical) === 1 ? '' : 's'} (doesn’t use your time off)` : ''}</div>
+      ${over ? `<div class="me-msg err" style="margin-top:8px">You’re over your ${meNum(allow)} days off for this year, so new requests may not be approved.</div>` : ''}
+      <div class="me-star">* You’re paid vacation pay on every pay cheque. It’s up to you to set it aside for your time off.</div>
+    </div>
     <div class="me-card"><h3>Ask for time off</h3>
       <div class="me-rules">${meNoticeText(ru)}${ru.notice_mode === 'block' ? '' : ' (sooner is OK, but your manager will see it’s short notice)'}.
-        ${ru.max_days ? `Up to <b>${esc(ru.max_days)} days</b> in a row${ru.max_days_mode === 'block' ? '' : ' (longer gets a closer look)'}.` : ''} For being sick on the day, use <b>Call in sick</b> on the shift instead.
+        You get ${meNum(ru.annual_days)} days a year (${meNum(ru.annual_days_senior)} after ${esc(ru.senior_years)} years), and up to ${esc(wkMax)} weekend days (Saturdays or Sundays) off each quarter (3 months).
+        A part day counts as half a day if you’re scheduled to work that day.
+        <b>Medical leave</b> (surgery, longer health needs) needs a note and doesn’t use your time off.
+        For being sick on the day, use <b>Call in sick</b> on the shift instead.
         ${blackouts ? `<div style="margin-top:6px">Busy times:<ul style="margin:4px 0 0 18px;padding:0">${blackouts}</ul></div>` : ''}</div>
       <div class="me-form" style="margin-top:12px">
-        <div class="two"><label>First day<input type="date" id="me-off-start" min="${escAttr(minStart)}" onchange="const e=document.getElementById('me-off-end'); if(!e.value||e.value<this.value) e.value=this.value"></label>
-          <label>Last day<input type="date" id="me-off-end" min="${escAttr(minStart)}"></label></div>
-        <label style="flex-direction:row;align-items:center;gap:8px;font-size:14px;color:var(--ink)"><input type="checkbox" id="me-off-part" style="min-height:auto" onchange="document.getElementById('me-off-times').style.display=this.checked?'flex':'none'"> Only part of one day</label>
+        <label>What for<select id="me-off-type" onchange="mePreviewOff()"><option value="time_off">Time off</option>${sickLeave ? '<option value="sick_leave">Sick leave (medical appointment)</option>' : ''}<option value="medical_leave">Medical leave (note needed)</option></select></label>
+        <div class="two"><label>First day<input type="date" id="me-off-start" min="${escAttr(R.today)}" onchange="const e=document.getElementById('me-off-end'); if(!e.value||e.value<this.value) e.value=this.value; mePreviewOff()"></label>
+          <label>Last day<input type="date" id="me-off-end" min="${escAttr(R.today)}" onchange="mePreviewOff()"></label></div>
+        <label style="flex-direction:row;align-items:center;gap:8px;font-size:14px;color:var(--ink)"><input type="checkbox" id="me-off-part" onchange="document.getElementById('me-off-times').style.display=this.checked?'flex':'none'; mePreviewOff()"> Only part of one day</label>
         <div class="two" id="me-off-times" style="display:none"><label>From<input type="time" id="me-off-from" step="900"></label><label>Until<input type="time" id="me-off-until" step="900"></label></div>
-        <label>Type<select id="me-off-type"><option value="vacation">Vacation</option><option value="personal">Personal</option><option value="unpaid">Unpaid</option><option value="other">Other</option></select></label>
-        <label>Note for your manager (optional)<textarea id="me-off-note" maxlength="500" placeholder="e.g. Family wedding"></textarea></label>
+        <div id="me-off-preview"></div>
+        <label><span id="me-off-note-label">Note for your manager (optional)</span><textarea id="me-off-note" maxlength="500" placeholder="e.g. Family wedding"></textarea></label>
         <button class="ho-btn primary" style="min-height:46px" onclick="meRequestOff()">Send request</button>
       </div></div>
     <div class="me-card"><h3>Your requests</h3>${list || '<div class="me-rules">No time off requests yet.</div>'}</div>`;
+}
+// Live check as dates are picked: notice, and whether it would go over the year's days
+function mePreviewOff() {
+  const box = document.getElementById('me-off-preview'); if (!box) return;
+  const R = _meReq, ru = R.rules || {}, T = R.tally || {};
+  const st = document.getElementById('me-off-start').value, en = document.getElementById('me-off-end').value || st;
+  const kind = document.getElementById('me-off-type').value, sick = kind === 'sick_leave';
+  const lbl = document.getElementById('me-off-note-label');
+  if (lbl) lbl.textContent = kind === 'medical_leave' ? 'Note for your manager (needed: what it’s for, and when you expect to be back)' : 'Note for your manager (optional)';
+  if (!st || en < st) { box.innerHTML = kind === 'medical_leave' ? '<div class="me-msg warn">Medical leave goes to your manager to approve. It doesn’t need 14 or 60 days’ notice and doesn’t use your time off.</div>' : ''; return; }
+  const part = document.getElementById('me-off-part').checked;
+  if (kind === 'medical_leave') { box.innerHTML = '<div class="me-msg warn">Medical leave goes to your manager to approve. It doesn’t need 14 or 60 days’ notice and doesn’t use your time off.</div>'; return; }
+  const toD = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+  const days = Math.round((toD(en) - toD(st)) / 86400000) + 1;
+  // a part day counts ½ only if they're on a shift that day (shifts already loaded on My shifts)
+  const onShift = (_meShifts || []).some(x => x.shift_date === st);
+  const count = part ? (onShift ? 0.5 : 0) : days;
+  const msgs = [];
+  if (sick) {
+    const sl = T.sick_leave || { used: 0, allowance: 5 };
+    if (Number(sl.used) + count > Number(sl.allowance)) msgs.push(['err', `That’s more than your ${sl.allowance} sick days for the year (you’ve used ${meNum(sl.used)}). Ask for time off instead.`]);
+  } else {
+    const tiers = (ru.notice_tiers || []).slice().sort((a, b) => a.up_to_days - b.up_to_days);
+    const tier = tiers.find(t => days <= t.up_to_days) || tiers[tiers.length - 1];
+    const ahead = Math.round((toD(st) - toD(R.today)) / 86400000);
+    if (tier && ahead < tier.notice_days) msgs.push([ru.notice_mode === 'block' ? 'err' : 'warn', `${days} day${days === 1 ? '' : 's'} off needs ${tier.notice_days} days’ notice, and this is ${ahead} days away.${ru.notice_mode === 'block' ? ' It won’t be accepted.' : ''}`]);
+    const sameYear = st.slice(0, 4) === String(T.year);
+    const used = Number(T.approved || 0) + Number(T.pending || 0);
+    if (sameYear && used + count > Number(T.allowance)) msgs.push(['warn', `This brings you to ${meNum(used + count)} of ${meNum(T.allowance)} days for ${T.year}. You can still send it, but you’re over your time off for the year, so it may not be approved.`]);
+  }
+  box.innerHTML = msgs.map(([k, t]) => `<div class="me-msg ${k}">${esc(t)}</div>`).join('');
 }
 async function meRequestOff() {
   const v = id => document.getElementById(id).value;
@@ -3785,9 +3847,11 @@ async function meRequestOff() {
     p_type: v('me-off-type'), p_note: v('me-off-note') || null });
   if (error) { const box = document.getElementById('me-body'); box.insertAdjacentHTML('afterbegin', `<div class="me-msg err" style="margin-bottom:10px">${esc(error.message)}</div>`); box.scrollIntoView({ behavior: 'smooth' }); return; }
   await meLoadRequests();
-  meRenderTimeOff((data.flags || []).length
-    ? `<div class="me-msg warn" style="margin-bottom:10px">Request sent. Your manager will take a closer look because: ${esc(data.flags.join('; '))}.</div>`
-    : '<div class="me-msg ok" style="margin-bottom:10px">Request sent. You’ll see it here as approved or not once your manager has looked at it.</div>');
+  meRenderTimeOff(data.over_allowance
+    ? '<div class="me-msg err" style="margin-bottom:10px">Request sent, but you’re over your time off for the year, so it may not be approved. Your manager has been told.</div>'
+    : (data.flags || []).length
+      ? `<div class="me-msg warn" style="margin-bottom:10px">Request sent. Your manager will take a closer look because: ${esc(data.flags.join('; '))}.</div>`
+      : '<div class="me-msg ok" style="margin-bottom:10px">Request sent. You’ll see it here as approved or not once your manager has looked at it.</div>');
 }
 async function meCancelOff(id) {
   if (!confirm('Cancel this request?')) return;
@@ -3804,15 +3868,18 @@ function meRenderAvail(msg) {
   document.getElementById('me-body').innerHTML = `
     ${msg || ''}
     <div class="me-card"><h3>When you can’t work</h3>
-      <div class="me-rules">Times you’re regularly not available (for example, school on Tuesday mornings). The schedule is built around these. New ones start at least <b>${esc(ru.unavailability_notice_days)} days</b> from today so posted schedules don’t change; removing one works right away.</div>
+      <div class="me-rules">Times you’re regularly not available on weekdays (for example, school on Tuesday mornings). The schedule is built around these.
+        Each one needs an end date, up to 6 months away, and has to repeat at least ${esc(ru.unavail_min_repeats || 2)} weeks (for a single day, ask for time off).
+        New ones start at least <b>${esc(ru.unavailability_notice_days)} days</b> from today so posted schedules don’t change; removing one works right away.
+        ${ru.unavail_weekends_allowed ? '' : '<br><b>Saturdays and Sundays:</b> being available on weekends is part of the job, so they can’t be set here. Talk to your manager if something special comes up.'}</div>
       <div style="margin-top:8px">${list || '<div class="me-rules">Nothing yet: you’re shown as available any time.</div>'}</div></div>
     <div class="me-card"><h3>Add a time you can’t work</h3>
       <div class="me-form">
-        <label>Day<select id="me-un-dow">${[1, 2, 3, 4, 5, 6, 0].map(i => `<option value="${i}">${DOW_NAMES[i]}s</option>`).join('')}</select></label>
+        <label>Day<select id="me-un-dow">${(ru.unavail_weekends_allowed ? [1, 2, 3, 4, 5, 6, 0] : [1, 2, 3, 4, 5]).map(i => `<option value="${i}">${DOW_NAMES[i]}s</option>`).join('')}</select></label>
         <label style="flex-direction:row;align-items:center;gap:8px;font-size:14px;color:var(--ink)"><input type="checkbox" id="me-un-allday" checked style="min-height:auto" onchange="document.getElementById('me-un-times').style.display=this.checked?'none':'flex'"> All day</label>
         <div class="two" id="me-un-times" style="display:none"><label>From<input type="time" id="me-un-from" step="900"></label><label>Until<input type="time" id="me-un-until" step="900"></label></div>
-        <div class="two"><label>Starting<input type="date" id="me-un-start" min="${escAttr(earliest)}" value="${escAttr(earliest)}"></label>
-          <label>Until (optional)<input type="date" id="me-un-end" min="${escAttr(earliest)}"></label></div>
+        <div class="two"><label>Starting<input type="date" id="me-un-start" min="${escAttr(earliest)}" value="${escAttr(earliest)}" onchange="const e=document.getElementById('me-un-end'); e.min=this.value; e.max=meAddDays(this.value, ${Number(ru.unavail_max_days || 183)})"></label>
+          <label>Until<input type="date" id="me-un-end" min="${escAttr(earliest)}" max="${escAttr(meAddDays(earliest, Number(ru.unavail_max_days || 183)))}" required></label></div>
         <button class="ho-btn primary" style="min-height:46px" onclick="meAddUnavail()">Save</button>
       </div></div>`;
 }
@@ -3822,7 +3889,7 @@ async function meAddUnavail() {
   const { error } = await sb.rpc('hub_add_unavailability', { p_day_of_week: Number(v('me-un-dow')),
     p_start_time: all ? null : v('me-un-from') || null, p_end_time: all ? null : v('me-un-until') || null,
     p_effective_from: v('me-un-start') || null, p_effective_to: v('me-un-end') || null });
-  if (error) { document.getElementById('me-body').insertAdjacentHTML('afterbegin', `<div class="me-msg err" style="margin-bottom:10px">${esc(error.message)}</div>`); return; }
+  if (error) { document.getElementById('me-body').insertAdjacentHTML('afterbegin', `<div class="me-msg err" style="margin-bottom:10px">${esc(error.message)}</div>`); document.getElementById('me-body').scrollIntoView({ behavior: 'smooth' }); return; }
   await meLoadRequests(); meRenderAvail('<div class="me-msg ok" style="margin-bottom:10px">Saved.</div>');
 }
 async function meEndUnavail(id) {
@@ -3862,7 +3929,14 @@ async function openRulesPane() {
       <div class="two"><label>Longest request (days in a row)${num('max_days', 365)}</label><label>If longer${mode('max_days_mode')}</label></div>
       <div class="two"><label>Already off at the same studio that day${num('max_off_per_studio', 50)}</label><label>If that many are off${mode('max_off_mode')}</label></div>
       <div class="two"><label>Studios with this many staff or more…${num('large_studio_staff', 200)}</label><label>…can have this many off${num('max_off_large_studio', 50)}</label></div>
+      <div class="two"><label>Days off per year${num('annual_days', 365)}</label><label>…after this many years${num('senior_years', 50)}</label></div>
+      <div class="two"><label>Days off per year for them${num('annual_days_senior', 365)}</label><label>If over the yearly days${mode('annual_mode')}</label></div>
+      <div class="two"><label>Weekend days (Sat/Sun) off per quarter${num('weekend_days_per_quarter', 26)}</label><label>If more weekend days${mode('weekend_mode')}</label></div>
+      <div class="ho-title" style="font-size:17px;margin-top:6px">Sick leave (medical appointments)</div>
+      <div class="two"><label>Provinces (e.g. BC, or BC, ON)<input id="ru-sick_leave_provinces" value="${escAttr((ru.sick_leave_provinces || []).join(', '))}" ${ed}></label><label>Days per calendar year${num('sick_leave_days', 365)}</label></div>
       <div class="ho-title" style="font-size:17px;margin-top:6px">Unavailability and sick calls</div>
+      <div class="two"><label>Unavailability can last up to (days)${num('unavail_max_days', 730)}</label><label>…and must repeat at least (weeks)${num('unavail_min_repeats', 52)}</label></div>
+      <label style="flex-direction:row;align-items:center;gap:8px;font-size:14px;color:var(--ink)"><input type="checkbox" id="ru-unavail_weekends_allowed" ${ru.unavail_weekends_allowed ? 'checked' : ''} ${ed}> Staff can set Saturdays and Sundays as unavailable</label>
       <div class="two"><label>New unavailability starts at least (days ahead)${num('unavailability_notice_days', 365)}</label>
         <label>Sick call allowed when the shift starts within (hours)${num('sick_window_hours', 168)}</label></div>
       <label style="flex-direction:row;align-items:center;gap:8px;font-size:14px;color:var(--ink)"><input type="checkbox" id="ru-sick_reason_required" ${ru.sick_reason_required ? 'checked' : ''} ${ed} style="min-height:auto"> A note is required when calling in sick</label>
@@ -3891,7 +3965,13 @@ async function saveRules() {
   const patch = { notice_mode: v('notice_mode'), max_days: n('max_days'), max_days_mode: v('max_days_mode'),
     max_off_per_studio: n('max_off_per_studio'), max_off_mode: v('max_off_mode'), unavailability_notice_days: n('unavailability_notice_days'),
     sick_window_hours: n('sick_window_hours'), sick_reason_required: document.getElementById('ru-sick_reason_required').checked, updated_at: new Date().toISOString(),
-    large_studio_staff: n('large_studio_staff'), max_off_large_studio: n('max_off_large_studio') };
+    large_studio_staff: n('large_studio_staff'), max_off_large_studio: n('max_off_large_studio'),
+    annual_days: n('annual_days'), annual_days_senior: n('annual_days_senior'), senior_years: n('senior_years'), annual_mode: v('annual_mode'),
+    weekend_days_per_quarter: n('weekend_days_per_quarter'), weekend_mode: v('weekend_mode'),
+    sick_leave_days: n('sick_leave_days'),
+    sick_leave_provinces: v('sick_leave_provinces').split(/[ ,]+/).map(x => x.trim().toUpperCase()).filter(Boolean),
+    unavail_max_days: n('unavail_max_days'), unavail_min_repeats: n('unavail_min_repeats'),
+    unavail_weekends_allowed: document.getElementById('ru-unavail_weekends_allowed').checked };
   const tiers = [...document.querySelectorAll('#ru-tiers .ru-tier')].map(r => ({
     up_to_days: parseInt(r.querySelector('.ru-up').value, 10), notice_days: parseInt(r.querySelector('.ru-notice').value, 10) }))
     .filter(t => t.up_to_days > 0 && t.notice_days >= 0).sort((a, b) => a.up_to_days - b.up_to_days);
