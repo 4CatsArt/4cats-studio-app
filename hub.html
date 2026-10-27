@@ -1602,6 +1602,17 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
     </div>
     <p class="ho-intro" id="plan-intro"></p>
     <div class="plan-days" id="plan-days"></div>
+    <!-- Floor plan for the day (Day view's own code). Outside plan-body so redraws don't wipe it. -->
+    <div id="plan-floor" class="ho-card" style="display:none;margin-bottom:14px">
+      <div class="ho-head" style="margin-bottom:8px"><div class="ho-title" id="plan-floor-title" style="font-size:17px">🪑 Floor plan</div><span class="spacer"></span>
+        <button class="ho-btn" onclick="planToggleFloor(false)">Close</button></div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:1rem;flex-wrap:wrap">
+        <button id="fp-assign-btn" class="ho-btn primary" onclick="assignTablesForDay()">🪑 Assign tables for the day</button>
+        <button class="ho-btn" onclick="clearDayAssignments()" style="color:#b91c1c">🗑 Clear &amp; reassign</button>
+        <span id="fp-assign-status" class="goal-note"></span>
+      </div>
+      <div id="floor-view-content"><div class="goal-note">Loading…</div></div>
+    </div>
     <!-- Read by the party code copied from the Day view (gift card + calculator). -->
     <input type="hidden" id="date-picker" value=""><span id="studio-name" style="display:none"></span>
     <div id="plan-body"></div>
@@ -2664,6 +2675,7 @@ const planWriteName = p => p.nickname || p.full_name || p.name;   // the way the
 function planIsKids(x) { return x.session_type === 'class' || x.session_type === 'series' || /class \d+ of \d+|week session/i.test(x.title || ''); }
 
 async function loadPlanDay(date) {
+  if (!_plan || _plan.date !== date) { const fl = document.getElementById('plan-floor'); if (fl) fl.style.display = 'none'; }   // a new day: close the floor plan
   planDayStrip(date);
   const body = document.getElementById('plan-body');
   body.innerHTML = '<div class="ho-intro">Loading…</div>';
@@ -2889,7 +2901,8 @@ function renderPlanDay() {
               ${hc || cb ? `<span class="pp-chip ex">☕ Hot chocolate <b>${hc}</b></span><span class="pp-chip ex">🍬 Candy bags <b>${cb}</b></span>
                 <button class="ho-btn" onclick="planPrintExtras()">🖨 Print extras list</button>` : '<span class="goal-note">No hot chocolate or candy pre-orders.</span>'}
               ${glazing ? '<button class="ho-btn" onclick="planPrintGlazing()">🖨 Print all glazing</button>' : ''}
-              <button class="ho-btn" onclick="planEmail(null)">✉️ Email everyone booked today</button></div>`;
+              <button class="ho-btn" onclick="planEmail(null)">✉️ Email everyone booked today</button>
+              <button class="ho-btn" onclick="planToggleFloor(true)">🪑 Floor plan</button></div>`;
           })()}
           ${pp.missingGuests ? `<div class="pp-note">${pp.missingGuests} part${pp.missingGuests === 1 ? 'y has' : 'ies have'}n't entered a guest count yet, so ${pp.missingGuests === 1 ? 'it isn’t' : 'they aren’t'} in the total.</div>` : ''}</div>`;
       })()}
@@ -3841,6 +3854,865 @@ async function planEmailSend() {
   }
 }
 
+
+/* ==========================================================================
+   FLOOR PLAN — copied as-is from index.html (the schedule's Day view):
+   rooms + tables for the day, automatic table assignment, clear & reassign,
+   table pop-ups and moving a booking to another table (seating_assignments).
+   Changes for the Hub: it refreshes itself instead of switching the Day view's
+   tabs, and is ready to send the signed-in login (window._hubToken, off for now).
+   ========================================================================== */
+let fpTableSlotMap = {}  // tableId → {table, slots} — filled in by loadFloorView (from index.html)
+const SESSION_TYPE_COLOURS = {
+  party:    { bg: '#fce7f3', border: '#f472b6', text: '#9d174d' },
+  minimake: { bg: '#fef9c3', border: '#facc15', text: '#854d0e' },
+  glazing:  { bg: '#ede9fe', border: '#a78bfa', text: '#5b21b6' },
+  wheel:    { bg: '#f3f4f6', border: '#9ca3af', text: '#374151' },
+  kids:     { bg: '#dcfce7', border: '#4ade80', text: '#166534' },
+  default:  { bg: '#dbeafe', border: '#60a5fa', text: '#1e40af' },
+}
+
+function getSessionColour(session) {
+  if (!session) return SESSION_TYPE_COLOURS.default
+  const title = (session.title || '').toLowerCase()
+  const type = (session.session_type || '').toLowerCase()
+  if (type === 'party') return SESSION_TYPE_COLOURS.party
+  if (title.includes('mini make')) return SESSION_TYPE_COLOURS.minimake
+  if (type === 'glazing' || title.includes('glazing')) return SESSION_TYPE_COLOURS.glazing
+  if (title.includes('wheel')) return SESSION_TYPE_COLOURS.wheel
+  if (/class\s+\d+\s+of\s+\d+/i.test(session.title || '') || title.includes('kids')) return SESSION_TYPE_COLOURS.kids
+  return SESSION_TYPE_COLOURS.default
+}
+
+// Keep getFloorColour as alias for backwards compat with legend rendering
+function getFloorColour(timeStr) { return SESSION_TYPE_COLOURS.default }
+
+// ── LOAD FLOOR VIEW ───────────────────────────────────────────────
+// Floor plan grid constants (must match admin.html)
+const FP_CELL_W = 100
+const FP_CELL_H = 80
+const FP_THICK = 4
+
+async function loadFloorView() {
+  // colour system is now session-type based
+  const el = document.getElementById('floor-view-content')
+  el.innerHTML = '<div class="loading">Loading floor plan…</div>'
+  const today = dateStr(currentDate)
+
+  // Load everything in parallel
+  const [tablesRes, roomsRes, featuresRes, sessionsRes] = await Promise.all([
+    fetch(SUPABASE_URL + '/rest/v1/studio_tables?studio_id=eq.' + currentStudioId + '&is_active=eq.true&order=table_number.asc', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    }),
+    fetch(SUPABASE_URL + '/rest/v1/studio_rooms?studio_id=eq.' + currentStudioId + '&order=sort_order.asc', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    }),
+    fetch(SUPABASE_URL + '/rest/v1/studio_cell_features?studio_id=eq.' + currentStudioId, {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    }),
+    sb.from('sessions').select('id, title, session_time, session_type, capacity').eq('studio_id', currentStudioId).eq('session_date', today).order('session_time')
+  ])
+
+  const tablesJson = await tablesRes.json()
+  const tables = Array.isArray(tablesJson) ? tablesJson : []
+  const roomsJson = await roomsRes.json()
+  const rooms = Array.isArray(roomsJson) ? roomsJson : []
+  const featuresJson = featuresRes.ok ? await featuresRes.json().catch(() => []) : []
+  const features = Array.isArray(featuresJson) ? featuresJson : []
+  const sessions = sessionsRes.data || []
+
+  if (!tablesRes.ok) {
+    el.innerHTML = '<div style="color:#c00;font-size:13px;padding:2rem 0">Error loading tables (' + tablesRes.status + '). Check that studio_tables is exposed in Supabase API settings.</div>'
+    return
+  }
+  if (!tables.length) {
+    el.innerHTML = '<div style="color:#aaa;font-size:13px;padding:2rem 0">No tables configured for this studio yet. Set them up in the admin 🪑 Tables tab.</div>'
+    return
+  }
+
+  // Load seating assignments
+  const sessionIds = sessions.map(s => s.id)
+  let assignments = []
+  if (sessionIds.length) {
+    const aRes = await fetch(SUPABASE_URL + '/rest/v1/seating_assignments?session_id=in.(' + sessionIds.join(',') + ')', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    })
+    const aJson = await aRes.json()
+    assignments = Array.isArray(aJson) ? aJson : []
+  }
+
+  // Load bookings
+  let bookings = []
+  if (sessionIds.length) {
+    const { data: bData } = await sb.from('bookings')
+      .select('id, session_id, customer_name, qty, shopify_order_name')
+      .in('session_id', sessionIds).gt('qty', 0).is('returned_at', null)
+    bookings = bData || []
+  }
+
+  // Build tableMap: tableId → array of slot objects
+  const tableMap = {}
+  tables.forEach(t => { tableMap[t.id] = [] })
+
+  const assignByTableSession = {}
+  assignments.forEach(a => {
+    const key = a.table_id + '|' + a.session_id
+    if (!assignByTableSession[key]) assignByTableSession[key] = []
+    assignByTableSession[key].push(a)
+  })
+  Object.entries(assignByTableSession).forEach(([key, aList]) => {
+    const [tableId, sessionId] = key.split('|')
+    const session = sessions.find(s => s.id === sessionId)
+    if (!session || !tableMap[tableId]) return
+    const colour = getSessionColour(session)
+    const sessionBookings = aList.map(a => {
+      const b = bookings.find(bk => bk.id === a.booking_id)
+      return { name: a.customer_name || (b ? b.customer_name : '?'), qty: b ? b.qty : 1, bookingId: a.booking_id, assignmentId: a.id, assignedBy: a.assigned_by }
+    })
+    const totalGuests = sessionBookings.reduce((s, b) => s + (b.qty || 1), 0)
+    tableMap[tableId].push({ session, sessionBookings, totalGuests, colour, hasManual: aList.some(a => a.assigned_by === 'manual') })
+  })
+
+  // ── LEGEND ────────────────────────────────────────────────────────
+  const legendItems = [
+    { label: 'Party', key: 'party' },
+    { label: 'Mini Make', key: 'minimake' },
+    { label: 'Glazing', key: 'glazing' },
+    { label: 'Wheel', key: 'wheel' },
+    { label: 'Kids Class', key: 'kids' },
+    { label: 'Workshop / Other', key: 'default' },
+  ]
+  let legendHtml = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:1.2rem;align-items:center">'
+  legendHtml += '<span style="font-size:12px;color:#888">Session types:</span>'
+  legendItems.forEach(item => {
+    const c = SESSION_TYPE_COLOURS[item.key]
+    legendHtml += `<span style="font-size:12px;padding:2px 10px;border-radius:10px;background:${c.bg};color:${escText(c.text)};border:1px solid ${c.border}">${item.label}</span>`
+  })
+  const sessionIdsWithBookings = new Set(bookings.map(b => b.session_id))
+  const unassignedSessions = sessions.filter(s =>
+    !assignments.some(a => a.session_id === s.id) && sessionIdsWithBookings.has(s.id)
+  )
+  if (unassignedSessions.length) {
+    legendHtml += `<span style="font-size:12px;color:#e65100;margin-left:8px">⚠ ${unassignedSessions.length} session${unassignedSessions.length > 1 ? 's' : ''} not yet assigned</span>`
+  }
+  legendHtml += '<span style="font-size:12px;color:#aaa;margin-left:4px">· 🚪 door &nbsp; <span style="color:#4285f4">🪟 window</span></span>'
+  legendHtml += '</div>'
+
+  // ── ROOM LAYOUT ───────────────────────────────────────────────────
+  const roomList = Array.isArray(rooms) ? rooms : []
+  const roomNames = roomList.map(r => r.name)
+  const featList = Array.isArray(features) ? features : []
+
+  // Tables with no room or unknown room
+  const unroomed = tables.filter(t => !t.room_name || !roomNames.includes(t.room_name))
+
+  let roomsHtml = ''
+
+  // Helper: build feature SVG for a cell
+  function fpFeatureSvg(cellFeats) {
+    if (!cellFeats || !cellFeats.length) return ''
+    const W = FP_CELL_W, H = FP_CELL_H
+    const DOOR_COLOR = '#444'
+    const WIN_COLOR = '#4285f4'
+    let parts = ''
+    cellFeats.forEach(function(f) {
+      const edge = f.edge, type = f.feature_type
+      if (type === 'door') {
+        const GAP = W * 0.28
+        const GAPV = H * 0.32
+        if (edge === 'top') {
+          parts += `<line x1="0" y1="1" x2="${W/2-GAP/2}" y2="1" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<line x1="${W/2+GAP/2}" y1="1" x2="${W}" y2="1" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<path d="M ${W/2-GAP/2} 1 Q ${W/2} ${GAP*0.8} ${W/2+GAP/2} 1" stroke="${DOOR_COLOR}" stroke-width="1" fill="none" stroke-dasharray="2,2"/>`
+        } else if (edge === 'bottom') {
+          const y = H-1
+          parts += `<line x1="0" y1="${y}" x2="${W/2-GAP/2}" y2="${y}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<line x1="${W/2+GAP/2}" y1="${y}" x2="${W}" y2="${y}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<path d="M ${W/2-GAP/2} ${y} Q ${W/2} ${H-1-GAP*0.8} ${W/2+GAP/2} ${y}" stroke="${DOOR_COLOR}" stroke-width="1" fill="none" stroke-dasharray="2,2"/>`
+        } else if (edge === 'left') {
+          parts += `<line x1="1" y1="0" x2="1" y2="${H/2-GAPV/2}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<line x1="1" y1="${H/2+GAPV/2}" x2="1" y2="${H}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<path d="M 1 ${H/2-GAPV/2} Q ${GAPV*0.8} ${H/2} 1 ${H/2+GAPV/2}" stroke="${DOOR_COLOR}" stroke-width="1" fill="none" stroke-dasharray="2,2"/>`
+        } else if (edge === 'right') {
+          const x = W-1
+          parts += `<line x1="${x}" y1="0" x2="${x}" y2="${H/2-GAPV/2}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<line x1="${x}" y1="${H/2+GAPV/2}" x2="${x}" y2="${H}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<path d="M ${x} ${H/2-GAPV/2} Q ${W-1-GAPV*0.8} ${H/2} ${x} ${H/2+GAPV/2}" stroke="${DOOR_COLOR}" stroke-width="1" fill="none" stroke-dasharray="2,2"/>`
+        }
+      } else if (type === 'window') {
+        const TICK = 5, N = 3
+        if (edge === 'top') {
+          parts += `<line x1="0" y1="1" x2="${W}" y2="1" stroke="${WIN_COLOR}" stroke-width="${FP_THICK}"/>`
+          for (let i=1;i<=N;i++) { const tx=(W/(N+1))*i; parts += `<line x1="${tx}" y1="1" x2="${tx}" y2="${1+TICK}" stroke="${WIN_COLOR}" stroke-width="1.5"/>` }
+        } else if (edge === 'bottom') {
+          const y=H-1
+          parts += `<line x1="0" y1="${y}" x2="${W}" y2="${y}" stroke="${WIN_COLOR}" stroke-width="${FP_THICK}"/>`
+          for (let i=1;i<=N;i++) { const tx=(W/(N+1))*i; parts += `<line x1="${tx}" y1="${y}" x2="${tx}" y2="${y-TICK}" stroke="${WIN_COLOR}" stroke-width="1.5"/>` }
+        } else if (edge === 'left') {
+          parts += `<line x1="1" y1="0" x2="1" y2="${H}" stroke="${WIN_COLOR}" stroke-width="${FP_THICK}"/>`
+          for (let i=1;i<=N;i++) { const ty=(H/(N+1))*i; parts += `<line x1="1" y1="${ty}" x2="${1+TICK}" y2="${ty}" stroke="${WIN_COLOR}" stroke-width="1.5"/>` }
+        } else if (edge === 'right') {
+          const x=W-1
+          parts += `<line x1="${x}" y1="0" x2="${x}" y2="${H}" stroke="${WIN_COLOR}" stroke-width="${FP_THICK}"/>`
+          for (let i=1;i<=N;i++) { const ty=(H/(N+1))*i; parts += `<line x1="${x}" y1="${ty}" x2="${x-TICK}" y2="${ty}" stroke="${WIN_COLOR}" stroke-width="1.5"/>` }
+        }
+      }
+    })
+    return `<svg style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible" viewBox="0 0 ${W} ${H}">${parts}</svg>`
+  }
+
+  // Helper: build a positioned table card on the grid
+  function fpTableCard(t) {
+    const slots = tableMap[t.id] || []
+    const maxConcurrent = slots.reduce((max, sl) => Math.max(max, sl.totalGuests), 0)
+    const isOver = maxConcurrent > t.capacity
+    const isEmpty = slots.length === 0
+    const isPortrait = t.orientation === 'portrait'
+    const isRound = t.shape === 'round'
+
+    const px = (t.position_x || 0) * FP_CELL_W
+    const py = (t.position_y || 0) * FP_CELL_H
+    const PAD = 6
+    const cardW = isRound ? FP_CELL_H - PAD*2 : isPortrait ? FP_CELL_W * 0.55 : FP_CELL_W * 2 - PAD*2
+    const cardH = isRound ? FP_CELL_H - PAD*2 : isPortrait ? FP_CELL_H * 2 - PAD*2 : FP_CELL_H * 0.55
+    const spanW = isPortrait ? FP_CELL_W : isRound ? FP_CELL_W : FP_CELL_W * 2
+    const spanH = isPortrait ? FP_CELL_H * 2 : FP_CELL_H
+    const radius = isRound ? '50%' : '6px'
+    const borderColor = isOver ? '#f43f5e' : isEmpty ? '#ccc' : '#888'
+    const bg = isEmpty ? '#f8f8f6' : '#fff'
+
+    // Compact slot badges — click table for full detail
+    let slotContent = ''
+    if (isEmpty) {
+      slotContent = `<div style="font-size:9px;color:#ccc;margin-top:2px">empty</div>`
+    } else {
+      slots.forEach(sl => {
+        const c = sl.colour
+        const timeLabel = fmtTime(sl.session.session_time)
+        const shortTitle = sl.session.title.length > 16 ? sl.session.title.substring(0,14) + '…' : sl.session.title
+        slotContent += `<div style="background:${c.bg};border:1px solid ${c.border};border-radius:3px;padding:2px 4px;margin-top:2px;font-size:9px;line-height:1.3">
+          <div style="font-weight:600;color:${escText(c.text)}">${timeLabel} · ${sl.totalGuests} guest${sl.totalGuests !== 1 ? 's' : ''}</div>
+          <div style="color:#555">${shortTitle}</div>
+        </div>`
+      })
+    }
+
+    // Encode table data for popup — store in a global map keyed by table id
+    fpTableSlotMap[t.id] = { table: t, slots: slots }
+
+    return `<div style="position:absolute;left:${px}px;top:${py}px;width:${spanW}px;height:${spanH}px;display:flex;align-items:center;justify-content:center;z-index:2;box-sizing:border-box">
+      <div onclick="showTablePopup('${t.id}')" style="width:${cardW}px;height:${cardH}px;border-radius:${radius};border:2px solid ${borderColor};background:${bg};box-shadow:0 2px 6px rgba(0,0,0,0.07);position:relative;overflow:hidden;display:flex;flex-direction:column;align-items:center;padding:4px 4px 2px;box-sizing:border-box;cursor:pointer;transition:box-shadow 0.15s" onmouseover="this.style.boxShadow='0 4px 14px rgba(0,0,0,0.15)'" onmouseout="this.style.boxShadow='0 2px 6px rgba(0,0,0,0.07)'">
+        <div style="font-weight:700;font-size:${isPortrait ? 11 : 12}px;color:${isEmpty ? '#bbb' : '#222'};line-height:1;white-space:nowrap">T${t.table_number}${t.label ? ' <span style="font-weight:400;color:#aaa;font-size:9px">' + t.label + '</span>' : ''}</div>
+        <div style="font-size:9px;color:${isOver ? '#f43f5e' : '#aaa'}">${maxConcurrent}/${t.capacity}${isOver ? ' ⚠' : ''}</div>
+        <div style="width:100%;overflow:hidden;flex:1">${slotContent}</div>
+      </div>
+    </div>`
+  }
+
+  // Render each room as a section
+  if (roomList.length) {
+    roomList.forEach(function(room, rIdx) {
+      const cols = room.grid_cols || 8
+      const rows = room.grid_rows || 2
+      const roomTables = tables.filter(t => t.room_name === room.name)
+      const canvasW = cols * FP_CELL_W
+      const canvasH = rows * FP_CELL_H
+
+      roomsHtml += `<div style="margin-bottom:1.5rem">`
+      // Room header
+      roomsHtml += `<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <span style="font-weight:600;font-size:14px">🏠 ${escText(room.name)}</span>
+        <span style="font-size:12px;color:#aaa">${roomTables.length} table${roomTables.length !== 1 ? 's' : ''}</span>
+      </div>`
+
+      // Grid canvas
+      roomsHtml += `<div style="overflow-x:auto;background:#fafafa;border:1.5px solid #e0e0d8;border-radius:8px;padding:8px">`
+      roomsHtml += `<div style="position:relative;width:${canvasW}px;height:${canvasH}px">`
+
+      // Draw cells with features
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const x = col * FP_CELL_W
+          const y = row * FP_CELL_H
+          const cellFeats = featList.filter(f => f.room_name === room.name && f.cell_x === col && f.cell_y === row)
+          roomsHtml += `<div style="position:absolute;left:${x}px;top:${y}px;width:${FP_CELL_W}px;height:${FP_CELL_H}px;border:1px dashed #e0e0d8;box-sizing:border-box">${fpFeatureSvg(cellFeats)}</div>`
+        }
+      }
+
+      // Draw tables
+      roomTables.forEach(t => { roomsHtml += fpTableCard(t) })
+
+      roomsHtml += `</div></div>`
+
+      // Divider between rooms (not after last)
+      if (rIdx < roomList.length - 1) {
+        roomsHtml += `<div style="display:flex;align-items:center;gap:10px;margin:1rem 0 0.5rem">
+          <div style="flex:1;height:2px;background:linear-gradient(to right,#e0e0d8,transparent)"></div>
+          <span style="font-size:11px;color:#ccc">▼</span>
+          <div style="flex:1;height:2px;background:linear-gradient(to left,#e0e0d8,transparent)"></div>
+        </div>`
+      }
+
+      roomsHtml += `</div>`
+    })
+  }
+
+  // Unroomed tables fallback
+  if (unroomed.length) {
+    roomsHtml += `<div style="margin-top:1rem;padding:12px;border:1.5px dashed #ddd;border-radius:8px">
+      <div style="font-size:12px;color:#aaa;margin-bottom:8px">Unassigned to a room:</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px">`
+    unroomed.forEach(t => {
+      const slots = tableMap[t.id] || []
+      const totalSeated = slots.reduce((s, sl) => s + sl.totalGuests, 0)
+      const isOver = totalSeated > t.capacity
+      const isEmpty = slots.length === 0
+      let slotsHtml = ''
+      slots.forEach(sl => {
+        const c = sl.colour
+        slotsHtml += `<div style="background:${c.bg};border:1px solid ${c.border};border-radius:4px;padding:3px 6px;margin-top:4px;font-size:11px">
+          <div style="font-weight:600;color:${escText(c.text)}">${fmtTime(sl.session.session_time)}</div>
+          <div style="color:#555">${sl.totalGuests} guests</div>
+        </div>`
+      })
+      roomsHtml += `<div style="border:1.5px solid ${isOver ? '#f43f5e' : isEmpty ? '#e8e8e0' : '#c8c8c0'};border-radius:8px;padding:10px;background:${isEmpty ? '#fafafa' : '#fff'}">
+        <div style="font-weight:700;font-size:14px;color:${isEmpty ? '#ccc' : '#222'}">T${t.table_number}</div>
+        <div style="font-size:11px;color:#aaa">${totalSeated}/${t.capacity}</div>
+        ${isEmpty ? '<div style="font-size:11px;color:#ccc">Empty</div>' : slotsHtml}
+      </div>`
+    })
+    roomsHtml += `</div></div>`
+  }
+
+  el.innerHTML = legendHtml + roomsHtml
+}
+
+// ── AUTO-ASSIGN ENGINE ────────────────────────────────────────────
+
+async function assignTablesForDay() {
+  // Handle both the day-view button and floor-plan button
+  const btn = document.getElementById('assign-tables-btn') || document.getElementById('fp-assign-btn')
+  const fpBtn = document.getElementById('fp-assign-btn')
+  const dayBtn = document.getElementById('assign-tables-btn')
+  const statusEl = document.getElementById('fp-assign-status')
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Assigning…' }
+  if (fpBtn && fpBtn !== btn) { fpBtn.disabled = true; fpBtn.textContent = '⏳ Assigning…' }
+  if (statusEl) statusEl.textContent = ''
+
+  const today = dateStr(currentDate)
+
+  if (!currentStudioId) {
+    alert('No studio selected.')
+    if (dayBtn) { dayBtn.textContent = '🪑 Assign Tables'; dayBtn.disabled = false }
+    if (fpBtn) { fpBtn.textContent = '🪑 Assign Tables'; fpBtn.disabled = false }
+    return
+  }
+
+  try {
+    // 1. Load tables for this studio
+    const tablesRes = await fetch(SUPABASE_URL + '/rest/v1/studio_tables?studio_id=eq.' + currentStudioId + '&is_active=eq.true&order=table_number.asc', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    })
+    const tables = await tablesRes.json()
+    if (!Array.isArray(tables) || !tables.length) {
+      alert('No tables configured for this studio. Set them up in admin → 🪑 Tables first.')
+      return
+    }
+
+    // 2. Load table groups
+    const groupsRes = await fetch(SUPABASE_URL + '/rest/v1/studio_table_groups?studio_id=eq.' + currentStudioId + '&order=sort_order.asc', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    })
+    const groups = await groupsRes.json()
+    const tableGroups = Array.isArray(groups) ? groups : []
+
+    // 3. Load today's sessions
+    console.log('[Assign] studio:', currentStudioId, 'date:', today)
+    const sessRes = await fetch(SUPABASE_URL + '/rest/v1/sessions?studio_id=eq.' + currentStudioId + '&session_date=eq.' + today + '&order=session_time.asc&select=id,title,session_time,session_type,capacity,spaces_left_cache,duration_minutes', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    })
+    const sessions = await sessRes.json()
+    console.log('[Assign] sessions found:', Array.isArray(sessions) ? sessions.length : sessions)
+    if (!Array.isArray(sessions) || !sessions.length) {
+      alert('No sessions found for ' + today + ' at this studio.')
+      if (dayBtn) { dayBtn.textContent = '🪑 Assign Tables'; dayBtn.disabled = false }
+      if (fpBtn) { fpBtn.textContent = '🪑 Assign Tables'; fpBtn.disabled = false }
+      return
+    }
+
+    // 4. Load bookings
+    const sessionIds = sessions.map(s => s.id)
+    const { data: bookings } = await sb.from('bookings')
+      .select('id, session_id, customer_name, qty, shopify_order_name, raw_payload')
+      .in('session_id', sessionIds).gt('qty', 0).is('returned_at', null)
+
+    // 5. Load existing assignments — skip any session that already has manual assignments
+    const aRes = await fetch(SUPABASE_URL + '/rest/v1/seating_assignments?session_id=in.(' + sessionIds.join(',') + ')', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    })
+    const existingAssignments = await aRes.json()
+    const manualSessionIds = new Set(
+      (Array.isArray(existingAssignments) ? existingAssignments : [])
+        .filter(a => a.assigned_by === 'manual')
+        .map(a => a.session_id)
+    )
+    // Also skip fully auto-assigned sessions (don't overwrite)
+    const autoAssignedSessionIds = new Set(
+      (Array.isArray(existingAssignments) ? existingAssignments : [])
+        .map(a => a.session_id)
+    )
+
+    // 6. Build table availability tracker
+    // tableHold[tableId] = array of {startMinutes, endMinutes}
+    const tableHold = {}
+    tables.forEach(t => { tableHold[t.id] = [] })
+
+    // Pre-populate holds from existing manual assignments
+    if (existingAssignments && existingAssignments.length) {
+      existingAssignments.forEach(a => {
+        const session = sessions.find(s => s.id === a.session_id)
+        if (!session) return
+        const startMins = timeToMins(session.session_time)
+        const holdMins = getHoldMinutes(session)
+        if (tableHold[a.table_id]) {
+          tableHold[a.table_id].push({ start: startMins, end: startMins + holdMins })
+        }
+      })
+    }
+
+    // Helpers
+    function timeToMins(timeStr) {
+      if (!timeStr) return 0
+      const parts = timeStr.split(':')
+      return parseInt(parts[0]) * 60 + parseInt(parts[1])
+    }
+
+    function getHoldMinutes(session) {
+      if (session.session_type === 'party') {
+        // Find next party session to determine how long to hold
+        const myMins = timeToMins(session.session_time)
+        const nextParty = sessions
+          .filter(s => s.session_type === 'party' && timeToMins(s.session_time) > myMins)
+          .sort((a, b) => timeToMins(a.session_time) - timeToMins(b.session_time))[0]
+        if (nextParty) {
+          // Hold until next party starts (so same tables can't be reused)
+          return timeToMins(nextParty.session_time) - myMins + 1
+        }
+        // No next party — use actual duration or 2.5 hours default
+        return (session.duration_minutes || 150) + 15
+      }
+      return 120 // 2-hour hold for all other types
+    }
+
+    function isTableFree(tableId, startMins, endMins) {
+      return (tableHold[tableId] || []).every(h => endMins <= h.start || startMins >= h.end)
+    }
+
+    function holdTable(tableId, startMins, endMins) {
+      if (tableHold[tableId]) tableHold[tableId].push({ start: startMins, end: endMins })
+    }
+
+    // 7. Sort sessions by time then by type (parties first within same time)
+    const sessionsToAssign = sessions
+      .filter(s => !manualSessionIds.has(s.id) && !autoAssignedSessionIds.has(s.id))
+      .sort((a, b) => {
+        const tA = timeToMins(a.session_time), tB = timeToMins(b.session_time)
+        if (tA !== tB) return tA - tB
+        if (a.session_type === 'party' && b.session_type !== 'party') return -1
+        if (b.session_type === 'party' && a.session_type !== 'party') return 1
+        return 0
+      })
+
+    const usedGroupIds = new Set() // track which groups have been assigned a party
+
+    const newAssignments = []
+
+    // Debug: log all party sessions
+    const partySessions = sessionsToAssign.filter(s => s.session_type === 'party')
+    console.log('[Party sessions to assign]', partySessions.map(s => s.session_time + ' id:' + s.id.substring(0,8)))
+
+    for (const session of sessionsToAssign) {
+      const sessionBookings = (bookings || []).filter(b => b.session_id === session.id)
+      if (!sessionBookings.length) continue
+
+      const startMins = timeToMins(session.session_time)
+      const holdMins = getHoldMinutes(session)
+      const endMins = startMins + holdMins
+
+      const isParty = session.session_type === 'party'
+      const isGlazing = session.session_type === 'glazing'
+      const isMiniMake = (session.title || '').toLowerCase().includes('mini make')
+      const isWheel = (session.title || '').toLowerCase().includes('wheel')
+      const isKidsClass = /class\s+\d+\s+of\s+\d+/i.test(session.title || '')
+      const isSplatter = isParty && (session.title || '').toLowerCase().includes('splatter')
+
+      if (isParty) {
+        // Each booking is a separate party — assign a unique group to each booking
+        const tablesNeeded = 2
+
+        console.log('[Party] session:', session.session_time, 'bookings:', sessionBookings.length, '(each gets its own group)')
+
+        for (const booking of sessionBookings) {
+          const sortedForParty = isSplatter
+            ? tableGroups.slice().sort((a, b) => {
+                const aHasSplatter = (a.table_ids || []).some(id => { const t = tables.find(x => x.id === id); return t && t.is_splatter_preferred })
+                const bHasSplatter = (b.table_ids || []).some(id => { const t = tables.find(x => x.id === id); return t && t.is_splatter_preferred })
+                if (aHasSplatter && !bHasSplatter) return -1
+                if (!aHasSplatter && bHasSplatter) return 1
+                return (a.sort_order || 0) - (b.sort_order || 0)
+              })
+            : tableGroups
+
+          let bookingAssigned = false
+          for (const group of sortedForParty) {
+            if (usedGroupIds.has(group.id)) continue
+            const groupTables = (group.table_ids || []).map(id => tables.find(t => t.id === id)).filter(Boolean)
+            if (groupTables.length < tablesNeeded) continue
+            const candidateTables = groupTables.slice(0, tablesNeeded)
+            const allFree = candidateTables.every(t => isTableFree(t.id, startMins, endMins))
+            if (!allFree) continue
+
+            candidateTables.forEach(t => { holdTable(t.id, startMins, endMins) })
+            usedGroupIds.add(group.id)
+            console.log('[Party assigned] booking:', booking.customer_name, 'session:', session.session_time, 'group:', group.name, 'tables:', candidateTables.map(t => 'T' + t.table_number))
+
+            // First table gets the actual booking, rest are reserved for the party
+            newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: candidateTables[0].id, booking_id: booking.id, customer_name: booking.customer_name, assigned_by: 'auto' })
+            for (let i = 1; i < candidateTables.length; i++) {
+              newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: candidateTables[i].id, booking_id: null, customer_name: booking.customer_name + ' (cont.)', assigned_by: 'auto' })
+            }
+            bookingAssigned = true
+            break
+          }
+
+          if (!bookingAssigned) {
+            // Fallback: use any free party-preferred or neutral tables
+            console.log('[Party FALLBACK] booking:', booking.customer_name, 'session:', session.session_time)
+            const pool = []
+            const addP = t => { if (!pool.find(x => x.id === t.id)) pool.push(t) }
+            tables.filter(t => t.is_kids_party_preferred && isTableFree(t.id, startMins, endMins)).forEach(addP)
+            tables.filter(t => isTableFree(t.id, startMins, endMins) && !t.is_kids_party_preferred && !t.is_glazing_preferred && !t.is_glazing_only && !t.is_minimake_preferred && !t.is_wheel_preferred && !t.is_kids_class_preferred).forEach(addP)
+            tables.filter(t => isTableFree(t.id, startMins, endMins) && !t.is_kids_party_preferred && !t.is_glazing_only).forEach(addP)
+            const picked = pool.slice(0, tablesNeeded)
+            picked.forEach(t => { holdTable(t.id, startMins, endMins) })
+            newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: picked[0].id, booking_id: booking.id, customer_name: booking.customer_name, assigned_by: 'auto' })
+            for (let i = 1; i < picked.length; i++) {
+              newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: picked[i].id, booking_id: null, customer_name: booking.customer_name + ' (cont.)', assigned_by: 'auto' })
+            }
+          }
+        }
+
+      } else {
+        // Workshop / glazing / mini make / wheel / kids class
+        // Determine if this session has a preferred table type
+        const hasPreference = isGlazing || isMiniMake || isWheel || isKidsClass
+
+        // Free tables helper
+        const isFreeAndAvailable = t => isTableFree(t.id, startMins, endMins)
+
+        // ALL free tables (excluding glazing-only for non-glazing, party-only for non-party)
+        const allAvailable = tables.filter(t => {
+          if (!isFreeAndAvailable(t)) return false
+          if (t.is_glazing_only && !isGlazing) return false
+          if (t.is_kids_party_preferred && !isParty) return false
+          return true
+        })
+
+        // Tier 1: preferred for THIS session type + same-type reuse
+        const tier1 = allAvailable.filter(t => {
+          const isPreferredForThis = (
+            (isGlazing && t.is_glazing_preferred) ||
+            (isMiniMake && t.is_minimake_preferred) ||
+            (isWheel && t.is_wheel_preferred) ||
+            (isKidsClass && t.is_kids_class_preferred)
+          )
+          if (isPreferredForThis) return true
+          // Same-type reuse
+          return (tableHold[t.id] || []).some(h => {
+            const prev = sessions.find(s => timeToMins(s.session_time) + getHoldMinutes(s) === h.end)
+            if (!prev) return false
+            return (isGlazing && prev.session_type === 'glazing') ||
+              (isMiniMake && (prev.title||'').toLowerCase().includes('mini make')) ||
+              (isWheel && (prev.title||'').toLowerCase().includes('wheel')) ||
+              (isKidsClass && /class\s+\d+\s+of\s+\d+/i.test(prev.title||''))
+          })
+        })
+
+        // Tier 2: no preference flags at all (truly neutral)
+        const tier2 = allAvailable.filter(t =>
+          !t.is_glazing_preferred && !t.is_minimake_preferred &&
+          !t.is_wheel_preferred && !t.is_kids_class_preferred
+        )
+
+        // Tier 3: preferred for OTHER types (avoid but use rather than leave unassigned)
+        const tier3 = allAvailable.filter(t => {
+          const isPreferredForThis = (isGlazing && t.is_glazing_preferred) ||
+            (isMiniMake && t.is_minimake_preferred) ||
+            (isWheel && t.is_wheel_preferred) ||
+            (isKidsClass && t.is_kids_class_preferred)
+          return !isPreferredForThis
+        })
+
+        // Tier 4: glazing-only as absolute last resort for non-glazing
+        const tier4 = tables.filter(t =>
+          isFreeAndAvailable(t) && t.is_glazing_only && !isGlazing
+        )
+
+        // Build candidate list — guaranteed non-empty if ANY table is free
+        const candidates = []
+        const add = t => { if (!candidates.find(c => c.id === t.id)) candidates.push(t) }
+        tier1.forEach(add)
+        tier2.forEach(add)
+        tier3.forEach(add)
+        tier4.forEach(add)
+
+        if (candidates.length === 0) {
+          console.warn('[Assign] No candidates for session:', session.title, '@', session.session_time)
+        }
+
+        // Fill tables: pack bookings into seats, move to next table when full
+        let tableIdx = 0
+        let seatsUsedOnCurrentTable = 0
+
+        for (const b of sessionBookings) {
+          if (tableIdx >= candidates.length) break // no more tables
+          const t = candidates[tableIdx]
+          // Will this booking fit?
+          if (seatsUsedOnCurrentTable + (b.qty || 1) > t.capacity && seatsUsedOnCurrentTable > 0) {
+            holdTable(t.id, startMins, endMins)
+            tableIdx++
+            seatsUsedOnCurrentTable = 0
+            if (tableIdx >= candidates.length) break
+          }
+          const currentTable = candidates[tableIdx]
+          if (seatsUsedOnCurrentTable === 0) {
+            // Starting a new table — check it's still free (might have been taken by previous booking)
+            if (!isTableFree(currentTable.id, startMins, endMins)) {
+              tableIdx++
+              seatsUsedOnCurrentTable = 0
+              if (tableIdx >= candidates.length) break
+            }
+          }
+          newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: candidates[tableIdx].id, booking_id: b.id, customer_name: b.customer_name, assigned_by: 'auto' })
+          seatsUsedOnCurrentTable += (b.qty || 1)
+        }
+        // Hold all tables used
+        const usedTableIds = [...new Set(newAssignments.filter(a => a.session_id === session.id).map(a => a.table_id))]
+        usedTableIds.forEach(tid => { if (isTableFree(tid, startMins, endMins)) holdTable(tid, startMins, endMins) })
+      }
+    }
+
+    // 8. Write new assignments to Supabase
+    if (!newAssignments.length) {
+      alert('All sessions are already assigned or have no bookings.')
+      return
+    }
+
+    const insertRes = await fetch(SUPABASE_URL + '/rest/v1/seating_assignments', {
+      method: 'POST',
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY), 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify(newAssignments)
+    })
+
+    if (!insertRes.ok) {
+      const err = await insertRes.json().catch(() => ({}))
+      throw new Error(err.message || 'HTTP ' + insertRes.status)
+    }
+
+    if (dayBtn) { dayBtn.textContent = '✓ Assigned!'; setTimeout(() => { dayBtn.textContent = '🪑 Assign Tables'; dayBtn.disabled = false }, 2500) }
+    if (fpBtn) { fpBtn.textContent = '✓ Assigned!'; setTimeout(() => { fpBtn.textContent = '🪑 Assign Tables'; fpBtn.disabled = false }, 2500) }
+    if (statusEl) { statusEl.textContent = 'Tables assigned for ' + today; setTimeout(() => { statusEl.textContent = '' }, 4000) }
+
+    // Switch to floor view to show result
+    loadFloorView()
+
+  } catch(e) {
+    alert('Assignment failed: ' + e.message)
+    if (dayBtn) { dayBtn.textContent = '🪑 Assign Tables'; dayBtn.disabled = false }
+    if (fpBtn) { fpBtn.textContent = '🪑 Assign Tables'; fpBtn.disabled = false }
+  }
+}
+
+// ── REASSIGN MODAL (from floor plan) ─────────────────────────────
+
+async function openReassignModal(assignmentId, bookingId, customerName, currentTableId) {
+  // Load all tables for this studio
+  const res = await fetch(SUPABASE_URL + '/rest/v1/studio_tables?studio_id=eq.' + currentStudioId + '&is_active=eq.true&order=table_number.asc', {
+    headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+  })
+  const tables = await res.json()
+  if (!Array.isArray(tables)) return
+
+  const existing = document.getElementById('reassign-modal')
+  if (existing) existing.remove()
+
+  const opts = tables.map(t => `<option value="${t.id}" ${t.id === currentTableId ? 'selected' : ''}>Table ${t.table_number}${t.label ? ' – ' + t.label : ''} (cap ${t.capacity})</option>`).join('')
+
+  const modal = document.createElement('div')
+  modal.id = 'reassign-modal'
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center'
+  modal.innerHTML = `
+    <div style="background:#fff;border-radius:12px;padding:1.8rem;width:360px;max-width:95vw;box-shadow:0 8px 40px rgba(0,0,0,0.2)">
+      <h3 style="margin:0 0 1rem;font-size:15px;font-weight:600">Move ${customerName}</h3>
+      <label style="font-size:12px;color:#666;display:block;margin-bottom:6px">Move to table</label>
+      <select id="reassign-table-sel" style="width:100%;height:36px;border:1px solid #ddd;border-radius:6px;padding:0 10px;font-size:14px;background:white;margin-bottom:0.8rem">${opts}</select>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:1rem">
+        <input type="checkbox" id="reassign-overseat"> Allow over-seating (ignore capacity)
+      </label>
+      <div id="reassign-err" style="color:#c00;font-size:12px;display:none;margin-bottom:0.8rem"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn" onclick="document.getElementById('reassign-modal').remove()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveReassign('${assignmentId}','${bookingId}')">Move</button>
+      </div>
+    </div>`
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove() })
+  document.body.appendChild(modal)
+}
+
+async function clearDayAssignments() {
+  if (!confirm('This will delete ALL table assignments for today (including manual ones) so you can re-run auto-assign. Continue?')) return
+  const today = dateStr(currentDate)
+  const { data: sessions } = await sb.from('sessions').select('id').eq('studio_id', currentStudioId).eq('session_date', today)
+  const sIds = (sessions || []).map(s => s.id)
+  if (!sIds.length) return
+  await fetch(SUPABASE_URL + '/rest/v1/seating_assignments?session_id=in.(' + sIds.join(',') + ')', {
+    method: 'DELETE',
+    headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+  })
+  await loadFloorView()
+}
+
+function showTablePopup(tableId) {
+  const entry = fpTableSlotMap[tableId]
+  if (!entry) return
+  const { table: t, slots } = entry
+  const totalSeated = slots.reduce((s, sl) => s + sl.totalGuests, 0)
+  const maxConcurrent = slots.reduce((max, sl) => Math.max(max, sl.totalGuests), 0)
+  const isOver = maxConcurrent > t.capacity
+
+  const existing = document.getElementById('table-detail-popup')
+  if (existing) existing.remove()
+
+  const prefFlags = []
+  if (t.is_kids_party_preferred) prefFlags.push('🎂 Party preferred')
+  if (t.is_glazing_preferred) prefFlags.push('🎨 Glazing preferred')
+  if (t.is_minimake_preferred) prefFlags.push('⭐ Mini Make preferred')
+  if (t.is_wheel_preferred) prefFlags.push('🏺 Wheel preferred')
+  if (t.is_kids_class_preferred) prefFlags.push('👶 Kids Class preferred')
+  if (t.is_glazing_only) prefFlags.push('🔒 Glazing only')
+
+  let slotsHtml = ''
+  if (!slots.length) {
+    slotsHtml = '<div style="color:#bbb;font-size:13px;padding:0.5rem 0">No sessions assigned to this table today.</div>'
+  } else {
+    slots.forEach(sl => {
+      const c = getSessionColour(sl.session)
+      slotsHtml += `<div style="margin-bottom:1rem">`
+      slotsHtml += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">`
+      slotsHtml += `<span style="background:${c.bg};color:${escText(c.text)};border:1px solid ${c.border};padding:2px 10px;border-radius:10px;font-size:12px;font-weight:600">${fmtTime(sl.session.session_time)}</span>`
+      slotsHtml += `<span style="font-size:13px;font-weight:600;color:#222">${escText(sl.session.title)}</span>`
+      slotsHtml += `<span style="font-size:12px;color:#aaa;margin-left:auto">${sl.totalGuests} guest${sl.totalGuests !== 1 ? 's' : ''}</span>`
+      slotsHtml += `</div>`
+      slotsHtml += `<div style="border:1px solid #f0f0e8;border-radius:6px;overflow:hidden">`
+      sl.sessionBookings.forEach((b, idx) => {
+        const rowBg = idx % 2 === 0 ? '#fff' : '#fafaf8'
+        slotsHtml += `<div style="display:flex;align-items:center;gap:10px;padding:7px 12px;background:${rowBg};border-bottom:${idx < sl.sessionBookings.length-1 ? '1px solid #f0f0e8' : 'none'}">`
+        slotsHtml += `<span style="font-size:13px;color:#333;flex:1">${escText(b.name)}</span>`
+        if (b.qty > 1) slotsHtml += `<span style="font-size:12px;color:#888;background:#f5f5f0;padding:1px 8px;border-radius:10px">×${b.qty}</span>`
+        slotsHtml += `<button onclick="openReassignModal('${b.assignmentId}','${b.bookingId}',${jsArg((b.name||''))},'${t.id}')" style="font-size:11px;padding:3px 10px;border:1px solid #ddd;border-radius:5px;background:white;cursor:pointer;color:#555">Move</button>`
+        slotsHtml += `</div>`
+      })
+      slotsHtml += `</div></div>`
+    })
+  }
+
+  const modal = document.createElement('div')
+  modal.id = 'table-detail-popup'
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9000;display:flex;align-items:center;justify-content:center;padding:1rem'
+  modal.innerHTML = `
+    <div style="background:#fff;border-radius:12px;width:100%;max-width:480px;max-height:85vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,0.2)">
+      <div style="padding:1.2rem 1.4rem;border-bottom:1px solid #f0f0e8;display:flex;align-items:flex-start;gap:12px">
+        <div style="flex:1">
+          <div style="font-weight:700;font-size:17px">Table ${t.table_number}${t.label ? ' <span style="font-weight:400;font-size:13px;color:#aaa">— ' + t.label + '</span>' : ''}</div>
+          <div style="font-size:12px;color:${isOver ? '#f43f5e' : '#888'};margin-top:2px">${maxConcurrent}/${t.capacity} peak${isOver ? ' ⚠ Over capacity' : ''}${t.room_name ? ' · ' + t.room_name : ''}</div>
+          ${prefFlags.length ? '<div style="font-size:11px;color:#aaa;margin-top:3px">' + prefFlags.join(' · ') + '</div>' : ''}
+        </div>
+        <button onclick="document.getElementById('table-detail-popup').remove()" style="font-size:20px;border:none;background:none;cursor:pointer;color:#aaa;padding:0;line-height:1">×</button>
+      </div>
+      <div style="padding:1.2rem 1.4rem">${slotsHtml}</div>
+    </div>`
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove() })
+  document.body.appendChild(modal)
+}
+
+async function saveReassign(assignmentId, bookingId) {
+  const tableId = document.getElementById('reassign-table-sel').value
+  const allowOver = document.getElementById('reassign-overseat').checked
+  const errEl = document.getElementById('reassign-err')
+  errEl.style.display = 'none'
+
+  if (!allowOver) {
+    // Check capacity for target table on this day
+    const today = dateStr(currentDate)
+    const { data: sessions } = await sb.from('sessions').select('id').eq('studio_id', currentStudioId).eq('session_date', today)
+    const sIds = (sessions || []).map(s => s.id)
+    const aRes = await fetch(SUPABASE_URL + '/rest/v1/seating_assignments?table_id=eq.' + tableId + (sIds.length ? '&session_id=in.(' + sIds.join(',') + ')' : ''), {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    })
+    const aList = await aRes.json()
+    const tRes = await fetch(SUPABASE_URL + '/rest/v1/studio_tables?id=eq.' + tableId, {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    })
+    const tList = await tRes.json()
+    const table = tList[0]
+    const { data: bData } = await sb.from('bookings').select('qty').in('id', (Array.isArray(aList) ? aList : []).map(a => a.booking_id).filter(Boolean))
+    const seated = (bData || []).reduce((s, b) => s + (b.qty || 1), 0)
+    if (table && seated >= table.capacity) {
+      errEl.textContent = 'Table ' + table.table_number + ' is at capacity (' + table.capacity + '). Check "Allow over-seating" to proceed.'
+      errEl.style.display = 'block'
+      return
+    }
+  }
+
+  const res = await fetch(SUPABASE_URL + '/rest/v1/seating_assignments?id=eq.' + assignmentId, {
+    method: 'PATCH',
+    headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY), 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+    body: JSON.stringify({ table_id: tableId, assigned_by: 'manual' })
+  })
+
+  if (!res.ok) { errEl.textContent = 'Save failed. Try again.'; errEl.style.display = 'block'; return }
+  document.getElementById('reassign-modal').remove()
+  await loadFloorView()
+}
+
+// ── QR / QUICK LINKS ──────────────────────────────────────────────────────────
+
+// ── LINKS / QR VIEW ──────────────────────────────────────────
+
+// Per-studio QR codes and links
+// Keys match studio IDs exactly. Fill in:
+//   partyDashboard  — QR PNG for party-dashboard.html (if different per studio, else move to QR_GLOBAL)
+//   partySignin     — QR PNG for legacy party sign-in page
+//   workshopPDF     — Google Drive direct-download or view URL for the workshop check-in sheet PDF
+const QR_BASE = 'https://snxibhbhhchjthfmjtaj.supabase.co/storage/v1/object/public/qr-codes'
+/* ======================= end of floor plan copy ======================= */
+
+// Open / close the floor plan for the Schedule's day
+async function planToggleFloor(show) {
+  const box = document.getElementById('plan-floor');
+  if (show === undefined) show = box.style.display === 'none';
+  box.style.display = show ? '' : 'none';
+  if (!show) return;
+  // Same database access as the Day view (public key) until those tables' permissions
+  // are checked: set window._hubToken to the signed-in token to switch it over.
+  window._hubToken = null;
+  window.currentStudioId = _sessionStudioId;
+  const [y, m, d] = _plan.date.split('-').map(Number);
+  currentDate = new Date(y, m - 1, d);
+  document.getElementById('plan-floor-title').textContent = '🪑 Floor plan · ' + ptyDayLabel(_plan.date);
+  await loadFloorView();
+  box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
 function planPrintClassList(sessionId) {
   const el = _plan.classLists[sessionId];
   if (!el) return;
