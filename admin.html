@@ -272,6 +272,10 @@ select:focus, input:focus { border-color: #888; }
 /* Staff avatars (staff-avatars bucket) — also shown in the 4Cats Hub */
 .st-av { display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; overflow: hidden; vertical-align: middle; flex-shrink: 0; font-weight: 700; color: #fff; }
 .st-av img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.av-folders { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; width: 100%; }
+.av-folder { border: 0.5px solid #d0d0c8; background: #fff; border-radius: 999px; padding: 5px 12px; font-size: 12px; cursor: pointer; }
+.av-folder.on { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
+.av-grid { display: flex; flex-wrap: wrap; gap: 6px; max-height: 260px; overflow-y: auto; width: 100%; }
 .av-pick-grid { display: flex; flex-wrap: wrap; gap: 8px; }
 .av-pick { width: 58px; height: 58px; padding: 0; border-radius: 50%; border: 2px solid transparent; background: none; cursor: pointer; display: flex; align-items: center; justify-content: center; }
 .av-pick:hover { border-color: #c8bce8; }
@@ -5144,13 +5148,24 @@ function staffCols() {
 const AVATAR_BUCKET = 'staff-avatars'
 const AVATAR_TINTS = ['#ece7ff', '#dbeafe', '#e3f9ec', '#fce7f3', '#fef3d6', '#e0f2fe', '#fde2e2', '#ede9fe']
 const AVATAR_INKS  = ['#5636c9', '#1d4ed8', '#15803d', '#be185d', '#b45309', '#0369a1', '#b91c1c', '#6d28d9']
-let _avatarOptions = null
-async function loadAvatarOptions() {
-  if (_avatarOptions) return _avatarOptions
-  const { data, error } = await sb.storage.from(AVATAR_BUCKET).list('', { limit: 500, sortBy: { column: 'name', order: 'asc' } })
+// Folders (Oct 2026): the bucket can be organised in folders. The picker shows
+// the folders as buttons and one folder's pictures at a time. avatar_key holds
+// the full path ("Cats/cat-laptop.png"), or just the name for loose files.
+let _avatarFolders = null          // ['' (loose files), 'Cats', 'Dogs', …]
+const _avatarFiles = {}            // folder → [paths]
+let _avatarFolder = null           // folder being shown
+async function loadAvatarFolder(folder) {
+  if (_avatarFiles[folder]) return _avatarFiles[folder]
+  const { data, error } = await sb.storage.from(AVATAR_BUCKET).list(folder, { limit: 1000, sortBy: { column: 'name', order: 'asc' } })
   if (error) { console.error('Could not list avatars', error); return [] }
-  _avatarOptions = (data || []).filter(f => f.id && /\.(png|jpe?g|webp)$/i.test(f.name)).map(f => f.name)
-  return _avatarOptions
+  const files = (data || []).filter(f => f.id && /\.(png|jpe?g|webp|gif)$/i.test(f.name)).map(f => (folder ? folder + '/' : '') + f.name)
+  if (folder === '') _avatarFolders = ['', ...(data || []).filter(f => !f.id && f.name !== '.emptyFolderPlaceholder').map(f => f.name)]
+  _avatarFiles[folder] = files
+  return files
+}
+async function loadAvatarOptions() {   // kept for anything else that asks: loose files + the folder being shown
+  const loose = await loadAvatarFolder('')
+  return _avatarFolder ? [...loose, ...(await loadAvatarFolder(_avatarFolder))] : loose
 }
 function avatarUrl(key) {
   return key ? sb.storage.from(AVATAR_BUCKET).getPublicUrl(key).data.publicUrl : ''
@@ -5171,25 +5186,36 @@ function avatarHtml(s, size) {
 let _avatarPickerSeed = ''
 async function setStaffAvatar(key, seed) {
   document.getElementById('staff-avatar-key').value = key || ''
+  _avatarFolder = null
   _avatarPickerSeed = seed || ''
   await renderAvatarPicker()
 }
 async function renderAvatarPicker() {
   const box = document.getElementById('staff-avatar-picker')
   const current = document.getElementById('staff-avatar-key').value
-  const opts = await loadAvatarOptions()
-  if (!opts.length) {
-    box.innerHTML = '<span style="font-size:12px;color:#aaa">No avatars yet. Upload them to the staff-avatars bucket in Supabase → Storage.</span>'
-    return
+  await loadAvatarFolder('')
+  const folders = _avatarFolders || ['']
+  if (_avatarFolder === null) {   // open on the current avatar's folder, else the first folder
+    const cf = current.includes('/') ? current.split('/').slice(0, -1).join('/') : ''
+    _avatarFolder = folders.includes(cf) && (cf || !folders.some(Boolean)) ? cf : (folders.find(Boolean) || '')
   }
+  const files = await loadAvatarFolder(_avatarFolder)
   const i = avatarTintIndex(_avatarPickerSeed)
-  box.innerHTML =
+  const tabs = folders.length > 1 ? `<div class="av-folders">${folders.filter(f => f || (_avatarFiles[''] || []).length).map(f =>
+      `<button type="button" class="av-folder${f === _avatarFolder ? ' on' : ''}" onclick="pickAvatarFolder(${stEsc(JSON.stringify(f))})">${f ? stEsc(f) : 'Not in a folder'}</button>`).join('')}</div>` : ''
+  box.innerHTML = tabs + `<div class="av-grid">` +
     `<button type="button" class="av-pick none${current ? '' : ' sel'}" onclick="pickStaffAvatar('')" title="No avatar — show their initial">None</button>` +
-    opts.map(k => `<button type="button" class="av-pick${k === current ? ' sel' : ''}" onclick="pickStaffAvatar(${stEsc(JSON.stringify(k))})" title="${stEsc(k)}">
-        <span class="st-av" style="width:50px;height:50px;background:${AVATAR_TINTS[i]}"><img src="${stEsc(avatarUrl(k))}" alt="${stEsc(k)}"></span></button>`).join('')
-  // A saved avatar whose file was since deleted from the bucket
-  if (current && !opts.includes(current)) box.insertAdjacentHTML('beforeend', `<span style="font-size:11px;color:#c0392b;align-self:center">Current avatar (${stEsc(current)}) is no longer in the bucket</span>`)
+    (files.length ? files.map(k => `<button type="button" class="av-pick${k === current ? ' sel' : ''}" onclick="pickStaffAvatar(${stEsc(JSON.stringify(k))})" title="${stEsc(k.split('/').pop())}">
+        <span class="st-av" style="width:50px;height:50px;background:${AVATAR_TINTS[i]}"><img loading="lazy" src="${stEsc(avatarUrl(k))}" alt="${stEsc(k)}"></span></button>`).join('')
+      : `<span style="font-size:12px;color:#aaa;align-self:center">No pictures in ${_avatarFolder ? 'this folder' : 'the bucket'} yet. Upload them in Supabase → Storage → staff-avatars.</span>`) + `</div>`
+  // The saved avatar's file is missing (deleted, or moved into a folder: run hub_avatar_folders_fix.sql)
+  if (current) {
+    const cf = current.includes('/') ? current.split('/').slice(0, -1).join('/') : ''
+    const there = await loadAvatarFolder(cf)
+    if (!there.includes(current)) box.insertAdjacentHTML('beforeend', `<div style="font-size:11px;color:#c0392b;margin-top:6px">Current avatar (${stEsc(current)}) isn’t in the bucket any more. Pick another, or run hub_avatar_folders_fix.sql if it was moved into a folder.</div>`)
+  }
 }
+function pickAvatarFolder(f) { _avatarFolder = f; renderAvatarPicker() }
 function pickStaffAvatar(key) {
   document.getElementById('staff-avatar-key').value = key || ''
   renderAvatarPicker()
