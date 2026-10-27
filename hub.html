@@ -557,6 +557,15 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .ts-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
 .ts-tools select { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; }
 .tsg-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.tsg-modes { display: inline-flex; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.tsg-modes button { border: none; background: #fff; font: inherit; font-size: 13px; padding: 7px 12px; cursor: pointer; color: var(--ink); }
+.tsg-modes button.on { background: var(--accent); color: #fff; }
+.tsg-selbar { display: flex; align-items: center; gap: 10px; padding: 8px 14px; margin-bottom: 10px; border-radius: 12px; background: #fff; border: 1px solid var(--border); font-size: 14px; }
+.tsg-selbar.on { background: #f1edff; border-color: #c7b8ff; position: sticky; top: 8px; z-index: 3; }
+.tsg-selbar .ho-btn { min-height: 32px; }
+.tsg-cb { width: 26px; text-align: center; }
+.tsg-cb input { width: 16px; height: 16px; cursor: pointer; }
+.tsg-sel td { background: #f4f0ff !important; }
 .tsg-per { display: flex; flex-direction: column; align-items: center; min-width: 220px; }
 .tsg-per b { font-size: 16px; color: var(--accent-deep); }
 .tsg-bar select, .tsg-bar input { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; }
@@ -1677,7 +1686,7 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
   <!-- Home office → timesheets: review and approve, by pay period -->
   <main class="main" id="ts-pane" style="display:none">
     <div class="ho-head"><div class="pts-page-title" style="margin:0">🕒 Timesheets</div><span class="spacer"></span><button class="ho-btn" onclick="loadTsPane()">Refresh</button></div>
-    <p class="ho-intro">Each pay period’s punches for everyone. Open a person to fix punches, answer their notes and approve. Staff see their timesheet and its status in the Hub.</p>
+    <p class="ho-intro">Everyone’s time punches, one row per day. Filter, tick rows (or select all), and approve. Tap ⋮ or 📝 on a row to fix punches or answer a note. Staff see each day’s status in the Hub.</p>
     <div id="ts-body"></div>
   </main>
 
@@ -5539,6 +5548,11 @@ function tsPeriodLabel(per) {
   return `${tsDayLabel(per.start)} – ${tsDayLabel(per.end)}${per.pay_date ? ' · paid ' + tsDayLabel(per.pay_date) : ''}`;
 }
 function tsStatusPill(ts) {
+  if (ts.days_worked !== undefined) {   // per-day approval (hub_timesheets_v3)
+    const w = Number(ts.days_worked) || 0, ap = Number(ts.days_approved) || 0;
+    if (w && ap >= w) return '<span class="me-pill approved">✓ All days approved</span>';
+    if (ap) return `<span class="me-pill pending">${ap} of ${w} days approved</span>`;
+  }
   if (ts.status === 'approved') return `<span class="me-pill approved">✓ Approved${ts.approved_by_name ? ' by ' + esc(ts.approved_by_name) : ''}</span>`;
   const ended = ts.period && ts.period.end < localDateStr(new Date());
   return `<span class="me-pill pending">${ts.reopened_at ? 'Changed since approval: waiting' : ended ? 'Waiting for approval' : 'Current pay period'}</span>`;
@@ -5558,6 +5572,7 @@ function tsDayHtml(d, admin) {
       ${n.answer ? `<div class="ts-answer">↳ ${esc(n.answered_by_name || 'Home office')}: ${esc(n.answer)}</div>` : (admin ? `<button class="ho-btn" style="min-height:30px;margin-top:4px" onclick="tsAnswer('${escAttr(n.id)}')">Answer</button>` : '<div class="ts-answer muted">Waiting for home office</div>')}</div>`).join('');
   return `<div class="ts-day${open ? ' open' : ''}">
     <div class="ts-head"><b>${esc(tsDayLabel(d.date))}</b>${shifts ? `<span class="goal-note">Shift ${shifts}</span>` : '<span class="goal-note">No shift</span>'}
+      ${!admin && (d.punches || []).length ? (d.approval && d.approval.status === 'approved' ? '<span class="me-pill approved">✓ Approved</span>' : d.approval && d.approval.status === 'changed' ? '<span class="me-pill pending">Changed: waiting</span>' : (d.date < localDateStr(new Date()) ? '<span class="me-pill pending">Waiting</span>' : '')) : ''}
       <span class="ts-tot">${(d.punches || []).length ? tsHm(d.minutes.worked) + (d.minutes.break ? ' · ' + tsHm(d.minutes.break) + ' break' : '') : ''}</span></div>
     ${chips ? `<div class="ts-chips">${chips}${admin ? `<span class="ts-p add" onclick="tsAddPunch('${escAttr(d.date)}')">＋ punch</span>` : ''}</div>` : (admin ? `<div class="ts-chips"><span class="ts-p add" onclick="tsAddPunch('${escAttr(d.date)}')">＋ punch</span></div>` : '')}
     ${open ? '<div class="ts-line" style="color:#b91c1c;font-weight:700">No punch out this day</div>' : ''}
@@ -5612,73 +5627,134 @@ async function openTsPane() {
   if (!_tsDate) { const d = new Date(); d.setDate(d.getDate() - 7); _tsDate = localDateStr(d); }   // the last finished pay period, usually
   loadTsPane();
 }
+// Filters: dates (week / pay period / custom), studio, employee, show
+window._tsf = window._tsf || { mode: 'pay', anchor: null, from: '', to: '', studio: '', staff: '', show: 'all' };
+let _tsStaffList = null;
+async function tsRange() {
+  const f = window._tsf, a = f.anchor || (() => { const d = new Date(); d.setDate(d.getDate() - 7); return localDateStr(d); })();
+  f.anchor = a;
+  if (f.mode === 'custom') { if (!f.from || !f.to) { f.from = addDaysStr(a, -6); f.to = a; } return { from: f.from, to: f.to, label: `${tsDayLabel(f.from)} – ${tsDayLabel(f.to)}` }; }
+  if (f.mode === 'week') { const [y, m, d] = a.split('-').map(Number); const dt = new Date(y, m - 1, d); const sun = addDaysStr(a, -dt.getDay());
+    return { from: sun, to: addDaysStr(sun, 6), label: `Week of ${tsDayLabel(sun)} – ${tsDayLabel(addDaysStr(sun, 6))}` }; }
+  const { data } = await sb.rpc('hub_pay_period', { p_date: a });
+  if (!data) return { from: a, to: a, label: a };
+  return { from: data.start, to: data.end, label: tsPeriodLabel(data) };
+}
+function tsStep(dir) {
+  const f = window._tsf;
+  if (f.mode === 'custom') return;
+  f.anchor = addDaysStr(f.anchor, dir * (f.mode === 'week' ? 7 : 14));
+  window._tsSel = new Set(); loadTsPane();
+}
+function tsSetFilter(k, v) { window._tsf[k] = v; if (k !== 'show') window._tsSel = new Set(); loadTsPane(); }
 async function loadTsPane(date) {
-  if (date) _tsDate = date;
-  const body = document.getElementById('ts-body');
+  if (date) window._tsf.anchor = date;
+  window._tsSel = window._tsSel || new Set();
+  const f = window._tsf, body = document.getElementById('ts-body');
   if (!body.innerHTML.trim()) body.innerHTML = '<div class="ho-intro">Loading…</div>';
-  const studio = document.getElementById('ts-studio') ? document.getElementById('ts-studio').value : '';
-  const { data, error } = await sb.rpc('hub_ts_grid', { p_date: _tsDate, p_studio_id: studio || null });
-  if (error) { body.innerHTML = `<div class="ho-card">${esc(error.message)}${/hub_ts_grid/i.test(error.message) ? ' (run hub_timesheets_v2.sql first)' : ''}</div>`; return; }
-  const per = data.period, people = data.people || [];
-  window._tsPeople = people;
-  const today = localDateStr(new Date()), ended = per.end < today;
+  if (!_tsStaffList) { const r = await sb.rpc('hub_ts_staff_list'); _tsStaffList = r.error ? [] : (r.data || []); }
+  const rg = await tsRange();
+  const { data, error } = await sb.rpc('hub_ts_rows', { p_from: rg.from, p_to: rg.to, p_studio_id: f.studio || null, p_staff_id: f.staff || null });
+  if (error) { body.innerHTML = `<div class="ho-card">${esc(error.message)}${/hub_ts_rows/i.test(error.message) ? ' (run hub_timesheets_v3.sql first)' : ''}</div>`; return; }
+  const today = localDateStr(new Date());
   const H = m => (Math.round((Number(m) || 0) / 60 * 100) / 100).toFixed(2);
   const sched = sh => (sh || []).reduce((n, x) => { const [a, b] = [x.start, x.end].map(t => { const [h, mi] = String(t || '0:0').split(':').map(Number); return h * 60 + mi; }); return n + Math.max(0, b - a); }, 0);
-  const needsCheck = x => (x.days || []).some(d => (d.notes || []).some(n => !n.answer) || (d.punches || []).some(p => (p.flags || []).length) || (d.minutes && d.minutes.open_days && d.date < today));
-  const easy = people.filter(x => x.status !== 'approved' && !needsCheck(x) && Number(x.totals.worked) > 0);
-  window._tsEasy = easy;
+  const info = d => {
+    const ps = d.punches || [], open = !!(d.minutes && d.minutes.open_days && d.date < today);
+    const appr = d.approval && d.approval.status;
+    return { ps, open, appr, canApprove: ps.length > 0 && !open && d.date < today,
+      check: (d.notes || []).some(n => !n.answer) || ps.some(p => (p.flags || []).length) || open || appr === 'changed' };
+  };
+  const show = d => { const k = info(d);
+    if (f.show === 'pending') return k.ps.length && k.appr !== 'approved';
+    if (f.show === 'approved') return k.appr === 'approved';
+    if (f.show === 'check') return k.check;
+    return true; };
+  const people = (data.people || []).map(x => Object.assign({}, x, { days: (x.days || []).filter(show) })).filter(x => x.days.length);
+  window._tsPeople = people;
+  window._tsRowKeys = [];
+  people.forEach(x => x.days.forEach(d => { if (info(d).canApprove || (d.approval && d.approval.status)) window._tsRowKeys.push(x.staff_id + '|' + d.date); }));
+  [...window._tsSel].forEach(k => { if (!window._tsRowKeys.includes(k)) window._tsSel.delete(k); });
+  const sel = window._tsSel;
+  const allOn = window._tsRowKeys.length && window._tsRowKeys.every(k => sel.has(k));
   const studioOpts = Object.keys(STUDIO_NAMES || {}).sort((a, b) => (STUDIO_NAMES[a] || '').localeCompare(STUDIO_NAMES[b] || ''))
-    .map(id => `<option value="${escAttr(id)}"${id === studio ? ' selected' : ''}>${esc(STUDIO_NAMES[id])}</option>`).join('');
+    .map(id => `<option value="${escAttr(id)}"${id === f.studio ? ' selected' : ''}>${esc(STUDIO_NAMES[id])}</option>`).join('');
+  const staffOpts = (_tsStaffList || []).map(x => `<option value="${escAttr(x.staff_id)}"${x.staff_id === f.staff ? ' selected' : ''}>${esc(x.full_name)}</option>`).join('');
+  let nRows = 0, nAppr = 0;
   const rows = people.map((x, pi) => {
-    const days = (x.days || []).filter(d => (d.shifts || []).length || (d.punches || []).length || (d.notes || []).length);
-    const worked = Number(x.totals.worked) || 0, sch = Number(x.scheduled_minutes) || 0, diff = worked - sch;
-    const st = x.status === 'approved' ? '<span class="tsg-st ok">APPROVED</span>' : (x.reopened_at ? '<span class="tsg-st need">CHANGED</span>' : (worked ? '<span class="tsg-st need">PENDING APPROVAL</span>' : ''));
+    const keys = x.days.filter(d => info(d).canApprove || (d.approval && d.approval.status)).map(d => x.staff_id + '|' + d.date);
+    const worked = x.days.reduce((n, d) => n + (d.minutes ? Number(d.minutes.worked) || 0 : 0), 0);
+    const sch = x.days.reduce((n, d) => n + sched(d.shifts), 0), diff = worked - sch;
     const collapsed = (window._tsCollapsed || {})[x.staff_id];
-    const head = `<tr class="tsg-group"><td colspan="2"><button class="tsg-tog" onclick="tsToggle('${escAttr(x.staff_id)}')">${collapsed ? '▸' : '▾'}</button> <b>${esc(String(x.full_name || '').toUpperCase())}</b></td>
-        <td colspan="7" class="tsg-actions">${st}${x.status === 'approved' && x.approved_by_name ? ` <span class="goal-note">by ${esc(x.approved_by_name)}</span>` : ''}
-          ${x.status === 'approved' ? `<button class="ho-btn" onclick="tsSetFor(${pi}, false)">Un-approve</button>`
-          : (ended && worked ? `<button class="ho-btn primary" onclick="tsSetFor(${pi}, true)">Approve</button>` : '')}<button class="ho-btn" onclick="tsOpenPerson(${pi})">Open</button></td>
-        <td>${H(sch)}</td><td><b>${H(worked)}</b></td><td class="${diff > 0 ? 'tsg-red' : ''}">${worked ? H(diff) : ''}</td><td colspan="3"></td></tr>`;
+    const head = `<tr class="tsg-group"><td class="tsg-cb">${keys.length ? `<input type="checkbox" ${keys.every(k => sel.has(k)) ? 'checked' : ''} onchange="tsPick(${JSON.stringify(keys).replace(/"/g, '&quot;')}, this.checked)">` : ''}</td>
+        <td colspan="2"><button class="tsg-tog" onclick="tsToggle('${escAttr(x.staff_id)}')">${collapsed ? '▸' : '▾'}</button> <b>${esc(String(x.full_name || '').toUpperCase())}</b></td>
+        <td colspan="5"></td><td>${H(sch)}</td><td><b>${H(worked)}</b></td><td class="${diff > 0 ? 'tsg-red' : ''}">${worked ? H(diff) : ''}</td><td colspan="4"></td></tr>`;
     if (collapsed) return head;
-    const body = days.map(d => {
-      const ps = d.punches || [];
-      const first = k => ps.find(p => p.kind === k), last = k => [...ps].reverse().find(p => p.kind === k);
+    return head + x.days.map(d => {
+      const k = info(d), ps = k.ps, key = x.staff_id + '|' + d.date;
+      nRows++; if (k.appr === 'approved') nAppr++;
+      const first = kk => ps.find(p => p.kind === kk), last = kk => [...ps].reverse().find(p => p.kind === kk);
       const inP = first('in'), outP = last('out'), bo = first('break_out'), bi = first('break_in');
       const nBreaks = ps.filter(p => p.kind === 'break_out').length;
       const flagged = ps.some(p => (p.flags || []).length);
       const loc = ((d.shifts || [])[0] || {}).studio_id || (ps[0] || {}).studio_id;
-      const s = sched(d.shifts), w = d.minutes ? Number(d.minutes.worked) || 0 : 0, dd = w - s;
-      const open = d.minutes && d.minutes.open_days && d.date < today;
-      const byEmail = ps.some(p => p.source === 'staff_link');
+      const sc = sched(d.shifts), w = d.minutes ? Number(d.minutes.worked) || 0 : 0, dd = w - sc;
       const notes = d.notes || [], unanswered = notes.some(n => !n.answer);
       const cell = p => p ? `<span class="${(p.flags || []).length ? 'tsg-flag' : ''}${p.original_at ? ' tsg-edit' : ''}" title="${escAttr([...(p.flags || []), p.comment ? 'Comment: ' + p.comment : '', p.edit_note ? 'Changed: ' + p.edit_note : ''].filter(Boolean).join(' · '))}">${esc(tsTime(p.at))}${p.original_at ? ' ✎' : ''}${p.comment ? ' 💬' : ''}</span>` : '';
-      return `<tr class="tsg-row${open ? ' tsg-open' : ''}">
+      const st = k.appr === 'approved' ? `<span class="tsg-st ok" title="${escAttr('Approved' + (d.approval.by ? ' by ' + d.approval.by : '') + (d.approval.at ? ', ' + new Date(d.approval.at).toLocaleDateString() : ''))}">APPROVED</span>`
+        : k.appr === 'changed' ? '<span class="tsg-st need" title="A punch changed after it was approved">CHANGED</span>'
+        : ps.length ? '<span class="tsg-st need">PENDING</span>' : '';
+      const canPick = k.canApprove || k.appr;
+      return `<tr class="tsg-row${k.open ? ' tsg-open' : ''}${sel.has(key) ? ' tsg-sel' : ''}">
+        <td class="tsg-cb">${canPick ? `<input type="checkbox" ${sel.has(key) ? 'checked' : ''} onchange="tsPick(['${escAttr(key)}'], this.checked)">` : ''}</td>
         <td class="tsg-name">${hubAvatarHtml(x, 22)}<span>${esc(x.name || x.full_name)}</span></td><td>${esc(tsDayLabel(d.date))}</td>
-        <td>${esc(STUDIO_NAMES[loc] || loc || '')}</td><td>${cell(inP)}</td><td>${cell(bo)}${nBreaks > 1 ? ` <span class="goal-note">+${nBreaks - 1}</span>` : ''}</td><td>${cell(bi)}</td>
+        <td>${esc(STUDIO_NAMES[loc] || loc || '')}</td><td>${cell(inP)}</td>
+        <td>${bo ? cell(bo) + '–' + (bi ? cell(bi) : '…') : ''}${nBreaks > 1 ? ` <span class="goal-note">+${nBreaks - 1}</span>` : ''}</td>
         <td>${d.minutes && d.minutes.break ? H(d.minutes.break) : ''}</td>
-        <td>${outP ? cell(outP) : (open ? '<span class="tsg-red">missing</span>' : '')}</td><td>${byEmail ? 'Email' : (ps.length ? 'No' : '')}</td>
-        <td>${s ? H(s) : ''}</td><td>${ps.length ? H(w) : ''}</td><td class="${dd > 0 && !open ? 'tsg-red' : ''}">${ps.length && s && !open ? H(dd) : ''}</td>
+        <td>${outP ? cell(outP) + (outP.source === 'staff_link' ? ' <span title="Set by the staff member from the “forgot to punch out?” email">📧</span>' : '') : (k.open ? '<span class="tsg-red">missing</span>' : '')}</td>
+        <td>${sc ? H(sc) : ''}</td><td>${ps.length ? H(w) : ''}</td><td class="${dd > 0 && !k.open ? 'tsg-red' : ''}">${ps.length && sc && !k.open ? H(dd) : ''}</td>
+        <td>${st}</td>
         <td>${flagged ? `<span class="tsg-flagicon" title="${escAttr(ps.flatMap(p => p.flags || []).join(' · '))}">⚑</span>` : ''}</td>
         <td>${notes.length ? `<button class="tsg-note${unanswered ? ' new' : ''}" title="${escAttr(notes.map(n => n.note).join(' · '))}" onclick="tsDaySheet(${pi}, '${escAttr(d.date)}')">📝${notes.length > 1 ? notes.length : ''}</button>` : ''}</td>
-        <td><button class="tsg-more" onclick="tsDaySheet(${pi}, '${escAttr(d.date)}')" title="Fix punches, notes">⋮</button></td></tr>`;
+        <td><button class="tsg-more" onclick="tsDaySheet(${pi}, '${escAttr(d.date)}')" title="Fix punches, notes, approve">⋮</button></td></tr>`;
     }).join('');
-    return head + body;
   }).join('');
   body.innerHTML = `<div class="ho-card tsg-bar">
-      <button class="ho-btn" onclick="loadTsPane('${addDaysStr(per.start, -1)}')">‹</button>
-      <div class="tsg-per"><b>${esc(tsPeriodLabel(per))}</b><span class="goal-note">${people.length} people · ${people.filter(x => x.status === 'approved').length} approved</span></div>
-      <button class="ho-btn" onclick="loadTsPane('${addDaysStr(per.end, 1)}')">›</button>
-      <select id="ts-studio" onchange="loadTsPane()"><option value="">All studios</option>${studioOpts}</select>
-      <label class="goal-note">Your name <input id="ts-by" value="${escAttr(tsByName())}" onchange="try{localStorage.setItem('hub_ts_name', this.value)}catch(e){}"></label>
+      <div class="tsg-modes">${[['week', 'Week'], ['pay', 'Pay period'], ['custom', 'Custom']].map(([k, l]) => `<button class="${f.mode === k ? 'on' : ''}" onclick="tsSetFilter('mode', '${k}')">${l}</button>`).join('')}</div>
+      ${f.mode === 'custom'
+        ? `<input type="date" value="${escAttr(rg.from)}" onchange="window._tsf.from = this.value; loadTsPane()"> – <input type="date" value="${escAttr(rg.to)}" onchange="window._tsf.to = this.value; loadTsPane()">`
+        : `<button class="ho-btn" onclick="tsStep(-1)">‹</button><div class="tsg-per"><b>${esc(rg.label)}</b></div><button class="ho-btn" onclick="tsStep(1)">›</button>`}
+      <select onchange="tsSetFilter('studio', this.value)"><option value="">All studios</option>${studioOpts}</select>
+      <select onchange="tsSetFilter('staff', this.value)"><option value="">All employees</option>${staffOpts}</select>
+      <select onchange="tsSetFilter('show', this.value)">${[['all', 'Show: everything'], ['pending', 'Show: pending'], ['approved', 'Show: approved'], ['check', 'Show: needs checking']].map(([k, l]) => `<option value="${k}"${f.show === k ? ' selected' : ''}>${l}</option>`).join('')}</select>
       <span class="spacer"></span>
+      <label class="goal-note">Your name <input id="ts-by" value="${escAttr(tsByName())}" onchange="try{localStorage.setItem('hub_ts_name', this.value)}catch(e){}"></label>
       <button class="ho-btn" onclick="tsToggleAll()">${Object.keys(window._tsCollapsed || {}).length ? 'Expand all' : 'Collapse all'}</button>
-      ${ended && easy.length ? `<button class="ho-btn primary" onclick="tsApproveEasy()">Approve all with nothing to check (${easy.length})</button>` : ''}
     </div>
-    ${!ended ? '<div class="goal-note" style="margin:-4px 0 10px">This pay period isn’t over yet, so it can’t be approved.</div>' : ''}
+    <div class="tsg-selbar${sel.size ? ' on' : ''}"><b>${sel.size}</b> selected
+      <button class="ho-btn primary" onclick="tsBulk(true)" ${sel.size ? '' : 'disabled'}>✓ Approve selected</button>
+      <button class="ho-btn" onclick="tsBulk(false)" ${sel.size ? '' : 'disabled'}>Un-approve selected</button>
+      ${sel.size ? '<button class="ho-btn" onclick="window._tsSel = new Set(); loadTsPane()">Clear</button>' : ''}
+      <span class="spacer"></span><span class="goal-note">${nRows} rows · ${nAppr} approved</span></div>
+    <div id="ts-result"></div>
     <div class="ho-card tsg-wrap"><table class="tsg"><thead><tr>
-      <th>Name</th><th>Date</th><th>Location</th><th>Clock in</th><th>Break start</th><th>Break end</th><th>Break (h)</th><th>Clock out</th><th title="Punch-out set by the staff member from the “forgot to punch out?” email">Email out</th>
-      <th>Sch. hours</th><th>Worked</th><th>Difference</th><th title="Flags: late, early…">⚑</th><th>Note</th><th></th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="15" class="goal-note" style="padding:16px">No one worked this pay period.</td></tr>'}</tbody></table></div>`;
+      <th class="tsg-cb"><input type="checkbox" title="Select all in this view" ${allOn ? 'checked' : ''} onchange="tsPick(window._tsRowKeys, this.checked)"></th>
+      <th>Name</th><th>Date</th><th>Location</th><th>Clock in</th><th>Break</th><th>Break (h)</th><th title="📧 = set by the staff member from the “forgot to punch out?” email">Clock out</th>
+      <th>Sch. hours</th><th>Worked</th><th>Difference</th><th>Status</th><th title="Flags: late, early…">⚑</th><th>Note</th><th></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="15" class="goal-note" style="padding:16px">Nothing in this view.</td></tr>'}</tbody></table></div>`;
+}
+function tsPick(keys, on) { (keys || []).forEach(k => on ? window._tsSel.add(k) : window._tsSel.delete(k)); loadTsPane(); }
+async function tsBulk(approve) {
+  const items = [...window._tsSel].map(k => { const [staff_id, date] = k.split('|'); return { staff_id, date }; });
+  if (!items.length) return;
+  if (!confirm(`${approve ? 'Approve' : 'Un-approve'} ${items.length} timesheet row${items.length === 1 ? '' : 's'}?`)) return;
+  const { data, error } = await sb.rpc('hub_ts_approve_days', { p_items: items, p_approve: approve, p_by_name: (document.getElementById('ts-by') || {}).value || null });
+  if (error) { alert(error.message); return; }
+  window._tsSel = new Set();
+  await loadTsPane();
+  const sk = (data && data.skipped) || [];
+  document.getElementById('ts-result').innerHTML = `<div class="me-msg ${sk.length ? 'warn' : 'ok'}" style="margin-bottom:10px">${approve ? 'Approved' : 'Un-approved'} ${data.done}.
+    ${sk.length ? `Skipped ${sk.length}: ${sk.map(x => `${esc(x.name)} ${esc(tsDayLabel(x.date))} (${esc(x.why)})`).join('; ')}.` : ''}</div>`;
 }
 function tsToggle(id) { window._tsCollapsed = window._tsCollapsed || {}; if (window._tsCollapsed[id]) delete window._tsCollapsed[id]; else window._tsCollapsed[id] = 1; loadTsPane(); }
 function tsToggleAll() {
@@ -5686,14 +5762,22 @@ function tsToggleAll() {
   window._tsCollapsed = {}; if (!any) (window._tsPeople || []).forEach(x => { window._tsCollapsed[x.staff_id] = 1; });
   loadTsPane();
 }
-async function tsSetFor(i, approve) { const x = (window._tsPeople || [])[i]; if (!x) return; _tsPerson = x.staff_id; await tsSet(approve); }
-// One day for one person: fix punches, add one, answer notes
+// One day for one person: fix punches, add one, answer notes, approve this day
 function tsDaySheet(i, date) {
   const x = (window._tsPeople || [])[i]; if (!x) return;
   _tsPerson = x.staff_id; window._tsDay = date;
   const d = (x.days || []).find(z => z.date === date) || { date, shifts: [], punches: [], notes: [], minutes: { worked: 0, break: 0, open_days: 0 } };
-  openDutySheet(`<h3>${esc(x.full_name)}</h3><p>${esc(tsDayLabel(date))} · tap a punch to fix it</p>${tsDayHtml(d, true)}
-    <div class="sheet-actions"><button class="primary" onclick="window._tsDay = null; closeDutySheet()">Done</button></div>`);
+  const appr = d.approval && d.approval.status;
+  openDutySheet(`<h3>${esc(x.full_name)}</h3><p>${esc(tsDayLabel(date))} · tap a punch to fix it${appr === 'approved' ? ` · <span class="tsg-st ok">APPROVED</span>${d.approval.by ? ' by ' + esc(d.approval.by) : ''}` : appr === 'changed' ? ' · <span class="tsg-st need">CHANGED</span>' : ''}</p>${tsDayHtml(d, true)}
+    <div class="sheet-actions">${appr ? `<button onclick="tsDayApprove('${escAttr(x.staff_id)}', '${escAttr(date)}', false)">Un-approve</button>` : ''}<span style="flex:1"></span>
+      <button onclick="window._tsDay = null; closeDutySheet()">Done</button>
+      ${appr !== 'approved' && (d.punches || []).length ? `<button class="primary" onclick="tsDayApprove('${escAttr(x.staff_id)}', '${escAttr(date)}', true)">✓ Approve this day</button>` : ''}</div>`);
+}
+async function tsDayApprove(staff, date, on) {
+  const { data, error } = await sb.rpc('hub_ts_approve_days', { p_items: [{ staff_id: staff, date }], p_approve: on, p_by_name: (document.getElementById('ts-by') || {}).value || null });
+  if (error) { alert(error.message); return; }
+  if (data.skipped && data.skipped.length) { alert('Not approved: ' + data.skipped[0].why + '.'); return; }
+  window._tsDay = null; closeDutySheet(); loadTsPane();
 }
 async function tsOpenPerson(i) {
   const x = (window._tsPeople || [])[i]; if (!x) return;
