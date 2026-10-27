@@ -556,6 +556,13 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .pe-list label { display: flex; gap: 8px; align-items: center; padding: 6px 10px; font-size: 14px; border-bottom: 1px solid #f1f0f5; cursor: pointer; }
 .camp-short { color: #b45309; font-weight: 700; margin-left: 6px; }
 .camp-ok { color: #15803d; font-weight: 600; margin-left: 6px; }
+.dev-code { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 40px; font-weight: 600; letter-spacing: 4px; color: var(--accent-deep); background: #f1edff; border-radius: 14px; padding: 12px 18px; display: inline-block; margin-top: 10px; }
+.dev-code.sm { font-size: 18px; letter-spacing: 2px; padding: 6px 10px; margin: 0; }
+.dev-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.dev-row:first-of-type { border-top: none; }
+.dev-row.pending { background: #fffbeb; border-radius: 12px; padding: 10px; border: 1px solid #fde68a; margin-top: 8px; }
+.dev-main { flex: 1; min-width: 200px; }
+.dev-row input { font: inherit; font-size: 14px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; min-width: 200px; }
 .glz-edit { display: flex; gap: 6px; align-items: center; }
 .glz-edit input { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; min-width: 160px; }
 .glz-edit .ho-btn { min-height: 30px; padding: 0 10px; }
@@ -1550,6 +1557,7 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
       <button class="nav-item" id="nav-sick" onclick="openSickPane()"><span class="ic">🤒</span> Sick calls</button>
       <button class="nav-item" id="nav-ts" onclick="openTsPane()"><span class="ic">🕒</span> Timesheets</button>
       <button class="nav-item" id="nav-rules" onclick="openRulesPane()"><span class="ic">📋</span> Staff request rules</button>
+      <button class="nav-item" id="nav-devices" onclick="openDevicesPane()"><span class="ic">🖥</span> Devices <span class="nav-badge" id="devices-badge" style="display:none"></span></button>
     </div>
 
     <!-- Coordinator section. Locked: one button that asks for the PIN.
@@ -1750,6 +1758,12 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
     <div class="ho-head"><div class="pts-page-title" style="margin:0">✉️ Email templates</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
     <p class="ho-intro">Pick a template, choose who it goes to, check the message, then send. Every email is logged.</p>
     <div id="etpl-body"></div>
+  </main>
+
+  <main class="main" id="devices-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">🖥 Studio computers</div><span class="spacer"></span><button class="ho-btn" onclick="loadDevicesPane()">Refresh</button></div>
+    <p class="ho-intro">A studio login only opens the Hub on the computers approved here. When a manager reads you the code on their screen, find it below, name the computer and approve it. Their screen opens by itself.</p>
+    <div id="devices-body"></div>
   </main>
 
   <main class="main" id="duties-pane" style="display:none">
@@ -5750,6 +5764,11 @@ async function ackSick(id) {
 // Sidebar counts: Parties = new bookings + cancellations + parties in the next
 // week not contacted; Notifications = new party items + recent bookings not seen yet.
 async function refreshCoordBadges(party, recent) {
+  // home office: computers waiting for approval (hub_devices.sql)
+  if (_studioData && _studioData.isAdmin) sb.rpc('hub_devices_list').then(r => {
+    const b = document.getElementById('devices-badge'); if (!b || r.error) return;
+    const n = (r.data || []).filter(d => d.status === 'pending').length; b.textContent = n; b.style.display = n ? '' : 'none';
+  }).catch(() => {});
   if (!coordOrAdmin() || !_sessionStudioId) return;
   try {
     party = party || (_pty && paneVisible('parties-pane') ? _pty : await fetchPartyData(_sessionStudioId));
@@ -6063,6 +6082,47 @@ async function tsLoadMe() {
   return _tsMe;
 }
 function tsByName() { return _tsMe || ''; }
+// ---------- Home office: studio computers ----------
+async function openDevicesPane() {
+  if (!(_studioData && _studioData.isAdmin)) return;
+  showOnlyPane('devices-pane'); setActiveNav('nav-devices');
+  loadDevicesPane();
+}
+function devWhat(ua) { ua = String(ua || ''); return /iPad/.test(ua) ? 'iPad' : /iPhone/.test(ua) ? 'iPhone' : /Android/.test(ua) ? 'Android' : /Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : 'Computer'; }
+function devBrowser(ua) { ua = String(ua || ''); return /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : /Firefox\//.test(ua) ? 'Firefox' : ''; }
+async function loadDevicesPane() {
+  const body = document.getElementById('devices-body'); if (!body) return;
+  body.innerHTML = '<div class="ho-intro">Loading…</div>';
+  const { data, error } = await sb.rpc('hub_devices_list');
+  if (error) { body.innerHTML = `<div class="ho-card"><div class="goal-note">${esc(/hub_devices_list/i.test(error.message) ? 'Run hub_devices.sql to set up approved computers.' : error.message)}</div></div>`; return; }
+  const pending = (data || []).filter(d => d.status === 'pending'), approved = (data || []).filter(d => d.status === 'approved'), removed = (data || []).filter(d => d.status === 'revoked');
+  const badge = document.getElementById('devices-badge'); if (badge) { badge.textContent = pending.length; badge.style.display = pending.length ? '' : 'none'; }
+  const when = t => t ? new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+  body.innerHTML = `
+    <div class="ho-card"><div class="ho-title" style="font-size:17px">Waiting for approval${pending.length ? ` (${pending.length})` : ''}</div>
+      ${pending.length ? pending.map(d => `<div class="dev-row pending"><div class="dev-code sm">${esc(d.code)}</div>
+          <div class="dev-main"><b>${esc(STUDIO_NAMES[d.studio_id] || d.studio_id)}</b><div class="goal-note">${esc(devWhat(d.user_agent))}${devBrowser(d.user_agent) ? ' · ' + esc(devBrowser(d.user_agent)) : ''} · asked ${esc(when(d.requested_at))}</div></div>
+          <input id="dev-name-${escAttr(d.id)}" placeholder="Name it, e.g. Front desk Mac" maxlength="60">
+          <button class="ho-btn primary" onclick="devSet('${escAttr(d.id)}', 'approved')">Approve</button>
+          <button class="ho-btn" onclick="devSet('${escAttr(d.id)}', 'revoked')">Deny</button></div>`).join('')
+        : '<div class="goal-note">Nothing waiting. A new studio computer shows a code here once someone signs in on it.</div>'}</div>
+    <div class="ho-card" style="margin-top:14px"><div class="ho-title" style="font-size:17px">Approved computers</div>
+      ${approved.length ? approved.map(d => `<div class="dev-row"><div class="dev-main"><b>${esc(STUDIO_NAMES[d.studio_id] || d.studio_id)}</b> · ${esc(d.name || devWhat(d.user_agent))}
+          <div class="goal-note">Last used ${esc(when(d.last_seen_at))} · approved ${esc(when(d.approved_at))}${d.approved_by_name ? ' by ' + esc(d.approved_by_name) : ''}</div></div>
+          <button class="ho-btn" onclick="devSet('${escAttr(d.id)}', 'revoked')">Remove</button></div>`).join('')
+        : '<div class="goal-note">None yet.</div>'}</div>
+    ${removed.length ? `<details class="me-more" style="margin-top:14px;background:#fff"><summary>Removed in the last 30 days (${removed.length})</summary>
+      ${removed.map(d => `<div class="dev-row"><div class="dev-main">${esc(STUDIO_NAMES[d.studio_id] || d.studio_id)} · ${esc(d.name || devWhat(d.user_agent))} <span class="goal-note">${esc(d.code)}</span></div>
+        <button class="ho-btn" onclick="devSet('${escAttr(d.id)}', 'approved')">Approve again</button></div>`).join('')}</details>` : ''}`;
+}
+async function devSet(id, status) {
+  if (status === 'revoked' && !confirm('Remove this computer? The studio login will stop working on it until it’s approved again.')) return;
+  const el = document.getElementById('dev-name-' + id);
+  const { error } = await sb.rpc('hub_device_set', { p_id: id, p_status: status, p_name: el ? el.value : null, p_by_name: (typeof tsByName === 'function' && (await tsLoadMe(), tsByName())) || null });
+  if (error) { alert(error.message); return; }
+  loadDevicesPane();
+}
+
 async function openTsPane() {
   if (!(_studioData && _studioData.isAdmin)) return;
   showOnlyPane('ts-pane'); setActiveNav('nav-ts');
@@ -8046,7 +8106,7 @@ async function requestPrize(prizeId) {
 
 // The page panes: only one shows at a time. Points + Instagram are
 // coordinator-only (their sidebar buttons only appear when unlocked).
-const PANES = ['dashboard-main', 'etpl-pane', 'tickets-pane', 'moments-pane', 'info-pane', 'duties-pane', 'schedule-pane', 'points-pane', 'instagram-pane', 'occupancy-pane', 'inventory-pane', 'announce-pane', 'checklist-pane', 'oc-overview-pane', 'plan-pane', 'parties-pane', 'notif-pane', 'rules-pane', 'sick-pane', 'punch-pane', 'ts-pane'];
+const PANES = ['dashboard-main', 'devices-pane', 'etpl-pane', 'tickets-pane', 'moments-pane', 'info-pane', 'duties-pane', 'schedule-pane', 'points-pane', 'instagram-pane', 'occupancy-pane', 'inventory-pane', 'announce-pane', 'checklist-pane', 'oc-overview-pane', 'plan-pane', 'parties-pane', 'notif-pane', 'rules-pane', 'sick-pane', 'punch-pane', 'ts-pane'];
 function showOnlyPane(id) {
   PANES.forEach(p => {
     const el = document.getElementById(p);
@@ -9316,6 +9376,45 @@ function stopStudioTimers() {
   if (_goalRefreshTimer) { clearInterval(_goalRefreshTimer); _goalRefreshTimer = null; }
 }
 
+// ---------- Approved studio computers (hub_devices.sql) ----------
+// Each computer keeps a random device key in this browser. A studio login on a computer
+// home office hasn't approved shows a code to read to home office, and opens by itself
+// once they approve it (checked every 5 seconds).
+let _deviceTimer = null;
+function hubDeviceToken() {
+  let t = null;
+  try { t = localStorage.getItem('hub_device_key'); } catch (e) {}
+  if (!t || t.length < 32) {
+    const a = new Uint8Array(32); crypto.getRandomValues(a);
+    t = Array.from(a, b => b.toString(16).padStart(2, '0')).join('');
+    try { localStorage.setItem('hub_device_key', t); } catch (e) {}
+  }
+  return t;
+}
+async function hubDeviceGate(studioId) {
+  let r;
+  try { r = await sb.rpc('hub_device_check', { p_token: hubDeviceToken(), p_user_agent: navigator.userAgent }); } catch (e) { return true; }
+  if (r.error) return /hub_device_check/i.test(r.error.message) ? true : (renderLoginGate(r.error.message), false);   // before hub_devices.sql: open as before
+  const d = r.data || {};
+  if (d.status === 'approved' || d.status === 'not_needed') { if (_deviceTimer) { clearInterval(_deviceTimer); _deviceTimer = null; } return true; }
+  document.getElementById('dashboard-shell').style.display = 'none';
+  document.getElementById('dashboard-gate').style.display = '';
+  document.getElementById('dashboard-gate-body').innerHTML = `
+    <div class="gate-title">${d.status === 'revoked' ? 'This computer was removed' : 'This computer isn’t approved yet'}</div>
+    <p class="gate-detail">${d.status === 'revoked' ? 'Home office removed this computer from the studio’s list. Call home office if that’s a mistake.'
+      : 'The studio login only works on the studio’s own computers. Call or message home office and read them this code:'}</p>
+    ${d.status !== 'revoked' ? `<div class="dev-code">${esc(d.code || '')}</div>
+      <p class="gate-detail" style="margin-top:6px">This page opens by itself once they approve it.</p>` : ''}
+    <button class="gate-btn" style="background:#fff;color:var(--ink);border:1px solid var(--border);margin-top:14px" onclick="if(_deviceTimer){clearInterval(_deviceTimer);_deviceTimer=null}; sb.auth.signOut().then(()=>location.reload())">Sign out</button>`;
+  if (!_deviceTimer) _deviceTimer = setInterval(async () => {
+    try {
+      const c = await sb.rpc('hub_device_check', { p_token: hubDeviceToken(), p_user_agent: navigator.userAgent });
+      if (!c.error && c.data && c.data.status === 'approved') { clearInterval(_deviceTimer); _deviceTimer = null; startStudioView(studioId); }
+    } catch (e) {}
+  }, 5000);
+  return false;
+}
+
 // ---------- Studio view ----------
 async function startStudioView(studioId) {
   // A personal staff login (hub_staff_portal.sql) opens the staff view instead.
@@ -9323,6 +9422,7 @@ async function startStudioView(studioId) {
     try {
       const w = await sb.rpc('hub_whoami');
       if (!w.error && w.data && w.data.kind === 'staff') { startStaffView(w.data); return; }
+      if (!w.error && w.data && w.data.kind === 'studio' && !(await hubDeviceGate(studioId))) return;   // studio logins: approved computers only
     } catch (e) { /* not set up yet: carry on as a studio login */ }
   }
   let data;
