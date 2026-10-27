@@ -7023,7 +7023,14 @@ async function loadClassStaff(studioId) {
     const isKidsRow = x => x.session_type === 'class' || x.session_type === 'series' || /class \d+ of \d+|week session/i.test(x.title || '');
     const withRoles = (sess || []).filter(x => !isKidsRow(x)).map(x => staffBy[x.id]).filter(r => r && ROLE_FIELDS.some(([f]) => String(r[f] || '').trim()));
     const pick = withRoles.find(r => true) || {};
-    _classInfo = { byKey, roles: pick, curriculum: cur.data || [] };
+    // Kids class weeks 2+ ("Class 4 of 4"): the families booked the series, so the
+    // bookings sit on week 1. Count the week's roster (same as the Schedule), and
+    // keep the rows so "On the floor" can add any the daily summary leaves out.
+    const kidsWeeks = (sess || []).filter(x => /\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(x.title || ''));
+    const rosters = await Promise.all(kidsWeeks.map(x => sb.rpc('get_class_week_bookings', { p_session_id: x.id })));
+    const kidsRows = kidsWeeks.map((x, i) => ({ time: x.session_time, title: x.title,
+      bookingCount: rosters[i].error ? 0 : (rosters[i].data || []).reduce((n, b) => n + (b.qty || 0), 0) }));
+    _classInfo = { byKey, roles: pick, curriculum: cur.data || [], kidsRows };
   } catch (e) {
     console.error('Class staff load failed:', e);
     _classInfo = null;
@@ -7108,7 +7115,15 @@ function renderFloorToday(data) {
   const nowHM = now.getHours() * 60 + now.getMinutes();
   // Events are shown in their own block, so leave their placeholder session rows out.
   const evTitles = new Set(_todayEvents.map(e => String(e.title || '').trim().toLowerCase()));
-  const allSessions = data.sessions.filter(s => !evTitles.has(String(s.title || '').trim().toLowerCase()))
+  const keyOf = s => String(s.time || '').slice(0, 8) + '|' + s.title;
+  const merged = data.sessions.map(s => Object.assign({}, s));
+  // Kids class weeks 2+: use the week's enrolled count, and add any the daily summary missed
+  ((_classInfo && _classInfo.kidsRows) || []).forEach(k => {
+    const have = merged.find(s => keyOf(s) === keyOf(k));
+    if (have) { if (!Number(have.bookingCount)) have.bookingCount = k.bookingCount; }
+    else merged.push({ time: k.time, title: k.title, bookingCount: k.bookingCount });
+  });
+  const allSessions = merged.filter(s => !evTitles.has(String(s.title || '').trim().toLowerCase()))
     .sort((a, b) => String(a.time).localeCompare(String(b.time)));
   // 0 booked and 0 spots open = not running today (kids classes always show).
   const notRunning = s => {
