@@ -4909,8 +4909,17 @@ function punchKey(k) {
   if (el.value.length === 4) punchCheck();
   punchIdle();
 }
+function punchDone() { clearTimeout(_punchTimer); window._punchJust = null; closeDutySheet(); if (paneVisible('punch-pane')) loadPunchBoard(); }
+async function punchSaveAfter() {
+  const j = window._punchJust, el = document.getElementById('pc-after'); if (!j || !el) return punchDone();
+  if (!el.value.trim()) { document.getElementById('pc-after-msg').innerHTML = '<div class="me-msg err">Write your comment, or tap No thanks.</div>'; return; }
+  const { error } = await sb.rpc('hub_punch_comment', { p_punch_id: j.id, p_staff_id: j.staff_id, p_pin: j.pin, p_comment: el.value, p_studio_id: _sessionStudioId });
+  if (error) { document.getElementById('pc-after-msg').innerHTML = `<div class="me-msg err">${esc(error.message)}</div>`; return; }
+  document.querySelector('#duty-sheet-back .duty-sheet').innerHTML = '<div class="pc-done">✓ Comment saved</div>';
+  clearTimeout(_punchTimer); _punchTimer = setTimeout(punchDone, 2000);
+}
 // Leave the screen clean if someone walks away mid-punch
-function punchIdle() { clearTimeout(_punchTimer); _punchTimer = setTimeout(punchCancel, 30000); }
+function punchIdle() { clearTimeout(_punchTimer); _punchTimer = setTimeout(() => (window._punchJust ? punchDone() : punchCancel()), 30000); }
 function punchCancel() { clearTimeout(_punchTimer); _punchPerson = null; closeDutySheet(); }
 async function punchCheck() {
   const el = document.getElementById('pc-pin'); if (!el || !_punchPerson) return;
@@ -4942,11 +4951,21 @@ async function punchGo(kind) {
   const { data, error } = await sb.rpc('hub_punch', { p_staff_id: p.staff_id, p_pin: pin, p_kind: kind, p_comment: comment || null, p_studio_id: _sessionStudioId });
   if (error) { document.getElementById('pc-msg').innerHTML = `<div class="me-msg err">${esc(error.message)}</div>`; document.querySelectorAll('.pc-acts button').forEach(b => { b.disabled = false; }); return; }
   const at = new Date(data.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const flagged = (data.flags || []).length > 0;
+  const already = (comment || '').trim();
+  // A warning: offer a comment box right here (PIN checked again on the server)
+  window._punchJust = flagged ? { id: data.id, staff_id: p.staff_id, pin } : null;
   openDutySheet(`<div class="pc-done">✓ ${esc(data.name || p.name)} ${PUNCH_DONE[kind]} at ${esc(at)}</div>
-    ${(data.flags || []).length ? `<div class="me-msg warn">${esc(data.flags.join(' · '))}. Add a comment from your phone if you need to explain.</div>` : ''}`);
+    ${flagged ? `<div class="me-msg warn">${esc(data.flags.join(' · '))}.</div>
+      ${already ? `<div class="goal-note" style="margin-top:8px">💬 Your comment: “${esc(already)}”</div>`
+        : `<label class="f" style="margin-top:10px">Want to explain? Add a comment for your manager (optional)
+            <input id="pc-after" maxlength="300" placeholder="e.g. Bus was late" style="font:inherit;font-size:15px;padding:10px;border:1px solid var(--border);border-radius:10px" oninput="punchIdle()"></label>
+          <div id="pc-after-msg"></div>
+          <div class="sheet-actions"><button onclick="punchDone()">No thanks</button><button class="primary" onclick="punchSaveAfter()">Save comment</button></div>
+          <div class="goal-note" style="margin-top:6px">You can also add one later in the Hub on your phone: Shifts → ⏱ My punches, or Hours → Add a note.</div>`}` : ''}`);
   _punchPerson = null;
   clearTimeout(_punchTimer);
-  _punchTimer = setTimeout(() => { closeDutySheet(); if (paneVisible('punch-pane')) loadPunchBoard(); }, 3500);
+  _punchTimer = setTimeout(punchDone, flagged && !already ? 30000 : 3500);
   if (typeof loadTeamToday === 'function') loadTeamToday(_sessionStudioId);
 }
 
