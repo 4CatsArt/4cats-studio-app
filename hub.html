@@ -543,6 +543,15 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .pc-acts .in { background: #16a34a; } .pc-acts .break_out { background: #d97706; } .pc-acts .break_in { background: #16a34a; } .pc-acts .out { background: #6d4aff; }
 .pe-list { max-height: 160px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; margin: 8px 0 12px; }
 .pe-list label { display: flex; gap: 8px; align-items: center; padding: 6px 10px; font-size: 14px; border-bottom: 1px solid #f1f0f5; cursor: pointer; }
+.glz-edit { display: flex; gap: 6px; align-items: center; }
+.glz-edit input { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; min-width: 160px; }
+.glz-edit .ho-btn { min-height: 30px; padding: 0 10px; }
+.glz-msg { font-size: 12px; margin-top: 2px; }
+.si-row { gap: 6px; flex-wrap: wrap; }
+.si-row select { font: inherit; font-size: 13px; padding: 5px; border: 1px solid var(--border); border-radius: 8px; max-width: 220px; }
+.si-row .ho-btn { min-height: 30px; padding: 0 10px; }
+.eh-detail { padding: 6px 10px 12px; }
+.eh-msg { background: #faf9fd; border: 1px solid var(--border); border-radius: 10px; padding: 10px; font-size: 13px; margin-top: 6px; }
 .plan-ci { border: none; background: #e3f9ec; color: #15803d; border-radius: 999px; padding: 3px 10px; font: inherit; font-size: 12.5px; font-weight: 700; cursor: pointer; margin-left: 6px; }
 .ts-nav { display: flex; align-items: center; gap: 10px; }
 .ts-nav .ts-per { flex: 1; text-align: center; }
@@ -2807,7 +2816,7 @@ async function loadPlanDay(date) {
     // Checked in on the studio's sign-in iPad (signin.html), same count as the Day view's ✅ (drop-ins left out)
     const signins = {};
     if (ids.length) {
-      const si = await sb.from('signin_entries').select('session_id, name, mode, signed_in_at').in('session_id', ids);
+      const si = await sb.from('signin_entries').select('id, session_id, name, mode, signed_in_at').in('session_id', ids);
       (si.data || []).filter(e => e.mode !== 'dropin').forEach(e => { (signins[e.session_id] = signins[e.session_id] || []).push(e); });
     }
     const booked = {}, extras = {};
@@ -2902,10 +2911,59 @@ function planShowSignins(id) {
   const x = (_plan.sessions || []).find(z => z.id === id) || {}, list = ((_plan.signins || {})[id] || []).slice()
     .sort((a, b) => String(a.signed_in_at).localeCompare(String(b.signed_in_at)));
   openDutySheet(`<h3>✅ Checked in</h3><p>${esc(shortTime(x.session_time || ''))} ${esc(x.title || '')} · ${list.length} on the sign-in iPad</p>
-    <div style="max-height:50vh;overflow:auto">${list.map(e => `<div class="me-list-row"><div class="what"><b>${esc(e.name || '—')}</b></div>
-      <span class="goal-note">${e.signed_in_at ? esc(new Date(e.signed_in_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })) : ''}</span></div>`).join('')}</div>
+    <div style="max-height:55vh;overflow:auto">${list.map(e => `<div class="me-list-row si-row" id="si-${escAttr(e.id)}"><div class="what"><b>${esc(e.name || '—')}</b>
+        <span class="goal-note">${e.signed_in_at ? esc(new Date(e.signed_in_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })) : ''}</span></div>
+      <select id="si-to-${escAttr(e.id)}"><option value="">Move to…</option>${(_plan.sessions || []).filter(z => z.id !== id).map(z => `<option value="${escAttr(z.id)}">${esc(shortTime(z.session_time || ''))} ${esc(z.title)}</option>`).join('')}</select>
+      <button class="ho-btn" onclick="planMoveSignin('${escAttr(e.id)}', '${escAttr(id)}')">Move</button>
+      <button class="ho-btn" title="Remove this check-in" onclick="planDeleteSignin('${escAttr(e.id)}', '${escAttr(id)}')">✕</button></div>`).join('')}</div>
+    <div id="si-msg"></div>
     <div class="sheet-actions"><button class="primary" onclick="closeDutySheet()">Close</button></div>`);
 }
+// Check-ins on the wrong class: move them (or remove them), same as the Day view
+async function planMoveSignin(entryId, fromId) {
+  const to = document.getElementById('si-to-' + entryId).value;
+  if (!to) { document.getElementById('si-msg').innerHTML = '<div class="me-msg err">Choose the class to move them to.</div>'; return; }
+  const { error } = await sb.from('signin_entries').update({ session_id: to }).eq('id', entryId);
+  if (error) { document.getElementById('si-msg').innerHTML = `<div class="me-msg err">${esc(error.message)}</div>`; return; }
+  const e = (_plan.signins[fromId] || []).find(z => String(z.id) === String(entryId));
+  _plan.signins[fromId] = (_plan.signins[fromId] || []).filter(z => String(z.id) !== String(entryId));
+  if (e) { e.session_id = to; (_plan.signins[to] = _plan.signins[to] || []).push(e); }
+  const x = (_plan.sessions || []).find(z => z.id === to) || {};
+  document.getElementById('si-' + entryId).innerHTML = `<span style="color:#15803d">✓ Moved to ${esc(shortTime(x.session_time || ''))} ${esc(x.title || '')}</span>`;
+  renderPlanDay();
+}
+async function planDeleteSignin(entryId, fromId) {
+  if (!confirm('Remove this check-in? This can’t be undone.')) return;
+  const { error } = await sb.from('signin_entries').delete().eq('id', entryId);
+  if (error) { document.getElementById('si-msg').innerHTML = `<div class="me-msg err">${esc(error.message)}</div>`; return; }
+  _plan.signins[fromId] = (_plan.signins[fromId] || []).filter(z => String(z.id) !== String(entryId));
+  const row = document.getElementById('si-' + entryId); if (row) row.remove();
+  renderPlanDay();
+}
+
+// Emails already sent to a class (email_sends, same as the Day view's history)
+async function planEmailHistory(sessionId) {
+  const x = (_plan.sessions || []).find(z => z.id === sessionId) || {};
+  openDutySheet('<h3>✉️ Emails sent</h3><div class="goal-note">Loading…</div>');
+  const { data, error } = await sb.from('email_sends').select('recipient_type, recipient_count, subject, sent_at, class_name, recipient_emails, message_html')
+    .eq('studio_id', _sessionStudioId).contains('session_ids', [sessionId]).order('sent_at', { ascending: false }).limit(50);
+  window._ehRows = data || [];
+  openDutySheet(`<h3>✉️ Emails sent</h3><p>${esc(shortTime(x.session_time || ''))} ${esc(x.title || '')}</p>
+    ${error ? `<div class="me-msg err">${esc(error.message)}</div>` : !(data || []).length ? '<div class="goal-note">Nothing sent to this class yet.</div>'
+      : `<div style="max-height:55vh;overflow:auto">${data.map((r, i) => `<div class="eh-row"><div class="me-list-row"><div class="what"><b>${esc(r.subject || '(no subject)')}</b>
+          <div class="goal-note">${esc(new Date(r.sent_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))} · ${esc(r.recipient_count || 0)} sent</div></div>
+          ${r.message_html || (r.recipient_emails || []).length ? `<button class="ho-btn" onclick="var d=document.getElementById('eh-d-${i}'); d.style.display = d.style.display === 'none' ? '' : 'none'">Show</button>` : ''}</div>
+        <div id="eh-d-${i}" class="eh-detail" style="display:none">${(r.recipient_emails || []).length ? `<div class="goal-note">To: ${esc(r.recipient_emails.join(', '))}</div>` : ''}
+          ${r.message_html ? `<div class="eh-msg">${planSafeEmailHtml(r.message_html)}</div>` : ''}</div></div>`).join('')}</div>`}
+    <div class="sheet-actions"><button class="primary" onclick="closeDutySheet()">Close</button></div>`);
+}
+// Sent messages are shown as text with line breaks (never as live HTML)
+function planSafeEmailHtml(html) {
+  const t = document.createElement('template');   // never runs or loads anything
+  t.innerHTML = String(html).replace(/<(script|style)[\s\S]*?<\/\1>/gi, '').replace(/<\/(p|div|h\d|li)>|<br\s*\/?>/gi, '\n');
+  return esc((t.content.textContent || '').replace(/\n{3,}/g, '\n\n').trim()).replace(/\n/g, '<br>');
+}
+
 function planCount(x) {
   const b = _plan.booked[x.id] || 0, left = x.spaces_left_cache;
   if (planIsKids(x)) return `<span class="plan-count"><b>${b}</b> enrolled</span>${planCheckedIn(x)}`;
@@ -3487,6 +3545,15 @@ async function openTodayClassList(key) {
   if (slot && slot.previousElementSibling) slot.previousElementSibling.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
+// Glazing: save what someone is glazing (hub_glazing_pieces.sql). Empty = back to the customer's choice.
+async function planSaveGlazing(bookingId) {
+  const el = document.getElementById('glz-' + bookingId), msg = document.getElementById('glz-msg-' + bookingId);
+  if (!el) return;
+  const { error } = await sb.rpc('hub_set_glazing_piece', { p_booking_id: String(bookingId), p_piece: el.value });
+  if (msg) msg.innerHTML = error ? `<span style="color:#b91c1c">${esc(/hub_set_glazing_piece/i.test(error.message) ? 'Saving needs hub_glazing_pieces.sql' : error.message)}</span>` : '<span style="color:#15803d">Saved ✓</span>';
+  if (!error) setTimeout(() => { if (msg) msg.innerHTML = ''; }, 2500);
+}
+
 // ---------- Class lists, notes and prints on the Schedule ----------
 // Class list: the same people as the Day view's list (kids class weeks 2+ come
 // from get_class_week_bookings; same order-and-line-item de-dupe).
@@ -3524,16 +3591,23 @@ async function toggleClassList(sessionId) {
     const kidsQ = rows.length ? await sb.from('booking_children').select('booking_id, child_index, child_name').in('booking_id', rows.map(b => b.id)).order('child_index') : { data: [] };
     const kids = {}; ((kidsQ.data) || []).forEach(k => { if (k.child_name) (kids[k.booking_id] = kids[k.booking_id] || []).push(k.child_name); });
     const glazing = x.session_type === 'glazing';
+    // What each person is glazing: the studio's saved version (hub_glazing_pieces.sql), else the customer's choice
+    let glz = {};
+    if (glazing && rows.length) { try { const g = await sb.rpc('hub_glazing_pieces', { p_booking_ids: rows.map(b => String(b.id)) }); if (!g.error) glz = g.data || {}; } catch (e) {} }
     const total = rows.reduce((n, b) => n + (b.qty || 0), 0);
     el.innerHTML = `<div class="cl-head"><b>${total}</b> ${planIsKids(x) ? 'enrolled' : 'booked'}
-        <span class="spacer"></span><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button>
+        <span class="spacer"></span><button class="ho-btn" onclick="planEmail('${escAttr(x.id)}')">✉️ Email this class</button><button class="ho-btn" onclick="planEmailHistory('${escAttr(x.id)}')">Sent</button><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button>
 </div>
       ${rows.length ? `<div class="oc-wrap"><table class="oc-table cl-table"><thead><tr><th>Name</th><th>Qty</th>${glazing ? '<th>Glazing</th>' : ''}<th>Extras</th><th>Phone</th><th>Order</th><th>Notes</th>${planMovable(x) ? '<th></th>' : ''}</tr></thead><tbody>
       ${rows.map(b => {
         const ex = [b.hot_chocolate_qty ? `☕ ${b.hot_chocolate_qty}` : '', b.candy_bag_qty ? `🍬 ${b.candy_bag_qty}` : '', b.aftercare ? 'Aftercare' : '', b.early_arrival ? 'Early arrival' : ''].filter(Boolean).join(' · ');
         const note = esc((typeof getOrderNote === 'function' ? getOrderNote(b) : b.order_note) || '');
         return `<tr><td><b>${esc(b.customer_name || '—')}</b>${(kids[b.id] || []).length ? `<div class="cl-kids">🧒 ${esc(kids[b.id].join(', '))}</div>` : ''}</td>
-          <td>${esc(b.qty)}</td>${glazing ? `<td>${esc(getGlazingPiece(b.raw_payload, b.event_date) || '') || '<span class="goal-note">not specified</span>'}</td>` : ''}
+          <td>${esc(b.qty)}</td>${glazing ? (() => {
+            const orig = getGlazingPiece(b.raw_payload, b.event_date) || '', saved = glz[String(b.id)];
+            return `<td class="glz-cell"><div class="glz-edit"><input id="glz-${escAttr(b.id)}" value="${escAttr(saved != null ? saved : orig)}" placeholder="What are they glazing?" maxlength="300">
+              <button class="ho-btn" onclick="planSaveGlazing('${escAttr(b.id)}')">Save</button></div>
+              ${saved != null && saved !== orig ? `<div class="goal-note">changed · customer chose: ${esc(orig || 'nothing')}</div>` : ''}<div class="glz-msg" id="glz-msg-${escAttr(b.id)}"></div></td>`; })() : ''}
           <td>${esc(ex)}</td><td>${esc(b.customer_phone || '')}</td><td>${b.shopify_order_name ? shopifyOrderLink(esc(b.shopify_order_name)) : ''}</td>
           <td>${note}${b.move_note ? `<div class="mv-note">↪ ${esc(b.move_note)}</div>` : ''}</td>
           ${planMovable(x) ? `<td><button class="ho-btn mv-btn" onclick="planMoveBooking('${escAttr(b.id)}', '${escAttr(x.id)}', ${escAttr(JSON.stringify(b.customer_name || 'this booking'))})">Move</button></td>` : ''}</tr>`;
@@ -3582,7 +3656,7 @@ async function buildKidsClassList(x, el) {
     const attendanceData = {}; (att.data || []).forEach(a => { attendanceData[`${a.shopify_order_name}|${(a.camper_name || '').toLowerCase().trim()}`] = a; });
     const enrolled = bookings.filter(b => (b.qty || 0) > 0).reduce((n, b) => n + (b.qty || 0), 0) + (cuTo || []).length;
     el.innerHTML = `<div class="cl-head"><b>${enrolled}</b> enrolled · tick ✓ for attendance, and Save after changing a child's details
-        <span class="spacer"></span><button class="ho-btn" onclick="planEmail('${escAttr(x.id)}')">✉️ Email this class</button><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button></div>
+        <span class="spacer"></span><button class="ho-btn" onclick="planEmail('${escAttr(x.id)}')">✉️ Email this class</button><button class="ho-btn" onclick="planEmailHistory('${escAttr(x.id)}')">Sent</button><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button></div>
       ${bookings.length || (cuTo || []).length
         ? `<div class="booking-table-wrap">${buildSeriesTable(bookings, tallyData, attendanceData, x.id, _plan.date, _sessionStudioId, x.session_time || '', childrenData, cuFrom || {}, cuTo || [], x.title)}</div>`
         : '<div class="goal-note" style="padding:8px 2px">No one enrolled yet.</div>'}`;
@@ -3626,7 +3700,7 @@ async function buildCampList(x, el) {
     const campers = bookings.reduce((n, b) => n + (b.qty || 0), 0);
     const campDay = day && day.data && day.data.camp_day ? day.data.camp_day : '';
     el.innerHTML = `<div class="cl-head"><b>${campers}</b> campers${campDay ? ' · ' + esc(campDay) : ''} · tick ✓ for attendance, and Save after changing a camper's details
-        <span class="spacer"></span><button class="ho-btn" onclick="planEmail('${escAttr(x.id)}')">✉️ Email this class</button><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button></div>
+        <span class="spacer"></span><button class="ho-btn" onclick="planEmail('${escAttr(x.id)}')">✉️ Email this class</button><button class="ho-btn" onclick="planEmailHistory('${escAttr(x.id)}')">Sent</button><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button></div>
       ${bookings.length ? `<div class="booking-table-wrap">${buildCampTable(bookings, tallyData, attendanceData, x.id, _plan.date, childrenData)}</div>`
                         : '<div class="goal-note" style="padding:8px 2px">No campers booked yet.</div>'}`;
     el.dataset.title = x.title; el.dataset.time = x.session_time || '';
@@ -8901,6 +8975,14 @@ function renderResetRequest(msg) {
 async function sendResetLink() {
   const email = (document.getElementById('reset-email').value || '').trim();
   if (!/.+@.+\..+/.test(email)) return;
+  // Studio logins (@4cats.com) are shared: their password is changed by home office, not reset here
+  if (/@([a-z0-9-]+\.)*4cats\.com$/i.test(email)) {
+    renderResetRequest();
+    document.getElementById('dashboard-gate-body').insertAdjacentHTML('afterbegin',
+      '<div class="gate-error">Studio logins (@4cats.com) can’t be reset here. Please ask home office to change the password.</div>');
+    document.getElementById('reset-email').value = email;
+    return;
+  }
   const btn = document.getElementById('reset-btn'); btn.disabled = true; btn.textContent = 'Sending…';
   const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname });
   // Same message either way, so the page never reveals which emails have a login
@@ -11403,6 +11485,12 @@ async function printAllGlazing() {
       .eq('session_id', s.id).order('booked_at')
     allBookings[s.id] = bookings || []
   }
+  // Hub: the studio's saved glazing pieces (hub_glazing_pieces.sql) win over the order's
+  let glzSaved = {}
+  try {
+    const allIds = Object.values(allBookings).flat().map(b => String(b.id)).filter(Boolean)
+    if (allIds.length) { const g = await sb.rpc('hub_glazing_pieces', { p_booking_ids: allIds }); if (!g.error) glzSaved = g.data || {} }
+  } catch (e) {}
 
   // Build print HTML
   const sectionsHtml = sessions.map(s => {
@@ -11410,7 +11498,7 @@ async function printAllGlazing() {
     const active = bookings.filter(b => !b.returned_at && (b.qty || 0) > 0)
     const total = active.reduce((sum, b) => sum + (b.qty || 0), 0)
     const rows = bookings.map(b => {
-      const glazing = escText(getGlazingPiece(b.raw_payload, b.event_date) || '')   // Hub copy: customer text escaped
+      const glazing = escText((glzSaved[String(b.id)] != null ? glzSaved[String(b.id)] : getGlazingPiece(b.raw_payload, b.event_date)) || '')   // Hub copy: customer text escaped
       const note = escText(getOrderNote(b) || '')
       const isReturned = !!b.returned_at || (b.qty || 0) === 0
       const rowStyle = isReturned ? 'opacity:0.4;text-decoration:line-through;' : ''
