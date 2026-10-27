@@ -3509,6 +3509,7 @@ function openPunch() {
 }
 async function loadPunchBoard(searchAll) {
   const body = document.getElementById('punch-body');
+  if (!searchAll) await loadBreakWarnings();
   const { data, error } = searchAll ? await sb.rpc('hub_punch_people', { p_studio_id: _sessionStudioId }) : await sb.rpc('hub_punch_board', { p_studio_id: _sessionStudioId });
   if (error) { body.innerHTML = `<div class="ho-card">${esc(/hub_punch/i.test(error.message) && /function/i.test(error.message) ? 'The punch clock isn’t set up yet (run hub_time_punch.sql).' : error.message)}</div>`; return; }
   const people = searchAll ? data : (data.people || []);
@@ -3517,15 +3518,16 @@ async function loadPunchBoard(searchAll) {
     ${searchAll ? `<input class="pc-search" id="pc-search" placeholder="Type your name…" oninput="filterPunchPeople(this.value)" style="width:100%;box-sizing:border-box;font:inherit;font-size:16px;padding:12px;border:1px solid var(--border);border-radius:12px;margin-bottom:12px">` : ''}
     <div class="pc-grid" id="pc-grid">${punchCards(people, searchAll)}</div>
     <div style="margin-top:16px">${searchAll ? '<button class="ho-btn" onclick="loadPunchBoard()">← Back to today’s team</button>'
-      : '<button class="ho-btn" onclick="loadPunchBoard(true)">Not on today’s list? Find your name</button>'}</div>`;
+      : '<div class="goal-note">Not on the list? You need a shift on today’s schedule here to punch in. Ask your manager or home office to add it.</div>'}</div>`;
   if (searchAll) document.getElementById('pc-search').focus();
 }
 function punchCards(people, searchAll) {
-  if (!people.length) return '<div class="ho-intro">No one is on the schedule here today. Use “Find your name”.</div>';
+  if (!people.length) return '<div class="ho-intro">No one is on the schedule here today.</div>';
   return people.map((p, i) => `<button class="pc-card" onclick="punchPick(${i})">${hubAvatarHtml(p, 64)}
       <span class="nm">${esc(p.name)}</span>
       ${p.start_time ? `<span class="tm">${esc(shortTime(p.start_time))}–${esc(shortTime(p.end_time))}</span>` : ''}
-      ${!searchAll ? `<span class="pc-state ${esc(p.state)}">${esc(PUNCH_STATE[p.state] || '')}</span>` : ''}</button>`).join('');
+      ${!searchAll ? `<span class="pc-state ${esc(p.state)}">${esc(PUNCH_STATE[p.state] || '')}</span>` : ''}
+      ${!searchAll && _breakWarn[p.staff_id] ? `<span class="pc-state break">⏰ Break time</span>` : ''}</button>`).join('');
 }
 function filterPunchPeople(q) {
   q = String(q || '').toLowerCase().trim();
@@ -3587,6 +3589,35 @@ async function punchGo(kind) {
   if (typeof loadTeamToday === 'function') loadTeamToday(_sessionStudioId);
 }
 
+// ---------- ⏰ Break warnings (studio computer) ----------
+// From the punch board: working 5h+ with no break, or 10+ min past the break
+// time in the day's roles without starting it. Shown in Who's working and on
+// the punch screen. Rules: break_warn_minutes, break_late_minutes.
+let _breakWarn = {};   // staff_id → text
+async function loadBreakWarnings() {
+  _breakWarn = {};
+  if (_studioData && _studioData.isAdmin) return;          // admin logins can't read the punch board
+  let board;
+  try { const r = await sb.rpc('hub_punch_board', { p_studio_id: _sessionStudioId }); if (r.error) return; board = r.data; } catch (e) { return; }
+  const ru = Object.assign({ break_warn_minutes: 300, break_late_minutes: 10 }, (board && board.rules) || {});
+  const now = Date.now();
+  const roleBreaks = [];   // [name, minutes-of-day]
+  const roles = (_classInfo && _classInfo.roles) || {};
+  ROLE_FIELDS.forEach(([f]) => {
+    const who = String(roles[f] || '').trim(), b = String(roles['break_' + f] || '').match(/(\d{1,2}):(\d{2})/);
+    if (who && b) { let h = +b[1]; if (h < 8) h += 12; roleBreaks.push([who.toLowerCase(), h * 60 + +b[2], b[0]]); }
+  });
+  (board.people || []).forEach(p => {
+    if (p.state !== 'in' || p.had_break) return;
+    const mins = p.first_in ? Math.round((now - new Date(p.first_in).getTime()) / 60000) : 0;
+    if (mins >= (ru.break_warn_minutes || 300)) { _breakWarn[p.staff_id] = `has worked ${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m without a break`; return; }
+    const names = [p.name, p.full_name, p.nickname].filter(Boolean).map(x => String(x).toLowerCase());
+    const rb = roleBreaks.find(([w]) => names.includes(w) || names.some(n => n.split(' ')[0] === w));
+    if (rb) { const d = new Date(); const nowMin = d.getHours() * 60 + d.getMinutes();
+      if (nowMin >= rb[1] + (ru.break_late_minutes || 10)) _breakWarn[p.staff_id] = `’s break was due at ${shortTime(rb[2] + ':00')}`; }
+  });
+}
+
 // ---------- ⏱ Timecards on the Schedule (coordinators / home office) ----------
 function tcMinutes(punches) {
   let worked = 0, brk = 0, inAt = null, brAt = null;
@@ -3607,7 +3638,7 @@ async function loadTimecards() {
   window._tcData = data || [];
   if (!(data || []).length) { box.innerHTML = '<div class="goal-note">No punches yet for this day.</div>'; return; }
   const isToday = _plan.date === localDateStr(new Date());
-  box.innerHTML = data.map((c, ci) => {
+  box.innerHTML = (tcCanFix() ? '' : '<div class="goal-note" style="margin-bottom:6px">Only home office can change punches.</div>') + data.map((c, ci) => {
     const t = tcMinutes(c.punches || []);
     const pills = (c.punches || []).map(p => {
       const at = new Date(p.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -3618,11 +3649,12 @@ async function loadTimecards() {
     return `<div class="tc-card"><div class="tc-head">${hubAvatarHtml(c, 28)}<span class="nm">${esc(c.name)}</span>
         <span class="goal-note">${c.shift_start ? 'Shift ' + esc(shortTime(c.shift_start)) + '–' + esc(shortTime(c.shift_end)) : 'Not scheduled'}</span>
         <span class="tot">${(c.punches || []).length ? `<b>${hm(t.worked)}</b> worked · ${hm(t.brk)} break` : 'No punches'}${noOut ? ' · <span style="color:#b91c1c;font-weight:700">no punch out</span>' : ''}</span></div>
-      <div class="tc-punches">${pills}<button class="tc-p" onclick="tcAdd(${ci})">＋ Add punch</button></div>${notes}</div>`;
+      <div class="tc-punches">${pills}${tcCanFix() ? `<button class="tc-p" onclick="tcAdd(${ci})">＋ Add punch</button>` : ''}</div>${notes}</div>`;
   }).join('');
 }
+function tcCanFix() { return !!(_studioData && _studioData.isAdmin); }
 function tcFix(id, ci) {
-  if (!planCanEdit()) { openPinModal(); return; }
+  if (!tcCanFix()) { alert('Only home office can change punches. Ask home office if a time needs fixing.'); return; }
   const c = window._tcData[ci], p = (c.punches || []).find(x => String(x.id) === String(id)); if (!p) return;
   const cur = new Date(p.at); const hhmm = String(cur.getHours()).padStart(2, '0') + ':' + String(cur.getMinutes()).padStart(2, '0');
   openDutySheet(`<h3>Fix a punch</h3><p>${esc(c.name)} · ${esc({ in: 'Punch in', break_out: 'Start break', break_in: 'End break', out: 'Punch out' }[p.kind])}${p.original_at ? ' · originally ' + esc(new Date(p.original_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })) : ''}</p>
@@ -3640,7 +3672,7 @@ async function tcSave(id, remove) {
   closeDutySheet(); loadTimecards();
 }
 function tcAdd(ci) {
-  if (!planCanEdit()) { openPinModal(); return; }
+  if (!tcCanFix()) return;
   const c = window._tcData[ci];
   openDutySheet(`<h3>Add a missing punch</h3><p>${esc(c.name)} · ${esc(ptyDayLabel(_plan.date))}</p>
     <div class="me-form"><label>Kind<select id="tc-kind"><option value="in">Punch in</option><option value="break_out">Start break</option><option value="break_in">End break</option><option value="out" selected>Punch out</option></select></label>
@@ -4567,7 +4599,9 @@ async function openRulesPane() {
       <div class="two"><label>New unavailability starts at least (days ahead)${num('unavailability_notice_days', 365)}</label>
         <label>Sick call allowed when the shift starts within (hours)${num('sick_window_hours', 168)}</label></div>
       <div class="ho-title" style="font-size:17px;margin-top:6px">Punch clock</div>
-      <div class="two"><label>Flag punching in more than (min) early${num('punch_early_minutes', 240)}</label><label>Flag punching in more than (min) late${num('punch_late_minutes', 240)}</label></div>
+      <div class="two"><label>Can punch in at most (min) before the shift${num('punch_early_minutes', 240)}</label><label>Flag punching in more than (min) late${num('punch_late_minutes', 240)}</label></div>
+      <div class="two"><label>Email “forgot to punch out?” after the shift ends + (min)${num('punchout_reminder_minutes', 720)}</label><label>Break warning after working (min) with no break${num('break_warn_minutes', 720)}</label></div>
+      <div class="two"><label>Break warning when this many min past their break time${num('break_late_minutes', 240)}</label><span></span></div>
       <div class="two"><label>Late sick call: this many hours’ notice or less${num('sick_late_hours', 168)}</label>
         <label>Doctor’s note needed for medical leave over (days)${num('medical_note_required_over_days', 365)}</label></div>
       <label>Home office copy of sick-call emails (optional email address)<input id="ru-notify_home_office_email" type="email" value="${escAttr(ru.notify_home_office_email || '')}" placeholder="Leave blank: only the studio’s managers get them" ${ed}></label>
@@ -4611,6 +4645,8 @@ async function saveRules() {
     unavail_max_days: n('unavail_max_days'), unavail_min_repeats: n('unavail_min_repeats'),
     unavail_weekends_allowed: document.getElementById('ru-unavail_weekends_allowed').checked };
   if ('punch_early_minutes' in (_rulesLoaded || {})) Object.assign(patch, { punch_early_minutes: n('punch_early_minutes'), punch_late_minutes: n('punch_late_minutes') });
+  if ('punchout_reminder_minutes' in (_rulesLoaded || {})) Object.assign(patch, { punchout_reminder_minutes: n('punchout_reminder_minutes'),
+    break_warn_minutes: n('break_warn_minutes'), break_late_minutes: n('break_late_minutes') });
   if ('medical_note_required_over_days' in (_rulesLoaded || {})) Object.assign(patch, {
     medical_note_required_over_days: n('medical_note_required_over_days'),
     notify_home_office_email: (v('notify_home_office_email') || '').trim() || null });
@@ -4874,6 +4910,7 @@ async function loadTeamToday(studioId) {
     loadSickCalls(studioId, 0)
   ]);
   _sickToday = {}; sick.forEach(c => { _sickToday[c.staff_id] = c; });
+  await loadBreakWarnings();
   if (error) {
     // Not set up yet (SQL not run) or not allowed — leave the card out.
     console.error('Who\'s working load failed:', error);
@@ -4911,6 +4948,7 @@ function renderTeamToday(rows) {
   const sickNow = people.filter(p => _sickToday[p.staff_id]);
   el.innerHTML = `<div class="team-title">Who's working</div>
     ${sickNow.map(p => sickAlertHtml(_sickToday[p.staff_id], p)).join('')}
+    ${people.filter(p => _breakWarn[p.staff_id]).map(p => `<div class="sick-alert wait">⏰ <b>${esc(p.name)}</b>${_breakWarn[p.staff_id].startsWith('’') ? '' : ' '}${esc(_breakWarn[p.staff_id])}.</div>`).join('')}
     <div class="team-list">${people.map(p => {
       const onNow = p.shifts.some(s => hmToMin(s.start) <= nowMin && nowMin < hmToMin(s.end));
       const done = p.shifts.every(s => hmToMin(s.end) <= nowMin);
@@ -7900,10 +7938,38 @@ if (INVENTORY_LIVE) {
 
 loadDashboardTheme();
 (async () => {
+  // "Forgot to punch out?" email link: its own page, no sign-in needed
+  const punchoutToken = new URLSearchParams(location.search).get('punchout');
+  if (punchoutToken) { renderPunchoutLink(punchoutToken); return; }
   const { data } = await sb.auth.getSession();
   if (data && data.session) startStudioView();
   else renderLoginGate();
 })();
+async function renderPunchoutLink(token) {
+  const gate = document.getElementById('dashboard-gate');
+  document.getElementById('dashboard-shell').style.display = 'none';
+  gate.style.display = '';
+  const box = document.getElementById('dashboard-gate-body') || gate;   // keeps the logo and "4Cats Hub" title
+  box.innerHTML = '<div class="gate-detail">Loading…</div>';
+  const { data, error } = await sb.rpc('hub_punchout_link_info', { p_token: token });
+  if (error || !data || !data.ok) { box.innerHTML = `<div class="gate-detail">${esc((data && data.why) || (error && error.message) || 'This link isn’t valid.')}</div>`; return; }
+  const [y, m, d] = String(data.work_date).split('-').map(Number);
+  const when = new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+  box.innerHTML = `<div class="gate-detail" style="text-align:left"><b>Hi ${esc(data.name)}!</b> You’re still punched in at <b>${esc(data.studio_name)}</b> for ${esc(when)}${data.shift_end ? ` (your shift ended at ${esc(shortTime(data.shift_end))})` : ''}. What time did you finish?</div>
+    <input type="time" id="po-time" class="gate-text-input" value="${escAttr(String(data.shift_end || '').slice(0, 5))}" step="300">
+    <input id="po-comment" class="gate-text-input" maxlength="300" placeholder="Comment (optional)">
+    <button class="gate-btn" id="po-go" onclick="submitPunchoutLink('${escAttr(token)}')">Set my punch-out time</button>
+    <div id="po-msg" style="margin-top:10px"></div>`;
+}
+async function submitPunchoutLink(token) {
+  const t = document.getElementById('po-time').value, msg = document.getElementById('po-msg');
+  if (!t) { msg.innerHTML = '<div class="me-msg err">Choose the time you finished.</div>'; return; }
+  document.getElementById('po-go').disabled = true;
+  const { error } = await sb.rpc('hub_punchout_by_link', { p_token: token, p_time: t, p_comment: document.getElementById('po-comment').value || null });
+  if (error) { msg.innerHTML = `<div class="me-msg err">${esc(error.message)}</div>`; document.getElementById('po-go').disabled = false; return; }
+  const box = document.getElementById('po-go').parentElement;
+  box.innerHTML = `<div class="gate-detail"><b>✓ Thanks!</b> You’re punched out at ${esc(shortTime(t + ':00'))}. Home office can see it was set from the email.</div>`;
+}
 </script>
 <script>
 /* ==========================================================================
