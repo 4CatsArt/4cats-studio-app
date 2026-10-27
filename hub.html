@@ -2950,10 +2950,18 @@ function renderPlanDay() {
         : `<span class="role-chip">${hubAvatarHtml(p, 22)}${esc(p.name)} <small>${esc(shortTime(p.start_time))}–${esc(shortTime(p.end_time))}</small></span>`).join('')
     : '<span class="ho-intro" style="margin:0">No shifts posted for this day yet.</span>')
     + (canShifts ? '<button class="ho-btn" style="min-height:32px" onclick="planEditShift(null)">+ Add shift</button>' : '');
+  const dplanR = planDemoPlan();
+  const breakClash = f => {
+    const b = String(P.roles['break_' + f] || '').match(/(\d{1,2}):(\d{2})\D+(\d{1,2}):(\d{2})/); if (!b || !P.roles[f]) return '';
+    const h = x => { x = +x; return x < 8 ? x + 12 : x; };
+    const a = h(b[1]) * 60 + +b[2], z = h(b[3]) * 60 + +b[4];
+    const hit = planBusyFor(P.roles[f], dplanR).find(([s0, s1]) => a < s1 && z > s0);
+    return hit ? `<div class="brk" style="color:#b45309">⚠ overlaps ${hit[2] === 'demo' ? 'a demo' : 'teaching'} ${esc(mHm(hit[0]))}–${esc(mHm(hit[1]))}</div>` : '';
+  };
   const roleCards = PLAN_ROLES.filter(([f]) => edit || P.roles[f]).map(([f, label]) => `<div class="plan-role"><label>${esc(label)}</label>
       ${pick(P.roles[f], `planSet('${f}', this.value)`)}
       ${edit ? `<div class="brk">Break <input type="text" value="${escAttr(P.roles['break_' + f])}" placeholder="e.g. 12:30–1:00" oninput="planSet('break_${f}', this.value, true)"></div>`
-        : (P.roles['break_' + f] ? `<div class="brk">Break ${esc(P.roles['break_' + f])}</div>` : '')}</div>`).join('')
+        : (P.roles['break_' + f] ? `<div class="brk">Break ${esc(P.roles['break_' + f])}</div>` : '')}${breakClash(f)}</div>`).join('')
     || '<div class="ho-intro">No roles set for this day yet.</div>';
   const kids = P.sessions.filter(planIsKids);
   const wheels = P.sessions.filter(x => P.wheel[x.id] !== undefined && !planNotRunning(x));
@@ -2966,13 +2974,7 @@ function renderPlanDay() {
   const circlers = [P.roles.circler, P.roles.circler2, P.roles.circler3].filter(Boolean);
   const nameOf = n => { const t = P.team.find(p => planWriteName(p) === n); return t ? t.name : n; };
   // who demos what this day (same calculation as "On the floor today")
-  const partyBy = {}; P.parties.forEach(pt => { const l = partyBy[pt.session.id] = partyBy[pt.session.id] || []; [pt.t1, pt.t2].forEach(n => { if (n && !l.includes(n)) l.push(n); }); });
-  const demoPlan = hubDemoPlan([
-    ...kids.filter(x => !planNotRunning(x)).map(x => ({ key: x.id, start: hubMin(x.session_time), kind: 'kids', teachers: [P.kidsTeacher[x.id]] })),
-    ...wheels.map(x => ({ key: x.id, start: hubMin(x.session_time), kind: 'wheel', teachers: [P.wheel[x.id]] })),
-    ...Object.keys(partyBy).map(id => { const x = P.sessions.find(z => z.id === id) || {}; return { key: id, start: hubMin(x.session_time), kind: 'party', teachers: partyBy[id] }; }),
-    ...others.filter(x => x.session_type !== 'party' && P.booked[x.id] > 0).map(x => ({ key: x.id, start: hubMin(x.session_time), kind: 'other', teachers: [] }))
-  ], P.roles);
+  const demoPlan = planDemoPlan();
   const dayCover = demoers.length || circlers.length
     ? `${demoers.length ? 'Demo: ' + demoers.map(nameOf).join(', ') : ''}${demoers.length && circlers.length ? ' · ' : ''}${circlers.length ? 'Circle: ' + circlers.map(nameOf).join(', ') : ''}`
     : 'Covered by the day’s Demoers and Circlers (none set yet)';
@@ -3040,7 +3042,35 @@ function renderPlanDay() {
 function planTouched(msg) { _plan.dirty = true; _plan.msg = ''; const m = document.getElementById('plan-msg'); if (m) m.textContent = msg || 'Unsaved changes'; }
 function planSet(f, v, typing) { _plan.roles[f] = v; planTouched(); if (!typing) renderPlanDay(); }
 function planWheel(id, v) { _plan.wheel[id] = v; planTouched(); }
-function planKids(id, v) { _plan.kidsTeacher[id] = v; planTouched(); }
+// Kids class teacher: the same choice as staff-schedule — just this day (a substitute)
+// or from this day on (the term teacher). Saved straight away with hub_set_class_teacher,
+// so staff-schedule sees it too.
+function planKids(id, v) {
+  const x = (_plan.sessions || []).find(z => z.id === id) || {};
+  const person = (_plan.team || []).find(p => planWriteName(p) === v);
+  const who = v ? (person ? person.name : v) : 'No teacher';
+  openDutySheet(`<h3>${esc(who)} for…</h3><p>${esc(shortTime(x.session_time || ''))} ${esc(x.title || '')}</p>
+    <div class="pc-acts" style="margin-top:8px">
+      <button class="out" style="background:#6d4aff" onclick="planKidsSave('${escAttr(id)}', ${escAttr(JSON.stringify(v))}, 'day')">Just ${esc(ptyDayLabel(_plan.date))} (a substitute)</button>
+      <button class="in" style="background:#16a34a" onclick="planKidsSave('${escAttr(id)}', ${escAttr(JSON.stringify(v))}, 'term')">From ${esc(ptyDayLabel(_plan.date))} on (the term teacher)</button></div>
+    <div id="pk-msg"></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet(); renderPlanDay()">Cancel</button></div>`);
+}
+async function planKidsSave(id, v, scope) {
+  const person = (_plan.team || []).find(p => planWriteName(p) === v);
+  if (v && !person) { document.getElementById('pk-msg').innerHTML = '<div class="me-msg err">Pick someone on today’s team.</div>'; return; }
+  const { data, error } = await sb.rpc('hub_set_class_teacher', { p_session_id: id, p_staff_id: person ? person.staff_id : null, p_scope: scope });
+  if (error && /hub_set_class_teacher/i.test(error.message)) {   // before hub_class_teacher.sql: this day only, saved with the roles
+    _plan.kidsTeacher[id] = v; closeDutySheet(); planTouched(); return;
+  }
+  if (error) { document.getElementById('pk-msg').innerHTML = `<div class="me-msg err">${esc(error.message)}</div>`; return; }
+  _plan.kidsTeacher[id] = data.teacher || '';
+  _plan.staffBy[id] = Object.assign({}, _plan.staffBy[id] || {}, { teacher: data.teacher || '' });
+  closeDutySheet();
+  _plan.msg = scope === 'term' ? `Term teacher saved for ${data.weeks} week${data.weeks === 1 ? '' : 's'}${data.skipped ? ` (${data.skipped} left as typed by the studio)` : ''}. Staff schedule shows it too.`
+                               : 'Substitute saved for this day. Staff schedule shows it too.';
+  renderPlanDay();
+}
 function planParty(i, n, v) { _plan.parties[i]['t' + n] = v; planTouched(); syncPartyTeacherInputs(); }
 
 function hmM(t) { const [h, m] = String(t || '0:0').split(':').map(Number); return h * 60 + (m || 0); }
@@ -3048,20 +3078,36 @@ function mHm(min) { const h = Math.floor(min / 60), m = min % 60, ap = h >= 12 ?
 // Suggest a 30-minute break for anyone in a role whose shift is over 5 hours,
 // near the middle of their shift, not while they're teaching a party, wheel
 // workshop or kids class, and not at the same time as anyone else's break.
+// Who teaches / demos what on the Schedule's day (kids classes, wheel, party art time, then demos)
+function planDemoPlan() {
+  const P = _plan;
+  const kids = P.sessions.filter(planIsKids), wheels = P.sessions.filter(x => P.wheel[x.id] !== undefined && !planNotRunning(x));
+  const partyIds = new Set(P.parties.map(pt => pt.session.id));
+  const others = P.sessions.filter(x => !planIsKids(x) && P.wheel[x.id] === undefined && !partyIds.has(x.id) && !planNotRunning(x));
+  const partyBy = {}, partyBusy = {};
+  P.parties.forEach(pt => {
+    const l = partyBy[pt.session.id] = partyBy[pt.session.id] || [];
+    [pt.t1, pt.t2].forEach(n => { if (n && !l.includes(n)) l.push(n); });
+    partyBusy[pt.session.id] = Math.max(partyBusy[pt.session.id] || 0, hubPartyBusyMin(pt.session.title, pt.booking && pt.booking.raw_payload, pt.detail));
+  });
+  return hubDemoPlan([
+    ...kids.filter(x => !planNotRunning(x)).map(x => ({ key: x.id, start: hubMin(x.session_time), kind: 'kids', teachers: [P.kidsTeacher[x.id]] })),
+    ...wheels.map(x => ({ key: x.id, start: hubMin(x.session_time), kind: 'wheel', teachers: [P.wheel[x.id]] })),
+    ...Object.keys(partyBy).map(id => { const x = P.sessions.find(z => z.id === id) || {}; return { key: id, start: hubMin(x.session_time), kind: 'party', teachers: partyBy[id], busy: partyBusy[id] }; }),
+    ...others.filter(x => x.session_type !== 'party' && P.booked[x.id] > 0).map(x => ({ key: x.id, start: hubMin(x.session_time), kind: 'other', teachers: [] }))
+  ], P.roles);
+}
+// A person's busy blocks: teaching (kids class 90 min, wheel 90, party art time, team building 15)
+// and the first 30 minutes of anything they demo
+function planBusyFor(name, plan) {
+  const k = hubNameKey(name);
+  return ((plan || planDemoPlan())._blocks || []).filter(b => b.name === k).map(b => [b.start, b.end, b.why]);
+}
 function planSuggestBreaks() {
   const P = _plan, taken = [];
   const personFor = name => P.team.find(p => planWriteName(p) === name || p.name === name);
-  const busyFor = name => {
-    const out = [];
-    const tlc = String(name || '').toLowerCase();
-    P.parties.forEach(pt => { if ([pt.t1, pt.t2].some(n => String(n).toLowerCase() === tlc)) { const a = hmM(pt.session.session_time); out.push([a, a + (pt.session.duration_minutes || 120)]); } });
-    P.sessions.forEach(x => {
-      const st = P.staffBy[x.id] || {};
-      const isMine = (P.wheel[x.id] && P.wheel[x.id].toLowerCase() === tlc) || (planIsKids(x) && String(st.teacher || '').toLowerCase() === tlc);
-      if (isMine) { const a = hmM(x.session_time); out.push([a, a + (x.duration_minutes || 90)]); }
-    });
-    return out;
-  };
+  const dplan = planDemoPlan();
+  const busyFor = name => planBusyFor(name, dplan).map(([a, b]) => [a, b]);   // teaching + demo starts
   // keep breaks people already typed (best effort: "12:30" or "12:30–1:00")
   PLAN_ROLES.forEach(([f]) => { const b = String(P.roles['break_' + f] || '').match(/(\d{1,2}):(\d{2})/); if (b) { let h = +b[1]; if (h < 8) h += 12; taken.push([h * 60 + +b[2], h * 60 + +b[2] + 30]); } });
   let added = 0, skipped = [];
@@ -7011,10 +7057,17 @@ async function loadClassStaff(studioId) {
     const [st, cur, pb] = await Promise.all([
       ids.length ? sb.from('session_staff').select('*').in('session_id', ids) : Promise.resolve({ data: [] }),
       sb.from('curriculum_weeks').select('*'),
-      partyIds.length ? sb.from('bookings').select('id, session_id').in('session_id', partyIds).gt('qty', 0).is('returned_at', null) : Promise.resolve({ data: [] })
+      partyIds.length ? sb.from('bookings').select('id, session_id, raw_payload').in('session_id', partyIds).gt('qty', 0).is('returned_at', null) : Promise.resolve({ data: [] })
     ]);
     const pbIds = (pb.data || []).map(b => b.id);
-    const pd = pbIds.length ? await sb.from('party_details').select('booking_id, party_teacher1, party_teacher2').in('booking_id', pbIds) : { data: [] };
+    const pd = pbIds.length ? await sb.from('party_details').select('booking_id, party_teacher1, party_teacher2, actual_art_time').in('booking_id', pbIds) : { data: [] };
+    // how long each party keeps its teachers busy (art time)
+    const partyBusy = {};
+    (pb.data || []).forEach(b => {
+      const x = (sess || []).find(z => z.id === b.session_id) || {};
+      const d = (pd.data || []).find(z => z.booking_id === b.id);
+      partyBusy[b.session_id] = Math.max(partyBusy[b.session_id] || 0, hubPartyBusyMin(x.title, b.raw_payload, d));
+    });
     const staffBy = {}; (st.data || []).forEach(r => { staffBy[r.session_id] = r; });
     const partyTeachers = {};
     (pb.data || []).forEach(b => {
@@ -7026,7 +7079,7 @@ async function loadClassStaff(studioId) {
     const byKey = {};
     (sess || []).forEach(x => {
       byKey[String(x.session_time || '').slice(0, 8) + '|' + x.title] = {
-        id: x.id, type: x.session_type, spaces: x.spaces_left_cache, staff: staffBy[x.id] || {}, party: partyTeachers[x.id] || []
+        id: x.id, type: x.session_type, spaces: x.spaces_left_cache, staff: staffBy[x.id] || {}, party: partyTeachers[x.id] || [], partyBusy: partyBusy[x.id] || null
       };
     });
     // Roles for the day: the first session that has any set (same as the Day view).
@@ -7117,6 +7170,17 @@ function classStaffHtml(s) {
 // free, the Director; if the Director's busy too, it needs a demoer.
 // A kids class with no teacher set gets the first free demoer.
 const HUB_BUSY_MIN = { kids: 90, wheel: 90, party: 60 };
+const HUB_DEMO_MIN = 30;   // a demo keeps the demoer busy for the first 30 minutes of a session
+// A party keeps its teachers busy for its art time: what the customer chose (60 or 90
+// minutes) or the actual art time on the party form. Team building: 15 minutes.
+function hubPartyBusyMin(title, rawPayload, detail) {
+  if (/team\s*building/i.test(title || '')) return 15;
+  let art = detail && detail.actual_art_time;
+  if (!art) {
+    try { const sub = getPartySubtype(title || ''); art = parseAddonDetails(parsePartyAddons(rawPayload, sub), sub).artTime; } catch (e) {}
+  }
+  return /90/.test(String(art || '')) ? 90 : 60;
+}
 const hubNameKey = n => String(n || '').trim().toLowerCase();
 const hubMin = t => { const [h, m] = String(t || '0:0').split(':').map(Number); return h * 60 + (m || 0); };
 // rows: [{ key, start (minutes), kind: 'kids'|'wheel'|'party'|'other', teachers: [names], booked }]
@@ -7135,7 +7199,7 @@ function hubDemoPlan(rows, roles) {
       const free = demoers.find(n => !isBusy(n, r.start)) || (director && !isBusy(director, r.start) ? director : '');
       if (free) { names = [free]; auto = true; }
     }
-    names.forEach(n => busy.push({ name: hubNameKey(n), start: r.start, end: r.start + (HUB_BUSY_MIN[r.kind] || 90) }));
+    names.forEach(n => busy.push({ name: hubNameKey(n), start: r.start, end: r.start + (r.busy || HUB_BUSY_MIN[r.kind] || 90), why: r.kind }));
     out[r.key] = { teachers: names, auto };
   });
   // 2. everything else: free demoers, else the Director, else nobody
@@ -7145,6 +7209,10 @@ function hubDemoPlan(rows, roles) {
     else if (director && !isBusy(director, r.start)) out[r.key] = { demo: [director], viaDirector: true };
     else out[r.key] = { demo: [], none: demoers.length > 0 || !!director };
   });
+  // every busy block (teaching + the start of anything they demo), for break planning
+  const blocks = busy.slice();
+  sorted.filter(r => r.kind === 'other').forEach(r => (out[r.key].demo || []).forEach(n => blocks.push({ name: hubNameKey(n), start: r.start, end: r.start + HUB_DEMO_MIN, why: 'demo' })));
+  Object.defineProperty(out, '_blocks', { value: blocks, enumerable: false });
   return out;
 }
 function hubDemoChips(plan) {
@@ -7200,7 +7268,7 @@ function renderFloorToday(data) {
       : /wheel/.test(title) ? 'wheel'
       : (info.type === 'series' || info.type === 'class' || /class \d+ of \d+|week session/.test(title)) ? 'kids' : 'other';
     const teachers = !info ? [] : kind === 'party' ? (info.party || []) : kind === 'wheel' ? [info.staff.wheel_teacher] : kind === 'kids' ? [info.staff.teacher] : [];
-    return { key, start: hubMin(s.time), kind, teachers, booked: Number(s.bookingCount || 0) };
+    return { key, start: hubMin(s.time), kind, teachers, booked: Number(s.bookingCount || 0), busy: kind === 'party' ? (info.partyBusy || hubPartyBusyMin(s.title)) : null };
   }).filter(r => r.kind !== 'skip'), (_classInfo && _classInfo.roles) || {});
   const offToday = allSessions.filter(notRunning);
   const rows = sessions.map(s => {
