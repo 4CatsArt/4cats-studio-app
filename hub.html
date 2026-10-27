@@ -3732,6 +3732,19 @@ async function meLoadRequests() {
   _meReq = data;
   if (_meTab === 'off') meRenderTimeOff(); else meRenderAvail();
 }
+// "Ask 14 days ahead for 1–3 days off, 60 days ahead for 4–10 days off"
+function meNoticeText(ru) {
+  const tiers = Array.isArray(ru.notice_tiers) && ru.notice_tiers.length
+    ? [...ru.notice_tiers].sort((a, b) => a.up_to_days - b.up_to_days) : null;
+  if (!tiers) return `Ask at least <b>${esc(ru.notice_days)} days</b> ahead`;
+  let from = 1;
+  const parts = tiers.map(t => {
+    const span = from === t.up_to_days ? `${from} day` : `${from}–${t.up_to_days} days`;
+    from = t.up_to_days + 1;
+    return `<b>${esc(t.notice_days)} days</b> ahead for ${esc(span)} off`;
+  });
+  return 'Ask ' + parts.join(', ') + (from > 1 ? ` (longer requests: ${esc(tiers[tiers.length - 1].notice_days)} days ahead)` : '');
+}
 function meFmtDate(ds) { const [y, m, d] = String(ds).split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }); }
 function meAddDays(ds, n) { const [y, m, d] = ds.split('-').map(Number); const x = new Date(y, m - 1, d + n); return localDateStr(x); }
 function meRenderTimeOff(msg) {
@@ -3749,7 +3762,7 @@ function meRenderTimeOff(msg) {
   document.getElementById('me-body').innerHTML = `
     ${msg || ''}
     <div class="me-card"><h3>Ask for time off</h3>
-      <div class="me-rules">Ask at least <b>${esc(ru.notice_days)} days</b> ahead${ru.notice_mode === 'block' ? '' : ' (sooner is OK, but your manager will see it’s short notice)'}.
+      <div class="me-rules">${meNoticeText(ru)}${ru.notice_mode === 'block' ? '' : ' (sooner is OK, but your manager will see it’s short notice)'}.
         ${ru.max_days ? `Up to <b>${esc(ru.max_days)} days</b> in a row${ru.max_days_mode === 'block' ? '' : ' (longer gets a closer look)'}.` : ''} For being sick on the day, use <b>Call in sick</b> on the shift instead.
         ${blackouts ? `<div style="margin-top:6px">Busy times:<ul style="margin:4px 0 0 18px;padding:0">${blackouts}</ul></div>` : ''}</div>
       <div class="me-form" style="margin-top:12px">
@@ -3840,9 +3853,15 @@ async function openRulesPane() {
   body.innerHTML = `
     <div class="ho-card me-form" style="max-width:720px">
       <div class="ho-title" style="font-size:17px">Time off requests</div>
-      <div class="two"><label>Notice needed (days)${num('notice_days', 365)}</label><label>If less notice${mode('notice_mode')}</label></div>
+      <div><div style="font-size:12px;font-weight:700;color:var(--ink-soft);margin-bottom:6px">Notice needed, by how long the request is</div>
+        <div id="ru-tiers">${(Array.isArray(ru.notice_tiers) ? [...ru.notice_tiers].sort((a, b) => a.up_to_days - b.up_to_days) : [{ up_to_days: 3, notice_days: ru.notice_days || 14 }])
+          .map(t => ruTierRow(t, ed)).join('')}</div>
+        ${_hoCan.edit ? '<button class="ho-btn" style="min-height:32px;margin-top:6px" onclick="document.getElementById(\'ru-tiers\').insertAdjacentHTML(\'beforeend\', ruTierRow({ up_to_days: \'\', notice_days: \'\' }, \'\'))">+ Add a tier</button>' : ''}
+        <div class="goal-note" style="margin-top:4px">Requests longer than the last tier need the last tier’s notice.</div></div>
+      <label>If less notice${mode('notice_mode')}</label>
       <div class="two"><label>Longest request (days in a row)${num('max_days', 365)}</label><label>If longer${mode('max_days_mode')}</label></div>
       <div class="two"><label>Already off at the same studio that day${num('max_off_per_studio', 50)}</label><label>If that many are off${mode('max_off_mode')}</label></div>
+      <div class="two"><label>Studios with this many staff or more…${num('large_studio_staff', 200)}</label><label>…can have this many off${num('max_off_large_studio', 50)}</label></div>
       <div class="ho-title" style="font-size:17px;margin-top:6px">Unavailability and sick calls</div>
       <div class="two"><label>New unavailability starts at least (days ahead)${num('unavailability_notice_days', 365)}</label>
         <label>Sick call allowed when the shift starts within (hours)${num('sick_window_hours', 168)}</label></div>
@@ -3861,12 +3880,24 @@ async function openRulesPane() {
         <button class="ho-btn" onclick="addBlackout()">Add busy time</button></div>` : ''}
     </div>`;
 }
+function ruTierRow(t, ed) {
+  return `<div class="two ru-tier" style="margin-bottom:6px;align-items:center"><label style="flex-direction:row;align-items:center;gap:6px">Up to <input type="number" class="ru-up" min="1" max="365" value="${escAttr(t.up_to_days)}" ${ed} style="width:90px"> days off</label>
+    <label style="flex-direction:row;align-items:center;gap:6px">ask <input type="number" class="ru-notice" min="0" max="365" value="${escAttr(t.notice_days)}" ${ed} style="width:90px"> days ahead</label>
+    ${ed ? '' : '<button class="ho-btn" style="min-height:32px;flex:none" onclick="this.closest(\'.ru-tier\').remove()" aria-label="Remove tier">✕</button>'}</div>`;
+}
 async function saveRules() {
   const n = k => Math.max(0, parseInt(document.getElementById('ru-' + k).value, 10) || 0);
   const v = k => document.getElementById('ru-' + k).value;
-  const patch = { notice_days: n('notice_days'), notice_mode: v('notice_mode'), max_days: n('max_days'), max_days_mode: v('max_days_mode'),
+  const patch = { notice_mode: v('notice_mode'), max_days: n('max_days'), max_days_mode: v('max_days_mode'),
     max_off_per_studio: n('max_off_per_studio'), max_off_mode: v('max_off_mode'), unavailability_notice_days: n('unavailability_notice_days'),
-    sick_window_hours: n('sick_window_hours'), sick_reason_required: document.getElementById('ru-sick_reason_required').checked, updated_at: new Date().toISOString() };
+    sick_window_hours: n('sick_window_hours'), sick_reason_required: document.getElementById('ru-sick_reason_required').checked, updated_at: new Date().toISOString(),
+    large_studio_staff: n('large_studio_staff'), max_off_large_studio: n('max_off_large_studio') };
+  const tiers = [...document.querySelectorAll('#ru-tiers .ru-tier')].map(r => ({
+    up_to_days: parseInt(r.querySelector('.ru-up').value, 10), notice_days: parseInt(r.querySelector('.ru-notice').value, 10) }))
+    .filter(t => t.up_to_days > 0 && t.notice_days >= 0).sort((a, b) => a.up_to_days - b.up_to_days);
+  if (!tiers.length) { document.getElementById('ru-msg').innerHTML = '<div class="me-msg err">Add at least one notice tier.</div>'; return; }
+  patch.notice_tiers = tiers;
+  patch.notice_days = tiers[0].notice_days;   // kept for anything still reading the single number
   const { error } = await sb.from('staff_request_rules').update(patch).eq('id', 1);
   document.getElementById('ru-msg').innerHTML = error ? `<div class="me-msg err">${esc(error.message)}</div>` : '<div class="me-msg ok">Saved. New requests follow these rules.</div>';
 }
