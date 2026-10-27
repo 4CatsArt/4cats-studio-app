@@ -545,6 +545,13 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .pc-acts { display: grid; gap: 8px; margin-top: 12px; }
 .pc-acts button { min-height: 56px; font: inherit; font-size: 18px; font-weight: 800; border-radius: 14px; border: none; color: #fff; }
 .pc-acts .in { background: #16a34a; } .pc-acts .break_out { background: #d97706; } .pc-acts .break_in { background: #16a34a; } .pc-acts .out { background: #6d4aff; }
+.et-grid { display: grid; grid-template-columns: 260px 1fr; gap: 14px; align-items: start; }
+@media (max-width: 860px) { .et-grid { grid-template-columns: 1fr; } }
+.et-list { padding: 8px; display: grid; gap: 4px; }
+.et-tpl { text-align: left; border: none; background: none; padding: 10px 12px; border-radius: 10px; font: inherit; font-size: 14px; font-weight: 600; color: var(--ink); cursor: pointer; }
+.et-tpl:hover { background: #f6f5fb; } .et-tpl.on { background: #ece7ff; color: var(--accent-deep); }
+.et-who { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.et-who input, .et-who select { font: inherit; font-size: 14px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; }
 .pe-list { max-height: 160px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; margin: 8px 0 12px; }
 .pe-list label { display: flex; gap: 8px; align-items: center; padding: 6px 10px; font-size: 14px; border-bottom: 1px solid #f1f0f5; cursor: pointer; }
 .glz-edit { display: flex; gap: 6px; align-items: center; }
@@ -1550,6 +1557,7 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
       <button class="nav-item locked-teaser" onclick="openPinModal()"><span class="ic">🔒</span> Unlock coordinator view</button>
       <button class="nav-item sc-only admin-ok" id="nav-parties" onclick="openPartiesPane()"><span class="ic">🎉</span> Parties <span class="nav-badge" id="parties-badge" style="display:none"></span></button>
       <button class="nav-item sc-only admin-ok" id="nav-notif" onclick="openNotifPane()"><span class="ic">🔔</span> Notifications <span class="nav-badge" id="notif-badge" style="display:none"></span></button>
+      <button class="nav-item sc-only admin-ok" id="nav-etpl" onclick="openEmailTplPane()"><span class="ic">✉️</span> Email templates</button>
       <button class="nav-item sc-only" id="nav-points" onclick="openPoints()"><span class="ic">⭐</span> My Points</button>
       <button class="nav-item sc-only" id="nav-occupancy" onclick="openOccupancy()"><span class="ic">📊</span> Fill Rates</button>
       <button class="nav-item sc-only" id="nav-instagram" onclick="openInstagram()"><span class="ic">📷</span> Instagram</button>
@@ -1729,6 +1737,13 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
     <button id="attach-lightbox-close" onclick="closeLightbox()">&times;</button>
     <img src="" alt="Attachment">
   </div>
+
+  <!-- Coordinators: email customers from a template (camp artwork pickup, and the studio's templates) -->
+  <main class="main" id="etpl-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">✉️ Email templates</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+    <p class="ho-intro">Pick a template, choose who it goes to, check the message, then send. Every email is logged.</p>
+    <div id="etpl-body"></div>
+  </main>
 
   <main class="main" id="duties-pane" style="display:none">
     <div class="ho-head"><div class="pts-page-title" style="margin:0">✅ Today’s duties</div><span class="spacer"></span>
@@ -4069,6 +4084,118 @@ async function planAfterCatchup() {
   if (x && _plan.classLists[openId]) { if (planIsCamp(x)) await buildCampList(x, _plan.classLists[openId]); else await buildKidsClassList(x, _plan.classLists[openId]); }
 }
 /* ======================= end of catch-up copy ======================= */
+// ---------- ✉️ Email templates page (coordinators + home office) ----------
+// Camp artwork pickup: the Day view's camp pickup email (send-camp-pickup-email: its own
+// send log and once-a-day guard), for camp families in a day / week / range.
+// Any other template: everyone booked on a date, or one class (send-email-blast).
+const ET_CAMP = { id: '__camp', name: '🏺 Camp artwork pickup', subject: '🎨 Great news, camp artwork is ready for pickup!' };
+function etCampMessage(label, mode) {
+  const when = mode === 'day' ? `camp today, ${label},` : mode === 'week' ? `camp ${label}` : `camp (${label})`;
+  return `Hi,\n\n🎨 Great news, your child's camp artwork is ready for pickup!\n\nAll artwork from ${when} has been completed and is ready to go home. If you haven't picked it up yet, we'd love for you to stop by as soon as you can.\n\nOur artwork shelves are filling up quickly, so we'd really appreciate you collecting your child's creations at your earliest convenience.\n\nPlease check our {{calendar_link}} for upcoming studio hours before stopping by. If you're unable to make it during one of our open times, simply contact the studio through the contact form on our website and we'll do our best to arrange another pickup time.\n\nWe can't wait for your artist to be reunited with everything they created!\n\nSee you soon,\nThe 4Cats Team`;
+}
+let _et = null;
+async function openEmailTplPane() {
+  if (!coordOrAdmin()) { openPinModal(); return; }
+  showOnlyPane('etpl-pane'); setActiveNav('nav-etpl');
+  const body = document.getElementById('etpl-body');
+  body.innerHTML = '<div class="ho-intro">Loading…</div>';
+  const { data } = await sb.from('email_templates').select('*').order('category').order('name');
+  const tpls = (data || []).filter(t => (!t.studio_ids || !t.studio_ids.length || t.studio_ids.includes(_sessionStudioId))
+    && t.category !== 'marketing_seasonal' && (!t.available_in || t.available_in.includes('blast')));
+  _et = { tpls: [ET_CAMP, ...tpls], tpl: null, recips: [], mode: 'week', date: localDateStr(new Date()) };
+  body.innerHTML = `<div class="et-grid">
+      <div class="ho-card et-list">${_et.tpls.map((t, i) => `<button class="et-tpl" onclick="etPick(${i})">${esc(t.name)}${t.id === '__camp' ? '<div class="goal-note">Camp families, by day, week or dates</div>' : ''}</button>`).join('')}</div>
+      <div class="ho-card" id="et-main"><div class="ho-intro" style="margin:0">Pick a template on the left.</div></div></div>`;
+}
+function etPick(i) {
+  _et.tpl = _et.tpls[i];
+  document.querySelectorAll('.et-tpl').forEach((b, k) => b.classList.toggle('on', k === i));
+  const camp = _et.tpl.id === '__camp';
+  const today = localDateStr(new Date());
+  document.getElementById('et-main').innerHTML = `<h3 style="margin:0 0 10px">${esc(_et.tpl.name)}</h3>
+    <div class="et-who">${camp ? `
+        <div class="tsg-modes">${[['day', 'A day'], ['week', 'A week'], ['range', 'Dates']].map(([k, l]) => `<button class="${_et.mode === k ? 'on' : ''}" onclick="_et.mode='${k}'; etPick(${i})">${l}</button>`).join('')}</div>
+        ${_et.mode === 'range' ? `<input type="date" id="et-from" value="${escAttr(_et.from || '')}"> – <input type="date" id="et-to" value="${escAttr(_et.to || today)}">`
+          : `<input type="date" id="et-date" value="${escAttr(_et.date)}">`}`
+      : `<input type="date" id="et-date" value="${escAttr(_et.date)}"><select id="et-class"><option value="">Everyone booked that day</option></select>`}
+      <button class="ho-btn" onclick="etLoad()">Find who to email</button></div>
+    <div id="et-recips"></div>
+    <div class="me-form" style="margin-top:12px">
+      <label>Subject<input id="et-subject" value="${escAttr(camp ? ET_CAMP.subject : (_et.tpl.subject || ''))}"></label>
+      <label>Message<textarea id="et-message" style="min-height:200px">${esc(camp ? etCampMessage('this week', 'week') : (_et.tpl.body || ''))}</textarea></label>
+      <div class="goal-note">Fill-ins: {{first_name}}, {{studio_name}}, {{date}}, {{class_name}}${camp ? ', {{calendar_link}}' : ''}. Blank lines become paragraphs.</div>
+    </div>
+    <div id="et-msg"></div>
+    <div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="ho-btn primary" id="et-send" onclick="etSend()" disabled>Send</button></div>`;
+  if (!camp) etFillClasses();
+}
+async function etFillClasses() {
+  const d = document.getElementById('et-date'), sel = document.getElementById('et-class'); if (!d || !sel) return;
+  d.onchange = etFillClasses;
+  const { data } = await sb.from('sessions').select('id, title, session_time').eq('studio_id', _sessionStudioId).eq('session_date', d.value).order('session_time');
+  sel.innerHTML = '<option value="">Everyone booked that day</option>' + (data || []).map(x => `<option value="${escAttr(x.id)}">${esc(shortTime(x.session_time))} ${esc(x.title)}</option>`).join('');
+  _et.daySessions = data || [];
+}
+async function etLoad() {
+  const camp = _et.tpl.id === '__camp', box = document.getElementById('et-recips');
+  box.innerHTML = '<div class="goal-note">Loading…</div>';
+  let sessions = [], label = '';
+  if (camp) {
+    let from, to;
+    if (_et.mode === 'range') { from = document.getElementById('et-from').value || null; to = document.getElementById('et-to').value; _et.from = from; _et.to = to;
+      if (!to) { box.innerHTML = '<div class="me-msg err">Choose an end date.</div>'; return; } }
+    else { const v = document.getElementById('et-date').value; _et.date = v; if (!v) return;
+      if (_et.mode === 'day') { from = to = v; } else { const [y, m, d] = v.split('-').map(Number); const dt = new Date(y, m - 1, d); const mon = new Date(dt); mon.setDate(dt.getDate() - ((dt.getDay() + 6) % 7)); const fri = new Date(mon); fri.setDate(mon.getDate() + 4); from = localDateStr(mon); to = localDateStr(fri); } }
+    let q = sb.from('sessions').select('id, session_date, session_time, title').eq('studio_id', _sessionStudioId).eq('session_type', 'camp').lte('session_date', to).order('session_date');
+    if (from) q = q.gte('session_date', from);
+    const r = await q; sessions = r.data || [];
+    const fmt = x => { const [y, m, d] = x.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }); };
+    label = _et.mode === 'day' ? fmt(from) : `${from ? fmt(from) : 'up to'} – ${fmt(to)}`;
+    _et.weekStart = from || (sessions[0] && sessions[0].session_date) || to; _et.weekEnd = to;
+    document.getElementById('et-message').value = etCampMessage(label, _et.mode);
+  } else {
+    const v = document.getElementById('et-date').value, cls = document.getElementById('et-class').value; _et.date = v;
+    sessions = cls ? (_et.daySessions || []).filter(x => x.id === cls) : (_et.daySessions || []);
+    label = cls && sessions[0] ? `${shortTime(sessions[0].session_time)} ${sessions[0].title}` : '';
+    _et.className = label; _et.type = cls ? 'classes' : 'day';
+  }
+  _et.sessionIds = sessions.map(x => x.id);
+  if (!sessions.length) { box.innerHTML = `<div class="goal-note">${camp ? 'No camp sessions then at this studio.' : 'Nothing running that day.'}</div>`; document.getElementById('et-send').disabled = true; return; }
+  const { data: bk } = await sb.from('bookings').select('session_id, customer_name, customer_email, qty, returned_at').in('session_id', _et.sessionIds).gt('qty', 0).is('returned_at', null);
+  const seen = {}, recips = []; let noEmail = 0;
+  (bk || []).forEach(b => { const k = String(b.customer_email || '').trim().toLowerCase(); if (!k) { noEmail++; return; } if (!seen[k]) { seen[k] = { email: b.customer_email.trim(), name: b.customer_name || '' }; recips.push(seen[k]); } });
+  recips.sort((a, b) => a.name.localeCompare(b.name));
+  if (camp && recips.length) {   // already sent this pickup email for this period?
+    const { data: log } = await sb.from('camp_pickup_emails').select('recipient_email, sent_at').eq('studio_id', _sessionStudioId).eq('week_start', _et.weekStart).eq('status', 'sent');
+    const sent = {}; (log || []).forEach(r => { sent[String(r.recipient_email || '').toLowerCase()] = r.sent_at; });
+    recips.forEach(r => { r.already = sent[r.email.toLowerCase()] || null; });
+  }
+  _et.recips = recips;
+  box.innerHTML = `<div class="goal-note" style="margin-top:10px"><b>${recips.length}</b> ${camp ? 'camp famil' + (recips.length === 1 ? 'y' : 'ies') : (recips.length === 1 ? 'person' : 'people')}${noEmail ? ` · ${noEmail} booking${noEmail === 1 ? '' : 's'} with no email` : ''}
+      ${recips.length ? ' · <a href="#" onclick="etAll(true); return false">all</a> / <a href="#" onclick="etAll(false); return false">none</a>' : ''}</div>
+    <div class="pe-list">${recips.map((r, i) => `<label><input type="checkbox" class="et-check" data-i="${i}" ${r.already ? '' : 'checked'} onchange="etCount()"> ${esc(r.name)} <span class="goal-note">${esc(r.email)}</span>${r.already ? ' <span class="pf-status ok">already emailed</span>' : ''}</label>`).join('') || '<div class="goal-note" style="padding:8px">No emails on file.</div>'}</div>`;
+  etCount();
+}
+function etAll(on) { document.querySelectorAll('.et-check').forEach(c => { c.checked = on; }); etCount(); }
+function etCount() { const n = document.querySelectorAll('.et-check:checked').length, b = document.getElementById('et-send'); if (b) { b.disabled = !n; b.textContent = n ? `Send to ${n}` : 'Send'; } }
+async function etSend() {
+  const sel = [...document.querySelectorAll('.et-check:checked')].map(c => _et.recips[+c.dataset.i]);
+  const subject = document.getElementById('et-subject').value.trim(), message = document.getElementById('et-message').value.trim(), msg = document.getElementById('et-msg');
+  if (!sel.length || !message) { msg.innerHTML = '<div class="me-msg err">Choose who to email and write the message.</div>'; return; }
+  if (!confirm(`Send this email to ${sel.length} ${sel.length === 1 ? 'person' : 'people'}?`)) return;
+  const btn = document.getElementById('et-send'); btn.disabled = true; btn.textContent = 'Sending…';
+  const camp = _et.tpl.id === '__camp';
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/${camp ? 'send-camp-pickup-email' : 'send-email-blast'}`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify(camp
+      ? { studio_id: _sessionStudioId, studio_name: STUDIO_NAMES[_sessionStudioId] || '', week_start: _et.weekStart, week_end: _et.weekEnd, subject, message, recipients: sel.map(r => ({ email: r.email, name: r.name })) }
+      : { studio_id: _sessionStudioId, studio_name: STUDIO_NAMES[_sessionStudioId] || '', recipient_type: _et.type, subject, message, recipients: sel.map(r => ({ email: r.email, name: r.name })), session_ids: _et.sessionIds, class_name: _et.className || '' }) });
+    const r = await res.json();
+    if (!r.success) throw new Error(r.error || 'The email didn’t send');
+    msg.innerHTML = `<div class="me-msg ok">Sent to ${r.sent != null ? r.sent : sel.length}.${r.skipped ? ' ' + r.skipped + ' skipped (already emailed today).' : ''}${r.failed ? ' ' + r.failed + ' didn’t go through.' : ''}</div>`;
+    btn.textContent = 'Sent ✓';
+  } catch (e) { msg.innerHTML = `<div class="me-msg err">${esc(e.message)}</div>`; btn.disabled = false; etCount(); }
+}
+
 // ---------- ✉️ Email the people booked (send-email-blast, same as the Day view) ----------
 // Coordinators (PIN) and home office. The function checks the signed-in login
 // and logs every send (email_sends).
@@ -7855,7 +7982,7 @@ async function requestPrize(prizeId) {
 
 // The page panes: only one shows at a time. Points + Instagram are
 // coordinator-only (their sidebar buttons only appear when unlocked).
-const PANES = ['dashboard-main', 'tickets-pane', 'moments-pane', 'info-pane', 'duties-pane', 'schedule-pane', 'points-pane', 'instagram-pane', 'occupancy-pane', 'inventory-pane', 'announce-pane', 'checklist-pane', 'oc-overview-pane', 'plan-pane', 'parties-pane', 'notif-pane', 'rules-pane', 'sick-pane', 'punch-pane', 'ts-pane'];
+const PANES = ['dashboard-main', 'etpl-pane', 'tickets-pane', 'moments-pane', 'info-pane', 'duties-pane', 'schedule-pane', 'points-pane', 'instagram-pane', 'occupancy-pane', 'inventory-pane', 'announce-pane', 'checklist-pane', 'oc-overview-pane', 'plan-pane', 'parties-pane', 'notif-pane', 'rules-pane', 'sick-pane', 'punch-pane', 'ts-pane'];
 function showOnlyPane(id) {
   PANES.forEach(p => {
     const el = document.getElementById(p);
