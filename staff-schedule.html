@@ -509,10 +509,13 @@ table.pl-staff .bad { color: var(--bad); }
               <select class="input" id="im-region">
                 <option value="">Choose…</option><option value="BC">BC</option><option value="AB">AB</option><option value="ON">ON</option>
               </select></label>
-            <label class="field"><span>Sling export (.csv)</span><input class="input" type="file" id="im-file" accept=".csv,text/csv" style="height:auto"></label>
+            <label class="field"><span>Sling export (.csv)</span><input class="input" type="file" id="im-file" accept=".csv,text/csv" style="height:auto" onchange="guessImportYear()"></label>
+            <label class="field" style="max-width:150px"><span>Year of the first date</span><input class="input" type="number" id="im-year" min="2020" max="2035" placeholder="Auto"></label>
             <button class="btn primary" onclick="previewImport()">Preview</button>
           </div>
           <p class="muted small" style="margin-top:8px;line-height:1.5">
+            Sling’s export has no years in it: check <b>Year of the first date</b> (for an export starting 29 Dec 2025, that’s 2025).
+            Shifts marked “(sick callout)” become sick days for those hours.
             Nothing is saved until you confirm. Repeating patterns of 3 weeks or more become unavailability.
             Shorter one-off days become time off waiting for approval. Times that Sling shifted by an hour
             after a daylight saving change are corrected automatically.
@@ -3341,7 +3344,17 @@ function isDst(dateStr) {
   return d >= nthSunday(2, 2) && d < nthSunday(10, 1)
 }
 
-function parseSlingExport(text) {
+// Fill in the year box with the importer's guess, so it can be checked before Preview
+async function guessImportYear() {
+  const file = document.getElementById('im-file').files[0], box = document.getElementById('im-year')
+  if (!file) return
+  try { const p = parseSlingExport(await file.text()); if (p.windowStart) box.value = p.windowStart.slice(0, 4) } catch (e) {}
+}
+
+// startYear (optional): the year of the file's first date. Sling's export has no years,
+// so without it the year is guessed from today (right for exports of the coming weeks,
+// wrong for history, e.g. a Dec–Mar export from last winter).
+function parseSlingExport(text, startYear) {
   const grid = parseCsv(text).filter(r => r.some(c => c.trim() !== ''))
   const header = grid.shift() || []
   if (!header.length || header[0].trim().toUpperCase() !== 'SUNDAY') throw new Error('This does not look like a Sling availability export (expected a SUNDAY…SATURDAY calendar grid).')
@@ -3361,7 +3374,9 @@ function parseSlingExport(text) {
     const dm = blocks[0].trim().match(/^(\d{1,2})\s+([A-Za-z]{3})/)
     if (!dm || !MONTHS[dm[2]]) return
     const month = MONTHS[dm[2]]
-    if (year === null) {
+    if (year === null && startYear) {
+      year = startYear
+    } else if (year === null) {
       year = now.getFullYear()
       if (month - (now.getMonth() + 1) > 6) year--
       else if ((now.getMonth() + 1) - month > 6) year++
@@ -3374,7 +3389,17 @@ function parseSlingExport(text) {
       const lines = b.split('\n').map(l => l.trim()).filter(Boolean)
       if (lines.length < 3) return
       const [timeLine, status] = [lines[0], lines[1]]
-      const name = lines.slice(2).join(' ').replace(/^zz-?\s*/i, '').trim()   // Sling marks some people "zz- Name"
+      // a note under the name, e.g. "(sick callout)", isn't part of the name
+      const nameLines = lines.slice(2).filter(l => !/^\(.*\)$/.test(l))
+      const notes = lines.slice(2).filter(l => /^\(.*\)$/.test(l)).join(' ')
+      const name = nameLines.join(' ').replace(/^zz\s*-?\s*/i, '').trim()   // Sling marks some people "zz- Name" / "zz - Name"
+      // A shift marked "(sick callout)" in Sling = a sick day for those hours
+      if (/sick/i.test(notes) && !/time off|unavailable/i.test(status)) {
+        const rs = /(\d{1,2}:\d{2}\s*[AP]M)\s*-\s*(\d{1,2}:\d{2}\s*[AP]M)/i.exec(timeLine)
+        const a = rs && time12to24(rs[1]), z = rs && time12to24(rs[2])
+        timeOffDays.push({ name, date, start: a && z && z > a ? a : null, end: a && z && z > a ? z : null, pending: false, kind: 'Sick' })
+        return
+      }
       if (/time off/i.test(status)) {
         // Sling time-off report: "Time off • Unpaid vacation", "Time off • Pending • Sick"
         const parts = status.split('•').map(x => x.trim())
@@ -3795,7 +3820,8 @@ async function previewImport() {
   const out = document.getElementById('im-preview')
   out.innerHTML = '<div class="panel"><div class="loading">Reading the export…</div></div>'
   let parsed
-  try { parsed = parseSlingExport(await file.text()) }
+  const yr = Number(document.getElementById('im-year').value) || null
+  try { parsed = parseSlingExport(await file.text(), yr) }
   catch (e) { out.innerHTML = '<div class="note bad">' + esc(e.message) + '</div>'; return }
   if (!parsed.entries && !parsed.timeOffs.length) { out.innerHTML = '<div class="note bad">No unavailability or time off found in this file.</div>'; return }
   const matches = await matchNames(parsed.names)
