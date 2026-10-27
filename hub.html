@@ -599,6 +599,14 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .tsg-st.need { background: #f5a524; }
 .tsg-st.ok { background: #16a34a; }
 .tsg-red { color: #dc2626; font-weight: 700; }
+.tsg-ot { color: #b45309; white-space: nowrap; }
+.tsg td.tsg-loc { white-space: normal; min-width: 80px; max-width: 110px; line-height: 1.25; }
+.ot-tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.ot-tbl th { text-align: left; font-size: 11px; color: var(--ink-soft); font-weight: 700; padding: 6px; }
+.ot-tbl td { padding: 6px; border-top: 1px solid var(--border); }
+.ot-tbl input { width: 70px; font: inherit; padding: 6px; border: 1px solid var(--border); border-radius: 8px; }
+.ot-tbl select { font: inherit; font-size: 12.5px; padding: 6px; border: 1px solid var(--border); border-radius: 8px; max-width: 220px; }
+.tsg-x { font-size: 10.5px; margin-left: 1px; color: #92400e; }
 .tsg-flagicon { color: #d97706; font-size: 15px; cursor: help; }
 .tsg-flag { background: #fff3dd; border-radius: 5px; padding: 1px 5px; }
 .tsg-edit { text-decoration: underline dotted #8b7bd8; }
@@ -5600,6 +5608,7 @@ function tsDayHtml(d, admin) {
       <span class="ts-tot">${(d.punches || []).length ? tsHm(d.minutes.worked) + (d.minutes.break ? ' · ' + tsHm(d.minutes.break) + ' break' : '') : ''}</span></div>
     ${chips && !admin ? `<div class="ts-chips">${chips}</div>` : ''}
     ${open ? '<div class="ts-line" style="color:#b91c1c;font-weight:700">No punch out this day</div>' : ''}
+    ${d.ot && (d.ot.ot15 || d.ot.ot2) ? `<div class="ts-line" style="color:#b45309">⏱ Overtime: ${d.ot.ot15 ? tsHm(d.ot.ot15) + ' at 1.5×' : ''}${d.ot.ot15 && d.ot.ot2 ? ', ' : ''}${d.ot.ot2 ? tsHm(d.ot.ot2) + ' at 2×' : ''}</div>` : ''}
     ${extra}${punchNotes}${notes}
     ${!admin ? `<button class="ho-btn" style="min-height:32px;margin-top:6px" onclick="meTsNote('${escAttr(d.date)}')">Add a note</button>` : ''}
   </div>`;
@@ -5611,7 +5620,9 @@ async function meLoadHours(date) {
   const body = document.getElementById('me-body');
   if (date) _meTsDate = date;
   body.innerHTML = '<div class="ho-intro">Loading…</div>';
-  const { data, error } = await sb.rpc('hub_my_timesheet', { p_date: _meTsDate || localDateStr(new Date()) });
+  let { data, error } = await sb.rpc('hub_my_timesheet_ot', { p_date: _meTsDate || localDateStr(new Date()) });
+  if (error && /hub_my_timesheet_ot/i.test(error.message)) ({ data, error } = await sb.rpc('hub_my_timesheet', { p_date: _meTsDate || localDateStr(new Date()) }));
+  if (!error && data) (data.days || []).forEach(d => { d.ot = (data.ot || {})[d.date] || null; });
   if (error) { body.innerHTML = `<div class="me-msg err">${esc(/hub_my_timesheet/i.test(error.message) ? 'Timesheets aren’t set up yet.' : error.message)}</div>`; return; }
   const per = data.period, prev = addDaysStr(per.start, -1), next = addDaysStr(per.end, 1);
   const days = (data.days || []).map(d => tsDayHtml(d, false)).join('');
@@ -5620,6 +5631,8 @@ async function meLoadHours(date) {
         <div class="ts-per"><b>${esc(tsPeriodLabel(per))}</b><div>${tsStatusPill(data)}</div></div>
         <button class="ho-btn" onclick="meLoadHours('${next}')" ${per.start > localDateStr(new Date()) ? 'disabled' : ''}>›</button></div>
       <div class="me-stats"><div class="me-stat"><b>${tsHm(data.totals.worked)}</b><span>worked</span></div><div class="me-stat"><b>${tsHm(data.totals.break)}</b><span>on breaks</span></div></div>
+      ${(() => { const o15 = (data.days || []).reduce((n, d) => n + (d.ot ? d.ot.ot15 : 0), 0), o2 = (data.days || []).reduce((n, d) => n + (d.ot ? d.ot.ot2 : 0), 0);
+        return o15 + o2 ? `<div class="me-small" style="margin-top:8px">⏱ Overtime this pay period: <b>${tsHm(o15)}</b> at 1.5×${o2 ? `, <b>${tsHm(o2)}</b> at 2×` : ''}</div>` : ''; })()}
       ${data.totals.open_days ? `<div class="me-msg warn" style="margin-top:10px">${data.totals.open_days} day${data.totals.open_days === 1 ? '' : 's'} with no punch out. Add a note with the time you finished.</div>` : ''}
       <div class="me-small" style="margin-top:8px">Something wrong? Tap <b>Add a note</b> on that day and home office will fix it before approving.</div>
     </div>
@@ -5678,7 +5691,10 @@ async function loadTsPane(date) {
   if (!body.innerHTML.trim()) body.innerHTML = '<div class="ho-intro">Loading…</div>';
   if (!_tsStaffList) { const r = await sb.rpc('hub_ts_staff_list'); _tsStaffList = r.error ? [] : (r.data || []); }
   const rg = await tsRange();
-  const { data, error } = await sb.rpc('hub_ts_rows', { p_from: rg.from, p_to: rg.to, p_studio_id: f.studio || null, p_staff_id: f.staff || null });
+  const args = { p_from: rg.from, p_to: rg.to, p_studio_id: f.studio || null, p_staff_id: f.staff || null };
+  let { data, error } = await sb.rpc('hub_ts_rows_ot', args);
+  if (error && /hub_ts_rows_ot/i.test(error.message)) ({ data, error } = await sb.rpc('hub_ts_rows', args));   // before hub_overtime.sql
+  if (!error) (data.people || []).forEach(x => (x.days || []).forEach(d => { d.ot = (x.ot || {})[d.date] || null; }));
   if (error) { body.innerHTML = `<div class="ho-card">${esc(error.message)}${/hub_ts_rows/i.test(error.message) ? ' (run hub_timesheets_v3.sql first)' : ''}</div>`; return; }
   const today = localDateStr(new Date());
   const H = m => (Math.round((Number(m) || 0) / 60 * 100) / 100).toFixed(2);
@@ -5709,10 +5725,12 @@ async function loadTsPane(date) {
     const keys = x.days.filter(d => info(d).canApprove || (d.approval && d.approval.status)).map(d => x.staff_id + '|' + d.date);
     const worked = x.days.reduce((n, d) => n + (d.minutes ? Number(d.minutes.worked) || 0 : 0), 0);
     const sch = x.days.reduce((n, d) => n + sched(d.shifts), 0), diff = worked - sch;
+    const ot15 = x.days.reduce((n, d) => n + (d.ot ? d.ot.ot15 : 0), 0), ot2 = x.days.reduce((n, d) => n + (d.ot ? d.ot.ot2 : 0), 0);
     const collapsed = (window._tsCollapsed || {})[x.staff_id];
     const head = `<tr class="tsg-group"><td class="tsg-cb">${keys.length ? `<input type="checkbox" ${keys.every(k => sel.has(k)) ? 'checked' : ''} onchange="tsPick(${JSON.stringify(keys).replace(/"/g, '&quot;')}, this.checked)">` : ''}</td>
         <td colspan="2"><button class="tsg-tog" onclick="tsToggle('${escAttr(x.staff_id)}')">${collapsed ? '▸' : '▾'}</button> <b>${esc(String(x.full_name || '').toUpperCase())}</b></td>
-        <td colspan="5"></td><td>${H(sch)}</td><td><b>${H(worked)}</b></td><td class="${diff > 0 ? 'tsg-red' : ''}">${worked ? H(diff) : ''}</td><td colspan="4"></td></tr>`;
+        <td colspan="5"></td><td>${H(sch)}</td><td><b>${H(worked)}</b></td><td class="${diff > 0 ? 'tsg-red' : ''}">${worked ? H(diff) : ''}</td>
+        <td>${tsOtCell(ot15, ot2, true)}</td><td colspan="4"></td></tr>`;
     if (collapsed) return head;
     return head + x.days.map(d => {
       const k = info(d), ps = k.ps, key = x.staff_id + '|' + d.date;
@@ -5735,11 +5753,12 @@ async function loadTsPane(date) {
       return `<tr class="tsg-row${k.open ? ' tsg-open' : ''}${sel.has(key) ? ' tsg-sel' : ''}">
         <td class="tsg-cb">${canPick ? `<input type="checkbox" ${sel.has(key) ? 'checked' : ''} onchange="tsPick(['${escAttr(key)}'], this.checked)">` : ''}</td>
         <td class="tsg-name">${hubAvatarHtml(x, 22)}<span>${esc(x.name || x.full_name)}</span></td><td>${esc(tsDayLabel(d.date))}</td>
-        <td>${esc(STUDIO_NAMES[loc] || loc || '')}</td><td>${cell(inP)}</td>
+        <td class="tsg-loc">${esc(STUDIO_NAMES[loc] || loc || '')}</td><td>${cell(inP)}</td>
         <td>${bo ? cell(bo) + '–' + (bi ? cell(bi) : '…') : ''}${nBreaks > 1 ? ` <span class="goal-note">+${nBreaks - 1}</span>` : ''}</td>
         <td>${d.minutes && d.minutes.break ? H(d.minutes.break) : ''}</td>
         <td>${outP ? cell(outP) + (outP.source === 'staff_link' ? ' <span title="Set by the staff member from the “forgot to punch out?” email">📧</span>' : '') : (k.open ? '<span class="tsg-red">missing</span>' : '')}</td>
         <td>${sc ? H(sc) : ''}</td><td>${ps.length ? H(w) : ''}</td><td class="${dd > 0 && !k.open ? 'tsg-red' : ''}">${ps.length && sc && !k.open ? H(dd) : ''}</td>
+        <td>${d.ot ? tsOtCell(d.ot.ot15, d.ot.ot2) : ''}</td>
         <td>${st}</td>
         <td>${flagged ? `<span class="tsg-flagicon" title="${escAttr(ps.flatMap(p => p.flags || []).join(' · '))}">⚑</span>` : ''}</td>
         <td>${nNotes ? `<button class="tsg-note${unanswered ? ' new' : ''}" title="${escAttr(noteTip)}" onclick="tsDaySheet(${pi}, '${escAttr(d.date)}')">📝${nNotes > 1 ? nNotes : ''}</button>` : ''}</td>
@@ -5766,9 +5785,17 @@ async function loadTsPane(date) {
     <div id="ts-result"></div>
     <div class="ho-card tsg-wrap"><table class="tsg"><thead><tr>
       <th class="tsg-cb"><input type="checkbox" title="Select all in this view" ${allOn ? 'checked' : ''} onchange="tsPick(window._tsRowKeys, this.checked)"></th>
-      <th>Name</th><th>Date</th><th>Location</th><th>Clock in</th><th>Break</th><th>Break (h)</th><th title="📧 = set by the staff member from the “forgot to punch out?” email">Clock out</th>
-      <th>Sch. hours</th><th>Worked</th><th>Difference</th><th>Status</th><th title="Flags: late, early…">⚑</th><th>Note</th><th></th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="15" class="goal-note" style="padding:16px">Nothing in this view.</td></tr>'}</tbody></table></div>`;
+      <th>Name</th><th>Date</th><th>Location</th><th>Clock in</th><th>Break</th><th title="Break hours">Brk (h)</th><th title="📧 = set by the staff member from the “forgot to punch out?” email">Clock out</th>
+      <th title="Scheduled hours">Sch.</th><th>Worked</th><th title="Worked minus scheduled">Diff.</th><th title="Overtime hours, worked out with the province’s rules (Sunday–Saturday weeks, all studios together)">OT</th><th>Status</th><th title="Flags: late, early…">⚑</th><th>Note</th><th></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="16" class="goal-note" style="padding:16px">Nothing in this view.</td></tr>'}</tbody></table></div>`;
+}
+// Overtime cell: hours at 1.5× and 2× (decimals, like the rest of the sheet)
+function tsOtCell(m15, m2, bold) {
+  const h = m => (Math.round((Number(m) || 0) / 60 * 100) / 100).toFixed(2);
+  const parts = [];
+  if (Number(m15) > 0) parts.push(`${bold ? '<b>' : ''}${h(m15)}${bold ? '</b>' : ''}<span class="tsg-x">×1.5</span>`);
+  if (Number(m2) > 0) parts.push(`${bold ? '<b>' : ''}${h(m2)}${bold ? '</b>' : ''}<span class="tsg-x">×2</span>`);
+  return parts.length ? `<span class="tsg-ot">${parts.join(' ')}</span>` : '';
 }
 function tsPick(keys, on) { (keys || []).forEach(k => on ? window._tsSel.add(k) : window._tsSel.delete(k)); loadTsPane(); }
 async function tsBulk(approve) {
@@ -6404,6 +6431,7 @@ async function openRulesPane() {
   _rulesHasUnpaidProv = 'unpaid_sick_provinces' in ru;   // only save it once v6 is run
   _rulesLoaded = ru;
   setTimeout(hoFillPinStaff, 0);
+  setTimeout(loadOtRules, 0);
   const mode = (k) => `<select id="ru-${k}" ${ed}><option value="flag"${ru[k] === 'flag' ? ' selected' : ''}>Let it through, flagged</option><option value="block"${ru[k] === 'block' ? ' selected' : ''}>Refuse it</option></select>`;
   const num = (k, max) => `<input type="number" id="ru-${k}" min="0" max="${max}" value="${escAttr(ru[k] ?? '')}" ${ed}>`;
   body.innerHTML = `
@@ -6441,6 +6469,7 @@ async function openRulesPane() {
       ${_hoCan.edit ? '<button class="ho-btn primary" onclick="saveRules()">Save rules</button>' : ''}
       <div id="ru-msg"></div>
     </div>
+    <div class="ho-card me-form" style="max-width:720px;margin-top:12px" id="ot-rules-card"><div class="goal-note">Loading overtime rules…</div></div>
     ${_hoCan.edit ? `<div class="ho-card me-form" style="max-width:720px;margin-top:12px">
       <div class="ho-title" style="font-size:17px">Set a punch PIN for someone</div>
       <div class="goal-note">For staff without a login. Staff with a login set their own in the Hub on their phone.</div>
@@ -6495,6 +6524,31 @@ async function saveRules() {
   document.getElementById('ru-msg').innerHTML = error
     ? `<div class="me-msg err">${/schema cache|column/i.test(error.message) ? 'Some rules aren’t set up in the database yet. Run the staff rules SQL files (v3, v4 and v5) in Supabase, then try again.' : esc(error.message)}</div>`
     : '<div class="me-msg ok">Saved. New requests follow these rules.</div>';
+}
+// Overtime by province (hub_overtime.sql). Stored in minutes, shown in hours.
+const OT_METHODS = [['daily_then_weekly', 'Daily first, then weekly on regular hours (BC)'], ['greater_of', 'Daily or weekly, whichever is more (AB)'], ['weekly', 'Weekly only (ON)']];
+async function loadOtRules() {
+  const card = document.getElementById('ot-rules-card'); if (!card) return;
+  const { data, error } = await sb.rpc('hub_ot_rules');
+  if (error) { card.innerHTML = `<div class="ho-title" style="font-size:17px">Overtime</div><div class="goal-note">${/hub_ot_rules/i.test(error.message) ? 'Run hub_overtime.sql to set up overtime.' : esc(error.message)}</div>`; return; }
+  const ed = _hoCan.edit ? '' : 'disabled', hrs = m => m == null ? '' : String(Math.round(m / 60 * 100) / 100);
+  card.innerHTML = `<div class="ho-title" style="font-size:17px">Overtime by province</div>
+    <div class="goal-note" style="margin-bottom:8px">Everyone hourly gets overtime, managers included. Weeks run Sunday–Saturday, with every studio’s hours added together.
+      Check these against Payworks or the province’s employment standards. Leave a box empty for “none”.</div>
+    <table class="ot-tbl"><thead><tr><th>Province</th><th>1.5× after (hours a day)</th><th>2× after (hours a day)</th><th>1.5× after (hours a week)</th><th>How they combine</th><th></th></tr></thead><tbody>
+    ${(data || []).map(r => `<tr data-prov="${escAttr(r.province)}"><td><b>${esc(r.province)}</b></td>
+      <td><input type="number" step="0.25" min="0" max="24" class="ot-d" value="${escAttr(hrs(r.daily_minutes))}" ${ed}></td>
+      <td><input type="number" step="0.25" min="0" max="24" class="ot-dd" value="${escAttr(hrs(r.daily_double_minutes))}" ${ed}></td>
+      <td><input type="number" step="0.25" min="0" max="80" class="ot-w" value="${escAttr(hrs(r.weekly_minutes))}" ${ed}></td>
+      <td><select class="ot-m" ${ed}>${OT_METHODS.map(([v, l]) => `<option value="${v}"${v === r.method ? ' selected' : ''}>${l}</option>`).join('')}</select></td>
+      <td>${_hoCan.edit ? `<button class="ho-btn" onclick="saveOtRule('${escAttr(r.province)}')">Save</button>` : ''}</td></tr>`).join('')}</tbody></table>
+    <div id="ot-msg"></div>`;
+}
+async function saveOtRule(prov) {
+  const row = document.querySelector(`#ot-rules-card tr[data-prov="${prov}"]`); if (!row) return;
+  const m = cls => { const v = row.querySelector(cls).value.trim(); return v === '' ? null : Math.round(Number(v) * 60); };
+  const { error } = await sb.rpc('hub_set_ot_rule', { p_province: prov, p_daily: m('.ot-d'), p_daily_double: m('.ot-dd'), p_weekly: m('.ot-w'), p_method: row.querySelector('.ot-m').value });
+  document.getElementById('ot-msg').innerHTML = error ? `<div class="me-msg err">${esc(error.message)}</div>` : `<div class="me-msg ok">${esc(prov)} overtime saved. Timesheets use it straight away.</div>`;
 }
 async function hoFillPinStaff() {
   const sel = document.getElementById('hp-staff'); if (!sel) return;
