@@ -6269,7 +6269,10 @@ function concernFormHtml(fixedStudio, studios) {
     <div class="goal-note" style="margin-top:8px">🚨 In an emergency, call <b>911</b>.</div>
     <div class="me-form" style="margin-top:12px">
       ${fixedStudio ? `<div class="goal-note">Studio: <b>${esc(STUDIO_NAMES[fixedStudio] || fixedStudio)}</b></div>`
-        : `<label>Studio<select id="cn-studio"><option value="">Choose…</option>${(studios || Object.keys(STUDIO_NAMES)).sort((a, b) => String(STUDIO_NAMES[a] || a).localeCompare(STUDIO_NAMES[b] || b)).map(id => `<option value="${escAttr(id)}">${esc(STUDIO_NAMES[id] || id)}</option>`).join('')}</select></label>`}
+        : (() => { const list = (studios && studios.length ? studios : (_cn.mineOnly ? [] : Object.keys(STUDIO_NAMES))).slice().sort((a, b) => String(STUDIO_NAMES[a] || a).localeCompare(STUDIO_NAMES[b] || b));
+            const one = list.length === 1;
+            return `<label>Studio<select id="cn-studio">${one ? '' : '<option value="">Choose…</option>'}${list.map(id => `<option value="${escAttr(id)}">${esc(STUDIO_NAMES[id] || id)}</option>`).join('')}
+              <option value="__none">Prefer not to say / not about a studio</option></select></label>`; })()}
       <label>When did it happen?<input type="date" id="cn-date" value="${today}" max="${today}"></label>
       <label>Your concern<textarea id="cn-text" rows="6" maxlength="5000" placeholder="Please be as detailed as you can, so it can be sorted out quickly."></textarea></label>
       <label>Your name and email <span class="goal-note">(only if you want us to contact you)</span><input id="cn-contact" maxlength="300" placeholder="Leave empty to stay anonymous"></label>
@@ -6284,20 +6287,22 @@ function openConcernPane() {   // studio computer / home office
   _cn = { kind: null, host: 'concern-host', fixed: _studioData && _studioData.isAdmin ? null : _sessionStudioId, studios: null };
   concernRerender();
 }
-function concernOpenSheet() {   // staff phones (nothing about them is looked up or sent)
-  openDutySheet(`<h3>🛡️ Report a concern</h3><div id="cn-sheet"></div><div class="sheet-actions"><button onclick="closeDutySheet()">Close</button></div>`);
-  _cn = { kind: null, host: 'cn-sheet', fixed: null, studios: null };
+async function concernOpenSheet() {   // staff phones: only their own studios to choose from (nothing about them is sent with the report)
+  openDutySheet(`<h3>🛡️ Report a concern</h3><div id="cn-sheet"><div class="goal-note">Loading…</div></div><div class="sheet-actions"><button onclick="closeDutySheet()">Close</button></div>`);
+  let mine = [];
+  try { const r = await sb.rpc('hub_chat_staff_studios', { p_staff: _me && _me.staff_id }); if (!r.error && Array.isArray(r.data)) mine = r.data.filter(Boolean); } catch (e) {}
+  _cn = { kind: null, host: 'cn-sheet', fixed: null, studios: mine, mineOnly: true };
   concernRerender();
 }
 async function concernSend(fixedStudio) {
   const msg = document.getElementById('cn-msg'), btn = document.getElementById('cn-send');
   const studio = fixedStudio || (document.getElementById('cn-studio') || {}).value || '';
   const text = document.getElementById('cn-text').value.trim();
-  if (!studio) { msg.innerHTML = '<div class="me-msg err">Choose the studio.</div>'; return; }
+  if (!studio) { msg.innerHTML = '<div class="me-msg err">Choose the studio, or “Prefer not to say”.</div>'; return; }
   if (!text) { msg.innerHTML = '<div class="me-msg err">Describe the concern.</div>'; return; }
   btn.disabled = true; btn.textContent = 'Sending…';
   const share = (document.querySelector('input[name=cn-share]:checked') || {}).value === 'yes';
-  const { error } = await sb.rpc('hub_report_concern', { p_kind: 'general', p_studio: studio, p_date: document.getElementById('cn-date').value || null,
+  const { error } = await sb.rpc('hub_report_concern', { p_kind: 'general', p_studio: studio === '__none' ? null : studio, p_date: document.getElementById('cn-date').value || null,
     p_concern: text, p_contact: document.getElementById('cn-contact').value || null, p_share: share });
   if (error) { btn.disabled = false; btn.textContent = 'Send anonymously'; msg.innerHTML = `<div class="me-msg err">${esc(/hub_report_concern/i.test(error.message) ? 'Reporting isn’t set up yet (hub_concerns.sql).' : error.message)}</div>`; return; }
   const h = document.getElementById(_cn.host);
@@ -6318,7 +6323,7 @@ async function loadConcernsAdmin() {
   const n = list.filter(c => c.status === 'new').length, badge = document.getElementById('concerns-badge'); if (badge) { badge.textContent = n; badge.style.display = n ? '' : 'none'; }
   const KIND = { general: 'Concern', safety: '🧹 Safety or cleanliness', conduct: '🙋 Staff behaviour or studio issue' }, ST = { new: 'New', reviewing: 'Looking into it', resolved: 'Resolved' };
   body.innerHTML = list.length ? list.map(c => `<div class="ho-card cn-card ${c.status}">
-      <div class="cn-head"><span class="cn-st ${c.status}">${ST[c.status]}</span><b>${KIND[c.kind] || c.kind}</b><span class="goal-note">· ${esc(STUDIO_NAMES[c.studio_id] || c.studio_id || 'No studio')} · happened ${esc(tsDayLabel(c.concern_date || c.sent_on))} · sent ${esc(tsDayLabel(c.sent_on))}</span></div>
+      <div class="cn-head"><span class="cn-st ${c.status}">${ST[c.status]}</span><b>${KIND[c.kind] || c.kind}</b><span class="goal-note">· ${esc(STUDIO_NAMES[c.studio_id] || c.studio_id || 'Studio not given')} · happened ${esc(tsDayLabel(c.concern_date || c.sent_on))} · sent ${esc(tsDayLabel(c.sent_on))}</span></div>
       <div class="cn-text">${esc(c.concern).replace(/\n/g, '<br>')}</div>
       <div class="goal-note">${c.contact ? `Wants to be contacted: <b>${esc(c.contact)}</b>` : 'Anonymous, no contact left'}${c.kind !== 'conduct' ? ` · ${c.share_with_studio ? 'OK to share with the studio team' : 'Don’t share with the studio team'}` : ''}</div>
       <div class="cn-edit"><select id="cn-st-${escAttr(c.id)}">${Object.entries(ST).map(([k, l]) => `<option value="${k}"${c.status === k ? ' selected' : ''}>${l}</option>`).join('')}</select>
