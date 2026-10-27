@@ -5224,7 +5224,7 @@ async function punchGo(kind) {
             <input id="pc-after" maxlength="300" placeholder="e.g. Bus was late" style="font:inherit;font-size:15px;padding:10px;border:1px solid var(--border);border-radius:10px" oninput="punchIdle()"></label>
           <div id="pc-after-msg"></div>
           <div class="sheet-actions"><button onclick="punchDone()">No thanks</button><button class="primary" onclick="punchSaveAfter()">Save comment</button></div>
-          <div class="goal-note" style="margin-top:6px">You can also add one later in the Hub on your phone: Shifts → ⏱ My punches, or Hours → Add a note.</div>`}` : ''}`);
+          <div class="goal-note" style="margin-top:6px">You can also add one later in the Hub on your phone: Hours → Add a note.</div>`}` : ''}`);
   _punchPerson = null;
   clearTimeout(_punchTimer);
   _punchTimer = setTimeout(punchDone, flagged && !already ? 30000 : 3500);
@@ -5684,23 +5684,29 @@ async function meLockboxHtml() {
 
 // Punch PIN + recent punches (with comments) on My shifts
 let _mePunch = null;
+// Shifts tab: just a nudge to set a punch PIN (punches live on Hours, the PIN on Profile)
 async function mePunchCardHtml() {
   let data, error;
   try { ({ data, error } = await sb.rpc('hub_my_punch_info')); } catch (e) { return ''; }
   if (error || !data || typeof data.has_pin !== 'boolean') return '';
   _mePunch = data;
-  if (!data.has_pin) return `<div class="me-card cover-ask"><h3>⏱ Set your punch PIN</h3>
+  if (data.has_pin) return '';
+  return `<div class="me-card cover-ask"><h3>⏱ Set your punch PIN</h3>
       <div class="me-small">You’ll type it on the studio computer to punch in and out. 4 numbers, just for you.</div>
-      <div class="me-form" style="margin-top:10px"><div class="two"><label>PIN<input id="me-pin1" type="password" inputmode="numeric" maxlength="4"></label><label>Again<input id="me-pin2" type="password" inputmode="numeric" maxlength="4"></label></div>
-      <button class="ho-btn primary" onclick="meSetPin()">Save PIN</button></div></div>`;
-  const recent = (data.punches || []).slice(0, 8);
-  return `<details class="me-more" style="margin-bottom:12px;background:#fff"><summary>⏱ My punches</summary>
-    ${recent.length ? recent.map(p => `<div class="me-list-row"><div class="what"><b>${esc({ in: 'In', break_out: 'Break', break_in: 'Back from break', out: 'Out' }[p.kind])}</b> · ${esc(meFmtDate(p.work_date))} ${esc(new Date(p.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }))}${p.original_at ? ' ✎' : ''}
-        <div>${(p.flags || []).length ? '⚑ ' + esc(p.flags.join(' · ')) + ' ' : ''}${p.comment ? '💬 “' + esc(p.comment) + '”' : ''}</div></div>
-        <button class="ho-btn" onclick="meCommentPunch('${escAttr(p.id)}')">${p.comment ? 'Edit comment' : 'Add comment'}</button></div>`).join('') : '<div class="me-small" style="padding-bottom:10px">No punches in the last 2 weeks.</div>'}
-    <div style="padding-bottom:10px">${data.pin_from_profile
-      ? '<div class="me-small">Your punch PIN is your manager PIN (it also unlocks the coordinator view). Home office changes it in admin.</div>'
-      : '<button class="ho-btn" onclick="meChangePin()">Change punch PIN</button>'}</div></details>`;
+      <div style="margin-top:10px"><button class="ho-btn primary" onclick="meTab('profile')">Set it in Profile</button></div></div>`;
+}
+// Profile tab: set or change the punch PIN
+async function mePunchPinCardHtml() {
+  let data;
+  try { const r = await sb.rpc('hub_my_punch_info'); if (r.error || !r.data || typeof r.data.has_pin !== 'boolean') return ''; data = r.data; } catch (e) { return ''; }
+  _mePunch = data;
+  if (data.pin_from_profile) return `<div class="me-card"><h3>⏱ Punch PIN</h3>
+      <div class="me-small">Your punch PIN is your manager PIN (it also unlocks the coordinator view). Home office changes it in admin.</div></div>`;
+  return `<div class="me-card"><h3>⏱ ${data.has_pin ? 'Change your punch PIN' : 'Set your punch PIN'}</h3>
+      <div class="me-small">You type it on the studio computer to punch in and out. 4 numbers, just for you.</div>
+      <div class="me-form" style="margin-top:10px"><div class="two"><label>${data.has_pin ? 'New PIN' : 'PIN'}<input id="me-pin1" type="password" inputmode="numeric" maxlength="4"></label>
+        <label>Again<input id="me-pin2" type="password" inputmode="numeric" maxlength="4"></label></div>
+      <button class="ho-btn" style="min-height:46px" onclick="meSetPin()">Save PIN</button></div></div>`;
 }
 async function meSetPin(again) {
   const a = document.getElementById('me-pin1').value, b = document.getElementById('me-pin2').value;
@@ -5708,19 +5714,7 @@ async function meSetPin(again) {
   if (a !== b) { alert('Those two PINs don’t match.'); return; }
   const { error } = await sb.rpc('hub_set_my_punch_pin', { p_pin: a });
   if (error) { alert(error.message); return; }
-  closeDutySheet(); meLoadShifts();
-}
-function meChangePin() {
-  openDutySheet(`<h3>⏱ Change punch PIN</h3><div class="me-form"><div class="two"><label>New PIN<input id="me-pin1" type="password" inputmode="numeric" maxlength="4"></label><label>Again<input id="me-pin2" type="password" inputmode="numeric" maxlength="4"></label></div></div>
-    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="meSetPin()">Save PIN</button></div>`);
-}
-async function meCommentPunch(id) {
-  const p = ((_mePunch || {}).punches || []).find(x => String(x.id) === String(id));
-  const c = prompt('Comment for your manager (e.g. “Punched in late by accident, I was here at 9”)', (p && p.comment) || '');
-  if (c === null) return;
-  const { error } = await sb.rpc('hub_comment_my_punch', { p_id: id, p_comment: c });
-  if (error) { alert(error.message); return; }
-  meLoadShifts();
+  meLoadProfile('<div class="me-msg ok" style="margin-bottom:10px">✓ Punch PIN saved. Use it on the studio computer.</div>');
 }
 function meCoverHtml() {
   const open = (_meCover || []).filter(r => r.status === 'asked');
@@ -6219,6 +6213,7 @@ async function meLoadProfile(msg) {
         <div class="me-small">Only you and home office can see your phone and emergency contact.</div>
         <button class="ho-btn primary" style="min-height:46px" onclick="meSaveProfile()">Save details</button>
       </div></div>
+    ${await mePunchPinCardHtml()}
     <div class="me-card"><h3>Change your password</h3>
       <div class="me-form">
         <label>New password<input id="pf-pw1" type="password" autocomplete="new-password"></label>
