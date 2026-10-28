@@ -74,6 +74,18 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .pill-audience-customer_facing { background: #f3e5f5; color: #6a1b9a; }
 .pill-topic { background: #f0f0ea; color: #555; }
 .pill-tag { background: #f5f5f5; color: #888; font-weight: 400; }
+.pill-notes { background: #fff3e0; color: #b35c00; cursor: pointer; }
+/* Admin-only change notes */
+.notes-banner { display: none; margin: -0.5rem 0 1rem; padding: 8px 12px; background: #fff3e0; border: 0.5px solid #ffcc80; border-radius: 7px; font-size: 13px; color: #8a4600; cursor: pointer; }
+.notes-hint { font-size: 12px; color: #888; margin-bottom: 12px; }
+.note-item { border: 0.5px solid #e6e6de; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; background: #fffdf8; }
+.note-item.done { background: #f7f7f4; }
+.note-item.done .note-body { color: #999; text-decoration: line-through; }
+.note-body { font-size: 14px; color: #222; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; }
+.note-meta { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 11px; color: #999; flex-wrap: wrap; }
+.note-meta .kb-action-btn { padding: 3px 10px; font-size: 11px; }
+.note-meta .note-actions { margin-left: auto; display: flex; gap: 6px; }
+.notes-section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: #999; font-weight: 600; margin: 14px 0 6px; }
 .kb-actions { display: flex; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 0.5px solid #f5f5f0; }
 .kb-action-btn { font-size: 12px; padding: 5px 12px; border-radius: 6px; border: 0.5px solid #d0d0c8; background: white; cursor: pointer; color: #555; }
 .kb-action-btn:hover { background: #f5f5f0; }
@@ -270,6 +282,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
           <option value="stale">Needs review</option>
           <option value="unverified">Never verified</option>
           <option value="verified">Verified</option>
+          <option value="notes">Has open change notes</option>
         </select>
         <select class="filter-select" id="kb-f-audience" onchange="renderKB()">
           <option value="">All Audiences</option>
@@ -505,6 +518,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
       <div style="font-size:17px;font-weight:600" id="doc-modal-title">New Doc</div>
       <button onclick="closeDocModal()" style="background:none;border:none;font-size:22px;cursor:pointer;color:#888;line-height:1">&times;</button>
     </div>
+    <div class="notes-banner" id="dm-notes-banner" onclick="openNotesModal(document.getElementById('dm-editing-id').value)"></div>
     <div class="modal-field">
       <div class="modal-label">Title</div>
       <input class="modal-input" type="text" id="dm-title" placeholder="e.g. Kiln Loading and Firing Guide">
@@ -712,6 +726,28 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
   </div>
 </div>
 
+<!-- CHANGE NOTES MODAL (home office only; stored in knowledge_base_notes) -->
+<div class="modal-overlay" id="notes-modal" style="z-index:1100">
+  <div class="modal-box">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:0.5rem">
+      <div>
+        <div style="font-size:17px;font-weight:600">&#128221; Notes for future changes</div>
+        <div style="font-size:13px;color:#666;margin-top:2px" id="notes-entry-title"></div>
+      </div>
+      <button onclick="closeNotesModal()" style="background:none;border:none;font-size:22px;cursor:pointer;color:#888;line-height:1">&times;</button>
+    </div>
+    <div class="notes-hint">&#128274; Only home office can see these. They're never shown to studios or in staff links.</div>
+    <div class="modal-field">
+      <textarea class="modal-textarea" id="notes-new" rows="3" placeholder="e.g. Update the glaze steps once the new kiln schedule starts in January"></textarea>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+        <span style="font-size:11px;color:#aaa">Ctrl/&#8984; + Enter to add</span>
+        <button class="btn-primary" style="margin-left:auto" id="notes-add-btn" onclick="addKBNote()">Add note</button>
+      </div>
+    </div>
+    <div id="notes-list"></div>
+  </div>
+</div>
+
 <!-- DOC READER MODAL -->
 <div class="modal-overlay" id="reader-modal">
   <div class="modal-box wide">
@@ -732,6 +768,8 @@ var sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY)
 
 var currentUser = null
 var allKB = []
+var allKBNotes = []       // knowledge_base_notes (home office only via RLS)
+var notesEntryId = null   // entry the notes modal is showing
 var allLog = []
 var homeOfficeUsers = []
 var docEditorMode = 'write'
@@ -854,6 +892,7 @@ function fetchKB() {
     .then(function(res) {
       if (res.error) { document.getElementById('kb-list').innerHTML = '<div class="empty-state">Error loading: ' + escHtml(res.error.message) + '</div>'; return }
       allKB = res.data || []
+      fetchKBNotes()
       renderKBStats()
       renderKB()
       loadSlideThumbs()
@@ -873,7 +912,8 @@ function renderKBStats() {
     { label: 'Slideshows', value: decks, color: '#8e44ad', click: "setKBFilter('kb-f-kind','slides')" },
     { label: 'Q&amp;A', value: active.length - docs - decks, color: '#2471a3', click: "setKBFilter('kb-f-kind','qa')" },
     { label: 'Needs review', value: stale, color: stale ? '#c0392b' : '#aaa', click: "setKBFilter('kb-f-verify','stale')" },
-    { label: 'Never verified', value: unverified, color: unverified ? '#8d6e00' : '#aaa', click: "setKBFilter('kb-f-verify','unverified')" }
+    { label: 'Never verified', value: unverified, color: unverified ? '#8d6e00' : '#aaa', click: "setKBFilter('kb-f-verify','unverified')" },
+    { label: 'Change notes', value: active.filter(function(e) { return openNoteCount(e.id) > 0 }).length, color: '#b35c00', click: "setKBFilter('kb-f-verify','notes')" }
   ]
   document.getElementById('kb-stats').innerHTML = chips.map(function(c) {
     return '<div class="stat-chip clickable" onclick="' + c.click + '"><div class="stat-chip-value" style="color:' + c.color + '">' + c.value + '</div><div class="stat-chip-label">' + c.label + '</div></div>'
@@ -913,7 +953,8 @@ function renderKB() {
     if (audience && e.audience !== audience) return false
     if (topic && e.topic !== topic) return false
     if (kind && (e.kind || 'qa') !== kind) return false
-    if (verify && verifyState(e) !== verify) return false
+    if (verify === 'notes') { if (!openNoteCount(e.id)) return false }
+    else if (verify && verifyState(e) !== verify) return false
     if (search) {
       var hay = (e.question + ' ' + String(e.answer || '').replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1') + ' ' + (e.tags || []).join(' ')).toLowerCase()
       if (hay.indexOf(search) === -1) return false
@@ -957,6 +998,7 @@ function renderKB() {
       + '<span class="pill pill-topic">' + escHtml(e.topic) + '</span>'
       + (kind !== 'qa' && !e.link_access ? '<span class="pill pill-private">&#128274; Home office only</span>' : '')
       + (owner ? '<span class="pill pill-owner">Owner: ' + escHtml(owner) + '</span>' : '')
+      + notesPill(e.id)
       + tags.map(function(t) { return '<span class="pill pill-tag">' + escHtml(t) + '</span>' }).join('')
       + '<span style="font-size:11px;color:#ccc;margin-left:auto">Updated ' + fmtDate(e.updated_at || e.created_at) + '</span>'
       + (e.archived ? '<span style="font-size:11px;color:#aaa">&bull; Archived</span>' : '')
@@ -964,6 +1006,7 @@ function renderKB() {
       + '<div class="kb-actions">'
       + (kind !== 'qa' ? '<button class="kb-action-btn" onclick="' + openFn + '(\'' + e.id + '\')">' + (isSlides ? 'View &#8599;' : 'Read') + '</button>' : '')
       + '<button class="kb-action-btn" onclick="' + editFn + '(\'' + e.id + '\')">Edit</button>'
+      + '<button class="kb-action-btn" onclick="openNotesModal(\'' + e.id + '\')">&#128221; Notes' + (openNoteCount(e.id) ? ' (' + openNoteCount(e.id) + ')' : '') + '</button>'
       + (kind !== 'qa' && !e.archived ? '<button class="kb-action-btn" onclick="copyViewLink(\'' + e.id + '\')">&#128279; Copy link</button>' : '')
       + (!e.archived && verifyState(e) !== 'verified' ? '<button class="kb-action-btn" style="color:#2e7d32;border-color:#a5d6a7" onclick="markVerified(\'' + e.id + '\')">&#10003; Still accurate</button>' : '')
       + (e.archived
@@ -1094,6 +1137,7 @@ function openDocModal() {
   selectValue('dm-verify-every', 180)
   document.getElementById('dm-link-access').checked = true
   document.getElementById('doc-modal-title').textContent = 'New Doc'
+  updateDocNotesBanner('')
   startDocImageSession(newUuid(), '')
   setDocEditorMode('write')
   document.getElementById('doc-modal').style.display = 'block'
@@ -1116,6 +1160,7 @@ function editDoc(id) {
   selectValue('dm-verify-every', e.verify_every_days || 180)
   document.getElementById('dm-link-access').checked = e.link_access !== false
   document.getElementById('doc-modal-title').textContent = 'Edit Doc'
+  updateDocNotesBanner(id)
   startDocImageSession(id, e.answer || '')
   setDocEditorMode('write')
   document.getElementById('doc-modal').style.display = 'block'
@@ -1915,6 +1960,7 @@ function openReader(id) {
     + (!e.link_access ? '<span class="pill pill-private" style="align-self:center">&#128274; Home office only</span>' : '')
     + (verifyState(e) !== 'verified' && !e.archived ? '<button class="btn-secondary" style="color:#2e7d32" onclick="markVerified(\'' + e.id + '\')">&#10003; Still accurate</button>' : '')
     + (/^https?:\/\//i.test(e.source_url || '') ? '<a class="btn-secondary" style="text-decoration:none" href="' + escHtml(e.source_url) + '" target="_blank" rel="noopener">Open original Google Doc &#8599;</a>' : '')
+    + '<button class="btn-secondary" onclick="openNotesModal(\'' + e.id + '\')">&#128221; Notes' + (openNoteCount(e.id) ? ' (' + openNoteCount(e.id) + ')' : '') + '</button>'
     + '<button class="btn-secondary" style="margin-left:auto" onclick="closeReader()">Close</button>'
   document.getElementById('reader-modal').style.display = 'block'
 }
@@ -1923,6 +1969,134 @@ function closeReader() {
   readerId = null
   document.getElementById('reader-modal').style.display = 'none'
 }
+
+// ── CHANGE NOTES (home office only) ───────────────────────────
+// Stored in their own table, knowledge_base_notes, whose RLS allows home
+// office only. They're deliberately NOT a column on knowledge_base, because
+// any signed-in login can read that table. kb-view never reads this table.
+
+function fetchKBNotes() {
+  sb.from('knowledge_base_notes')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .then(function(res) {
+      if (res.error) { console.warn('Could not load change notes', res.error); return }
+      allKBNotes = res.data || []
+      refreshNotesUI()
+    })
+}
+
+function openNoteCount(kbId) {
+  var n = 0
+  for (var i = 0; i < allKBNotes.length; i++) if (allKBNotes[i].kb_id === kbId && !allKBNotes[i].done) n++
+  return n
+}
+
+function notesPill(kbId) {
+  var n = openNoteCount(kbId)
+  return n ? '<span class="pill pill-notes" onclick="openNotesModal(\'' + kbId + '\')">&#128221; ' + n + ' change note' + (n === 1 ? '' : 's') + '</span>' : ''
+}
+
+function updateDocNotesBanner(kbId) {
+  var el = document.getElementById('dm-notes-banner')
+  if (!el) return
+  var n = kbId ? openNoteCount(kbId) : 0
+  el.style.display = n ? 'block' : 'none'
+  el.innerHTML = n ? '&#128221; ' + n + ' open change note' + (n === 1 ? '' : 's') + ' for this doc. <u>View</u>' : ''
+}
+
+// Re-render everything that shows note counts
+function refreshNotesUI() {
+  renderKBStats()
+  renderKB()
+  if (readerId && document.getElementById('reader-modal').style.display === 'block') openReader(readerId)
+  if (document.getElementById('doc-modal').style.display === 'block') updateDocNotesBanner(document.getElementById('dm-editing-id').value)
+  if (notesEntryId) renderNotesList()
+}
+
+function openNotesModal(kbId) {
+  var e = allKB.find(function(x) { return x.id === kbId })
+  if (!e) return
+  notesEntryId = kbId
+  document.getElementById('notes-entry-title').textContent = e.question || ''
+  document.getElementById('notes-new').value = ''
+  renderNotesList()
+  document.getElementById('notes-modal').style.display = 'block'
+  setTimeout(function() { document.getElementById('notes-new').focus() }, 50)
+}
+
+function closeNotesModal() {
+  notesEntryId = null
+  document.getElementById('notes-modal').style.display = 'none'
+}
+
+function noteHtml(n) {
+  var who = ownerName(n.created_by_user_id)
+  var meta = escHtml(who || 'Home office') + ' &bull; ' + fmtDate(n.created_at)
+  if (n.done) meta += ' &bull; done ' + fmtDate(n.done_at) + (ownerName(n.done_by_user_id) ? ' by ' + escHtml(ownerName(n.done_by_user_id)) : '')
+  return '<div class="note-item' + (n.done ? ' done' : '') + '">'
+    + '<div class="note-body">' + escHtml(n.body) + '</div>'
+    + '<div class="note-meta"><span>' + meta + '</span><span class="note-actions">'
+    + (n.done
+        ? '<button class="kb-action-btn" onclick="setKBNoteDone(\'' + n.id + '\', false)">Reopen</button>'
+        : '<button class="kb-action-btn" style="color:#2e7d32;border-color:#a5d6a7" onclick="setKBNoteDone(\'' + n.id + '\', true)">&#10003; Done</button>')
+    + '<button class="kb-action-btn danger" onclick="deleteKBNote(\'' + n.id + '\')">Delete</button>'
+    + '</span></div></div>'
+}
+
+function renderNotesList() {
+  var notes = allKBNotes.filter(function(n) { return n.kb_id === notesEntryId })
+  var open = notes.filter(function(n) { return !n.done })
+  var done = notes.filter(function(n) { return n.done })
+  var html = ''
+  if (!notes.length) html = '<div style="font-size:13px;color:#aaa;padding:8px 0">No notes yet.</div>'
+  if (open.length) html += '<div class="notes-section-label">Open (' + open.length + ')</div>' + open.map(noteHtml).join('')
+  if (done.length) html += '<div class="notes-section-label">Done (' + done.length + ')</div>' + done.map(noteHtml).join('')
+  document.getElementById('notes-list').innerHTML = html
+}
+
+function addKBNote() {
+  var ta = document.getElementById('notes-new')
+  var body = (ta.value || '').trim()
+  if (!notesEntryId || !body) return
+  var btn = document.getElementById('notes-add-btn')
+  btn.disabled = true
+  sb.from('knowledge_base_notes')
+    .insert({ kb_id: notesEntryId, body: body, created_by_user_id: currentUser.id })
+    .select('*')
+    .then(function(r) {
+      btn.disabled = false
+      if (r.error) { alert('Could not add note: ' + r.error.message); return }
+      if (!r.data || !r.data.length) { alert('Nothing was saved. You may not have permission to add notes.'); return }
+      ta.value = ''
+      allKBNotes.unshift(r.data[0])
+      refreshNotesUI()
+      ta.focus()
+    })
+}
+
+function setKBNoteDone(noteId, done) {
+  var fields = done
+    ? { done: true, done_at: new Date().toISOString(), done_by_user_id: currentUser.id }
+    : { done: false, done_at: null, done_by_user_id: null }
+  sb.from('knowledge_base_notes').update(fields).eq('id', noteId).select('*').then(function(r) {
+    if (r.error) { alert('Could not update note: ' + r.error.message); return }
+    if (!r.data || !r.data.length) { alert('Nothing was saved. You may not have permission to change notes.'); return }
+    allKBNotes = allKBNotes.map(function(n) { return n.id === noteId ? r.data[0] : n })
+    refreshNotesUI()
+  })
+}
+
+function deleteKBNote(noteId) {
+  if (!confirm('Delete this note? This can\'t be undone.')) return
+  sb.from('knowledge_base_notes').delete().eq('id', noteId).select('id').then(function(r) {
+    if (r.error) { alert('Could not delete note: ' + r.error.message); return }
+    if (!r.data || !r.data.length) { alert('Nothing was deleted. You may not have permission to delete notes.'); return }
+    allKBNotes = allKBNotes.filter(function(n) { return n.id !== noteId })
+    refreshNotesUI()
+  })
+}
+
 
 // ── QUESTION LOG ──────────────────────────────────────────────
 
@@ -2261,6 +2435,8 @@ document.addEventListener('DOMContentLoaded', function() {
   if (rm) rm.addEventListener('click', function(e) { if (e.target === this) closeReader() })
   var body = document.getElementById('dm-body')
   if (body) body.addEventListener('paste', handleDocPaste)
+  var notesNew = document.getElementById('notes-new')
+  if (notesNew) notesNew.addEventListener('keydown', function(e) { if (e.keyCode === 13 && (e.ctrlKey || e.metaKey)) { e.preventDefault(); addKBNote() } })
   if (body) ['keyup', 'click', 'input', 'select', 'focus'].forEach(function(ev) { body.addEventListener(ev, updateImageOptions) })
   var imFile = document.getElementById('im-file')
   if (imFile) imFile.addEventListener('change', function() { handleImageFile(imFile.files[0]); imFile.value = '' })
