@@ -643,6 +643,16 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 /* "Report a concern" is hidden for now (studio + staff). To bring it back, delete this one line.
    Home office's 🛡️ Concerns page stays. */
 .hub-concern-link { display: none !important; }
+.hist-box { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px; background: #fff; }
+.hist-box summary { cursor: pointer; font-weight: 700; font-size: 14px; }
+.hist-list { display: grid; gap: 2px; margin-top: 6px; }
+.hist-row { display: flex; gap: 10px; padding: 7px 0; border-bottom: 1px solid #f0eef6; font-size: 13.5px; }
+.hist-row:last-child { border-bottom: 0; }
+.hist-ic { width: 22px; text-align: center; flex: none; } .hist-main { flex: 1; min-width: 0; }
+.hist-main span { color: var(--ink-soft); }
+.hist-filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.hist-filters input, .hist-filters select { font: inherit; font-size: 14px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; }
+.hist-filters label { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--ink-soft); }
 .cn-intro { background: #f6f5fb; border: 1px solid var(--border); border-radius: 12px; padding: 4px 14px; font-size: 14px; line-height: 1.45; margin-bottom: 10px; }
 .cn-intro p { margin: 8px 0; } .cn-intro a { color: var(--accent-deep); font-weight: 600; }
 .cn-anon { background: #ecfdf3; border: 1px solid #bbf7d0; border-radius: 12px; padding: 10px 12px; font-size: 14px; }
@@ -1710,6 +1720,7 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
       <button class="nav-item" id="nav-announce" onclick="openAnnouncePane()"><span class="ic">📢</span> Announcements</button>
       <button class="nav-item" id="nav-oc-overview" onclick="openOcOverview()"><span class="ic">✅</span> Open & close</button>
       <button class="nav-item" id="nav-sick" onclick="openSickPane()"><span class="ic">🤒</span> Sick calls</button>
+      <button class="nav-item" id="nav-hist" onclick="openHistPane()"><span class="ic">🕘</span> Shift history</button>
       <button class="nav-item" id="nav-ts" onclick="openTsPane()"><span class="ic">🕒</span> Timesheets</button>
       <button class="nav-item" id="nav-ack-ho" onclick="openAckCompliance('ho')"><span class="ic">✍️</span> Policy sign-offs</button>
       <button class="nav-item" id="nav-rules" onclick="openRulesPane()"><span class="ic">📋</span> Staff request rules</button>
@@ -1958,6 +1969,13 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
     <div class="ho-head"><div class="pts-page-title" style="margin:0">🔁 Shift swaps</div><span class="spacer"></span><button class="ho-btn" onclick="loadSwapsPane()">Refresh</button></div>
     <p class="ho-intro">Staff offer a shift; someone at the same or a nearby studio takes it; you approve. Approving moves the shift to them and tells them both.</p>
     <div id="swaps-body"></div>
+  </main>
+
+  <main class="main" id="hist-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">🕘 Shift history</div><span class="spacer"></span><button class="ho-btn" onclick="histLoad()">Refresh</button></div>
+    <p class="ho-intro">Every change to shifts and time punches: published, changed, moved, swapped, deleted, imported from Sling, clocked in and out, edited and removed. Who did it, and when. Changes made together (like publishing a week) are grouped.</p>
+    <div class="ho-card hist-filters" id="hist-filters"></div>
+    <div class="ho-card" id="hist-body" style="margin-top:12px"></div>
   </main>
 
   <main class="main" id="ann-pane" style="display:none">
@@ -7077,11 +7095,62 @@ function tsDaySheet(i, date) {
       <div id="tse-msg"></div>
       <div class="tse-save"><button class="ho-btn primary" onclick="tsEditSave()">Save changes</button></div></div>
     ${tsDayHtml(d, true)}
+    <details class="hist-box" id="ts-hist"><summary>🕘 History for this day</summary><div id="ts-hist-body" class="goal-note">Loading…</div></details>
     <div class="sheet-actions">${appr ? `<button onclick="tsDayApprove('${escAttr(x.staff_id)}', '${escAttr(date)}', false)">Un-approve</button>` : ''}<span style="flex:1"></span>
       <button onclick="window._tsDay = null; closeDutySheet()">Done</button>
       ${appr !== 'approved' && (d.punches || []).length ? `<button class="primary" onclick="tsDayApprove('${escAttr(x.staff_id)}', '${escAttr(date)}', true)">✓ Approve this day</button>` : ''}</div>`);
   const sh = document.querySelector('#duty-sheet-back .duty-sheet'); if (sh) sh.classList.add('wide');
   tsEditRender();
+  histDayLoad(x.staff_id, date, 'ts-hist-body');
+}
+// 🕘 Everything that happened to a person's shift and punches on a day (hub_shift_history.sql)
+async function histDayLoad(staffId, date, elId) {
+  const el = document.getElementById(elId); if (!el) return;
+  const { data, error } = await sb.rpc('hub_history_day', { p_staff_id: staffId, p_date: date });
+  if (error) { el.innerHTML = esc(/hub_history_day/i.test(error.message) ? 'History isn’t set up yet (hub_shift_history.sql).' : error.message); return; }
+  el.innerHTML = (data || []).length ? `<div class="hist-list">${data.map(h => histRow(h)).join('')}</div>`
+    : 'Nothing recorded for this day yet. (History starts from when it was switched on.)';
+}
+function histRow(h, extra) {
+  const t = new Date(h.at);
+  return `<div class="hist-row"><span class="hist-ic">${h.kind === 'punch' ? '⏱' : '📅'}</span>
+    <div class="hist-main"><b>${esc(h.action)}</b>${h.detail ? ` <span>${esc(h.detail)}</span>` : ''}${extra || ''}
+      <div class="goal-note">${esc(h.who || '')} · ${esc(t.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}</div></div></div>`;
+}
+
+// ---------- Home office: 🕘 Shift history (hub_history_feed) ----------
+let _hist = { from: null, to: null, studio: '', staff: '', kind: '' };
+async function openHistPane() {
+  if (!(_studioData && _studioData.isAdmin)) return;
+  showOnlyPane('hist-pane'); setActiveNav('nav-hist');
+  if (!_hist.from) { const t = new Date(), f = new Date(); f.setDate(t.getDate() - 7); _hist.from = localDateStr(f); _hist.to = localDateStr(t); }
+  if (!_tsStaffList) { const r = await sb.rpc('hub_ts_staff_list'); _tsStaffList = r.error ? [] : (r.data || []); }
+  document.getElementById('hist-filters').innerHTML = `
+    <label>From <input type="date" id="hf-from" value="${escAttr(_hist.from)}"></label>
+    <label>To <input type="date" id="hf-to" value="${escAttr(_hist.to)}"></label>
+    <select id="hf-studio"><option value="">All studios</option>${Object.keys(STUDIO_NAMES).sort().map(k => `<option value="${escAttr(k)}"${_hist.studio === k ? ' selected' : ''}>${esc(STUDIO_NAMES[k])}</option>`).join('')}</select>
+    <select id="hf-staff"><option value="">Everyone</option>${(_tsStaffList || []).map(p => `<option value="${escAttr(p.staff_id || p.id)}"${_hist.staff === (p.staff_id || p.id) ? ' selected' : ''}>${esc(p.full_name || p.name || p.display_name)}</option>`).join('')}</select>
+    <select id="hf-kind"><option value="">Shifts and punches</option><option value="shift"${_hist.kind === 'shift' ? ' selected' : ''}>Shifts only</option><option value="punch"${_hist.kind === 'punch' ? ' selected' : ''}>Punches only</option></select>
+    <button class="ho-btn primary" onclick="histApply()">Show</button>`;
+  histLoad();
+}
+function histApply() {
+  const v = id => document.getElementById(id).value;
+  Object.assign(_hist, { from: v('hf-from'), to: v('hf-to'), studio: v('hf-studio'), staff: v('hf-staff'), kind: v('hf-kind') });
+  histLoad();
+}
+async function histLoad() {
+  const box = document.getElementById('hist-body'); box.innerHTML = '<div class="goal-note">Loading…</div>';
+  const { data, error } = await sb.rpc('hub_history_feed', { p_from: _hist.from, p_to: _hist.to, p_studio_id: _hist.studio || null, p_staff_id: _hist.staff || null, p_kind: _hist.kind || null });
+  if (error) { box.innerHTML = `<div class="goal-note">${esc(/hub_history_feed/i.test(error.message) ? 'History isn’t set up yet: run hub_shift_history.sql.' : error.message)}</div>`; return; }
+  const day = d => d ? tsDayLabel(d) : '';
+  box.innerHTML = (data || []).length ? `<div class="hist-list">${data.map(g => {
+      const one = g.count === 1 && g.items && g.items[0];
+      const what = one ? `<span>${esc(one.staff || '')} · ${esc(day(one.date))}${one.detail ? ' · ' + esc(one.detail) : ''}</span>`
+        : `<span>${g.count} ${g.kind === 'punch' ? 'punches' : 'shifts'} for ${g.people} ${g.people === 1 ? 'person' : 'people'}${g.from ? ` · ${esc(day(g.from))}${g.to && g.to !== g.from ? ' – ' + esc(day(g.to)) : ''}` : ''}${(g.sample || []).length ? ` · ${esc(g.sample.filter(Boolean).join(', '))}${g.people > (g.sample || []).length ? '…' : ''}` : ''}</span>`;
+      return histRow({ kind: g.kind, action: g.action + (g.studio_id ? ` · ${STUDIO_NAMES[g.studio_id] || g.studio_id}` : ''), detail: '', who: g.who, at: g.at }, ' ' + what);
+    }).join('')}</div>${data.length >= 500 ? '<div class="goal-note">Showing the latest 500. Narrow the dates, studio or person to see more.</div>' : ''}`
+    : '<div class="goal-note">Nothing in this time. (History starts from when it was switched on.)</div>';
 }
 const TSE_KINDS = [['in', 'Clock in'], ['break_out', 'Break start'], ['break_in', 'Break end'], ['out', 'Clock out']];
 function tsEditRender() {
@@ -8996,7 +9065,7 @@ async function requestPrize(prizeId) {
 
 // The page panes: only one shows at a time. Points + Instagram are
 // coordinator-only (their sidebar buttons only appear when unlocked).
-const PANES = ['dashboard-main', 'ann-pane', 'concern-pane', 'concerns-pane', 'swaps-pane', 'chat-pane', 'dm-pane', 'devices-pane', 'etpl-pane', 'tickets-pane', 'moments-pane', 'info-pane', 'duties-pane', 'schedule-pane', 'points-pane', 'instagram-pane', 'occupancy-pane', 'inventory-pane', 'announce-pane', 'checklist-pane', 'oc-overview-pane', 'plan-pane', 'parties-pane', 'notif-pane', 'rules-pane', 'sick-pane', 'punch-pane', 'ts-pane', 'acks-pane', 'ackc-pane'];
+const PANES = ['dashboard-main', 'hist-pane', 'ann-pane', 'concern-pane', 'concerns-pane', 'swaps-pane', 'chat-pane', 'dm-pane', 'devices-pane', 'etpl-pane', 'tickets-pane', 'moments-pane', 'info-pane', 'duties-pane', 'schedule-pane', 'points-pane', 'instagram-pane', 'occupancy-pane', 'inventory-pane', 'announce-pane', 'checklist-pane', 'oc-overview-pane', 'plan-pane', 'parties-pane', 'notif-pane', 'rules-pane', 'sick-pane', 'punch-pane', 'ts-pane', 'acks-pane', 'ackc-pane'];
 function showOnlyPane(id) {
   if (id !== 'chat-pane' && _chat && _chat.mode !== 'staff') chatStop();   // leaving Chat: stop checking for messages
   PANES.forEach(p => {
