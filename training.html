@@ -863,6 +863,26 @@
     -webkit-animation: shake 0.4s ease;
     animation: shake 0.4s ease;
   }
+
+  /* ── POLICY SIGN-OFFS (read-only; staff sign in the Hub) ── */
+  .ack-section { margin: 4px 0 20px; }
+  .ack-row {
+    background: var(--white); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px; margin-bottom: 8px;
+    display: -webkit-box; display: -webkit-flex; display: flex;
+    -webkit-box-align: center; -webkit-align-items: center; align-items: center;
+  }
+  .ack-row .ack-t { -webkit-box-flex: 1; -webkit-flex: 1; flex: 1; min-width: 0; padding-right: 10px; }
+  .ack-row .ack-title { font-size: 15px; color: var(--dark); }
+  .ack-row .ack-sub { font-size: 12px; color: var(--soft); margin-top: 2px; font-family: -apple-system, Helvetica, Arial, sans-serif; }
+  .ack-st { font-size: 11px; font-weight: bold; padding: 3px 9px; border-radius: 10px; white-space: nowrap; font-family: -apple-system, Helvetica, Arial, sans-serif; }
+  .ack-st.signed { background: var(--green-bg); color: #1e7b34; }
+  .ack-st.due_soon { background: #FFF6DB; color: #8a6200; }
+  .ack-st.due { background: #EEF2FF; color: #3a3fa8; }
+  .ack-st.overdue { background: #FFECEB; color: var(--red); }
+  .ack-note { font-size: 12px; color: var(--soft); margin: 2px 0 10px; font-family: -apple-system, Helvetica, Arial, sans-serif; }
+  .ack-history { font-size: 12px; color: var(--soft); font-family: -apple-system, Helvetica, Arial, sans-serif; line-height: 1.7; }
+  .ack-link { background: none; border: none; color: var(--orange); font-size: 13px; padding: 4px 0; cursor: pointer; font-family: inherit; }
 </style>
 </head>
 <body>
@@ -1002,6 +1022,9 @@
       <div class="loading-msg">Loading training items…</div>
     </div>
 
+    <!-- Policy sign-offs (Knowledge Base). Read-only here: staff sign in the Hub. -->
+    <div class="ack-section" id="ack-section" style="display:none"></div>
+
     <button class="btn-switch" onclick="openSwitchPinScreen()">↩ Switch Staff Member</button>
   </div>
 </div>
@@ -1035,7 +1058,8 @@ var STUDIO_NAMES = {
 
 // ── STATE ────────────────────────────────────────────────────
 var pinBuffer = '';
-var currentManager = null;   // { id, display_name, nickname, studio_ids, role } — PIN is never sent to the browser
+var currentManager = null;
+var ackPin = '';             // the manager's PIN, kept only to load policy sign-offs (cleared on Lock)   // { id, display_name, nickname, studio_ids, role } — PIN is never sent to the browser
 var currentStudio = '';
 var currentStaff = null;     // { id, user_id, display_name, nickname, role }
 var trainingUnits = [];
@@ -1180,6 +1204,7 @@ function attemptLogin() {
       }
     }
 
+    ackPin = pinBuffer;
     if (choices.length === 1) {
       currentManager = choices[0].manager;
       currentStudio = choices[0].studioId;
@@ -1342,6 +1367,7 @@ function loadChecklist() {
   document.getElementById('checklist-body').innerHTML = '<div class="loading-msg">Loading training items…</div>';
 
   loadNameCard();
+  loadAckSection();
 
   // Load units (non-draft)
   var unitsUrl = SUPABASE_URL + '/rest/v1/training_units'
@@ -1589,6 +1615,65 @@ function toggleItem(itemId) {
   });
 }
 
+// ── POLICY SIGN-OFFS ──────────────────────────────────────────
+// Which Knowledge Base policies this person must sign, and their history.
+// Loaded through staff-pin (training_acks), never straight from the database.
+var ACK_LABEL = { signed: 'Signed', due_soon: 'Due soon', due: 'To sign', overdue: 'Overdue' };
+var ACK_RANK = { overdue: 0, due: 1, due_soon: 2, signed: 3 };
+
+function ackDate(d) {
+  if (!d) return '';
+  var p = String(d).slice(0, 10).split('-');
+  var m = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return m[parseInt(p[1], 10) - 1] + ' ' + parseInt(p[2], 10) + ', ' + p[0];
+}
+
+function loadAckSection() {
+  var box = document.getElementById('ack-section');
+  box.style.display = 'none';
+  box.innerHTML = '';
+  if (!currentStaff || !currentStaff.id || !ackPin) return;
+  var staffId = currentStaff.id;
+  callStaffPin({ action: 'training_acks', pin: ackPin, staff_id: staffId })
+  .then(function(r) {
+    if (!currentStaff || currentStaff.id !== staffId) return;   // switched people meanwhile
+    if (r.status !== 200 || r.body.error) return;               // not set up yet: just leave it hidden
+    renderAckSection(r.body.items || [], r.body.history || []);
+  })
+  .catch(function() {});
+}
+
+function renderAckSection(items, history) {
+  var box = document.getElementById('ack-section');
+  if (!items.length && !history.length) return;
+  items.sort(function(a, b) { return (ACK_RANK[a.status] - ACK_RANK[b.status]) || String(a.title).localeCompare(String(b.title)); });
+  var todo = 0;
+  for (var i = 0; i < items.length; i++) if (items[i].status !== 'signed') todo++;
+  var html = '<div class="unit-header"><span>&#9997;&#65039; Policy sign-offs</span><span class="unit-count">'
+    + (items.length - todo) + ' / ' + items.length + '</span></div>'
+    + '<div class="ack-note">' + (todo ? 'They sign these in the Hub: on their phone, or on the studio computer with their punch PIN.' : 'All signed and up to date.') + '</div>';
+  for (var j = 0; j < items.length; j++) {
+    var it = items[j], sub;
+    if (it.status === 'signed') sub = 'Signed ' + ackDate(it.signed_at) + (it.due_date ? ' &middot; next due ' + ackDate(it.due_date) : '');
+    else if (it.status === 'due_soon') sub = 'Signed ' + ackDate(it.signed_at) + ' &middot; renew by ' + ackDate(it.due_date);
+    else sub = (it.status === 'overdue' ? 'Was due ' : 'Due ') + ackDate(it.due_date) + (it.last_signed_any ? ' &middot; updated since they last signed' : '');
+    html += '<div class="ack-row"><div class="ack-t"><div class="ack-title">' + escHtml(it.title) + '</div><div class="ack-sub">' + sub + '</div></div>'
+      + '<span class="ack-st ' + escHtml(it.status) + '">' + (ACK_LABEL[it.status] || '') + '</span></div>';
+  }
+  if (history.length) {
+    html += '<button class="ack-link" onclick="var h=document.getElementById(\'ack-history\'); h.style.display = h.style.display === \'none\' ? \'block\' : \'none\'">Signing history (' + history.length + ')</button>'
+      + '<div class="ack-history" id="ack-history" style="display:none">';
+    for (var k = 0; k < history.length; k++) {
+      var h = history[k];
+      html += ackDate(h.signed_at) + ' &middot; ' + escHtml(h.title) + ' (v' + h.version + ') &middot; signed as &ldquo;' + escHtml(h.typed_name) + '&rdquo;'
+        + (h.method === 'studio_pin' ? ' on the studio computer' : ' on their own login') + '<br>';
+    }
+    html += '</div>';
+  }
+  box.innerHTML = html;
+  box.style.display = 'block';
+}
+
 function refreshProgressCount() {
   var rows = document.querySelectorAll('.training-item');
   var total = rows.length;
@@ -1812,6 +1897,7 @@ function verifySwitchPin() {
   .then(function(r) {
     switchPinChecking = false;
     if (r.status === 200 && r.body.ok === true) {
+      ackPin = switchPinBuffer;
       document.getElementById('switch-pin-error').textContent = '';
       closeSwitchPinScreen();
       goBackToPicker();
@@ -1838,6 +1924,7 @@ function switchPinFailed(msg) {
 }
 
 function doLock() {
+  ackPin = '';
   currentManager = null;
   currentStaff = null;
   currentStudio = '';
