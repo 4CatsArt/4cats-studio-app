@@ -1469,6 +1469,26 @@ body.admin-login .studio-only { display: none !important; }
   padding: 4px 10px; border-radius: 999px; background: var(--accent-soft);
 }
 .project-tile .project-link:hover { background: var(--accent); color: #fff; }
+/* Tap a project for its tools and materials */
+.project-tile.tap { cursor: pointer; transition: box-shadow .15s, transform .15s; }
+.project-tile.tap:hover { box-shadow: 0 6px 18px rgba(42,25,45,.13); transform: translateY(-1px); }
+.project-tile button.project-link { border: none; cursor: pointer; font-family: inherit; }
+.ps-top { display: flex; gap: 14px; align-items: center; margin-bottom: 14px; }
+.ps-top img, .ps-top .ph-none { width: 92px; height: 92px; border-radius: 12px; object-fit: cover; flex: none; background: var(--accent-soft); }
+.ps-top .ps-medium { font-size: 12px; font-weight: 800; color: var(--accent-deep); text-transform: uppercase; letter-spacing: .04em; }
+.ps-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 640px) { .ps-cols { grid-template-columns: 1fr; } }
+.ps-sec { border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; }
+.ps-sec h4 { font-size: 13px; font-weight: 800; margin: 0 0 8px; }
+.ps-sec ul { list-style: none; margin: 0; padding: 0; }
+.ps-sec li { padding: 6px 0; border-top: 1px solid var(--border); font-size: 14px; line-height: 1.3; display: flex; justify-content: space-between; gap: 10px; }
+.ps-sec li:first-child { border-top: none; }
+.ps-sec li .q { font-family: 'IBM Plex Mono', monospace; font-weight: 700; color: var(--accent-deep); white-space: nowrap; font-size: 13px; }
+.ps-sec li small { display: block; font-size: 12px; color: var(--ink-soft); }
+.ps-empty { font-size: 13px; color: var(--ink-soft); }
+.ps-links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.ps-links .project-link { font-size: 12px; font-weight: 700; color: var(--accent-deep); text-decoration: none; padding: 4px 10px; border-radius: 999px; background: var(--accent-soft); }
+.ps-links .project-link:hover { background: var(--accent); color: #fff; }
 .projects-mini { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
 .projects-mini-label { font-size: 11.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 10px; }
 .projects-mini-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
@@ -1650,6 +1670,15 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
     <div class="prize-modal-head"><div id="inv-modal-title"></div>
       <button type="button" class="pm-close" onclick="invCloseGroup()" aria-label="Close">✕</button></div>
     <div id="inv-modal-body"></div>
+  </div>
+</div>
+
+<!-- A project's tools and materials (Today at 4Cats → tap a project) -->
+<div id="ps-modal" class="prize-modal" style="display:none" onclick="if (event.target === this) closeProjectSupplies()">
+  <div class="prize-modal-card">
+    <div class="prize-modal-head"><div id="ps-modal-title">What's needed</div>
+      <button type="button" class="pm-close" onclick="closeProjectSupplies()" aria-label="Close">✕</button></div>
+    <div id="ps-modal-body"></div>
   </div>
 </div>
 
@@ -8788,16 +8817,88 @@ function projectTileHtml(p) {
     { url: safeHttpUrl(p.printout_url), label: p.base_printout_url ? '🖨 Steps' : '🖨 Printout' },
     { url: safeHttpUrl(p.template_url), label: '📐 Template' }
   ].filter(l => l.url)
-   .map(l => `<a class="project-link" href="${escAttr(l.url)}" target="_blank" rel="noopener">${esc(l.label)}</a>`)
+   .map(l => `<a class="project-link" href="${escAttr(l.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(l.label)}</a>`)
    .join('');
+  _projectTiles[String(p.name || '').toLowerCase()] = p;
+  const needBtn = `<button type="button" class="project-link" onclick="event.stopPropagation();openProjectSupplies(${escAttr(JSON.stringify(String(p.name || '')))})">🧰 What's needed</button>`;
 
-  return `<div class="project-tile">
+  return `<div class="project-tile tap" role="button" tabindex="0"
+      onclick="openProjectSupplies(${escAttr(JSON.stringify(String(p.name || '')))})"
+      onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); this.click(); }">
       <div class="ph-wrap">${photo}${pill}</div>
       <div class="info">
         <div class="nm">${esc(p.name)}</div>
-        ${links ? `<div class="project-links">${links}</div>` : ''}
+        <div class="project-links">${links}${needBtn}</div>
       </div>
     </div>`;
+}
+
+// ---------- Project tools & materials (tap a project tile) ----------
+// Read from get_project_supplies(), matched by the project's name. Set up in
+// projects.html → Library → a project → What's needed. Amounts are per person.
+const _projectTiles = {};        // lower-case name → tile data (photo, medium, links)
+const _projectSupplies = {};     // lower-case name → { tools, materials }
+
+async function fetchProjectSupplies(names) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_project_supplies`, {
+    method: 'POST',
+    headers: await fnHeaders(),
+    body: JSON.stringify({ p_names: names })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error((data && data.message) || 'Request failed');
+  (data || []).forEach(r => { _projectSupplies[String(r.name).toLowerCase()] = r; });
+}
+
+function fmtQty(q) {
+  const n = Number(q);
+  if (q === null || q === undefined || q === '' || isNaN(n)) return '';
+  return String(Math.round(n * 100) / 100);
+}
+
+async function openProjectSupplies(name) {
+  const key = String(name || '').toLowerCase();
+  const p = _projectTiles[key] || { name };
+  document.getElementById('ps-modal-title').textContent = p.name;
+  const body = document.getElementById('ps-modal-body');
+  document.getElementById('ps-modal').style.display = 'flex';
+  if (!_projectSupplies[key]) {
+    body.innerHTML = `<div class="ps-empty">Loading…</div>`;
+    try { await fetchProjectSupplies([name]); }
+    catch (e) { body.innerHTML = `<div class="ps-empty">Couldn't load the list right now.</div>`; return; }
+  }
+  const s = _projectSupplies[key] || { tools: [], materials: [] };
+  const tools = s.tools || [], mats = s.materials || [];
+  const photo = p.image_url
+    ? `<img src="${escAttr(p.image_url)}" alt="" onerror="this.outerHTML='<div class=&quot;ph-none&quot;></div>'">`
+    : `<div class="ph-none"></div>`;
+  const toolsHtml = tools.length
+    ? `<ul>${tools.map(t => `<li>${esc(t)}</li>`).join('')}</ul>`
+    : `<div class="ps-empty">No tools listed yet.</div>`;
+  const matsHtml = mats.length
+    ? `<ul>${mats.map(m => {
+        const q = fmtQty(m.qty);
+        const amt = q ? `${q}${m.unit ? (m.unit === 'g' ? 'g' : ' ' + m.unit) : ''}` : '';
+        return `<li><span>${esc(m.name)}${m.note ? `<small>${esc(m.note)}</small>` : ''}</span>${amt ? `<span class="q">${esc(amt)}</span>` : ''}</li>`;
+      }).join('')}</ul>`
+    : `<div class="ps-empty">No materials listed yet.</div>`;
+  const links = [
+    { url: safeHttpUrl(p.base_printout_url), label: '🖨 ' + (p.base_printout_name ? p.base_printout_name + ' base' : 'Base') },
+    { url: safeHttpUrl(p.printout_url), label: p.base_printout_url ? '🖨 Steps' : '🖨 Printout' },
+    { url: safeHttpUrl(p.template_url), label: '📐 Template' }
+  ].filter(l => l.url);
+  body.innerHTML = `
+    <div class="ps-top">${photo}<div>${p.medium ? `<div class="ps-medium">${esc(p.medium)}</div>` : ''}
+      <div class="ps-empty">Amounts are per person.</div></div></div>
+    <div class="ps-cols">
+      <div class="ps-sec"><h4>🧰 Tools</h4>${toolsHtml}</div>
+      <div class="ps-sec"><h4>🎨 Materials</h4>${matsHtml}</div>
+    </div>
+    ${links.length ? `<div class="ps-links">${links.map(l => `<a class="project-link" href="${escAttr(l.url)}" target="_blank" rel="noopener">${esc(l.label)}</a>`).join('')}</div>` : ''}`;
+}
+
+function closeProjectSupplies() {
+  document.getElementById('ps-modal').style.display = 'none';
 }
 
 // Shows Today + Tomorrow; the arrow opens the rest of the week in place.
@@ -8872,6 +8973,12 @@ function renderTodaysProjects(data, forecastDays) {
     : '';
 
   card.innerHTML = head + eventLine + mainHtml + miniHtml;
+
+  // Fetch tools & materials for these tiles up front so a tap opens instantly.
+  // Fresh on every refresh, so list changes in projects.html show up.
+  const names = main.concat(minis).map(p => String(p.name || '')).filter(Boolean);
+  Object.keys(_projectSupplies).forEach(k => { delete _projectSupplies[k]; });
+  if (names.length) fetchProjectSupplies(names).catch(e => console.warn('Project supplies load failed:', e));
 }
 
 // ---------- Coordinator Points (coordinator view) ----------
