@@ -682,6 +682,10 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .si-row .ho-btn { min-height: 30px; padding: 0 10px; }
 .eh-detail { padding: 6px 10px 12px; }
 .eh-msg { background: #faf9fd; border: 1px solid var(--border); border-radius: 10px; padding: 10px; font-size: 13px; margin-top: 6px; }
+.plan-day .dm { font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: .3px; color: var(--accent-deep); line-height: 1.1; }
+.plan-day.on .dm { color: #fff; }
+.plan-pick { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-soft); font-weight: 600; }
+.plan-pick input { font: inherit; font-size: 14px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 10px; color: var(--ink); background: #fff; }
 .plan-day.today:not(.on) { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 .plan-ci { border: none; background: #e3f9ec; color: #15803d; border-radius: 999px; padding: 3px 10px; font: inherit; font-size: 12.5px; font-weight: 700; cursor: pointer; margin-left: 6px; }
 .ts-nav { display: flex; align-items: center; gap: 10px; }
@@ -2003,6 +2007,7 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
     <div class="ho-head">
       <div class="pts-page-title" style="margin:0">🗓️ Schedule</div>
       <span class="spacer"></span>
+      <label class="plan-pick" title="Go to any date, ahead or in the past">Go to date <input type="date" id="plan-pick" onchange="if (this.value) loadPlanDay(this.value)"></label>
       <button class="ho-btn primary" onclick="loadPlanDay(localDateStr(new Date()))" title="Show today on the schedule">📅 Jump to today</button>
       <button class="ho-btn" onclick="goToDashboard()" title="Back to the Today screen">← Today screen</button>
     </div>
@@ -3137,11 +3142,11 @@ function openPlanAhead() {
 // Running = a session with spots or bookings (capacity above 0, or not set),
 // a kids class week, a catch-up class, or an event. Hidden sessions don't count.
 let _planRunDays = null;   // { studio, days: Set }
-async function loadPlanRunDays() {
+async function loadPlanRunDays(win) {
   const st = _sessionStudioId;
-  if (_planRunDays && _planRunDays.studio === st) return;
-  const from = new Date(); from.setDate(from.getDate() - 7);
-  const to = new Date(); to.setDate(to.getDate() + 28);
+  win = win || planStripWindow(_planStripSel || localDateStr(new Date()));
+  if (_planRunDays && _planRunDays.studio === st && _planRunDays.from === win.from) return;
+  const from = planDateOf(win.from), to = planDateOf(win.to);
   const { data, error } = await sb.from('sessions').select('session_date, capacity, show, session_type, title')
     .eq('studio_id', st).gte('session_date', localDateStr(from)).lte('session_date', localDateStr(to));
   if (error) return;
@@ -3151,21 +3156,37 @@ async function loadPlanRunDays() {
     if (x.session_type === 'festival' || x.capacity === null || x.capacity > 0 ||
         /\bclass\s+\d+\s+of\s+\d+/i.test(x.title || '') || x.title === 'Catch Up Class') days.add(x.session_date);
   });
-  _planRunDays = { studio: st, days };
+  _planRunDays = { studio: st, days, from: win.from };
   if (_planStripSel) planDayStrip(_planStripSel);
+}
+// The strip shows a week back to four weeks ahead of TODAY, or, for a date picked
+// outside that, a week before to four weeks after that date.
+function planDateOf(ds) { const [y, m, d] = ds.split('-').map(Number); return new Date(y, m - 1, d); }
+function planStripWindow(sel) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const lo = new Date(today); lo.setDate(lo.getDate() - 7);
+  const hi = new Date(today); hi.setDate(hi.getDate() + 28);
+  const s = planDateOf(sel);
+  const start = (s < lo || s > hi) ? new Date(s.getFullYear(), s.getMonth(), s.getDate() - 7) : lo;
+  const end = new Date(start); end.setDate(end.getDate() + 35);
+  return { from: localDateStr(start), to: localDateStr(end), start };
 }
 let _planStripSel = null;
 function planDayStrip(sel) {
   _planStripSel = sel;
   const el = document.getElementById('plan-days');
-  if (!_planRunDays || _planRunDays.studio !== _sessionStudioId) loadPlanRunDays();
-  const run = _planRunDays && _planRunDays.studio === _sessionStudioId ? _planRunDays.days : null;
+  const win = planStripWindow(sel);
+  if (!_planRunDays || _planRunDays.studio !== _sessionStudioId || _planRunDays.from !== win.from) loadPlanRunDays(win);
+  const run = _planRunDays && _planRunDays.studio === _sessionStudioId && _planRunDays.from === win.from ? _planRunDays.days : null;
+  const pick = document.getElementById('plan-pick'); if (pick && pick.value !== sel) pick.value = sel;
+  const todayStr = localDateStr(new Date());
   const out = [];
-  for (let i = -7; i <= 28; i++) {
-    const d = new Date(); d.setDate(d.getDate() + i);
+  for (let k = 0; k <= 35; k++) {
+    const d = new Date(win.start); d.setDate(d.getDate() + k);
     const ds = localDateStr(d);
+    const i = Math.round((planDateOf(ds) - planDateOf(todayStr)) / 86400000);   // days from today
     const idle = run && !run.has(ds);
-    out.push(`<button class="plan-day${ds === sel ? ' on' : ''}${i === 0 ? ' today' : ''}${i < 0 ? ' past' : ''}${idle ? ' idle' : ''}" title="${idle ? 'Nothing running' : ''}" onclick="loadPlanDay('${ds}')"><div class="dw">${i === 0 ? 'Today' : d.toLocaleDateString(undefined, { weekday: 'short' })}</div><div class="dn">${d.getDate()}</div></button>`);
+    out.push(`<button class="plan-day${ds === sel ? ' on' : ''}${i === 0 ? ' today' : ''}${i < 0 ? ' past' : ''}${idle ? ' idle' : ''}" title="${idle ? 'Nothing running' : ''}" onclick="loadPlanDay('${ds}')">${k === 0 || d.getDate() === 1 ? `<div class="dm">${d.toLocaleDateString(undefined, { month: 'short' })}${d.getFullYear() !== new Date().getFullYear() ? ' ’' + String(d.getFullYear()).slice(2) : ''}</div>` : '<div class="dm">&nbsp;</div>'}<div class="dw">${i === 0 ? 'Today' : d.toLocaleDateString(undefined, { weekday: 'short' })}</div><div class="dn">${d.getDate()}</div></button>`);
   }
   el.innerHTML = out.join('');
   const on = el.querySelector('.plan-day.on');
