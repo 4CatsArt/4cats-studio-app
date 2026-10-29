@@ -654,6 +654,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
   var effects = [];
   var dealsAdmin = null;
   var homeCards = null;
+  var kilnRows = null, howtoRows = null;
   var FX_NAMES = { snow: 'Snowflakes', leaves: 'Falling leaves', hearts: 'Hearts', confetti: 'Confetti', stars: 'Stars', pumpkins: 'Pumpkins' };
   var canEdit = false;
   var flash = null;
@@ -790,6 +791,10 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     var fx = await sb.rpc('world_effects_list');
     effects = fx.error ? [] : (fx.data || []);
     if (fx.error) console.error('Effects didn\u2019t load:', fx.error);
+    var kr = await sb.rpc('world_kiln_status_list');
+    kilnRows = kr.error ? null : (kr.data || []);
+    var hr = await sb.rpc('world_howto_list');
+    howtoRows = hr.error ? null : (hr.data || []);
     var hc = await sb.rpc('world_home_cards_list');
     homeCards = hc.error ? null : (hc.data || []);
     if (hc.error) console.error('Home cards didn\u2019t load:', hc.error);
@@ -931,11 +936,15 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     }
     html += '</section>';
     html += homeCardsHtml();
+    html += kilnHtml();
+    html += howtoHtml();
     html += dealsSectionHtml();
     html += devPasswordHtml();
     app.innerHTML = html;
     bindDealsSection();
     bindHomeCards();
+    bindKiln();
+    bindHowto();
     bindDevPassword();
     var todayFrame = app.querySelector('#todayPv .pv-frame');
     if (todayFrame && fxWin) previewEffect(todayFrame, fxWin);
@@ -1366,6 +1375,118 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     flash = ['ok', 'Saved \u201c' + p.name + '\u201d. World shows it within a minute.'];
     await loadThemes();
   });
+
+  // ---------------- Kiln status (per studio) ----------------
+  function kilnHtml() {
+    if (kilnRows === null) return '<section class="panel" style="margin-top:20px"><h2>Kiln status</h2><p class="sub">Run world_kiln_howto_questions.sql in Supabase to switch this on.</p></section>';
+    var by = {}; kilnRows.forEach(function (r) { by[r.studio_id] = r; });
+    var h = '<section class="panel" style="margin-top:20px"><h2>Kiln status</h2>' +
+      '<p class="sub" style="margin:0 0 10px">Shown on each studio\u2019s World home page. Studios can also change their own in the Hub.</p>' +
+      '<table><thead><tr><th>Studio</th><th>Status</th><th>Book glazing after</th><th>Note for customers</th><th></th></tr></thead><tbody>';
+    STUDIOS.forEach(function (g) {
+      g.list.forEach(function (st) {
+        var r = by[st[0]] || { status: 'ok', glaze_days: 7, note: '' };
+        h += '<tr data-kiln="' + st[0] + '"><td><div class="tname">' + esc(st[1]) + '</div>' + (r.updated_at ? '<div class="tmeta">Changed ' + esc(new Date(r.updated_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })) + (r.updated_by ? ' by ' + esc(r.updated_by) : '') + '</div>' : '') + '</td>' +
+          '<td><select data-k="status"' + (canEdit ? '' : ' disabled') + '>' + [['ok', '\ud83d\udd25 Up and running'], ['behind', '\u23f3 Running behind'], ['issue', '\ud83d\udd27 Kiln issue']].map(function (o) {
+            return '<option value="' + o[0] + '"' + (r.status === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select></td>' +
+          '<td><input type="number" data-k="days" min="1" max="90" value="' + (r.glaze_days || 7) + '" style="width:70px"' + (canEdit ? '' : ' disabled') + '> days</td>' +
+          '<td><input type="text" data-k="note" maxlength="140" value="' + esc(r.note || '') + '" placeholder="Optional" style="width:100%"' + (canEdit ? '' : ' disabled') + '></td>' +
+          '<td>' + (canEdit ? '<button class="btn btn-plain" type="button" data-ksave="' + st[0] + '">Save</button>' : '') + '</td></tr>';
+      });
+    });
+    return h + '</tbody></table></section>';
+  }
+  function bindKiln() {
+    app.querySelectorAll('[data-kiln] [data-k="status"]').forEach(function (sel) {
+      // Picking "Kiln issue" suggests 18 days; back to "up and running", 7.
+      sel.addEventListener('change', function () {
+        var days = sel.closest('tr').querySelector('[data-k="days"]');
+        if (sel.value === 'issue' && +days.value < 18) days.value = 18;
+        if (sel.value === 'ok') days.value = 7;
+      });
+    });
+    app.querySelectorAll('[data-ksave]').forEach(function (b) {
+      b.addEventListener('click', async function () {
+        var tr = b.closest('tr');
+        b.disabled = true; b.textContent = 'Saving\u2026';
+        var r = await sb.rpc('world_kiln_status_set', {
+          p_studio_id: b.dataset.ksave, p_status: tr.querySelector('[data-k="status"]').value,
+          p_glaze_days: parseInt(tr.querySelector('[data-k="days"]').value, 10) || 7, p_note: tr.querySelector('[data-k="note"]').value
+        });
+        b.disabled = false;
+        b.textContent = r.error ? 'Not saved' : 'Saved \u2713';
+        if (r.error) alert('Not saved: ' + r.error.message);
+        setTimeout(function () { b.textContent = 'Save'; }, 2000);
+      });
+    });
+  }
+
+  // ---------------- "How do I…?" tiles ----------------
+  function howtoHtml() {
+    if (howtoRows === null) return '';
+    var h = '<section class="panel" style="margin-top:20px"><div class="toolbar"><div class="grow"><h2>\u201cHow do I\u2026?\u201d tiles</h2>' +
+      '<p class="sub" style="margin:0">The ideas row on World\u2019s home page. Use \u2191 \u2193 to change the order.</p></div>' +
+      (canEdit ? '<button class="btn btn-berry" type="button" id="htNew">Add a tile</button>' : '') + '</div>';
+    if (!howtoRows.length) return h + '<div class="empty">No tiles yet.</div></section>';
+    h += '<table><thead><tr><th></th><th>Tile</th><th>Link</th><th>Status</th><th></th></tr></thead><tbody>' + howtoRows.map(function (t, i) {
+      return '<tr><td style="font-size:26px">' + (t.image_url ? '<img src="' + esc(t.image_url) + '" alt="" style="width:44px;height:33px;object-fit:cover;border-radius:6px">' : esc(t.icon || '')) + '</td>' +
+        '<td><div class="tname">' + esc(t.label) + '</div></td><td class="tmeta">' + esc(t.url || '') + '</td>' +
+        '<td><span class="pill ' + (t.active ? 'ready' : 'notready') + '">' + (t.active ? 'Showing' : 'Hidden') + '</span></td>' +
+        '<td><div class="row-actions">' + (canEdit ? '<button class="btn btn-plain" type="button" data-htmove="' + i + '" data-d="-1"' + (i ? '' : ' disabled') + ' aria-label="Move up">\u2191</button>' +
+          '<button class="btn btn-plain" type="button" data-htmove="' + i + '" data-d="1"' + (i < howtoRows.length - 1 ? '' : ' disabled') + ' aria-label="Move down">\u2193</button>' +
+          '<button class="btn btn-plain" type="button" data-htedit="' + i + '">Edit</button><button class="btn btn-danger" type="button" data-htdel="' + i + '">Delete</button>' : '') + '</div></td></tr>';
+    }).join('') + '</tbody></table></section>';
+    return h;
+  }
+  function bindHowto() {
+    var nb = document.getElementById('htNew');
+    if (nb) nb.addEventListener('click', function () { editHowto({ label: '', icon: '\u2728', url: '', active: true }); });
+    app.querySelectorAll('[data-htedit]').forEach(function (b) { b.addEventListener('click', function () { editHowto(howtoRows[+b.dataset.htedit]); }); });
+    app.querySelectorAll('[data-htdel]').forEach(function (b) {
+      b.addEventListener('click', async function () {
+        var t = howtoRows[+b.dataset.htdel];
+        if (!confirm('Delete \u201c' + t.label + '\u201d?')) return;
+        var r = await sb.rpc('world_howto_delete', { p_id: t.id });
+        if (r.error) { alert('Not deleted: ' + r.error.message); return; }
+        await loadThemes();
+      });
+    });
+    app.querySelectorAll('[data-htmove]').forEach(function (b) {
+      b.addEventListener('click', async function () {
+        var i = +b.dataset.htmove, j = i + (+b.dataset.d);
+        if (j < 0 || j >= howtoRows.length) return;
+        var list = howtoRows.slice(); var tmp = list[i]; list[i] = list[j]; list[j] = tmp;
+        for (var k = 0; k < list.length; k++) {
+          if (list[k].sort !== k + 1) { var r = await sb.rpc('world_howto_save', { p: Object.assign({}, list[k], { sort: k + 1 }) }); if (r.error) { alert(r.error.message); break; } }
+        }
+        await loadThemes();
+      });
+    });
+  }
+  function editHowto(t) {
+    var label = prompt('Words on the tile (e.g. \u201cPlan a birthday party\u201d):', t.label || '');
+    if (label === null) return;
+    label = label.trim(); if (!label) { alert('The tile needs some words.'); return; }
+    var url = prompt('Where it goes (a 4cats.com link, or #coming, #camps, #deals):', t.url || '');
+    if (url === null) return;
+    var icon = prompt('An emoji for the tile (used when there\u2019s no picture):', t.icon || '\u2728');
+    if (icon === null) return;
+    var show = confirm('Show this tile on World? (OK = show, Cancel = hide)');
+    var save = async function (imageUrl) {
+      var r = await sb.rpc('world_howto_save', { p: Object.assign({}, t, { label: label, url: url.trim() || null, icon: icon.trim() || null, active: show, image_url: imageUrl }) });
+      if (r.error) { alert('Not saved: ' + r.error.message); return; }
+      flash = ['ok', 'Saved \u201c' + label + '\u201d.'];
+      await loadThemes();
+    };
+    if (confirm('Add or change its picture now? (OK = choose a picture, Cancel = keep ' + (t.image_url ? 'the current one' : 'the emoji') + ')')) {
+      var inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*';
+      inp.addEventListener('change', async function () {
+        var f = inp.files && inp.files[0]; if (!f) { save(t.image_url || null); return; }
+        try { save(await uploadDealImage(f, 'howto', 600)); } catch (err) { alert('Upload didn\u2019t work: ' + err.message); save(t.image_url || null); }
+      });
+      inp.click();
+    } else save(t.image_url || null);
+  }
 
   // ---------------- 30 Days of Deals ----------------
   function dealsSectionHtml() {
