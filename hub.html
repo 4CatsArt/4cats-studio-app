@@ -3264,8 +3264,12 @@ async function loadPlanDay(date) {
         const openRows = [];
         [...new Set(party.filter(x => !(booked[x.id] > 0)).map(x => String(x.session_time).slice(0, 5)))].forEach(t => {
           const open = (slotsAt[t] || 0) - (bookedAt[t] || 0);
-          if (open > 0) openRows.push({ id: 'slot-' + t, title: 'Open party slot', session_date: date, session_time: t + ':00', session_type: 'party',
-            capacity: open, spaces_left_cache: open, show: true, partySlot: true });
+          // the party products customers can book at this time (old leftovers with no Shopify product, like "Party Time Slot", don't count)
+          const products = party.filter(x => !(booked[x.id] > 0) && String(x.session_time).slice(0, 5) === t && buildShopifyTitle(x.session_date, x.session_time || '00:00:00', x.title));
+          // closed from the Schedule (every party product here set to 0 spots on Shopify)
+          const closed = products.length > 0 && products.every(x => x.spaces_left_cache !== null && x.spaces_left_cache !== undefined && Number(x.spaces_left_cache) <= 0);
+          if (open > 0) openRows.push({ id: 'slot-' + t, title: closed ? 'Party slot (closed)' : 'Open party slot', session_date: date, session_time: t + ':00', session_type: 'party',
+            capacity: closed ? 0 : open, spaces_left_cache: closed ? 0 : open, show: true, partySlot: true, slotClosed: closed, slotProducts: products });
         });
         sessions = sessions.filter(x => !isRoomParty(x) || booked[x.id] > 0).concat(openRows)
           .sort((a, b) => String(a.session_time).localeCompare(String(b.session_time)));
@@ -3463,12 +3467,14 @@ function renderPlanDay() {
     ...kids.map(x => [hmM(x.session_time), `<div class="plan-sess tap" data-open-cl="${escAttr(x.id)}" tabindex="0"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">Kids class teacher${!P.kidsTeacher[x.id] && demoPlan[x.id] && demoPlan[x.id].auto ? ` · none set, so <b>${esc(nameOf(demoPlan[x.id].teachers[0]))}</b> (the day’s demoer)` : ''}${edit ? ' · changes here are for this day only (the term teacher is set in the staff schedule)' : ''}</div></span>
         ${planRowExtras(x)}${planCount(x)}${pick(P.kidsTeacher[x.id], `planKids('${escAttr(x.id)}', this.value)`)}${planRowTools(x)}</div>${planNoteHtml(x)}<div class="pf-wrap" data-cl="${escAttr(x.id)}"></div>`]),
     ...others.map(x => [hmM(x.session_time), `<div class="plan-sess${x.session_type === 'party' ? '' : ' tap'}"${x.session_type === 'party' ? '' : ` data-open-cl="${escAttr(x.id)}" tabindex="0"`}><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">${
-          x.partySlot ? `${x.spaces_left_cache} party slot${x.spaces_left_cache === 1 ? '' : 's'} open, not booked yet`
+          x.partySlot ? (x.slotClosed ? 'Closed online: customers can’t book this time' : `${x.spaces_left_cache} party slot${x.spaces_left_cache === 1 ? '' : 's'} open, not booked yet`)
           : x.session_type === 'party' ? 'Not booked yet'
           : !(P.booked[x.id] > 0) ? 'No one booked yet'
           : planIsCamp(x) ? planCampLine(x)
           : (demoers.length || P.roles.director) && demoPlan[x.id] ? `<span class="floor-staff" style="margin-top:4px">${hubDemoChips(demoPlan[x.id])}</span>` : esc(dayCover)}</div></span>
-        ${planRowExtras(x)}${planCount(x)}<span class="kind-chip kind-${sessionKind(x.title)[1]}">${esc(sessionKind(x.title)[0])}</span>${x.session_type === 'party' ? (planCanAdjust() && !x.partySlot ? `<button class="ho-btn spots-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Spots</button>` : '') : planRowTools(x)}</div>${planNoteHtml(x)}<div class="pf-wrap" data-cl="${escAttr(x.id)}"></div>`]),
+        ${planRowExtras(x)}${planCount(x)}<span class="kind-chip kind-${sessionKind(x.title)[1]}">${esc(sessionKind(x.title)[0])}</span>${x.session_type === 'party' ? (planCanAdjust() ? (x.partySlot
+          ? `<button class="ho-btn spots-btn" onclick="planSlotOpenClose('${escAttr(x.id)}', ${x.slotClosed ? 'true' : 'false'})">${x.slotClosed ? 'Reopen' : 'Close slot'}</button>`
+          : `<button class="ho-btn spots-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Spots</button>`) : '') : planRowTools(x)}</div>${planNoteHtml(x)}<div class="pf-wrap" data-cl="${escAttr(x.id)}"></div>`]),
     ...(P.events || []).map(x => [-1, `<div class="plan-sess" style="background:#fff4dd;border-color:#ffd998"><span class="t">🎪</span><span class="nm">${esc(x.title)}<div class="sub">Event · staffing is set on the event</div></span></div>`])
   ].sort((a, b) => a[0] - b[0]).map(r => r[1]).join('');
   // Party forms: keep the open forms' own elements (and anything typed) across redraws.
@@ -3504,7 +3510,8 @@ function renderPlanDay() {
     <div class="ho-section-head">Everything on this day</div>${sessRows || '<div class="ho-intro">Nothing running this day.</div>'}
     ${notRunning.length ? `<details class="plan-closed"><summary>Not running (${notRunning.length}) · 0 booked and no spots open</summary>
       ${notRunning.map(x => `<div class="plan-sess off"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}</span>
-        ${planCanAdjust() ? `<button class="ho-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Open spots</button>` : ''}</div>`).join('')}</details>` : ''}
+        ${planCanAdjust() ? (x.partySlot ? `<button class="ho-btn" onclick="planSlotOpenClose('${escAttr(x.id)}', true)">Reopen</button>`
+          : `<button class="ho-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Open spots</button>`) : ''}</div>`).join('')}</details>` : ''}
     ${edit ? `<div class="plan-actions">
       <span class="plan-msg" id="plan-msg">${esc(P.msg || (P.dirty ? 'Unsaved changes' : ''))}</span>
       <button class="ho-btn" onclick="planFill()">Fill blanks from the schedule</button>
@@ -3820,6 +3827,53 @@ async function planAdjustSpotsGo(sessionId) {
   if (_plan.date === localDateStr(new Date()) && _lastHeroData) loadDailyHero(_sessionPin, _sessionStudioId);
 }
 function planOpenSpots(sessionId) { return planAdjustSpots(sessionId); }
+
+// Close (or reopen) an open party slot: every party product at that time (Kids Party,
+// Splatter Party, Party Time Slot…) is set to 0 spots on Shopify (reopen: 1 each).
+// Same Shopify step, permission and log as Spots. Booked parties aren't touched.
+function planSlotOpenClose(slotId, reopen) {
+  if (!planCanAdjust()) { alert('Closing a party slot needs an admin login, or a coordinator whose staff profile has “Can adjust spaces”.'); return; }
+  const x = _plan.sessions.find(z => z.id === slotId); if (!x) return;
+  const names = (x.slotProducts || []).map(p => p.title);
+  openDutySheet(`<h3>${reopen ? 'Reopen' : 'Close'} the ${esc(shortTime(x.session_time))} party slot?</h3>
+    <p>${esc(ptyDayLabel(_plan.date))} · ${esc(STUDIO_NAMES[_sessionStudioId] || '')}</p>
+    <div class="ho-intro" style="margin:0">${reopen ? 'Customers will be able to book a party at this time again.' : 'Customers won’t be able to book a party at this time online.'}
+      This changes ${names.length} product${names.length === 1 ? '' : 's'} on Shopify: ${esc(names.join(', '))}.</div>
+    <div id="slot-msg" class="ho-intro" style="margin:8px 0 0"></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="slot-go" onclick="planSlotGo('${escAttr(slotId)}', ${reopen ? 'true' : 'false'})">${reopen ? 'Reopen it' : 'Close it'}</button></div>`);
+}
+async function planSlotGo(slotId, reopen) {
+  const x = _plan.sessions.find(z => z.id === slotId); if (!x) return;
+  const msg = document.getElementById('slot-msg'), btn = document.getElementById('slot-go');
+  btn.disabled = true; msg.textContent = 'Updating Shopify…';
+  const call = async body => (await fetch(`${SUPABASE_URL}/functions/v1/shopify-inventory`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify(body) })).json();
+  const qty = reopen ? 1 : 0, done = [], skipped = [];
+  for (const p of (x.slotProducts || [])) {
+    const title = buildShopifyTitle(p.session_date, p.session_time || '00:00:00', p.title);
+    if (!title) continue;   // no Shopify product: nothing customers can book
+    try {
+      const d = await call({ action: 'get_all', product_title: title });
+      const v = d && !d.error && d.variants ? d.variants.find(z => z.variant_title === STUDIO_VARIANT_MAP[_sessionStudioId]) : null;
+      if (!v) { skipped.push(p.title); continue; }
+      const old = Number(v.inventory_quantity || 0);
+      const set = await call({ action: 'set', inventory_item_id: v.inventory_item_id, quantity: qty, pin: _sessionPin || null, studio_id: _sessionStudioId, product_title: title });
+      if (!set || !set.inventory_level) { skipped.push(p.title + (set && set.error ? ` (${set.error})` : '')); continue; }
+      await sb.from('sessions').update({ capacity: qty, spaces_left_cache: qty }).eq('id', p.id);
+      try {
+        await sb.from('spaces_adjustment_log').insert({ session_id: p.id, studio_id: _sessionStudioId, session_title: p.title, session_date: p.session_date,
+          session_time: p.session_time, staff_id: _adjustStaff ? _adjustStaff.id : null, staff_name: _adjustStaff ? _adjustStaff.display_name : 'Home office (Hub)',
+          made_by_role: _adjustStaff ? (_adjustStaff.role || 'coordinator') : 'admin', old_spaces_left: old, new_spaces_left: qty });
+      } catch (e) {}
+      done.push(p.title);
+    } catch (e) { skipped.push(p.title); }
+  }
+  if (!done.length) { msg.textContent = 'Nothing changed on Shopify' + (skipped.length ? `: ${skipped.join(', ')}` : '') + '. Try again.'; btn.disabled = false; return; }
+  closeDutySheet();
+  await loadPlanDay(_plan.date);
+  _plan.msg = `${shortTime(x.session_time)} party slot ${reopen ? 'reopened' : 'closed online'} (${done.length} product${done.length === 1 ? '' : 's'})` + (skipped.length ? `. Couldn’t change: ${skipped.join(', ')}.` : '.');
+  renderPlanDay();
+  _planRunDays = null; planDayStrip(_plan.date);
+}
 
 // ---------- Admin: shifts on the Schedule ----------
 // Admin logins can add, change or remove the day's shifts here. They save to
