@@ -654,7 +654,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
   var effects = [];
   var dealsAdmin = null;
   var homeCards = null;
-  var kilnRows = null, howtoRows = null;
+  var kilnRows = null, howtoRows = null, ideaRows = null, paSummary = [], ideaTab = 'pa_days';
   var FX_NAMES = { snow: 'Snowflakes', leaves: 'Falling leaves', hearts: 'Hearts', confetti: 'Confetti', stars: 'Stars', pumpkins: 'Pumpkins' };
   var canEdit = false;
   var flash = null;
@@ -791,6 +791,10 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     var fx = await sb.rpc('world_effects_list');
     effects = fx.error ? [] : (fx.data || []);
     if (fx.error) console.error('Effects didn\u2019t load:', fx.error);
+    var ir = await sb.rpc('world_ideas_list');
+    ideaRows = ir.error ? null : (ir.data || []);
+    var ps = await sb.rpc('world_pa_day_summary');
+    paSummary = ps.error ? [] : (ps.data || []);
     var kr = await sb.rpc('world_kiln_status_list');
     kilnRows = kr.error ? null : (kr.data || []);
     var hr = await sb.rpc('world_howto_list');
@@ -936,6 +940,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     }
     html += '</section>';
     html += homeCardsHtml();
+    html += ideasHtml();
     html += kilnHtml();
     html += howtoHtml();
     html += dealsSectionHtml();
@@ -944,6 +949,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     bindDealsSection();
     bindHomeCards();
     bindKiln();
+    bindIdeas();
     bindHowto();
     bindDevPassword();
     var todayFrame = app.querySelector('#todayPv .pv-frame');
@@ -1375,6 +1381,59 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     flash = ['ok', 'Saved \u201c' + p.name + '\u201d. World shows it within a minute.'];
     await loadThemes();
   });
+
+  // ---------------- Ideas from customers ----------------
+  var IDEA_LABEL = { pa_days: 'PA/PD days', class_times: 'Class times', camps: 'Camps', age_groups: 'Age groups', parties: 'Party ideas', projects: 'Future projects', other: 'Something else' };
+  function studioNameOf(id) {
+    var n = id || '';
+    STUDIOS.forEach(function (g) { g.list.forEach(function (st) { if (st[0] === id) n = st[1]; }); });
+    return n || 'No studio chosen';
+  }
+  function ideasHtml() {
+    if (ideaRows === null) return '<section class="panel" style="margin-top:20px"><h2>Ideas from customers</h2><p class="sub">Run world_ideas.sql in Supabase to switch this on.</p></section>';
+    var counts = {}; ideaRows.forEach(function (r) { counts[r.kind] = (counts[r.kind] || 0) + (r.status === 'new' ? 1 : 0); });
+    var h = '<section class="panel" style="margin-top:20px"><h2>Ideas from customers</h2>' +
+      '<p class="sub" style="margin:0 0 10px">From \u201cHelp us make 4Cats better!\u201d on World. Each one is also emailed to hello@4cats.com.</p>' +
+      '<div class="toolbar" style="flex-wrap:wrap;gap:6px">' + Object.keys(IDEA_LABEL).map(function (k) {
+        return '<button class="btn ' + (ideaTab === k ? 'btn-berry' : 'btn-plain') + '" type="button" data-ideatab="' + k + '">' + esc(IDEA_LABEL[k]) + (counts[k] ? ' (' + counts[k] + ' new)' : '') + '</button>';
+      }).join('') + '</div>';
+    if (ideaTab === 'pa_days') {
+      h += '<h3 style="margin:14px 0 6px">PA/PD days wanted</h3>';
+      h += paSummary.length ? '<table><thead><tr><th>Date</th><th>Studio</th><th>Families</th><th>Kids</th><th>Schools</th></tr></thead><tbody>' + paSummary.map(function (r) {
+        return '<tr><td><b>' + esc(niceDate(String(r.day).slice(0, 10))) + '</b></td><td>' + esc(studioNameOf(r.studio_id)) + '</td><td>' + r.families + '</td><td>' + (r.kids || '\u2014') + '</td><td class="tmeta">' + esc(r.schools || '') + '</td></tr>';
+      }).join('') + '</tbody></table>' : '<div class="empty">No upcoming PA/PD dates suggested yet.</div>';
+      h += '<h3 style="margin:18px 0 6px">Every PA/PD suggestion</h3>';
+    }
+    var list = ideaRows.filter(function (r) { return r.kind === ideaTab; });
+    if (!list.length) return h + '<div class="empty">Nothing here yet.</div></section>';
+    h += '<table><thead><tr><th>When</th><th>From</th><th>Studio</th><th>Idea</th><th></th></tr></thead><tbody>' + list.map(function (r) {
+      var bits = [];
+      if (r.school) bits.push('<b>School:</b> ' + esc(r.school));
+      if (r.dates && r.dates.length) bits.push('<b>Dates:</b> ' + r.dates.map(function (d) { return esc(niceDate(d)); }).join(', '));
+      if (r.kids) bits.push('<b>Kids:</b> ' + r.kids + (r.ages ? ' (ages ' + esc(r.ages) + ')' : ''));
+      if (r.details) bits.push(esc(r.details));
+      return '<tr' + (r.status === 'new' ? ' style="background:#fffaf0"' : '') + '><td class="tmeta">' + esc(new Date(r.created_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })) + '</td>' +
+        '<td><div class="tname">' + esc(r.name || '') + '</div><div class="tmeta">' + (r.email ? '<a href="mailto:' + esc(r.email) + '">' + esc(r.email) + '</a>' : '') + '</div></td>' +
+        '<td>' + esc(studioNameOf(r.studio_id)) + '</td><td>' + bits.join('<br>') + '</td>' +
+        '<td>' + (canEdit ? '<select data-ideastatus="' + esc(r.id) + '">' + [['new', 'New'], ['seen', 'Seen'], ['done', 'Done']].map(function (o) {
+          return '<option value="' + o[0] + '"' + (r.status === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select>' : esc(r.status)) + '</td></tr>';
+    }).join('') + '</tbody></table></section>';
+    return h;
+  }
+  function bindIdeas() {
+    app.querySelectorAll('[data-ideatab]').forEach(function (b) {
+      b.addEventListener('click', function () { ideaTab = b.dataset.ideatab; renderList(); });
+    });
+    app.querySelectorAll('[data-ideastatus]').forEach(function (sel) {
+      sel.addEventListener('change', async function () {
+        var r = await sb.rpc('world_idea_set_status', { p_id: sel.dataset.ideastatus, p_status: sel.value });
+        if (r.error) { alert('Not saved: ' + r.error.message); return; }
+        var row = ideaRows.filter(function (x) { return x.id === sel.dataset.ideastatus; })[0];
+        if (row) row.status = sel.value;
+        sel.closest('tr').style.background = sel.value === 'new' ? '#fffaf0' : '';
+      });
+    });
+  }
 
   // ---------------- Kiln status (per studio) ----------------
   function kilnHtml() {
