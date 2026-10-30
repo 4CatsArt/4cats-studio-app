@@ -439,6 +439,19 @@ button.pill { cursor: pointer; }
       <div><label class="field-label" for="ed-metafield">Shopify project metafield</label><input type="text" id="ed-metafield"></div>
       <div class="full"><label class="field-label" for="ed-description">Description</label><textarea id="ed-description"></textarea></div>
       <div class="full"><label class="field-label" for="ed-notes">Notes</label><textarea id="ed-notes"></textarea></div>
+      <!-- For customers: shown on 4Cats World (spotlights, and later booking, glazing and emails) -->
+      <div class="full" style="border-top:1px solid #e8e3d6;margin-top:6px;padding-top:12px">
+        <div class="field-label" style="font-size:13px;color:#c3090c">For customers (4Cats World)</div>
+        <div class="small" style="color:#888;margin:2px 0 8px">What families see about this project on 4Cats World.</div>
+      </div>
+      <div class="full"><label class="field-label" for="ed-wblurb">Short description</label><textarea id="ed-wblurb" maxlength="400" placeholder="e.g. Make a mug filled with your favourite holiday things!"></textarea></div>
+      <div class="full"><label class="field-label" for="ed-whigh">✓ Highlights (one per line)</label><textarea id="ed-whigh" placeholder="Choose your favourite design&#10;All materials included&#10;Great for gifting (or keeping!)"></textarea></div>
+      <div class="full"><label class="field-label" for="ed-wvideo">Video link (YouTube or video file)</label><input type="url" id="ed-wvideo" placeholder="https://youtu.be/…"></div>
+      <div class="full"><label class="field-label">Marketing pictures <span class="small" style="color:#888">(the first is the main one)</span></label>
+        <div id="ed-wpics" style="display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 6px"></div>
+        <input type="file" id="ed-wpic-file" accept="image/*" multiple style="display:none" onchange="worldPicsChosen(this)">
+        <button type="button" class="btn" onclick="document.getElementById('ed-wpic-file').click()">+ Add pictures</button>
+        <span class="small" id="ed-wpic-msg" style="color:#888;margin-left:6px"></span></div>
     </div>
     <div class="sup-box">
       <div class="sup-head"><h3>What's needed</h3><a href="#" class="small" onclick="openToolsLib();return false">manage tools, kits &amp; prepped</a></div>
@@ -1117,6 +1130,53 @@ function renderLibrary() {
 }
 
 let editorCallback = null
+// ---- Marketing pictures for 4Cats World ----
+// Shrunk in the browser, then saved in the public world-banners bucket
+// (projects/ folder), the same place World's other pictures live.
+let edWorldPics = []
+function renderWorldPics() {
+  const box = document.getElementById('ed-wpics')
+  box.innerHTML = edWorldPics.map((u, i) =>
+    '<figure style="margin:0;width:96px;text-align:center"><img src="' + esc(u) + '" alt="" style="width:96px;height:72px;object-fit:cover;border-radius:8px;display:block">' +
+    '<figcaption class="small">' + (i === 0 ? '<b>Main</b>' : '<a href="#" onclick="worldPicMain(' + i + ');return false">Make main</a>') +
+    ' \u00b7 <a href="#" onclick="worldPicRemove(' + i + ');return false">Remove</a></figcaption></figure>').join('') ||
+    '<span class="small" style="color:#888">No pictures yet.</span>'
+}
+function worldPicMain(i) { const u = edWorldPics.splice(i, 1)[0]; edWorldPics.unshift(u); renderWorldPics() }
+function worldPicRemove(i) { edWorldPics.splice(i, 1); renderWorldPics() }
+function shrinkImage(file, maxW) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => {
+      const scale = Math.min(1, maxW / img.naturalWidth)
+      const c = document.createElement('canvas')
+      c.width = Math.round(img.naturalWidth * scale); c.height = Math.round(img.naturalHeight * scale)
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height)
+      URL.revokeObjectURL(img.src)
+      c.toBlob(b => b ? resolve(b) : reject(new Error('Could not read that picture')), 'image/jpeg', 0.86)
+    }
+    img.onerror = () => reject(new Error('Could not open that picture'))
+    img.src = URL.createObjectURL(file)
+  })
+}
+async function worldPicsChosen(input) {
+  const files = Array.from(input.files || []); input.value = ''
+  const msg = document.getElementById('ed-wpic-msg')
+  for (const f of files) {
+    msg.textContent = 'Uploading\u2026'
+    try {
+      const blob = await shrinkImage(f, 1600)
+      const slug = (document.getElementById('ed-name').value || 'project').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'project'
+      const path = 'projects/' + Date.now() + '-' + Math.random().toString(36).slice(2, 6) + '-' + slug + '.jpg'
+      const up = await sb.storage.from('world-banners').upload(path, blob, { contentType: 'image/jpeg', cacheControl: '31536000', upsert: false })
+      if (up.error) throw new Error(up.error.message)
+      edWorldPics.push(sb.storage.from('world-banners').getPublicUrl(path).data.publicUrl)
+      renderWorldPics()
+      msg.textContent = 'Added \u2713 (save the project to keep it)'
+    } catch (e) { msg.textContent = 'Upload didn\u2019t work: ' + e.message }
+  }
+}
+
 function openProjectEditor(id, presetName, onSaved) {
   editing = id ? libById[id] : null
   editorCallback = onSaved || null
@@ -1138,6 +1198,11 @@ function openProjectEditor(id, presetName, onSaved) {
   document.getElementById('ed-marketing').value = p.marketing_photos_url || ''
   document.getElementById('ed-description').value = p.description || ''
   document.getElementById('ed-notes').value = p.notes || ''
+  document.getElementById('ed-wblurb').value = p.world_blurb || ''
+  document.getElementById('ed-whigh').value = (p.world_highlights || []).join('\n')
+  document.getElementById('ed-wvideo').value = p.world_video_url || ''
+  edWorldPics = (p.world_images || []).slice()
+  renderWorldPics()
   editTags = (p.tags || []).slice()
   renderEditTags()
   edSup = {
@@ -1240,6 +1305,10 @@ async function saveProject() {
     marketing_photos_url: nz(document.getElementById('ed-marketing').value),
     description: nz(document.getElementById('ed-description').value),
     notes: nz(document.getElementById('ed-notes').value),
+    world_blurb: nz(document.getElementById('ed-wblurb').value),
+    world_highlights: document.getElementById('ed-whigh').value.split('\n').map(s => s.trim()).filter(Boolean),
+    world_video_url: nz(document.getElementById('ed-wvideo').value),
+    world_images: edWorldPics.slice(),
     tool_kit_ids: edSup.kits.slice(),
     tools_added: edSup.added.slice(),
     tools_removed: edSup.removed.filter(id => kitToolIds().has(id)),
