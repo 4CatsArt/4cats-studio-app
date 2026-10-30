@@ -470,6 +470,39 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
   </div>
 </dialog>
 
+<dialog class="editor" id="pollEditor" aria-labelledby="pollTitle">
+  <div class="ed-head">
+    <h2 id="pollTitle">Vote</h2>
+    <button class="btn btn-plain" type="button" id="pollCancel">Cancel</button>
+    <button class="btn btn-berry" type="button" id="pollSave">Save vote</button>
+  </div>
+  <div class="ed-body" style="grid-template-columns:1fr">
+    <div class="ed-col">
+      <p class="msg err" id="pollErr" hidden></p>
+      <div class="group">
+        <h3>The vote</h3>
+        <div class="field"><label for="v_title">Title</label><input type="text" id="v_title" maxlength="80" placeholder="Choose Your Favourite Mug Design"></div>
+        <div class="field"><label for="v_sub">Line under it</label><input type="text" id="v_sub" maxlength="160" placeholder="Which one will you make? Tap a design to learn more and book!"></div>
+        <div class="two">
+          <div class="field"><label for="v_start">Show from (optional)</label><input type="date" id="v_start"></div>
+          <div class="field"><label for="v_end">Until (optional)</label><input type="date" id="v_end"></div>
+        </div>
+        <div class="two">
+          <div class="field"><label for="v_pri">Priority (higher shows first)</label><input type="number" id="v_pri" value="0"></div>
+          <div class="field"><label>&nbsp;</label><label class="check"><input type="checkbox" id="v_active" checked> Switched on</label></div>
+        </div>
+        <span class="help">Families tap ❤️ Love it, 👍 Like it or 👎 Not for me on each design (one vote per design, and they can change it). Everyone sees the totals.</span>
+      </div>
+      <div class="group">
+        <h3>Designs</h3>
+        <div id="v_opts"></div>
+        <button class="btn btn-plain" type="button" id="v_add">+ Add a design</button>
+        <input type="file" id="v_pic" accept="image/*" hidden>
+      </div>
+    </div>
+  </div>
+</dialog>
+
 <dialog class="editor" id="hcEditor" aria-labelledby="hcTitle">
   <div class="ed-head">
     <h2 id="hcTitle">Home page card</h2>
@@ -685,6 +718,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
   var effects = [];
   var dealsAdmin = null;
   var homeCards = null;
+  var pollData = null;
   var kilnRows = null, howtoRows = null, ideaRows = null, paSummary = [], ideaTab = 'pa_days';
   var FX_NAMES = { snow: 'Snowflakes', leaves: 'Falling leaves', hearts: 'Hearts', confetti: 'Confetti', stars: 'Stars', pumpkins: 'Pumpkins' };
   var canEdit = false;
@@ -822,6 +856,8 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     var fx = await sb.rpc('world_effects_list');
     effects = fx.error ? [] : (fx.data || []);
     if (fx.error) console.error('Effects didn\u2019t load:', fx.error);
+    var pr = await sb.rpc('world_polls_admin');
+    pollData = pr.error ? null : (pr.data || { polls: [], options: [], counts: [] });
     var ir = await sb.rpc('world_ideas_list');
     ideaRows = ir.error ? null : (ir.data || []);
     var ps = await sb.rpc('world_pa_day_summary');
@@ -971,6 +1007,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     }
     html += '</section>';
     html += homeCardsHtml();
+    html += pollsHtml();
     html += ideasHtml();
     html += kilnHtml();
     html += howtoHtml();
@@ -981,6 +1018,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     bindHomeCards();
     bindKiln();
     bindIdeas();
+    bindPolls();
     bindHowto();
     bindDevPassword();
     var todayFrame = app.querySelector('#todayPv .pv-frame');
@@ -1475,6 +1513,122 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     if (r.error) { err.textContent = 'Not saved: ' + r.error.message; err.hidden = false; return; }
     hcEditor.close();
     flash = ['ok', 'Saved \u201c' + p.name + '\u201d. World shows it within a minute.'];
+    await loadThemes();
+  });
+
+  // ---------------- Votes ("Choose your favourite…") ----------------
+  function pollTotals(optId) {
+    var t = { love: 0, like: 0, no: 0 };
+    (pollData.counts || []).forEach(function (c) { if (c.option_id === optId) t[c.reaction] = c.n; });
+    return t;
+  }
+  function pollsHtml() {
+    if (pollData === null) return '<section class="panel" style="margin-top:20px"><h2>Votes</h2><p class="sub">Run world_polls.sql in Supabase to switch this on.</p></section>';
+    var today = new Date().toISOString().slice(0, 10);
+    var h = '<section class="panel" style="margin-top:20px"><div class="toolbar"><div class="grow"><h2>Votes</h2>' +
+      '<p class="sub" style="margin:0">Blocks like \u201cChoose Your Favourite Mug Design\u201d on World\u2019s home page. Make a new one any time.</p></div>' +
+      (canEdit ? '<button class="btn btn-berry" type="button" id="pollNew">Add a vote</button>' : '') + '</div>';
+    if (!pollData.polls.length) return h + '<div class="empty">No votes yet.</div></section>';
+    pollData.polls.forEach(function (p) {
+      var opts = pollData.options.filter(function (o) { return o.poll_id === p.id; }).map(function (o) {
+        var t = pollTotals(o.id); return { o: o, t: t, all: t.love + t.like + t.no };
+      }).sort(function (a, b) { return (b.t.love - a.t.love) || (b.t.like - a.t.like) || (a.t.no - b.t.no); });
+      var st = !p.active ? ['notready', 'Switched off'] : (p.starts_on && p.starts_on > today ? ['soon', 'Starts ' + niceDate(p.starts_on)] : (p.ends_on && p.ends_on < today ? ['', 'Finished'] : ['ready', 'Showing']));
+      h += '<div style="border:1px solid var(--line,#e8dfcd);border-radius:12px;padding:12px 14px;margin-top:12px">' +
+        '<div class="toolbar" style="margin:0 0 8px"><div class="grow"><div class="tname">' + esc(p.title) + '</div><div class="tmeta">' +
+        (p.starts_on || p.ends_on ? esc((p.starts_on ? niceDate(p.starts_on) : '') + ' \u2013 ' + (p.ends_on ? niceDate(p.ends_on) : '')) : 'Always') + '</div></div>' +
+        '<span class="pill ' + st[0] + '">' + esc(st[1]) + '</span>' +
+        '<div class="row-actions"><button class="btn btn-plain" type="button" data-polledit="' + esc(p.id) + '">' + (canEdit ? 'Edit' : 'View') + '</button>' +
+        (canEdit ? '<button class="btn btn-danger" type="button" data-polldel="' + esc(p.id) + '">Delete</button>' : '') + '</div></div>' +
+        (opts.length ? '<table><thead><tr><th>Design</th><th>\u2764\ufe0f Love it</th><th>\ud83d\udc4d Like it</th><th>\ud83d\udc4e Not for me</th><th>Votes</th></tr></thead><tbody>' + opts.map(function (x, i) {
+          return '<tr><td>' + (x.o.image_url ? '<img src="' + esc(x.o.image_url) + '" alt="" style="width:34px;height:34px;object-fit:cover;border-radius:6px;vertical-align:middle;margin-right:8px">' : '') +
+            (i === 0 && x.all ? '\ud83c\udfc6 ' : '') + esc(x.o.label) + '</td><td><b>' + x.t.love + '</b></td><td>' + x.t.like + '</td><td>' + x.t.no + '</td><td class="tmeta">' + x.all + '</td></tr>';
+        }).join('') + '</tbody></table>' : '<div class="empty">No designs yet.</div>') + '</div>';
+    });
+    return h + '</section>';
+  }
+  var pollEditor = document.getElementById('pollEditor'), pollDraft = null, pollPicFor = null;
+  function drawPollOpts() {
+    $('v_opts').innerHTML = pollDraft.options.map(function (o, i) {
+      return '<div style="display:grid;grid-template-columns:64px 1fr 1fr auto;gap:8px;align-items:center;margin-bottom:8px">' +
+        '<button type="button" data-vpic="' + i + '" title="Choose a picture" style="width:64px;height:64px;border-radius:10px;border:1px dashed #cbbfa5;background:#f6f3ea center/cover no-repeat' + (o.image_url ? ' url(\'' + esc(o.image_url).replace(/'/g, '') + '\')' : '') + ';cursor:pointer;font-size:11px">' + (o.image_url ? '' : 'Picture') + '</button>' +
+        '<input type="text" data-vlabel="' + i + '" value="' + esc(o.label || '') + '" placeholder="Design name, e.g. Snowman" maxlength="60">' +
+        '<input type="text" data-vurl="' + i + '" value="' + esc(o.url || '') + '" placeholder="Link (optional)">' +
+        '<span style="white-space:nowrap"><button class="link-btn" type="button" data-vmove="' + i + '" data-d="-1"' + (i ? '' : ' disabled') + '>\u2191</button>' +
+        '<button class="link-btn" type="button" data-vmove="' + i + '" data-d="1"' + (i < pollDraft.options.length - 1 ? '' : ' disabled') + '>\u2193</button>' +
+        '<button class="link-btn" type="button" data-vdel="' + i + '">Remove</button></span></div>';
+    }).join('') || '<p class="help">No designs yet. Add one below.</p>';
+  }
+  function keepPollFields() {
+    $('v_opts').querySelectorAll('[data-vlabel]').forEach(function (el) { pollDraft.options[+el.dataset.vlabel].label = el.value; });
+    $('v_opts').querySelectorAll('[data-vurl]').forEach(function (el) { pollDraft.options[+el.dataset.vurl].url = el.value; });
+  }
+  function openPoll(p) {
+    pollDraft = p ? JSON.parse(JSON.stringify(p)) : { title: '', subtitle: '', active: true, priority: 0 };
+    pollDraft.options = p ? pollData.options.filter(function (o) { return o.poll_id === p.id; }).map(function (o) { return { id: o.id, label: o.label, image_url: o.image_url, url: o.url }; }) : [];
+    $('pollErr').hidden = true;
+    $('v_title').value = pollDraft.title || ''; $('v_sub').value = pollDraft.subtitle || '';
+    $('v_start').value = pollDraft.starts_on || ''; $('v_end').value = pollDraft.ends_on || '';
+    $('v_pri').value = pollDraft.priority || 0; $('v_active').checked = pollDraft.active !== false;
+    $('pollSave').hidden = !canEdit; $('v_add').hidden = !canEdit;
+    drawPollOpts();
+    pollEditor.showModal();
+  }
+  function bindPolls() {
+    var nb = document.getElementById('pollNew');
+    if (nb) nb.addEventListener('click', function () { openPoll(null); });
+    app.querySelectorAll('[data-polledit]').forEach(function (b) {
+      b.addEventListener('click', function () { openPoll(pollData.polls.filter(function (p) { return p.id === b.dataset.polledit; })[0]); });
+    });
+    app.querySelectorAll('[data-polldel]').forEach(function (b) {
+      b.addEventListener('click', async function () {
+        var p = pollData.polls.filter(function (x) { return x.id === b.dataset.polldel; })[0];
+        if (!p || !confirm('Delete \u201c' + p.title + '\u201d and all its votes?')) return;
+        var r = await sb.rpc('world_poll_delete', { p_id: p.id });
+        if (r.error) { alert('Not deleted: ' + r.error.message); return; }
+        await loadThemes();
+      });
+    });
+  }
+  $('v_add').addEventListener('click', function () { keepPollFields(); pollDraft.options.push({ label: '', image_url: null, url: '' }); drawPollOpts(); });
+  $('v_opts').addEventListener('click', function (e) {
+    var t = e.target.closest('button'); if (!t) return;
+    keepPollFields();
+    if (t.dataset.vpic !== undefined) { pollPicFor = +t.dataset.vpic; $('v_pic').click(); return; }
+    if (t.dataset.vdel !== undefined) {
+      if (pollDraft.options[+t.dataset.vdel].id && !confirm('Remove this design? Its votes go too.')) return;
+      pollDraft.options.splice(+t.dataset.vdel, 1); drawPollOpts(); return;
+    }
+    if (t.dataset.vmove !== undefined) {
+      var i = +t.dataset.vmove, j = i + (+t.dataset.d), tmp = pollDraft.options[i];
+      pollDraft.options[i] = pollDraft.options[j]; pollDraft.options[j] = tmp; drawPollOpts();
+    }
+  });
+  $('v_pic').addEventListener('change', async function (e) {
+    var f = e.target.files && e.target.files[0]; e.target.value = '';
+    if (!f || pollPicFor === null) return;
+    var i = pollPicFor; pollPicFor = null;
+    try { pollDraft.options[i].image_url = await uploadDealImage(f, 'vote-' + (pollDraft.options[i].label || 'design'), 900); drawPollOpts(); }
+    catch (err) { alert('Upload didn\u2019t work: ' + err.message); }
+  });
+  $('pollCancel').addEventListener('click', function () { pollEditor.close(); });
+  $('pollSave').addEventListener('click', async function () {
+    keepPollFields();
+    var err = $('pollErr'); err.hidden = true;
+    var p = Object.assign({}, pollDraft, {
+      title: $('v_title').value.trim(), subtitle: $('v_sub').value.trim() || null,
+      starts_on: $('v_start').value || null, ends_on: $('v_end').value || null,
+      priority: parseInt($('v_pri').value, 10) || 0, active: $('v_active').checked,
+      options: pollDraft.options.filter(function (o) { return (o.label || '').trim(); })
+    });
+    if (!p.title) { err.textContent = 'Give the vote a title.'; err.hidden = false; return; }
+    if (p.options.length < 2) { err.textContent = 'Add at least two designs.'; err.hidden = false; return; }
+    this.disabled = true;
+    var r = await sb.rpc('world_poll_save', { p: p });
+    this.disabled = false;
+    if (r.error) { err.textContent = 'Not saved: ' + r.error.message; err.hidden = false; return; }
+    pollEditor.close();
+    flash = ['ok', 'Saved \u201c' + p.title + '\u201d. World shows it within a minute.'];
     await loadThemes();
   });
 
