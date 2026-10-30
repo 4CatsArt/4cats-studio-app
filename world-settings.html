@@ -252,6 +252,8 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
 .sale-form { border: 1px solid var(--line, #e8dfcd); border-radius: 14px; padding: 12px 14px; margin: 10px 0 14px; background: #fffdf8; }
 .sale-seasons { display: flex; flex-wrap: wrap; gap: 6px 16px; }
 .tx-total td { border-top: 2px solid #222; }
+.mp-table td { vertical-align: middle; }
+#sl_seasons[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -800,7 +802,9 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
   var TYPO_DEFAULT = { headings: { font: 'DM Sans', weight: 700, size: 26, line_height: 1.15, letter_spacing: 1 }, body: { font: 'Work Sans', size: 16, line_height: 1.5, letter_spacing: 0 }, menus: { size: 15 } };
   var typo = null, typoDraft = null;
   var glazePage = null;
-  var campPricing = null, salesRows = null, salesEditing = null, taxRows = null;
+  var campPricing = null, salesRows = null, salesEditing = null, taxRows = null, memberPricing = null;
+  // Kinds of booking (member pricing and sales). Only camps are sold through World (Stripe) so far.
+  var KINDS = [['camps', 'Camps', true], ['workshops', 'Workshops', false], ['classes', 'Classes', false], ['glazing', 'Glazing', false], ['parties', 'Parties', false], ['items', 'Items and kits', false]];
   // Font menus in the theme editor come from the font library.
   var DEFAULT_FONTS = ['DM Sans', 'Work Sans', 'Fredoka', 'Bungee', 'Pacifico', 'Creepster', 'Mountains of Christmas', 'Caveat', 'Permanent Marker'];
   var WEIGHT_NAMES = { 100: 'Thin', 200: 'Extra light', 300: 'Light', 400: 'Regular', 500: 'Medium', 600: 'Semi-bold', 700: 'Bold', 800: 'Extra bold', 900: 'Black' };
@@ -988,6 +992,8 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     var fx = await sb.rpc('world_effects_list');
     effects = fx.error ? [] : (fx.data || []);
     if (fx.error) console.error('Effects didn\u2019t load:', fx.error);
+    var mpr = await sb.rpc('world_setting_get', { p_key: 'member_pricing' });
+    memberPricing = mpr.error ? null : (mpr.data || null);
     var cpr = await sb.rpc('world_setting_get', { p_key: 'camp_pricing' });
     campPricing = cpr.error ? null : (cpr.data || null);
     var slr = await sb.rpc('world_sales_list');
@@ -1151,6 +1157,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     }
     html += '</section>';
     html += homeCardsHtml();
+    html += memberPricingHtml();
     html += campPricingHtml();
     html += salesHtml();
     html += taxReportHtml();
@@ -1172,6 +1179,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     bindFonts();
     bindTypography();
     bindGlazingPage();
+    bindMemberPricing();
     bindCampPricing();
     bindSales();
     bindTaxReport();
@@ -1782,6 +1790,34 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     });
   }
 
+  // ---------------- Member pricing (one place for all member savings) ----------------
+  function memberPricingHtml() {
+    if (memberPricing === null) return '<section class="panel" style="margin-top:20px"><h2>Member pricing</h2><p class="sub">Run world_member_pricing.sql in Supabase to switch this on.</p></section>';
+    return '<section class="panel" style="margin-top:20px"><div class="toolbar"><div class="grow"><h2>Member pricing</h2>' +
+      '<p class="sub" style="margin:0">How much members save on each kind of booking. Sales come off after the member price.</p></div></div>' +
+      '<table class="mp-table"><thead><tr><th>Booking</th><th>Members save</th><th></th></tr></thead><tbody>' + KINDS.map(function (k) {
+        var v = memberPricing[k[0]] != null ? memberPricing[k[0]] : 0;
+        return '<tr><td><b>' + k[1] + '</b></td><td><span class="ty-num" style="width:110px"><input type="number" min="0" max="90" step="0.5" data-mp="' + k[0] + '" value="' + esc(v) + '"' + (canEdit ? '' : ' disabled') + '><i>%</i></span></td>' +
+          '<td>' + (k[2] ? '<span class="pill ready">Used at checkout now</span>' : '<span class="help">Used once these are sold through World. Until then, Shopify sets their member prices.</span>') + '</td></tr>';
+      }).join('') + '</tbody></table>' +
+      (canEdit ? '<div style="display:flex;gap:8px;align-items:center;margin-top:10px"><button class="btn btn-berry" type="button" id="mpSave">Save member pricing</button><span class="help" id="mpMsg"></span></div>' : '') + '</section>';
+  }
+  function bindMemberPricing() {
+    var b = document.getElementById('mpSave'); if (!b) return;
+    b.addEventListener('click', async function () {
+      var v = {}, bad = false;
+      document.querySelectorAll('[data-mp]').forEach(function (el) { var n = Number(el.value); if (!(n >= 0 && n <= 90)) bad = true; v[el.dataset.mp] = n; });
+      if (bad) { $('mpMsg').textContent = 'Each should be between 0 and 90%.'; return; }
+      b.disabled = true;
+      var r = await sb.rpc('world_setting_set', { p_key: 'member_pricing', p_value: v });
+      b.disabled = false;
+      if (r.error) { $('mpMsg').textContent = 'Not saved: ' + r.error.message; return; }
+      memberPricing = v; if (campPricing) campPricing.member_pct = v.camps;
+      $('mpMsg').textContent = 'Saved \u2713 Camp checkouts use ' + v.camps + '% for members from now on.';
+      var cm = document.getElementById('cp_member'); if (cm) { cm.value = v.camps; cpPreview(); }
+    });
+  }
+
   // ---------------- Camp pricing (Stripe camp checkout) ----------------
   var PROVS = ['BC', 'AB', 'ON'];
   function taxText(list) { return (list || []).map(function (x) { return x[0] + ' ' + x[1]; }).join(' + '); }
@@ -1797,7 +1833,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
       '<p class="sub" style="margin:0">Prices and discounts for camps paid with Stripe on World. Discounts stack in this order: member, then 5+ days, then any sale.</p></div></div>' +
       '<div class="cp-live ' + (P.use_stripe ? 'on' : '') + '"><label class="check"><input type="checkbox" id="cp_live"' + (P.use_stripe ? ' checked' : '') + (canEdit ? '' : ' disabled') + '> <b>Sell camps with Stripe on the live site</b></label>' +
       '<span class="help">Off: the live site uses the Shopify cart for camps (the test site always offers Stripe). Only switch on once the live Stripe keys are in.</span></div>' +
-      '<div class="cp-grid">' + num('cp_full', 'Full day', P.full_day, 0.01, '$') + num('cp_half', 'Half day', P.half_day, 0.01, '$') + num('cp_member', 'Members save', P.member_pct, 0.5, '%') +
+      '<div class="cp-grid">' + num('cp_full', 'Full day', P.full_day, 0.01, '$') + num('cp_half', 'Half day', P.half_day, 0.01, '$') + '<div class="field"><label for="cp_member">Members save</label><span class="ty-num" style="width:100%"><input type="number" id="cp_member" value="' + esc(P.member_pct) + '" disabled><i>%</i></span><span class="help">Set in Member pricing.</span></div>' +
       num('cp_mmin', 'Multi-day discount from', P.multi_day_min, 1, 'days') + num('cp_mpct', 'Multi-day discount', P.multi_day_pct, 0.5, '%') + num('cp_after', 'Aftercare per child per day', P.aftercare, 0.01, '$') + '</div>' +
       '<label class="check" style="margin:4px 0 12px"><input type="checkbox" id="cp_aftertax"' + (P.aftercare_taxed ? ' checked' : '') + (canEdit ? '' : ' disabled') + '> Aftercare is taxed</label>' +
       '<h3 style="margin:8px 0 6px">Taxes</h3><p class="help" style="margin:0 0 8px">Write each like <b>GST 5</b>, or <b>GST 5 + PST 7</b>. Camps and aftercare are \u201cservices\u201d; \u201cgoods\u201d is for items like kits later.</p>' +
@@ -1865,7 +1901,11 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
         '<div class="field"><label for="sl_pct">Percent off</label><span class="ty-num" style="width:100%"><input type="number" id="sl_pct" min="1" max="90" step="0.5" value="' + esc(ed.percent || 40) + '"><i>%</i></span></div></div>' +
         '<div class="two"><div class="field"><label for="sl_start">Starts</label><input type="date" id="sl_start" value="' + esc(ed.starts_on || today) + '"></div>' +
         '<div class="field"><label for="sl_end">Ends</label><input type="date" id="sl_end" value="' + esc(ed.ends_on || '') + '"></div></div>' +
-        '<div class="field"><label>Which camps?</label><div class="sale-seasons">' + SEASONS.map(function (x) {
+        '<div class="field"><label>What\u2019s on sale?</label><div class="sale-seasons">' + KINDS.map(function (k) {
+          var on = (ed.applies_to && ed.applies_to.length) ? ed.applies_to.indexOf(k[0]) !== -1 : k[0] === 'camps';
+          return '<label class="check"><input type="checkbox" data-sapply="' + k[0] + '"' + (on ? ' checked' : '') + '> ' + k[1] + '</label>'; }).join('') +
+        '</div><span class="help">Camp sales apply at checkout now. Sales on the others are saved for when they\u2019re sold through World: for now, set those up in Shopify too.</span></div>' +
+        '<div class="field" id="sl_seasons"><label>Which camps?</label><div class="sale-seasons">' + SEASONS.map(function (x) {
           return '<label class="check"><input type="checkbox" data-sseason="' + x[0] + '"' + ((ed.seasons || []).indexOf(x[0]) !== -1 ? ' checked' : '') + '> ' + x[1] + '</label>'; }).join('') +
         '</div><span class="help">Tick none for all camps.</span></div>' +
         '<label class="check"><input type="checkbox" id="sl_active"' + (ed.active !== false ? ' checked' : '') + '> Switched on</label>' +
@@ -1873,16 +1913,25 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
         '<div style="display:flex;gap:8px;align-items:center"><button class="btn btn-berry" type="button" id="slSave">Save sale</button><button class="btn btn-plain" type="button" id="slCancel">Cancel</button><span class="help" id="slMsg"></span></div></div>';
     }
     if (!salesRows.length) h += '<div class="empty">No sales yet.</div>';
-    else h += '<table><thead><tr><th>Sale</th><th>Off</th><th>Dates</th><th>Camps</th><th>Full day becomes</th><th></th></tr></thead><tbody>' + salesRows.map(function (x, i) {
+    else h += '<table><thead><tr><th>Sale</th><th>Off</th><th>Dates</th><th>On sale</th><th>Full-day camp becomes</th><th></th></tr></thead><tbody>' + salesRows.map(function (x, i) {
       var st = !x.active ? ['notready', 'Off'] : (x.starts_on > today ? ['soon', 'Starts ' + niceDate(x.starts_on)] : (x.ends_on < today ? ['', 'Finished'] : ['ready', 'On now']));
       var f = function (n) { return '$' + (Math.round(n * 100) / 100).toFixed(2); };
       return '<tr><td><div class="tname">' + esc(x.name) + '</div><span class="pill ' + st[0] + '">' + esc(st[1]) + '</span></td><td><b>' + esc(x.percent) + '%</b></td>' +
         '<td class="tmeta">' + esc(niceDate(x.starts_on) + ' \u2013 ' + niceDate(x.ends_on)) + '</td>' +
-        '<td class="tmeta">' + esc((x.seasons && x.seasons.length) ? x.seasons.map(function (k) { return (SEASONS.filter(function (y) { return y[0] === k; })[0] || [0, k])[1]; }).join(', ') : 'All camps') + '</td>' +
-        '<td class="tmeta">' + f(P.full_day * (1 - x.percent / 100)) + ' \u00b7 members ' + f(P.full_day * (1 - P.member_pct / 100) * (1 - x.percent / 100)) + '</td>' +
+        '<td class="tmeta">' + esc(saleWhat(x)) + '</td>' +
+        '<td class="tmeta">' + (saleForCamps(x) ? f(P.full_day * (1 - x.percent / 100)) + ' \u00b7 members ' + f(P.full_day * (1 - P.member_pct / 100) * (1 - x.percent / 100)) : '\u2014') + '</td>' +
         '<td>' + (canEdit ? '<div class="row-actions"><button class="btn btn-plain" type="button" data-saleedit="' + i + '">Edit</button><button class="btn btn-danger" type="button" data-saledel="' + i + '">Delete</button></div>' : '') + '</td></tr>';
     }).join('') + '</tbody></table>';
     return h + '</section>';
+  }
+  function saleForCamps(x) { return !x.applies_to || !x.applies_to.length || x.applies_to.indexOf('camps') !== -1; }
+  function saleWhat(x) {
+    var list = (x.applies_to && x.applies_to.length) ? x.applies_to : ['camps'];
+    return list.map(function (k) {
+      var name = (KINDS.filter(function (y) { return y[0] === k; })[0] || [0, k])[1];
+      if (k === 'camps' && x.seasons && x.seasons.length) name += ' (' + x.seasons.map(function (sn) { return (SEASONS.filter(function (y) { return y[0] === sn; })[0] || [0, sn])[1].replace(/ camps.*$/, ''); }).join(', ') + ')';
+      return name;
+    }).join(', ');
   }
   function slPreview() {
     var el = document.getElementById('slPreview'); if (!el) return;
@@ -1914,10 +1963,14 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     }); });
     if (!document.getElementById('slSave')) return;
     slPreview(); $('sl_pct').addEventListener('input', slPreview);
+    var syncSeasons = function () { var c = document.querySelector('[data-sapply="camps"]'); $('sl_seasons').hidden = !(c && c.checked); };
+    document.querySelectorAll('[data-sapply]').forEach(function (c) { c.addEventListener('change', syncSeasons); }); syncSeasons();
     $('slCancel').addEventListener('click', function () { salesEditing = null; redrawSales(); });
     $('slSave').addEventListener('click', async function () {
       var seasons = []; document.querySelectorAll('[data-sseason]').forEach(function (c) { if (c.checked) seasons.push(c.dataset.sseason); });
-      var p = Object.assign({}, salesEditing, { name: $('sl_name').value.trim(), percent: Number($('sl_pct').value), starts_on: $('sl_start').value, ends_on: $('sl_end').value,
+      var applies = []; document.querySelectorAll('[data-sapply]').forEach(function (c) { if (c.checked) applies.push(c.dataset.sapply); });
+      if (!applies.length) { $('slMsg').textContent = 'Tick what\u2019s on sale.'; return; }
+      var p = Object.assign({}, salesEditing, { applies_to: applies, name: $('sl_name').value.trim(), percent: Number($('sl_pct').value), starts_on: $('sl_start').value, ends_on: $('sl_end').value,
         seasons: seasons.length ? seasons : null, active: $('sl_active').checked });
       if (!p.name) { $('slMsg').textContent = 'Give the sale a name.'; return; }
       if (!(p.percent > 0 && p.percent < 100)) { $('slMsg').textContent = 'Check the percent off.'; return; }
