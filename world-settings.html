@@ -243,6 +243,15 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
 .fp-wrap[hidden] { display: none; }
 .pv-hero { background-position: var(--pv-pos, center right) !important; }
 .pv-phone .pv-hero { background-position: var(--pv-pos-m, var(--pv-pos, center)) !important; }
+.cp-live { border: 1px solid var(--line, #e8dfcd); border-radius: 12px; padding: 10px 12px; margin: 8px 0 12px; display: flex; flex-direction: column; gap: 4px; }
+.cp-live.on { border-color: #1d6b39; background: #e3f3e8; }
+.cp-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 12px; }
+@media (max-width: 760px) { .cp-grid { grid-template-columns: 1fr 1fr; } }
+.cp-tax input { width: 100%; min-width: 120px; }
+.cp-tax td, .cp-tax th { padding: 6px; }
+.sale-form { border: 1px solid var(--line, #e8dfcd); border-radius: 14px; padding: 12px 14px; margin: 10px 0 14px; background: #fffdf8; }
+.sale-seasons { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.tx-total td { border-top: 2px solid #222; }
 </style>
 </head>
 <body>
@@ -791,6 +800,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
   var TYPO_DEFAULT = { headings: { font: 'DM Sans', weight: 700, size: 26, line_height: 1.15, letter_spacing: 1 }, body: { font: 'Work Sans', size: 16, line_height: 1.5, letter_spacing: 0 }, menus: { size: 15 } };
   var typo = null, typoDraft = null;
   var glazePage = null;
+  var campPricing = null, salesRows = null, salesEditing = null, taxRows = null;
   // Font menus in the theme editor come from the font library.
   var DEFAULT_FONTS = ['DM Sans', 'Work Sans', 'Fredoka', 'Bungee', 'Pacifico', 'Creepster', 'Mountains of Christmas', 'Caveat', 'Permanent Marker'];
   var WEIGHT_NAMES = { 100: 'Thin', 200: 'Extra light', 300: 'Light', 400: 'Regular', 500: 'Medium', 600: 'Semi-bold', 700: 'Bold', 800: 'Extra bold', 900: 'Black' };
@@ -978,6 +988,10 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     var fx = await sb.rpc('world_effects_list');
     effects = fx.error ? [] : (fx.data || []);
     if (fx.error) console.error('Effects didn\u2019t load:', fx.error);
+    var cpr = await sb.rpc('world_setting_get', { p_key: 'camp_pricing' });
+    campPricing = cpr.error ? null : (cpr.data || null);
+    var slr = await sb.rpc('world_sales_list');
+    salesRows = slr.error ? null : (slr.data || []);
     var gpr = await sb.rpc('world_setting_get', { p_key: 'glazing_page' });
     glazePage = gpr.error ? null : (gpr.data || { intro: '', steps: [], faqs: [] });
     var tr = await sb.rpc('world_setting_get', { p_key: 'typography' });
@@ -1137,6 +1151,9 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     }
     html += '</section>';
     html += homeCardsHtml();
+    html += campPricingHtml();
+    html += salesHtml();
+    html += taxReportHtml();
     html += glazingPageHtml();
     html += typographyHtml();
     html += fontsHtml();
@@ -1155,6 +1172,9 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     bindFonts();
     bindTypography();
     bindGlazingPage();
+    bindCampPricing();
+    bindSales();
+    bindTaxReport();
     bindHowto();
     bindDevPassword();
     foldSections();
@@ -1759,6 +1779,189 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
       if (!bx) return;
       if (bx.classList.contains('folded')) bx.querySelector('.fold-title').click();
       bx.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
+
+  // ---------------- Camp pricing (Stripe camp checkout) ----------------
+  var PROVS = ['BC', 'AB', 'ON'];
+  function taxText(list) { return (list || []).map(function (x) { return x[0] + ' ' + x[1]; }).join(' + '); }
+  function parseTax(t) {   // "GST 5 + PST 7" → [["GST",5],["PST",7]]
+    var out = String(t || '').split('+').map(function (p) { var m = p.trim().match(/^(GST|PST|HST)\s*([\d.]+)\s*%?$/i); return m ? [m[1].toUpperCase(), Number(m[2])] : null; });
+    return out.every(Boolean) && out.length ? out : null;
+  }
+  function campPricingHtml() {
+    if (campPricing === null) return '<section class="panel" style="margin-top:20px"><h2>Camp pricing</h2><p class="sub">Run world_stripe_camps.sql in Supabase to switch this on.</p></section>';
+    var P = campPricing, tx = P.taxes || {};
+    var num = function (id, label, v, step, suffix) { return '<div class="field"><label for="' + id + '">' + label + '</label><span class="ty-num" style="width:100%"><input type="number" id="' + id + '" step="' + (step || 1) + '" value="' + esc(v) + '"' + (canEdit ? '' : ' disabled') + '>' + (suffix ? '<i>' + suffix + '</i>' : '') + '</span></div>'; };
+    return '<section class="panel" style="margin-top:20px"><div class="toolbar"><div class="grow"><h2>Camp pricing</h2>' +
+      '<p class="sub" style="margin:0">Prices and discounts for camps paid with Stripe on World. Discounts stack in this order: member, then 5+ days, then any sale.</p></div></div>' +
+      '<div class="cp-live ' + (P.use_stripe ? 'on' : '') + '"><label class="check"><input type="checkbox" id="cp_live"' + (P.use_stripe ? ' checked' : '') + (canEdit ? '' : ' disabled') + '> <b>Sell camps with Stripe on the live site</b></label>' +
+      '<span class="help">Off: the live site uses the Shopify cart for camps (the test site always offers Stripe). Only switch on once the live Stripe keys are in.</span></div>' +
+      '<div class="cp-grid">' + num('cp_full', 'Full day', P.full_day, 0.01, '$') + num('cp_half', 'Half day', P.half_day, 0.01, '$') + num('cp_member', 'Members save', P.member_pct, 0.5, '%') +
+      num('cp_mmin', 'Multi-day discount from', P.multi_day_min, 1, 'days') + num('cp_mpct', 'Multi-day discount', P.multi_day_pct, 0.5, '%') + num('cp_after', 'Aftercare per child per day', P.aftercare, 0.01, '$') + '</div>' +
+      '<label class="check" style="margin:4px 0 12px"><input type="checkbox" id="cp_aftertax"' + (P.aftercare_taxed ? ' checked' : '') + (canEdit ? '' : ' disabled') + '> Aftercare is taxed</label>' +
+      '<h3 style="margin:8px 0 6px">Taxes</h3><p class="help" style="margin:0 0 8px">Write each like <b>GST 5</b>, or <b>GST 5 + PST 7</b>. Camps and aftercare are \u201cservices\u201d; \u201cgoods\u201d is for items like kits later.</p>' +
+      '<table class="cp-tax"><thead><tr><th></th>' + PROVS.map(function (p) { return '<th>' + p + '</th>'; }).join('') + '</tr></thead><tbody>' +
+      [['services', 'Services (camps, aftercare)'], ['goods', 'Goods (kits, items)']].map(function (c) {
+        return '<tr><td><b>' + c[1] + '</b></td>' + PROVS.map(function (p) { return '<td><input type="text" data-tax="' + c[0] + '|' + p + '" value="' + esc(taxText((tx[c[0]] || {})[p])) + '"' + (canEdit ? '' : ' disabled') + '></td>'; }).join('') + '</tr>';
+      }).join('') + '</tbody></table>' +
+      '<div class="cp-preview" id="cpPreview"></div>' +
+      (canEdit ? '<div style="display:flex;gap:8px;align-items:center;margin-top:12px"><button class="btn btn-berry" type="button" id="cpSave">Save camp pricing</button><span class="help" id="cpMsg"></span></div>' : '') + '</section>';
+  }
+  function campPriceDraft() {
+    var v = function (id) { return Number($(id).value); };
+    var taxes = { services: {}, goods: {} }, bad = null;
+    document.querySelectorAll('[data-tax]').forEach(function (el) {
+      var k = el.dataset.tax.split('|'), t = parseTax(el.value);
+      if (!t) bad = k[1] + ' ' + k[0]; else taxes[k[0]][k[1]] = t;
+    });
+    return { bad: bad, P: Object.assign({}, campPricing, { use_stripe: $('cp_live').checked, full_day: v('cp_full'), half_day: v('cp_half'), member_pct: v('cp_member'),
+      multi_day_min: Math.round(v('cp_mmin')), multi_day_pct: v('cp_mpct'), aftercare: v('cp_after'), aftercare_taxed: $('cp_aftertax').checked, taxes: taxes }) };
+  }
+  function cpPreview() {
+    var el = document.getElementById('cpPreview'); if (!el) return;
+    var d = campPriceDraft().P, r2 = function (n) { return (Math.round(n * 100) / 100).toFixed(2); };
+    var row = function (label, base) {
+      var m = base * (1 - d.member_pct / 100);
+      return '<tr><td>' + label + '</td><td>$' + r2(base) + '</td><td>$' + r2(m) + '</td><td>$' + r2(base * d.multi_day_min * (1 - d.multi_day_pct / 100)) + '</td><td>$' + r2(m * d.multi_day_min * (1 - d.multi_day_pct / 100)) + '</td></tr>';
+    };
+    el.innerHTML = '<p class="help" style="margin:12px 0 4px">Preview (before tax):</p><table><thead><tr><th></th><th>Regular</th><th>Members</th><th>' + d.multi_day_min + ' days</th><th>' + d.multi_day_min + ' days, members</th></tr></thead><tbody>' +
+      row('Full day', d.full_day) + row('Half day', d.half_day) + '</tbody></table>';
+  }
+  function bindCampPricing() {
+    if (!document.getElementById('cp_full')) return;
+    cpPreview();
+    document.querySelectorAll('#cp_full,#cp_half,#cp_member,#cp_mmin,#cp_mpct').forEach(function (el) { el.addEventListener('input', cpPreview); });
+    var live = $('cp_live');
+    live.addEventListener('change', function () {
+      if (live.checked && !confirm('Switch the LIVE site\u2019s camps to Stripe checkout? Only do this once the live Stripe keys and webhook are set up.')) live.checked = false;
+      live.closest('.cp-live').classList.toggle('on', live.checked);
+    });
+    var b = document.getElementById('cpSave'); if (!b) return;
+    b.addEventListener('click', async function () {
+      var d = campPriceDraft();
+      if (d.bad) { $('cpMsg').textContent = 'Check the tax for ' + d.bad + ' (write it like GST 5, or GST 5 + PST 7).'; return; }
+      if (!(d.P.full_day > 0 && d.P.half_day > 0)) { $('cpMsg').textContent = 'Check the prices.'; return; }
+      b.disabled = true;
+      var r = await sb.rpc('world_setting_set', { p_key: 'camp_pricing', p_value: d.P });
+      b.disabled = false;
+      if (r.error) { $('cpMsg').textContent = 'Not saved: ' + r.error.message; return; }
+      campPricing = d.P; $('cpMsg').textContent = 'Saved \u2713 New camp checkouts use these prices straight away.';
+    });
+  }
+
+  // ---------------- Sales (stacked on top of member and multi-day discounts) ----------------
+  var SEASONS = [['winter', 'Winter camps'], ['spring', 'Spring camps'], ['summer', 'Summer camps'], ['fall', 'Fall camps (PA/PD)']];
+  function salesHtml() {
+    if (salesRows === null) return '<section class="panel" style="margin-top:20px"><h2>Sales</h2><p class="sub">Run world_stripe_camps.sql in Supabase to switch this on.</p></section>';
+    var today = new Date().toISOString().slice(0, 10);
+    var P = campPricing || { full_day: 124, half_day: 95, member_pct: 20 };
+    var ed = salesEditing;
+    var h = '<section class="panel" style="margin-top:20px"><div class="toolbar"><div class="grow"><h2>Sales</h2>' +
+      '<p class="sub" style="margin:0">Camp sales on World (Stripe checkout), taken off after member and multi-day discounts, like the Spring Camp Flash Sale.</p></div>' +
+      (canEdit && !ed ? '<button class="btn btn-berry" type="button" id="saleNew">Add a sale</button>' : '') + '</div>';
+    if (ed) {
+      h += '<div class="sale-form"><div class="two"><div class="field"><label for="sl_name">Name (shown to families)</label><input type="text" id="sl_name" maxlength="60" value="' + esc(ed.name || '') + '" placeholder="Spring Camp Flash Sale"></div>' +
+        '<div class="field"><label for="sl_pct">Percent off</label><span class="ty-num" style="width:100%"><input type="number" id="sl_pct" min="1" max="90" step="0.5" value="' + esc(ed.percent || 40) + '"><i>%</i></span></div></div>' +
+        '<div class="two"><div class="field"><label for="sl_start">Starts</label><input type="date" id="sl_start" value="' + esc(ed.starts_on || today) + '"></div>' +
+        '<div class="field"><label for="sl_end">Ends</label><input type="date" id="sl_end" value="' + esc(ed.ends_on || '') + '"></div></div>' +
+        '<div class="field"><label>Which camps?</label><div class="sale-seasons">' + SEASONS.map(function (x) {
+          return '<label class="check"><input type="checkbox" data-sseason="' + x[0] + '"' + ((ed.seasons || []).indexOf(x[0]) !== -1 ? ' checked' : '') + '> ' + x[1] + '</label>'; }).join('') +
+        '</div><span class="help">Tick none for all camps.</span></div>' +
+        '<label class="check"><input type="checkbox" id="sl_active"' + (ed.active !== false ? ' checked' : '') + '> Switched on</label>' +
+        '<p class="help" id="slPreview" style="margin:8px 0"></p>' +
+        '<div style="display:flex;gap:8px;align-items:center"><button class="btn btn-berry" type="button" id="slSave">Save sale</button><button class="btn btn-plain" type="button" id="slCancel">Cancel</button><span class="help" id="slMsg"></span></div></div>';
+    }
+    if (!salesRows.length) h += '<div class="empty">No sales yet.</div>';
+    else h += '<table><thead><tr><th>Sale</th><th>Off</th><th>Dates</th><th>Camps</th><th>Full day becomes</th><th></th></tr></thead><tbody>' + salesRows.map(function (x, i) {
+      var st = !x.active ? ['notready', 'Off'] : (x.starts_on > today ? ['soon', 'Starts ' + niceDate(x.starts_on)] : (x.ends_on < today ? ['', 'Finished'] : ['ready', 'On now']));
+      var f = function (n) { return '$' + (Math.round(n * 100) / 100).toFixed(2); };
+      return '<tr><td><div class="tname">' + esc(x.name) + '</div><span class="pill ' + st[0] + '">' + esc(st[1]) + '</span></td><td><b>' + esc(x.percent) + '%</b></td>' +
+        '<td class="tmeta">' + esc(niceDate(x.starts_on) + ' \u2013 ' + niceDate(x.ends_on)) + '</td>' +
+        '<td class="tmeta">' + esc((x.seasons && x.seasons.length) ? x.seasons.map(function (k) { return (SEASONS.filter(function (y) { return y[0] === k; })[0] || [0, k])[1]; }).join(', ') : 'All camps') + '</td>' +
+        '<td class="tmeta">' + f(P.full_day * (1 - x.percent / 100)) + ' \u00b7 members ' + f(P.full_day * (1 - P.member_pct / 100) * (1 - x.percent / 100)) + '</td>' +
+        '<td>' + (canEdit ? '<div class="row-actions"><button class="btn btn-plain" type="button" data-saleedit="' + i + '">Edit</button><button class="btn btn-danger" type="button" data-saledel="' + i + '">Delete</button></div>' : '') + '</td></tr>';
+    }).join('') + '</tbody></table>';
+    return h + '</section>';
+  }
+  function slPreview() {
+    var el = document.getElementById('slPreview'); if (!el) return;
+    var P = campPricing || { full_day: 124, half_day: 95, member_pct: 20 }, pct = Number($('sl_pct').value) || 0;
+    var f = function (n) { return '$' + (Math.round(n * 100) / 100).toFixed(2); };
+    el.innerHTML = 'Full day: ' + f(P.full_day) + ' \u2192 <b>' + f(P.full_day * (1 - pct / 100)) + '</b> (members <b>' + f(P.full_day * (1 - P.member_pct / 100) * (1 - pct / 100)) + '</b>) \u00b7 Half day: ' +
+      f(P.half_day) + ' \u2192 <b>' + f(P.half_day * (1 - pct / 100)) + '</b> (members <b>' + f(P.half_day * (1 - P.member_pct / 100) * (1 - pct / 100)) + '</b>)';
+  }
+  function redrawSales() {
+    var old = app.querySelector('.panel.fold[data-fold="Sales"]'); if (!old) { renderList(); return; }
+    var tmp = document.createElement('div'); tmp.innerHTML = salesHtml();
+    var fresh = tmp.firstChild; old.parentNode.replaceChild(fresh, old);
+    fresh.classList.add('fold'); fresh.dataset.fold = 'Sales';
+    var h2 = fresh.querySelector('h2'), keep = h2; while (keep.parentNode !== fresh) keep = keep.parentNode;
+    keep.classList.add('fold-keep'); h2.classList.add('fold-title'); h2.setAttribute('role', 'button'); h2.setAttribute('tabindex', '0'); h2.setAttribute('aria-expanded', 'true');
+    h2.addEventListener('click', function () { var o = fresh.classList.toggle('folded') === false; h2.setAttribute('aria-expanded', String(o)); });
+    bindSales();
+  }
+  function bindSales() {
+    var nb = document.getElementById('saleNew');
+    if (nb) nb.addEventListener('click', function () { salesEditing = { percent: 40, active: true, seasons: [] }; redrawSales(); });
+    app.querySelectorAll('[data-saleedit]').forEach(function (b) { b.addEventListener('click', function () { salesEditing = JSON.parse(JSON.stringify(salesRows[+b.dataset.saleedit])); redrawSales(); }); });
+    app.querySelectorAll('[data-saledel]').forEach(function (b) { b.addEventListener('click', async function () {
+      var x = salesRows[+b.dataset.saledel];
+      if (!confirm('Delete the sale \u201c' + x.name + '\u201d? (Tip: untick \u201cSwitched on\u201d to keep it for next time.)')) return;
+      var r = await sb.rpc('world_sale_delete', { p_id: x.id });
+      if (r.error) { alert('Not deleted: ' + r.error.message); return; }
+      salesRows.splice(+b.dataset.saledel, 1); redrawSales();
+    }); });
+    if (!document.getElementById('slSave')) return;
+    slPreview(); $('sl_pct').addEventListener('input', slPreview);
+    $('slCancel').addEventListener('click', function () { salesEditing = null; redrawSales(); });
+    $('slSave').addEventListener('click', async function () {
+      var seasons = []; document.querySelectorAll('[data-sseason]').forEach(function (c) { if (c.checked) seasons.push(c.dataset.sseason); });
+      var p = Object.assign({}, salesEditing, { name: $('sl_name').value.trim(), percent: Number($('sl_pct').value), starts_on: $('sl_start').value, ends_on: $('sl_end').value,
+        seasons: seasons.length ? seasons : null, active: $('sl_active').checked });
+      if (!p.name) { $('slMsg').textContent = 'Give the sale a name.'; return; }
+      if (!(p.percent > 0 && p.percent < 100)) { $('slMsg').textContent = 'Check the percent off.'; return; }
+      if (!p.starts_on || !p.ends_on || p.ends_on < p.starts_on) { $('slMsg').textContent = 'Check the dates.'; return; }
+      var r = await sb.rpc('world_sale_save', { p: p });
+      if (r.error) { $('slMsg').textContent = 'Not saved: ' + r.error.message; return; }
+      var l = await sb.rpc('world_sales_list'); salesRows = l.error ? salesRows : (l.data || []);
+      salesEditing = null; redrawSales();
+    });
+  }
+
+  // ---------------- Tax report (Stripe orders: GST, PST and HST kept separately) ----------------
+  function taxReportHtml() {
+    var d = new Date(), first = new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0, 10), today = d.toISOString().slice(0, 10);
+    return '<section class="panel" style="margin-top:20px"><div class="toolbar"><div class="grow"><h2>Tax report</h2>' +
+      '<p class="sub" style="margin:0">GST, PST and HST collected through Stripe on World (live orders only), with sales before tax. Shopify orders stay in Shopify\u2019s own reports.</p></div></div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:end;margin:8px 0 12px"><div class="field" style="margin:0"><label for="tx_from">From</label><input type="date" id="tx_from" value="' + first + '"></div>' +
+      '<div class="field" style="margin:0"><label for="tx_to">To</label><input type="date" id="tx_to" value="' + today + '"></div>' +
+      '<button class="btn btn-berry" type="button" id="txRun">Show report</button><button class="btn btn-plain" type="button" id="txCsv" disabled>Download CSV</button></div>' +
+      '<div id="txOut"><p class="help">Choose dates and press Show report.</p></div></section>';
+  }
+  function bindTaxReport() {
+    var run = document.getElementById('txRun'); if (!run) return;
+    var f = function (n) { return '$' + Number(n || 0).toFixed(2); };
+    run.addEventListener('click', async function () {
+      run.disabled = true; $('txOut').innerHTML = '<p class="help">Loading\u2026</p>';
+      var r = await sb.rpc('world_tax_report', { p_from: $('tx_from').value, p_to: $('tx_to').value });
+      run.disabled = false;
+      if (r.error) { $('txOut').innerHTML = '<p class="msg err">' + esc(r.error.message) + '</p>'; return; }
+      taxRows = r.data || [];
+      if (!taxRows.length) { $('txOut').innerHTML = '<p class="help">No paid Stripe orders in those dates.</p>'; $('txCsv').disabled = true; return; }
+      var t = taxRows.reduce(function (a, x) { ['sales_before_tax', 'gst', 'pst', 'hst', 'total_tax', 'orders'].forEach(function (k) { a[k] = (a[k] || 0) + Number(x[k] || 0); }); return a; }, {});
+      $('txOut').innerHTML = '<table><thead><tr><th>Month</th><th>Province</th><th>Studio</th><th>Orders</th><th>Sales before tax</th><th>GST</th><th>PST</th><th>HST</th><th>Total tax</th></tr></thead><tbody>' +
+        taxRows.map(function (x) { return '<tr><td>' + esc(x.month) + '</td><td>' + esc(x.province) + '</td><td>' + esc(studioNameOf(x.studio_id)) + '</td><td>' + x.orders + '</td><td>' + f(x.sales_before_tax) + '</td><td>' + f(x.gst) + '</td><td>' + f(x.pst) + '</td><td>' + f(x.hst) + '</td><td>' + f(x.total_tax) + '</td></tr>'; }).join('') +
+        '<tr class="tx-total"><td colspan="3"><b>Total</b></td><td><b>' + t.orders + '</b></td><td><b>' + f(t.sales_before_tax) + '</b></td><td><b>' + f(t.gst) + '</b></td><td><b>' + f(t.pst) + '</b></td><td><b>' + f(t.hst) + '</b></td><td><b>' + f(t.total_tax) + '</b></td></tr></tbody></table>';
+      $('txCsv').disabled = false;
+    });
+    $('txCsv').addEventListener('click', function () {
+      if (!taxRows || !taxRows.length) return;
+      var rows = [['Month', 'Province', 'Studio', 'Orders', 'Sales before tax', 'GST', 'PST', 'HST', 'Total tax']].concat(taxRows.map(function (x) {
+        return [x.month, x.province, studioNameOf(x.studio_id), x.orders, x.sales_before_tax, x.gst, x.pst, x.hst, x.total_tax]; }));
+      var csv = rows.map(function (r) { return r.map(function (v) { v = String(v == null ? '' : v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }).join(','); }).join('\n');
+      var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+      a.download = '4cats-world-tax-' + $('tx_from').value + '-to-' + $('tx_to').value + '.csv'; document.body.appendChild(a); a.click(); a.remove();
     });
   }
 
