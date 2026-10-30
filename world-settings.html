@@ -259,6 +259,9 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
 .mp-in input { width: 70px; }
 .mp-groups { width: 180px; border: 1px solid var(--line, #e8dfcd); border-radius: 10px; padding: 7px 10px; }
 .mp-prev { max-width: 260px; }
+.co-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line, #e8dfcd); flex-wrap: wrap; }
+.co-link input { flex: 1; min-width: 140px; border: 1px solid var(--line, #e8dfcd); border-radius: 8px; padding: 6px 8px; font: inherit; }
+.co-thumb { width: 56px; height: 56px; border-radius: 10px; border: 1px dashed #cbbfa5; background: #f6f3ea center / cover no-repeat; cursor: pointer; font-size: 11px; flex: none; }
 </style>
 </head>
 <body>
@@ -554,6 +557,44 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
   </div>
 </dialog>
 
+<dialog class="editor" id="colEditor" aria-labelledby="colEdTitle">
+  <div class="ed-head">
+    <h2 id="colEdTitle">Collection</h2>
+    <button class="btn btn-plain" type="button" id="colCancel">Cancel</button>
+    <button class="btn btn-berry" type="button" id="colSave">Save collection</button>
+  </div>
+  <div class="ed-body" style="grid-template-columns:1fr">
+    <div class="ed-col">
+      <p class="msg err" id="colErr" hidden></p>
+      <div class="group">
+        <h3>The collection</h3>
+        <div class="field"><label for="co_title">Title</label><input type="text" id="co_title" maxlength="60" placeholder="Holiday Gift Ideas"></div>
+        <div class="field"><label for="co_sub">Short line (optional)</label><input type="text" id="co_sub" maxlength="120" placeholder="Handmade gifts they’ll love"></div>
+        <div class="field"><label for="co_pic">Cover picture (optional, square works best)</label><input type="file" id="co_pic" accept="image/*"><span class="help" id="co_picnow"></span>
+          <span class="help">Without one, World uses the first item’s photo.</span></div>
+        <div class="two">
+          <div class="field"><label for="co_start">Show from (optional)</label><input type="date" id="co_start"></div>
+          <div class="field"><label for="co_end">Until (optional)</label><input type="date" id="co_end"></div>
+        </div>
+        <div class="two">
+          <div class="field"><label for="co_pri">Priority (higher shows first)</label><input type="number" id="co_pri" value="0"></div>
+          <div class="field"><label>&nbsp;</label><label class="check"><input type="checkbox" id="co_active" checked> Switched on</label></div>
+        </div>
+      </div>
+      <div class="group">
+        <h3>What’s in it</h3>
+        <p class="help" style="margin:0 0 8px">Bookable things only show at studios where they’re running (with their photo, next date and Book now). Links show everywhere.</p>
+        <div id="co_items"></div>
+        <div class="two" style="margin-top:10px;align-items:end">
+          <div class="field"><label for="co_addfeat">Add something bookable</label><select id="co_addfeat"><option value="">Choose…</option></select></div>
+          <div class="field"><label>&nbsp;</label><button class="btn btn-plain" type="button" id="co_addlink">+ Add a link (e.g. a kit in the shop)</button></div>
+        </div>
+        <input type="file" id="co_itempic" accept="image/*" hidden>
+      </div>
+    </div>
+  </div>
+</dialog>
+
 <dialog class="editor" id="pollEditor" aria-labelledby="pollTitle">
   <div class="ed-head">
     <h2 id="pollTitle">Vote</h2>
@@ -806,6 +847,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
   var dealsAdmin = null;
   var homeCards = null;
   var pollData = null;
+  var collectionsRows = null;
   var fontRows = null;
   var TYPO_DEFAULT = { headings: { font: 'DM Sans', weight: 700, size: 26, line_height: 1.15, letter_spacing: 1 }, body: { font: 'Work Sans', size: 16, line_height: 1.5, letter_spacing: 0 }, menus: { size: 15 } };
   var typo = null, typoDraft = null;
@@ -1017,6 +1059,8 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     var fr = await sb.rpc('world_fonts_list');
     fontRows = fr.error ? null : (fr.data || []);
     fillFontSelects();
+    var clr = await sb.rpc('world_collections_list');
+    collectionsRows = clr.error ? null : (clr.data || []);
     var pr = await sb.rpc('world_polls_admin');
     pollData = pr.error ? null : (pr.data || { polls: [], options: [], counts: [] });
     var ir = await sb.rpc('world_ideas_list');
@@ -1175,6 +1219,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     html += glazingPageHtml();
     html += typographyHtml();
     html += fontsHtml();
+    html += collectionsHtml();
     html += pollsHtml();
     html += ideasHtml();
     html += kilnHtml();
@@ -1187,6 +1232,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     bindKiln();
     bindIdeas();
     bindPolls();
+    bindCollections();
     bindFonts();
     bindTypography();
     bindGlazingPage();
@@ -2415,6 +2461,113 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
       });
     });
   }
+
+  // ---------------- Collections (groups of things to book or buy) ----------------
+  function collectionsHtml() {
+    if (collectionsRows === null) return '<section class="panel" style="margin-top:20px"><h2>Collections</h2><p class="sub">Run world_collections.sql in Supabase to switch this on.</p></section>';
+    var today = new Date().toISOString().slice(0, 10);
+    var h = '<section class="panel" style="margin-top:20px"><div class="toolbar"><div class="grow"><h2>Collections</h2>' +
+      '<p class="sub" style="margin:0">Groups of things you put together, like \u201cHoliday Gift Ideas\u201d or \u201cDate Night\u201d. Shown on World\u2019s home page.</p></div>' +
+      (canEdit ? '<button class="btn btn-berry" type="button" id="colNew">Add a collection</button>' : '') + '</div>';
+    if (!collectionsRows.length) return h + '<div class="empty">No collections yet.</div></section>';
+    h += '<table><thead><tr><th>Collection</th><th>Items</th><th>Showing</th><th></th></tr></thead><tbody>' + collectionsRows.map(function (c, i) {
+      var st = !c.active ? ['notready', 'Off'] : (c.starts_on && c.starts_on > today ? ['soon', 'Starts ' + niceDate(c.starts_on)] : (c.ends_on && c.ends_on < today ? ['', 'Finished'] : ['ready', 'Showing']));
+      var items = c.items || [];
+      return '<tr><td><div class="tname">' + esc(c.title) + '</div>' + (c.subtitle ? '<div class="tmeta">' + esc(c.subtitle) + '</div>' : '') + '</td>' +
+        '<td class="tmeta">' + esc(items.map(function (x) { return x.title; }).slice(0, 4).join(', ') + (items.length > 4 ? ' +' + (items.length - 4) + ' more' : '')) + '</td>' +
+        '<td><span class="pill ' + st[0] + '">' + esc(st[1]) + '</span></td>' +
+        '<td>' + (canEdit ? '<div class="row-actions"><button class="btn btn-plain" type="button" data-coledit="' + i + '">Edit</button><button class="btn btn-danger" type="button" data-coldel="' + i + '">Delete</button></div>' : '') + '</td></tr>';
+    }).join('') + '</tbody></table></section>';
+    return h;
+  }
+  var colEditor = document.getElementById('colEditor'), colDraft = null, colPicFor = null;
+  function drawColItems() {
+    $('co_items').innerHTML = colDraft.items.map(function (it, i) {
+      var moves = '<span style="white-space:nowrap"><button class="link-btn" type="button" data-comove="' + i + '" data-d="-1"' + (i ? '' : ' disabled') + '>\u2191</button>' +
+        '<button class="link-btn" type="button" data-comove="' + i + '" data-d="1"' + (i < colDraft.items.length - 1 ? '' : ' disabled') + '>\u2193</button>' +
+        '<button class="link-btn" type="button" data-codel="' + i + '">Remove</button></span>';
+      if (it.type === 'bookable') return '<div class="co-row"><span class="pill ready">Bookable</span><b style="flex:1">' + esc(it.title) + '</b>' + moves + '</div>';
+      return '<div class="co-row co-link"><button type="button" class="co-thumb" data-copic="' + i + '" title="Choose a picture" style="' + (it.image_url ? 'background-image:url(\'' + esc(it.image_url).replace(/'/g, '') + '\')' : '') + '">' + (it.image_url ? '' : 'Picture') + '</button>' +
+        '<input type="text" data-cof="title" data-coi="' + i + '" value="' + esc(it.title || '') + '" placeholder="Name, e.g. Advent Calendar Kit" maxlength="60">' +
+        '<input type="text" data-cof="url" data-coi="' + i + '" value="' + esc(it.url || '') + '" placeholder="Link, e.g. https://4cats.com/products/\u2026">' +
+        '<input type="text" data-cof="note" data-coi="' + i + '" value="' + esc(it.note || '') + '" placeholder="Note, e.g. $45 (optional)" maxlength="40">' + moves + '</div>';
+    }).join('') || '<p class="help">Nothing in it yet. Add something below.</p>';
+  }
+  function keepColFields() {
+    $('co_items').querySelectorAll('[data-cof]').forEach(function (el) { colDraft.items[+el.dataset.coi][el.dataset.cof] = el.value.trim(); });
+  }
+  async function openCollectionEd(c) {
+    colDraft = c ? JSON.parse(JSON.stringify(c)) : { items: [], active: true, priority: 0 };
+    colDraft.items = colDraft.items || [];
+    $('colErr').hidden = true;
+    $('co_title').value = colDraft.title || ''; $('co_sub').value = colDraft.subtitle || '';
+    $('co_start').value = colDraft.starts_on || ''; $('co_end').value = colDraft.ends_on || '';
+    $('co_pri').value = colDraft.priority || 0; $('co_active').checked = colDraft.active !== false;
+    $('co_picnow').textContent = colDraft.image_url ? 'Current: uploaded \u2713' : '';
+    $('colSave').hidden = !canEdit;
+    drawColItems();
+    colEditor.showModal();
+    // the bookable list (same as featuring something on a home page card)
+    if (typeof featureChoices === 'undefined' || featureChoices === null) {
+      var r = await sb.rpc('world_feature_options'); window.__colFeat = r.error ? [] : (r.data || []);
+    } else window.__colFeat = featureChoices;
+    $('co_addfeat').innerHTML = '<option value="">Choose\u2026</option>' + (window.__colFeat || []).map(function (x) {
+      return '<option value="' + esc(x.title) + '">' + esc(x.title) + ' \u00b7 next ' + niceDate(x.next_date) + ' \u00b7 ' + x.studios + (x.studios === 1 ? ' studio' : ' studios') + '</option>'; }).join('');
+  }
+  function bindCollections() {
+    var nb = document.getElementById('colNew'); if (nb) nb.addEventListener('click', function () { openCollectionEd(null); });
+    app.querySelectorAll('[data-coledit]').forEach(function (b) { b.addEventListener('click', function () { openCollectionEd(collectionsRows[+b.dataset.coledit]); }); });
+    app.querySelectorAll('[data-coldel]').forEach(function (b) { b.addEventListener('click', async function () {
+      var c = collectionsRows[+b.dataset.coldel];
+      if (!confirm('Delete the collection \u201c' + c.title + '\u201d? (Tip: untick \u201cSwitched on\u201d to keep it for later.)')) return;
+      var r = await sb.rpc('world_collection_delete', { p_id: c.id });
+      if (r.error) { alert('Not deleted: ' + r.error.message); return; }
+      await loadThemes();
+    }); });
+  }
+  $('co_addfeat').addEventListener('change', function () {
+    var v = this.value; if (!v) return; keepColFields();
+    if (!colDraft.items.some(function (x) { return x.type === 'bookable' && x.title === v; })) colDraft.items.push({ type: 'bookable', title: v });
+    this.value = ''; drawColItems();
+  });
+  $('co_addlink').addEventListener('click', function () { keepColFields(); colDraft.items.push({ type: 'link', title: '', url: '', note: '', image_url: null }); drawColItems(); });
+  $('co_items').addEventListener('click', function (e) {
+    var t = e.target.closest('button'); if (!t) return;
+    keepColFields();
+    if (t.dataset.copic !== undefined) { colPicFor = +t.dataset.copic; $('co_itempic').click(); return; }
+    if (t.dataset.codel !== undefined) { colDraft.items.splice(+t.dataset.codel, 1); drawColItems(); return; }
+    if (t.dataset.comove !== undefined) { var i = +t.dataset.comove, j = i + (+t.dataset.d), tmp = colDraft.items[i]; colDraft.items[i] = colDraft.items[j]; colDraft.items[j] = tmp; drawColItems(); }
+  });
+  $('co_itempic').addEventListener('change', async function (e) {
+    var f = e.target.files && e.target.files[0]; e.target.value = ''; if (!f || colPicFor === null) return;
+    var i = colPicFor; colPicFor = null;
+    try { colDraft.items[i].image_url = await uploadDealImage(f, 'collection-item', 900); drawColItems(); } catch (err) { alert('Upload didn\u2019t work: ' + err.message); }
+  });
+  $('co_pic').addEventListener('change', async function (e) {
+    var f = e.target.files && e.target.files[0]; if (!f) return;
+    $('co_picnow').textContent = 'Uploading\u2026';
+    try { colDraft.image_url = await uploadDealImage(f, 'collection', 1000); $('co_picnow').textContent = 'Uploaded \u2713 (save to keep it)'; }
+    catch (err) { $('co_picnow').textContent = 'Upload didn\u2019t work: ' + err.message; }
+    e.target.value = '';
+  });
+  $('colCancel').addEventListener('click', function () { colEditor.close(); });
+  $('colSave').addEventListener('click', async function () {
+    keepColFields();
+    var err = $('colErr'); err.hidden = true;
+    var bad = colDraft.items.filter(function (x) { return x.type === 'link' && (!x.title || !/^https?:\/\//.test(x.url || '')); })[0];
+    if (bad) { err.textContent = 'Each link needs a name and a full link (starting with https://).'; err.hidden = false; return; }
+    var p = Object.assign({}, colDraft, { title: $('co_title').value.trim(), subtitle: $('co_sub').value.trim() || null,
+      starts_on: $('co_start').value || null, ends_on: $('co_end').value || null, priority: parseInt($('co_pri').value, 10) || 0, active: $('co_active').checked });
+    delete p.created_at;
+    if (!p.title) { err.textContent = 'Give the collection a title.'; err.hidden = false; return; }
+    if (!p.items.length) { err.textContent = 'Add at least one thing to the collection.'; err.hidden = false; return; }
+    this.disabled = true;
+    var r = await sb.rpc('world_collection_save', { p: p });
+    this.disabled = false;
+    if (r.error) { err.textContent = 'Not saved: ' + r.error.message; err.hidden = false; return; }
+    colEditor.close(); flash = ['ok', 'Saved \u201c' + p.title + '\u201d. World shows it within a minute.'];
+    await loadThemes();
+  });
 
   // ---------------- Votes ("Choose your favourite…") ----------------
   function pollTotals(optId) {
