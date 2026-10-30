@@ -254,6 +254,11 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
 .tx-total td { border-top: 2px solid #222; }
 .mp-table td { vertical-align: middle; }
 #sl_seasons[hidden] { display: none; }
+.mp-table select { min-width: 210px; }
+.mp-in { display: inline-flex; width: auto; min-width: 0; margin: 2px 0; }
+.mp-in input { width: 70px; }
+.mp-groups { width: 180px; border: 1px solid var(--line, #e8dfcd); border-radius: 10px; padding: 7px 10px; }
+.mp-prev { max-width: 260px; }
 </style>
 </head>
 <body>
@@ -805,7 +810,10 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
   var glazePage = null;
   var campPricing = null, salesRows = null, salesEditing = null, taxRows = null, memberPricing = null;
   // Kinds of booking (member pricing and sales). Only camps are sold through World (Stripe) so far.
-  var KINDS = [['camps', 'Camps', true], ['workshops', 'Workshops', false], ['classes', 'Classes', false], ['glazing', 'Glazing', false], ['parties', 'Parties', false], ['items', 'Items and kits', false]];
+  var KINDS = [['camps', 'Camps', true], ['pa_days', 'PA/PD days', false], ['workshops', 'Workshops', false], ['mini_make', 'Mini Make', false], ['glazing', 'Glazing', false],
+    ['classes', 'Classes', false], ['kids_parties', 'Kids parties', false], ['team_building', 'Team building and get-togethers', false], ['items', 'Items and kits', false]];
+  // How members can save: each rule's fields
+  var MP_RULES = [['pct', 'Percent off'], ['off', 'Dollars off each'], ['each', 'Price per person (1 vs 2 or more)'], ['groups', 'Group prices that repeat'], ['party', 'Dollars off the base price + % off extras']];
   // Font menus in the theme editor come from the font library.
   var DEFAULT_FONTS = ['DM Sans', 'Work Sans', 'Fredoka', 'Bungee', 'Pacifico', 'Creepster', 'Mountains of Christmas', 'Caveat', 'Permanent Marker'];
   var WEIGHT_NAMES = { 100: 'Thin', 200: 'Extra light', 300: 'Light', 400: 'Regular', 500: 'Medium', 600: 'Semi-bold', 700: 'Bold', 800: 'Extra bold', 900: 'Black' };
@@ -1792,30 +1800,92 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
   }
 
   // ---------------- Member pricing (one place for all member savings) ----------------
+  function mpRule(k) {   // older saves were just a number (percent)
+    var v = memberPricing && memberPricing[k];
+    if (v == null || typeof v === 'number') return { rule: 'pct', pct: Number(v || 0) };
+    return v;
+  }
+  function mpMoney(n) { return '$' + (Math.round(n * 100) / 100).toFixed(2).replace(/\.00$/, ''); }
+  // What members pay, in words (the preview beside each row)
+  function mpPreview(r) {
+    if (r.rule === 'pct') return Number(r.pct) ? r.pct + '% off' : 'No member discount';
+    if (r.rule === 'off') return mpMoney(Number(r.amount || 0)) + ' off each';
+    if (r.rule === 'each') return '1: ' + mpMoney(r.one) + ' \u00b7 2: ' + mpMoney(2 * r.more) + ' \u00b7 3: ' + mpMoney(3 * r.more) + ' (' + mpMoney(r.more) + ' each)';
+    if (r.rule === 'groups') {
+      var t = (r.totals || []).map(Number).filter(function (x) { return x > 0; }); if (!t.length) return 'Add the group prices';
+      var out = [];
+      for (var n = 1; n <= Math.max(t.length + 2, 5); n++) { var full = Math.floor((n - 1) / t.length), rest = n - full * t.length; out.push(n + ': ' + mpMoney(full * t[t.length - 1] + t[rest - 1])); }
+      return out.join(' \u00b7 ');
+    }
+    if (r.rule === 'party') return mpMoney(Number(r.base_off || 0)) + ' off the base price \u00b7 ' + Number(r.extras_pct || 0) + '% off extras';
+    return '';
+  }
+  function mpFields(k, r, lock) {
+    var dis = canEdit ? '' : ' disabled', num = function (f, v, pre, post, step) {
+      return '<span class="ty-num mp-in">' + (pre ? '<i>' + pre + '</i>' : '') + '<input type="number" min="0" step="' + (step || 0.01) + '" data-mpk="' + k + '" data-mpf="' + f + '" value="' + esc(v == null ? '' : v) + '"' + dis + '>' + (post ? '<i>' + post + '</i>' : '') + '</span>'; };
+    if (r.rule === 'pct') return num('pct', r.pct, '', '%', 0.5);
+    if (r.rule === 'off') return num('amount', r.amount, '$', 'off each');
+    if (r.rule === 'each') return '1 person ' + num('one', r.one, '$') + ' \u00b7 2 or more ' + num('more', r.more, '$', 'each');
+    if (r.rule === 'groups') return '<input type="text" class="mp-groups" data-mpk="' + k + '" data-mpf="totals" value="' + esc((r.totals || []).join(', ')) + '" placeholder="29, 39, 49, 59"' + dis + '>' +
+      '<span class="help" style="display:block">Prices for 1, 2, 3\u2026 people, then it starts over.</span>';
+    if (r.rule === 'party') return num('base_off', r.base_off, '$', 'off base') + ' \u00b7 ' + num('extras_pct', r.extras_pct, '', '% off extras', 0.5);
+    return '';
+  }
   function memberPricingHtml() {
     if (memberPricing === null) return '<section class="panel" style="margin-top:20px"><h2>Member pricing</h2><p class="sub">Run world_member_pricing.sql in Supabase to switch this on.</p></section>';
     return '<section class="panel" style="margin-top:20px"><div class="toolbar"><div class="grow"><h2>Member pricing</h2>' +
-      '<p class="sub" style="margin:0">How much members save on each kind of booking. Sales come off after the member price.</p></div></div>' +
-      '<table class="mp-table"><thead><tr><th>Booking</th><th>Members save</th><th></th></tr></thead><tbody>' + KINDS.map(function (k) {
-        var v = memberPricing[k[0]] != null ? memberPricing[k[0]] : 0;
-        return '<tr><td><b>' + k[1] + '</b></td><td><span class="ty-num" style="width:110px"><input type="number" min="0" max="90" step="0.5" data-mp="' + k[0] + '" value="' + esc(v) + '"' + (canEdit ? '' : ' disabled') + '><i>%</i></span></td>' +
-          '<td>' + (k[2] ? '<span class="pill ready">Used at checkout now</span>' : '<span class="help">Used once these are sold through World. Until then, Shopify sets their member prices.</span>') + '</td></tr>';
+      '<p class="sub" style="margin:0">How members save on each kind of booking. Sales come off after the member price.</p></div></div>' +
+      '<table class="mp-table"><thead><tr><th>Booking</th><th>How members save</th><th>Amounts</th><th>Members pay</th></tr></thead><tbody>' + KINDS.map(function (k) {
+        var r = mpRule(k[0]), lock = k[0] === 'camps';
+        return '<tr data-mprow="' + k[0] + '"><td><b>' + k[1] + '</b>' + (k[2] ? '<br><span class="pill ready">Used at checkout now</span>' : '<br><span class="help">Once sold through World</span>') + '</td>' +
+          '<td><select data-mprule="' + k[0] + '"' + (canEdit && !lock ? '' : ' disabled') + '>' + MP_RULES.map(function (x) { return '<option value="' + x[0] + '"' + (x[0] === r.rule ? ' selected' : '') + '>' + x[1] + '</option>'; }).join('') + '</select>' +
+          (lock ? '<span class="help" style="display:block">Camp checkout uses percent off.</span>' : '') + '</td>' +
+          '<td class="mp-fields">' + mpFields(k[0], r, lock) + '</td><td class="mp-prev help">' + esc(mpPreview(r)) + '</td></tr>';
       }).join('') + '</tbody></table>' +
+      '<p class="help">Shopify still sets member prices for anything not yet sold through World.</p>' +
       (canEdit ? '<div style="display:flex;gap:8px;align-items:center;margin-top:10px"><button class="btn btn-berry" type="button" id="mpSave">Save member pricing</button><span class="help" id="mpMsg"></span></div>' : '') + '</section>';
   }
+  function mpRead(k) {   // the rule as typed in a row
+    var row = app.querySelector('[data-mprow="' + k + '"]'), r = { rule: row.querySelector('[data-mprule]').value };
+    row.querySelectorAll('[data-mpf]').forEach(function (el) {
+      r[el.dataset.mpf] = el.dataset.mpf === 'totals' ? el.value.split(/[,\s]+/).map(Number).filter(function (x) { return x > 0; }) : Number(el.value);
+    });
+    return r;
+  }
   function bindMemberPricing() {
+    if (!document.querySelector('[data-mprow]')) return;
+    var defaults = { pct: { pct: 0 }, off: { amount: 5 }, each: { one: 0, more: 0 }, groups: { totals: [] }, party: { base_off: 0, extras_pct: 0 } };
+    app.querySelectorAll('[data-mprule]').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        var k = sel.dataset.mprule, r = Object.assign({ rule: sel.value }, defaults[sel.value]);
+        var row = app.querySelector('[data-mprow="' + k + '"]');
+        row.querySelector('.mp-fields').innerHTML = mpFields(k, r); row.querySelector('.mp-prev').textContent = mpPreview(r);
+        bindMpInputs(row);
+      });
+    });
+    app.querySelectorAll('[data-mprow]').forEach(bindMpInputs);
     var b = document.getElementById('mpSave'); if (!b) return;
     b.addEventListener('click', async function () {
-      var v = {}, bad = false;
-      document.querySelectorAll('[data-mp]').forEach(function (el) { var n = Number(el.value); if (!(n >= 0 && n <= 90)) bad = true; v[el.dataset.mp] = n; });
-      if (bad) { $('mpMsg').textContent = 'Each should be between 0 and 90%.'; return; }
+      var v = {}, bad = null;
+      KINDS.forEach(function (k) {
+        var r = mpRead(k[0]); v[k[0]] = r;
+        if (r.rule === 'pct' && !(r.pct >= 0 && r.pct <= 90)) bad = k[1] + ': percent between 0 and 90';
+        if (r.rule === 'groups' && !(r.totals && r.totals.length)) bad = k[1] + ': add the group prices';
+        if (r.rule === 'each' && !(r.one > 0 && r.more > 0)) bad = k[1] + ': add both prices';
+      });
+      if (bad) { $('mpMsg').textContent = 'Check ' + bad + '.'; return; }
       b.disabled = true;
       var r = await sb.rpc('world_setting_set', { p_key: 'member_pricing', p_value: v });
       b.disabled = false;
       if (r.error) { $('mpMsg').textContent = 'Not saved: ' + r.error.message; return; }
-      memberPricing = v; if (campPricing) campPricing.member_pct = v.camps;
-      $('mpMsg').textContent = 'Saved \u2713 Camp checkouts use ' + v.camps + '% for members from now on.';
-      var cm = document.getElementById('cp_member'); if (cm) { cm.value = v.camps; cpPreview(); }
+      memberPricing = v; if (campPricing) campPricing.member_pct = v.camps.pct;
+      $('mpMsg').textContent = 'Saved \u2713 Camp checkouts use ' + v.camps.pct + '% for members from now on.';
+      var cm = document.getElementById('cp_member'); if (cm) { cm.value = v.camps.pct; cpPreview(); }
+    });
+  }
+  function bindMpInputs(row) {
+    row.querySelectorAll('[data-mpf]').forEach(function (el) {
+      el.addEventListener('input', function () { row.querySelector('.mp-prev').textContent = mpPreview(mpRead(row.dataset.mprow)); });
     });
   }
 
