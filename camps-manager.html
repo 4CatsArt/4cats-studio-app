@@ -48,7 +48,10 @@ th { text-align: left; font-size: 12px; text-transform: uppercase; letter-spacin
 td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 .pill { display: inline-block; font-size: 12px; font-weight: 800; border-radius: 999px; padding: 2px 9px; background: var(--off-bg); }
 .pill.ok { background: var(--live-bg); color: var(--live); } .pill.shop { background: #eef0ff; color: #3b3fb6; }
-.shop-row td { color: var(--soft); } .pill.full { background: #fde2e2; color: #b91c1c; } .pill.closed { background: var(--off-bg); color: var(--soft); }
+.shop-row td { color: var(--soft); }
+.day-head td { background: var(--snow); border-top: 2px solid var(--line); }
+.day-sp { margin-left: 10px; font-size: 14px; color: var(--soft); }
+.day-sp .spaces-in { width: 64px; } .pill.full { background: #fde2e2; color: #b91c1c; } .pill.closed { background: var(--off-bg); color: var(--soft); }
 .msg { border-radius: 12px; padding: 10px 14px; margin: 0 0 14px; } .msg.ok { background: var(--live-bg); color: var(--live); } .msg.err { background: #fde2e2; color: #b91c1c; }
 .check { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; cursor: pointer; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -122,7 +125,7 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
   var nameById = {}; STUDIOS.forEach(function (g) { g.list.forEach(function (s) { nameById[s[0]] = s[1]; }); });
   var KINDS = { full: 'Full day', half: 'Half day', pa: 'PA/PD day' };
   var SEASON = { winter: 'Winter', spring: 'Spring', summer: 'Summer', fall: 'Fall', pa: 'PA/PD days' };
-  var canEdit = false, programs = [], days = [], flash = null;
+  var canEdit = false, programs = [], days = [], flash = null, studioSpaces = {};
   var filt = { from: todayStr(), to: addDays(todayStr(), 120), studio: '', program: '' };
 
   function $(id) { return document.getElementById(id); }
@@ -162,6 +165,9 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
     var p = await sb.rpc('camp_programs_list');
     if (p.error) { app.innerHTML = '<div class="panel"><h2>Not set up yet</h2><p class="sub">Run camps_manager.sql in Supabase first. (' + esc(p.error.message) + ')</p></div>'; return; }
     programs = p.data || [];
+    var sp = await sb.rpc('camp_studio_spaces_list');
+    studioSpaces = {}; (sp.data || []).forEach(function (x) { studioSpaces[x.studio_id] = x.spaces; });
+    if (sp.error) flash = ['err', 'Studio spaces aren\u2019t set up yet: run camp_shared_spaces.sql in Supabase.'];
     await loadDays();
   }
   async function loadDays() {
@@ -175,7 +181,7 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
   function render() {
     var h = '';
     if (flash) { h += '<p class="msg ' + flash[0] + '">' + esc(flash[1]) + '</p>'; flash = null; }
-    h += programsHtml() + addHtml() + daysHtml();
+    h += programsHtml() + spacesHtml() + addHtml() + daysHtml();
     app.innerHTML = h;
     bind();
   }
@@ -188,12 +194,22 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
           '<td>' + (canEdit ? '<button class="btn btn-plain" type="button" data-progedit="' + i + '">Edit</button>' : '') + '</td></tr>';
       }).join('') + '</tbody></table></section>';
   }
+  function spacesHtml() {
+    return '<section class="panel"><h2>Camp spaces per studio</h2><p class="sub">How many kids each studio can take at camp. Every camp at a studio on a day shares these: a full-day or PA/PD child uses a morning and an afternoon spot; a half-day child uses just their half. Single days can be changed below.</p>' +
+      '<div class="studio-groups">' + STUDIOS.map(function (g) {
+        return '<fieldset><legend>' + esc(g.group) + '</legend>' + g.list.map(function (s) {
+          var v = studioSpaces[s[0]];
+          return '<label style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:3px 0"><span>' + esc(s[1]) + '</span>' +
+            (canEdit ? '<input class="spaces-in" type="number" min="0" max="300" data-stsp="' + s[0] + '" value="' + (v == null ? '' : v) + '" placeholder="\u2014">' : '<b>' + (v == null ? '\u2014' : v) + '</b>') + '</label>';
+        }).join('') + '</fieldset>';
+      }).join('') + '</div>' +
+      (canEdit ? '<div style="margin-top:10px;display:flex;gap:8px;align-items:center"><button class="btn btn-berry" type="button" id="spSave">Save studio spaces</button><span class="help" id="spMsg">Upcoming camp days follow a studio\u2019s new number (except days changed one by one).</span></div>' : '') + '</section>';
+  }
   function addHtml() {
     if (!canEdit) return '';
     var act = programs.filter(function (p) { return p.active; });
     return '<section class="panel"><h2>Add camp days</h2><p class="sub">Makes a camp day for every studio, date and time you choose. Any studio, date and time that already has a camp (made here, or already on Shopify) is skipped, so nothing doubles up.</p>' +
-      '<div class="two"><div class="field"><label for="ad_prog">Program</label><select id="ad_prog">' + act.map(function (p) { return '<option value="' + esc(p.id) + '">' + esc(p.name) + '</option>'; }).join('') + '</select></div>' +
-      '<div class="field"><label for="ad_spaces">Spaces per camp day</label><input id="ad_spaces" type="number" min="1" max="200" value="16"></div></div>' +
+      '<div class="field"><label for="ad_prog">Program</label><select id="ad_prog">' + act.map(function (p) { return '<option value="' + esc(p.id) + '">' + esc(p.name) + '</option>'; }).join('') + '</select><span class="help">Spaces come from each studio\u2019s camp spaces (above), shared with the other camps that day.</span></div>' +
       '<div class="field"><label>Studios <button class="link" type="button" data-allst="1">All</button><button class="link" type="button" data-allst="0">None</button></label><div class="studio-groups">' +
       STUDIOS.map(function (g) {
         return '<fieldset><legend><label class="check"><input type="checkbox" data-grp="' + esc(g.group) + '"> ' + esc(g.group) + '</label></legend>' +
@@ -218,17 +234,33 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
       '<button class="btn btn-plain" type="button" id="fGo" style="align-self:flex-end">Show</button></div>';
     if (!days.length) return h + '<p class="sub">No camp days in those dates yet.</p></section>';
     var nShop = days.filter(function (d) { return d.source === 'shopify'; }).length;
-    h += '<p class="help">' + days.length + ' camp days' + (nShop ? ' (' + nShop + ' on Shopify, ' + (days.length - nShop) + ' made here)' : '') + ' \u00b7 ' + tot.bk + ' booked of ' + tot.cap + ' spaces' + (days.length >= 3000 ? ' (first 3,000 shown: narrow the dates)' : '') +
-      (nShop ? '. Shopify camp days are sold on 4cats.com: their spaces are changed in the Hub or Shopify, as now.' : '') + '</p>' +
-      '<table><thead><tr><th>Date</th><th>Time</th><th>Studio</th><th>Program</th><th>Spaces</th><th>Booked</th><th>Left</th><th></th></tr></thead><tbody>' + days.map(function (d, i) {
+    h += '<p class="help">' + days.length + ' camp days' + (nShop ? ' (' + nShop + ' on Shopify, ' + (days.length - nShop) + ' made here)' : '') + (days.length >= 3000 ? ' (first 3,000 shown: narrow the dates)' : '') +
+      (nShop ? '. Shopify camp days are sold on 4cats.com and don\u2019t share spaces: change them in the Hub or Shopify, as now.' : '') + '</p>';
+    var groups = [], byKey = {};
+    days.forEach(function (d, i) { var k = d.studio_id + '|' + d.session_date; if (!byKey[k]) { byKey[k] = { studio: d.studio_id, date: d.session_date, rows: [] }; groups.push(byKey[k]); } byKey[k].rows.push([d, i]); });
+    var PART = { full: 'Full day', am: 'Morning', pm: 'Afternoon' };
+    h += '<table><thead><tr><th>Camp</th><th>Time</th><th>Booked</th><th>Left</th><th></th></tr></thead>';
+    groups.forEach(function (g) {
+      var world = g.rows.filter(function (x) { return x[0].source === 'world'; });
+      var cap = world.length ? world[0][0].capacity : null, changed = world.some(function (x) { return x[0].day_changed; });
+      var am = world.filter(function (x) { return x[0].part === 'am'; })[0], pm = world.filter(function (x) { return x[0].part === 'pm'; })[0];
+      var key = g.studio + '|' + g.date;
+      h += '<tbody class="day-group"><tr class="day-head"><td colspan="5"><b>' + esc(niceDate(g.date)) + '</b> \u00b7 ' + esc(nameById[g.studio] || g.studio) +
+        (world.length ? ' <span class="day-sp">Shared spaces: ' + (canEdit ? '<input class="spaces-in" type="number" min="0" max="300" value="' + (cap == null ? '' : cap) + '" data-dayspaces="' + key + '" aria-label="Spaces this day">' +
+          ' <button class="link" type="button" data-daysave="' + key + '">Save</button>' + (changed ? '<button class="link" type="button" data-dayreset="' + key + '">Back to ' + (studioSpaces[g.studio] == null ? 'default' : studioSpaces[g.studio]) + '</button>' : '') : '<b>' + cap + '</b>') +
+          (changed ? ' <span class="pill" title="Changed for this day only">this day only</span>' : '') +
+          (am || pm ? ' \u00b7 morning ' + (am ? am[0].spaces_left : '\u2014') + ' left \u00b7 afternoon ' + (pm ? pm[0].spaces_left : '\u2014') + ' left' : '') + '</span>' : '') + '</td></tr>';
+      g.rows.forEach(function (x) {
+        var d = x[0], i = x[1], shop = d.source === 'shopify', edit = canEdit && !shop;
         var st = d.closed ? '<span class="pill closed">Closed</span>' : (d.spaces_left <= 0 ? '<span class="pill full">Full</span>' : '<span class="pill ok">' + d.spaces_left + ' left</span>');
-        var shop = d.source === 'shopify', edit = canEdit && !shop;
-        return '<tr' + (shop ? ' class="shop-row"' : '') + '><td>' + esc(niceDate(d.session_date)) + '</td><td>' + esc(timeLabel(d.session_time)) + '</td><td>' + esc(nameById[d.studio_id] || d.studio_id) + '</td>' +
-          '<td>' + esc(d.program) + (shop ? ' <span class="pill shop" title="Sold on Shopify: change its spaces in the Hub or Shopify">Shopify</span>' : '') + '</td>' +
-          '<td>' + (edit ? '<input class="spaces-in" type="number" min="' + d.booked + '" max="200" value="' + d.capacity + '" data-spaces="' + i + '" aria-label="Spaces"> <button class="link" type="button" data-spsave="' + i + '">Save</button>' : (d.capacity == null ? '\u2014' : d.capacity)) + '</td>' +
-          '<td>' + d.booked + '</td><td>' + st + '</td><td style="white-space:nowrap">' + (edit ? '<button class="link" type="button" data-open="' + i + '">' + (d.closed ? 'Reopen' : 'Close') + '</button>' +
+        h += '<tr' + (shop ? ' class="shop-row"' : '') + '><td>' + esc(d.program) + (shop ? ' <span class="pill shop" title="Sold on Shopify: change its spaces in the Hub or Shopify">Shopify</span>' : ' <span class="help">' + esc(PART[d.part] || '') + '</span>') + '</td>' +
+          '<td>' + esc(timeLabel(d.session_time)) + '</td><td>' + d.booked + (shop && d.capacity != null ? ' of ' + d.capacity : '') + '</td><td>' + st + '</td>' +
+          '<td style="white-space:nowrap">' + (edit ? '<button class="link" type="button" data-open="' + i + '">' + (d.closed ? 'Reopen' : 'Close') + '</button>' +
           (d.booked ? '' : '<button class="btn-danger link" type="button" data-del="' + i + '">Delete</button>') : '') + '</td></tr>';
-      }).join('') + '</tbody></table></section>';
+      });
+      h += '</tbody>';
+    });
+    h += '</table></section>';
     return h;
   }
 
@@ -243,7 +275,8 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
     if (from && to && from <= to) for (var d = from, n = 0; d <= to && n < 400; d = addDays(d, 1), n++) {
       if (wds.indexOf(new Date(d + 'T12:00:00').getDay()) !== -1 && skip.indexOf(d) === -1) dates.push(d);
     }
-    return { prog: prog, studios: studios, dates: dates, spaces: parseInt($('ad_spaces').value, 10), slots: prog ? (prog.times || []).length : 0 };
+    return { prog: prog, studios: studios, dates: dates, slots: prog ? (prog.times || []).length : 0,
+      missing: studios.filter(function (st) { return studioSpaces[st] == null; }) };
   }
   function addPreview() {
     var p = addPlan(), el = $('adPreview'), go = $('adGo');
@@ -251,8 +284,9 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
     if (!p.prog || !p.studios.length || !p.dates.length) { el.textContent = 'Choose a program, studios and dates.'; go.disabled = true; return; }
     el.innerHTML = 'This will create up to <b>' + n + '</b> camp day' + (n === 1 ? '' : 's') + ': ' + p.dates.length + ' date' + (p.dates.length === 1 ? '' : 's') +
       ' (' + esc(niceDate(p.dates[0])) + (p.dates.length > 1 ? ' to ' + esc(niceDate(p.dates[p.dates.length - 1])) : '') + ') \u00d7 ' + p.studios.length + ' studio' + (p.studios.length === 1 ? '' : 's') +
-      (p.slots > 1 ? ' \u00d7 ' + p.slots + ' times a day' : '') + ', with ' + (p.spaces || '?') + ' spaces each.';
-    go.disabled = !(p.spaces >= 1 && p.spaces <= 200);
+      (p.slots > 1 ? ' \u00d7 ' + p.slots + ' times a day' : '') + '.' +
+      (p.missing.length ? '<br><span style="color:#b91c1c">Set camp spaces first for: ' + esc(p.missing.map(function (x) { return nameById[x]; }).join(', ')) + '.</span>' : '');
+    go.disabled = p.missing.length > 0;
   }
 
   // ---- Program editor ----
@@ -327,7 +361,7 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
     var pn = $('progNew'); if (pn) pn.addEventListener('click', function () { openProgram(null); });
     app.querySelectorAll('[data-progedit]').forEach(function (b) { b.addEventListener('click', function () { openProgram(programs[+b.dataset.progedit]); }); });
     if ($('adGo')) {
-      ['ad_prog', 'ad_spaces', 'ad_from', 'ad_to', 'ad_skip'].forEach(function (id) { $(id).addEventListener('input', addPreview); $(id).addEventListener('change', addPreview); });
+      ['ad_prog', 'ad_from', 'ad_to', 'ad_skip'].forEach(function (id) { $(id).addEventListener('input', addPreview); $(id).addEventListener('change', addPreview); });
       app.querySelectorAll('[data-st],[data-wd]').forEach(function (c) { c.addEventListener('change', addPreview); });
       app.querySelectorAll('[data-grp]').forEach(function (g) { g.addEventListener('change', function () {
         app.querySelectorAll('[data-st][data-g="' + g.dataset.grp + '"]').forEach(function (c) { c.checked = g.checked; }); addPreview(); }); });
@@ -337,20 +371,40 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
         var p = addPlan(), n = p.studios.length * p.dates.length * p.slots;
         if (!confirm('Create up to ' + n + ' camp days of \u201c' + p.prog.name + '\u201d?')) return;
         this.disabled = true; this.textContent = 'Creating\u2026';
-        var r = await sb.rpc('camp_days_create', { p_program: p.prog.id, p_studios: p.studios, p_dates: p.dates, p_spaces: p.spaces });
+        var r = await sb.rpc('camp_days_create', { p_program: p.prog.id, p_studios: p.studios, p_dates: p.dates });
         if (r.error) { flash = ['err', 'Not created: ' + r.error.message]; }
         else { flash = ['ok', 'Created ' + r.data + ' camp day' + (r.data === 1 ? '' : 's') + (r.data < n ? ' (' + (n - r.data) + ' already existed)' : '') + '.']; filt.from = p.dates[0]; filt.to = p.dates[p.dates.length - 1]; filt.program = p.prog.id; }
         await loadDays();
       });
     }
     $('fGo').addEventListener('click', function () { filt.from = $('f_from').value || todayStr(); filt.to = $('f_to').value || addDays(filt.from, 120); filt.studio = $('f_studio').value; filt.program = $('f_prog').value; loadDays(); });
-    app.querySelectorAll('[data-spsave]').forEach(function (b) { b.addEventListener('click', async function () {
-      var d = days[+b.dataset.spsave], v = parseInt(app.querySelector('[data-spaces="' + b.dataset.spsave + '"]').value, 10);
-      if (!(v >= d.booked)) { alert(d.booked + ' already booked: spaces can\u2019t be fewer than that.'); return; }
-      var r = await sb.rpc('camp_day_set_spaces', { p_session: d.id, p_spaces: v });
-      flash = r.error ? ['err', r.error.message] : ['ok', 'Spaces saved for ' + nameById[d.studio_id] + ', ' + niceDate(d.session_date) + '.'];
+    app.querySelectorAll('[data-daysave],[data-dayreset]').forEach(function (b) { b.addEventListener('click', async function () {
+      var key = b.dataset.daysave || b.dataset.dayreset, k = key.split('|');
+      var v = b.dataset.daysave ? parseInt(app.querySelector('[data-dayspaces="' + key + '"]').value, 10) : null;
+      if (b.dataset.daysave && !(v >= 0)) { alert('Enter how many spaces.'); return; }
+      var r = await sb.rpc('camp_day_spaces_set', { p_studio: k[0], p_day: k[1], p_spaces: v });
+      flash = r.error ? ['err', r.error.message] : ['ok', (v == null ? 'Back to the studio\u2019s usual spaces' : 'Spaces saved') + ' for ' + nameById[k[0]] + ', ' + niceDate(k[1]) + '.'];
       await loadDays();
     }); });
+    var sps = $('spSave');
+    if (sps) sps.addEventListener('click', async function () {
+      var changes = [];
+      app.querySelectorAll('[data-stsp]').forEach(function (inp) {
+        var v = inp.value.trim(), st = inp.dataset.stsp, old = studioSpaces[st];
+        if (v === '') return;
+        var n = parseInt(v, 10);
+        if (n >= 0 && n !== old) changes.push([st, n]);
+      });
+      if (!changes.length) { $('spMsg').textContent = 'Nothing changed.'; return; }
+      sps.disabled = true; $('spMsg').textContent = 'Saving ' + changes.length + '\u2026';
+      for (var i = 0; i < changes.length; i++) {
+        var r = await sb.rpc('camp_studio_spaces_set', { p_studio: changes[i][0], p_spaces: changes[i][1] });
+        if (r.error) { sps.disabled = false; $('spMsg').textContent = 'Not saved for ' + nameById[changes[i][0]] + ': ' + r.error.message; return; }
+        studioSpaces[changes[i][0]] = changes[i][1];
+      }
+      flash = ['ok', 'Saved camp spaces for ' + changes.length + ' studio' + (changes.length === 1 ? '' : 's') + '.'];
+      await loadDays();
+    });
     app.querySelectorAll('[data-open]').forEach(function (b) { b.addEventListener('click', async function () {
       var d = days[+b.dataset.open];
       var r = await sb.rpc('camp_day_set_open', { p_session: d.id, p_open: d.closed });
