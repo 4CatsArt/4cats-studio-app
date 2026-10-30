@@ -6157,7 +6157,7 @@ async function loadNotifPane() {
   const body = document.getElementById('notif-body');
   body.innerHTML = '<div class="ho-intro">Loading…</div>';
   try {
-    const [party, recent, sick] = await Promise.all([fetchPartyData(_sessionStudioId), fetchRecentBookings(), loadSickCalls(_sessionStudioId, 2)]);
+    const [party, recent, sick, fam] = await Promise.all([fetchPartyData(_sessionStudioId), fetchRecentBookings(), loadSickCalls(_sessionStudioId, 2), loadFamilyChanges()]);
     const seen = notifSeenAt();
     const newParties = party.list.filter(pt => !pt.booking.party_alert_dismissed);
     let html = '';
@@ -6167,6 +6167,21 @@ async function loadNotifPane() {
         ${c.plan ? `<div class="mt" style="color:${sickNeedsPlan(c) ? '#b91c1c' : c.cover_status === 'asked' ? '#b45309' : '#15803d'}">${c.handled_by_name ? esc(c.handled_by_name) + ': ' : ''}${sickPlanLine(c)}</div>` : ''}</div>
         <span class="tm">${esc(relTime(c.created_at))}</span>
         ${!sickNeedsPlan(c) ? `<span class="pf-status ${c.cover_status === 'asked' ? 'need' : 'ok'}">${c.cover_status === 'asked' ? '⏳ Asked ' + esc(c.cover_name || '') : '✓ ' + esc(SICK_PLANS[c.plan] || 'Handled')}</span><button class="ho-btn" onclick="openSickPlan('${escAttr(c.id)}')">Change</button>` : `<button class="ho-btn" onclick="openSickPlan('${escAttr(c.id)}')">I’m on it</button>`}</div>`).join('');
+    }
+    if (fam.length) {
+      // Families changing their own camp days or cancelling on 4Cats World (hub_family_changes.sql)
+      const where = st => st === _sessionStudioId ? '' : ' (' + esc(STUDIO_LABEL_SHORT(st)) + ')';
+      html += `<div class="ho-section-head">👪 Family changes <span class="mt" style="font-weight:400">made by families on 4Cats World</span></div>` + fam.map(f => {
+        const who = esc(f.customer_name || 'A family') + (f.kids && f.kids.length ? ' · ' + esc(f.kids.join(', ')) : '') + (f.qty > 1 ? ' · ' + f.qty + ' spots' : '');
+        const fromLine = esc(f.from_title || '') + ' · ' + esc(ptyDayLabel(f.from_date)) + ' ' + esc(shortTime(f.from_time || '')) + where(f.from_studio);
+        const body = f.kind === 'move'
+          ? `<div class="tt">${f.to_studio === _sessionStudioId && f.from_studio !== _sessionStudioId ? 'Moved here' : 'Changed camp day'}: ${who}</div>
+             <div class="mt"><s>${fromLine}</s> → <b>${esc(ptyDayLabel(f.to_date))} ${esc(shortTime(f.to_time || ''))}${where(f.to_studio)}</b></div>`
+          : `<div class="tt">Cancelled: ${who}</div><div class="mt">${fromLine}${f.amount > 0 ? ` · $${Number(f.amount).toFixed(2)} gift card` + (f.gift_last4 ? ' ending ' + esc(f.gift_last4) : '') : ''}</div>`;
+        return `<div class="ntf${f.reviewed ? '' : (f.kind === 'cancel' ? ' cancel' : ' new')}"><span class="ic">${f.kind === 'move' ? '🔁' : '🚫'}</span><div class="bd">${body}</div>
+          <span class="tm">${esc(relTime(f.at))}</span>
+          ${f.reviewed ? '<span class="pf-status ok">✓ Reviewed</span>' : `<button class="ho-btn" onclick="famReviewed('${escAttr(f.kind)}', ${Number(f.ref_id)})">Mark reviewed</button>`}</div>`;
+      }).join('');
     }
     if (newParties.length || party.cancels.length) {
       html += `<div class="ho-section-head">Parties to review</div>` +
@@ -6190,6 +6205,25 @@ async function loadNotifPane() {
     if (recent[0] && recent[0].booked_at) { try { localStorage.setItem(NOTIF_SEEN_KEY(), recent[0].booked_at); } catch (e) {} }
     refreshCoordBadges(party, recent);
   } catch (e) { body.innerHTML = `<div class="ho-card">Couldn't load: ${esc(e.message || e)}</div>`; }
+}
+// Family changes (camp day moves and self-cancellations), last 14 days, for this studio.
+async function loadFamilyChanges() {
+  if (!_sessionStudioId) return [];
+  try { const r = await sb.rpc('hub_family_changes', { p_studio: _sessionStudioId, p_days: 14 }); return r.error ? [] : (r.data || []); } catch (e) { return []; }
+}
+async function famReviewed(kind, ref) {
+  const who = (_lastHeroData && _sessionPin && _lastHeroData.firstName && _lastHeroData.firstName !== 'team') ? _lastHeroData.firstName : null;
+  const { error } = await sb.rpc('hub_family_change_review', { p_studio: _sessionStudioId, p_kind: kind, p_ref: ref, p_by: who });
+  if (error) { alert(error.message); return; }
+  loadNotifPane();
+}
+function STUDIO_LABEL_SHORT(id) {
+  const n = { 'BC-RICH-GC': 'Richmond Garden City', 'BC-RICH-STV': 'Richmond Steveston', 'BC-SUR-SSR': 'Surrey South', 'BC-YVR-KIT': 'Kitsilano', 'BC-YVR-MS': 'Main Street', 'BC-YVR-UBC': 'UBC',
+    'BC-YYJ-CSV': 'Cook Street Village', 'BC-YYJ-ESQ': 'Esquimalt', 'BC-YYJ-OB': 'Oak Bay', 'BC-YYJ-VIC': 'Victoria Uptown', 'AB-YYC-ING': 'Inglewood', 'AB-STA-STA': 'St Albert',
+    'ON-BRL-BRL': 'Burlington', 'ON-CMB-GLT': 'Cambridge', 'ON-ERN-ERN': 'Erin', 'ON-HAM-OS': 'Ottawa Street', 'ON-HAM-WD': 'Waterdown', 'ON-HAM-WH': 'West Harbour', 'ON-KGN-AP': 'Kingston',
+    'ON-LDN-BYR': 'Byron', 'ON-LDN-WVG': 'Wortley Village', 'ON-MIS-PC': 'Port Credit', 'ON-OAK-OAK': 'Oakville North', 'ON-OAK-WST': 'Oakville West', 'ON-YOW-GLB': 'The Glebe',
+    'ON-STC-STC': 'St Catharines', 'ON-YYZ-AVE': 'Avenue Road', 'ON-YYZ-BP': 'Baby Point', 'ON-YYZ-LEA': 'Leaside', 'ON-YYZ-BEA': 'The Beaches', 'ON-WTR-WTR': 'Waterloo' };
+  return n[id] || id || '';
 }
 async function fetchRecentBookings() {
   const { data, error } = await sb.from('bookings').select('id, session_id, customer_name, qty, shopify_order_name, booked_at')
@@ -6241,7 +6275,9 @@ async function refreshCoordBadges(party, recent) {
   setB('parties-badge', newP + soon);
   let sickN = 0;
   try { sickN = (await loadSickCalls(_sessionStudioId, 2)).filter(sickNeedsPlan).length; } catch (e) {}
-  setB('notif-badge', newP + sickN + (seen ? unseen : 0));
+  let famN = 0;
+  try { famN = (await loadFamilyChanges()).filter(f => !f.reviewed).length; } catch (e) {}
+  setB('notif-badge', newP + sickN + famN + (seen ? unseen : 0));
 }
 
 
