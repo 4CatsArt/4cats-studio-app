@@ -327,6 +327,9 @@ select:focus, input:focus { border-color: #888; }
 .sh-msg { font-size: 12px; padding: 6px 10px; border-radius: 6px; margin-bottom: 8px; } .sh-msg.ok { background: #e3f6ea; color: #15803d; } .sh-msg.err { background: #fde8e8; color: #a32020; }
 .sh-sp { margin: 4px 0 8px; border: 1px solid #e8a93a; border-radius: 8px; padding: 10px 12px; background: #fffdf7; }
 .sh-sp-tr > td { padding: 0 4px; border-bottom: 0; }
+.sh-copy { display: block; margin-top: 3px; font-size: 11px; border: 0.5px solid #d0d0c8; border-radius: 5px; padding: 1px 4px; max-width: 170px; color: #555; background: #fff; }
+.sh-bulkgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 10px; font-size: 12px; max-height: 210px; overflow-y: auto; border: 0.5px solid #eee; border-radius: 6px; padding: 6px; background: #fff; }
+.sh-bulkgrid label { display: flex; gap: 5px; align-items: center; }
 .sh-sprow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 4px 0; font-size: 12px; }
 .sh-sprow input { font-size: 12px; padding: 3px 6px; border: 0.5px solid #d0d0c8; border-radius: 5px; }
 </style>
@@ -10810,7 +10813,8 @@ function renderSetupHours() {
   const setCount = studios.filter(s => shHours[s.id] && (shHours[s.id].week || []).length).length
   document.getElementById('sh-count').textContent = `· ${setCount} of ${studios.length} studios set`
   let h = (shMsg ? `<div class="sh-msg ${shMsg[0]}">${escHtml(shMsg[1])}</div>` : '') +
-    `<div style="font-size:12px;color:#888;margin-bottom:8px">Same hours coordinators set in the Hub (Studio info) and families see on 4Cats World. ${shCanEdit ? 'Click a day to change it.' : 'View only: needs Studio Ops edit access to change.'}</div>` +
+    `<div style="font-size:12px;color:#888;margin-bottom:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span style="flex:1">Same hours coordinators set in the Hub (Studio info) and families see on 4Cats World. ${shCanEdit ? 'Click a day to change it.' : 'View only: needs Studio Ops edit access to change.'}</span>` +
+      (shCanEdit ? `<button type="button" class="sh-btn" onclick="shBulkOpen()">+ Special day for many studios</button>` : '') + `</div>` + shBulkHtml(studios, provName) +
     `<div style="overflow-x:auto"><table class="sh-grid"><thead><tr><th>Studio</th>${SH_DAYS.map(d => `<th>${d}</th>`).join('')}<th>Special days &amp; note</th></tr></thead><tbody>`
   let prov = ''
   studios.forEach(st => {
@@ -10832,7 +10836,8 @@ function renderSetupHours() {
     }
     h += `<td><div class="sh-chips">${up.slice(0, 3).map(x => `<span class="sh-chip${x.closed ? ' cl' : ''}">${new Date(x.date + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })}${x.label ? ' · ' + escHtml(x.label) : ''} · ${x.closed ? 'Closed' : shT(x.open) + '–' + shT(x.close)}</span>`).join('')}${up.length > 3 ? `<span class="sh-chip">+${up.length - 3}</span>` : ''}</div>` +
       (H.note ? `<div class="sh-note">${escHtml(H.note)}</div>` : '') +
-      (shCanEdit ? `<button type="button" class="sh-link" onclick="shOpenSpecial('${sid}')">${up.length ? 'Special days' : '+ Special days'}</button> · <button type="button" class="sh-link" onclick="shEditNote('${sid}')">${H.note ? 'Note' : '+ Note'}</button>` : '') + `</td></tr>`
+      (shCanEdit ? `<button type="button" class="sh-link" onclick="shOpenSpecial('${sid}')">${up.length ? 'Special days' : '+ Special days'}</button> · <button type="button" class="sh-link" onclick="shEditNote('${sid}')">${H.note ? 'Note' : '+ Note'}</button>` +
+        `<select class="sh-copy" onchange="shCopyFrom('${sid}', this.value); this.value=''"><option value="">Copy hours from…</option>${studios.filter(o => o.id !== sid && shHours[o.id] && (shHours[o.id].week || []).length).map(o => `<option value="${o.id}">${escHtml(getStudioName(o.id))}</option>`).join('')}</select>` : '') + `</td></tr>`
     // The special days editor opens right under its studio's row
     if (shSpFor === sid) h += `<tr class="sh-sp-tr"><td colspan="9">${shSpecialHtml()}</td></tr>`
   })
@@ -10862,6 +10867,62 @@ function shSaveCell() {
   const week = ((H.week && H.week.length) ? H.week : SH_DAYS.map((_, i) => ({ day: i + 1, closed: true })))
     .map(x => targets.includes(x.day) ? (closed ? { day: x.day, closed: true } : { day: x.day, closed: false, open: o, close: c }) : Object.assign({}, x))
   shSave(sid, { week })
+}
+// Copy another studio's weekly hours (their special days and note stay their own)
+function shCopyFrom(sid, from) {
+  if (!from) return
+  const src = shHours[from]; if (!src || !(src.week || []).length) return
+  const line = [1, 2, 3, 4, 5, 6, 7].map(n => SH_DAYS[n - 1] + ' ' + shCell(src.week.find(x => x.day === n))).join(', ')
+  if (!confirm(`Copy ${getStudioName(from)}'s hours to ${getStudioName(sid)}?\n\n${line}\n\n${getStudioName(sid)}'s special days and note stay as they are.`)) return
+  shSave(sid, { week: src.week.map(x => Object.assign({}, x)) })
+}
+// ---- One special day for many studios ----
+let shBulk = null
+function shBulkOpen() { shBulk = { date: '', label: '', closed: true, open: '10:00', close: '14:00', pick: {}, running: false }; shSpFor = null; shEditing = null; renderSetupHours() }
+function shBulkHtml(studios, provName) {
+  if (!shBulk) return ''
+  const B = shBulk, provs = ['BC', 'AB', 'ON']
+  return `<div class="sh-sp" id="shBulk"><b>Add a special day to many studios</b>
+    <div class="sh-sprow"><input type="date" id="shbD" value="${B.date}"><input type="text" id="shbL" value="${escHtml(B.label)}" placeholder="e.g. Christmas" maxlength="40">
+      <label><input type="checkbox" id="shbC"${B.closed ? ' checked' : ''} onchange="shBulkKeep();renderSetupHours()"> Closed</label>
+      <input type="time" id="shbO" value="${B.open}"${B.closed ? ' disabled' : ''}> to <input type="time" id="shbX" value="${B.close}"${B.closed ? ' disabled' : ''}></div>
+    <div style="font-size:12px;margin:6px 0 4px">Which studios? <button type="button" class="sh-link" onclick="shBulkAll(true)">All</button> · <button type="button" class="sh-link" onclick="shBulkAll(false)">None</button> ·
+      ${provs.map(pv => `<button type="button" class="sh-link" onclick="shBulkProv('${pv}')">${provName[pv]}</button>`).join(' · ')}</div>
+    <div class="sh-bulkgrid">${studios.map(st => `<label><input type="checkbox" class="shbS" value="${st.id}"${B.pick[st.id] ? ' checked' : ''}> ${escHtml(getStudioName(st.id))}</label>`).join('')}</div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:8px"><span style="flex:1;font-size:12px;color:#888" id="shbMsg">Replaces any special day those studios already have on that date.</span>
+      <button type="button" class="sh-btn" onclick="shBulk=null;renderSetupHours()"${B.running ? ' disabled' : ''}>Cancel</button>
+      <button type="button" class="sh-btn go" onclick="shBulkSave()"${B.running ? ' disabled' : ''}>Add to ${Object.keys(B.pick).filter(k => B.pick[k]).length} studios</button></div></div>`
+}
+function shBulkKeep() {
+  if (!shBulk || !document.getElementById('shbD')) return
+  shBulk.date = document.getElementById('shbD').value; shBulk.label = document.getElementById('shbL').value.trim()
+  shBulk.closed = document.getElementById('shbC').checked; shBulk.open = document.getElementById('shbO').value; shBulk.close = document.getElementById('shbX').value
+  document.querySelectorAll('#shBulk .shbS').forEach(c => { shBulk.pick[c.value] = c.checked })
+}
+function shBulkAll(on) { shBulkKeep(); (allStudios || []).forEach(st => { shBulk.pick[st.id] = on }); renderSetupHours() }
+function shBulkProv(pv) { shBulkKeep(); (allStudios || []).forEach(st => { if (st.id.slice(0, 2) === pv) shBulk.pick[st.id] = true }); renderSetupHours() }
+document.addEventListener('change', e => { if (e.target && e.target.classList && e.target.classList.contains('shbS')) { shBulkKeep(); renderSetupHours() } })
+async function shBulkSave() {
+  shBulkKeep()
+  const B = shBulk, ids = Object.keys(B.pick).filter(k => B.pick[k]), msg = () => document.getElementById('shbMsg')
+  if (!B.date) { msg().textContent = 'Choose a date.'; return }
+  if (!B.closed && !(B.open && B.close && B.close > B.open)) { msg().textContent = 'Closing time needs to be after opening.'; return }
+  if (!ids.length) { msg().textContent = 'Tick at least one studio.'; return }
+  const day = B.closed ? { date: B.date, closed: true, label: B.label || null } : { date: B.date, closed: false, open: B.open, close: B.close, label: B.label || null }
+  B.running = true; renderSetupHours()
+  let done = 0, failed = []
+  for (const sid of ids) {
+    const H = shHours[sid] || {}
+    const week = (H.week && H.week.length) ? H.week : SH_DAYS.map((_, i) => ({ day: i + 1, closed: true }))
+    const special = (H.special || []).filter(x => x.date !== B.date).concat([day])
+    const r = await sb.rpc('hub_studio_hours_save', { p_studio: sid, p_week: week, p_note: H.note || null, p_special: special, p_by: null })
+    if (r.error) failed.push(getStudioName(sid)); else { shHours[sid] = Object.assign({}, H, { studio_id: sid, week, special }); done++ }
+    const m = msg(); if (m) m.textContent = `Saving… ${done + failed.length} of ${ids.length}`
+  }
+  shBulk = null
+  shMsg = failed.length ? ['err', `Added to ${done} studios. Didn’t save for: ${failed.join(', ')}.`]
+    : ['ok', `Added ${B.label || 'the special day'} (${new Date(B.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })}) to ${done} studios. The Hub and 4Cats World show it straight away.`]
+  renderSetupHours()
 }
 function shEditNote(sid) {
   const v = prompt(`Note for families at ${getStudioName(sid)} (leave empty to remove):`, (shHours[sid] || {}).note || '')
