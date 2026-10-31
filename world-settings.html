@@ -2799,7 +2799,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
         '<h3 class="mem-h">Remove a tag from everyone</h3>' +
         '<p class="help" style="margin:0 0 6px">Searches <b>every customer in Shopify</b> for the tag, e.g. <code>bookeo-member</code>. Count first, then remove. Only that tag comes off: anyone who also has another member tag, or a membership here, stays a member.</p>' +
         '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><input type="text" id="rtTag" placeholder="bookeo-member" style="max-width:220px">' +
-        '<button class="btn btn-plain" type="button" id="rtCount">Count</button><button class="btn btn-danger" type="button" id="rtGo">Remove it</button><button class="btn btn-plain" type="button" id="rtStop">Stop</button><span class="help" id="rtMsg"></span></div>' : '') +
+        '<button class="btn btn-plain" type="button" id="rtCount">Count</button><button class="btn btn-plain" type="button" id="rtReport">Report</button><button class="btn btn-danger" type="button" id="rtGo">Remove it</button><button class="btn btn-plain" type="button" id="rtStop">Stop</button><span class="help" id="rtMsg"></span></div>' : '') +
       '</section>';
   }
   // ---- Appstle import ----
@@ -2926,6 +2926,33 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
       finally { rtBusy = false; $('rtGo').disabled = false; $('rtCount').disabled = false; }
     };
     $('rtCount').addEventListener('click', function () { rtCall(true); });
+    // Report: customers with the tag but no membership here (and no other member tag), with their last order
+    $('rtReport').addEventListener('click', async function () {
+      var tag = $('rtTag').value.trim(); if (!tag) { $('rtMsg').textContent = 'Type the tag first.'; return; }
+      if (rtBusy) { $('rtMsg').textContent = 'Still working on the last one\u2026'; return; }
+      rtBusy = true; var b = this; b.disabled = true;
+      var all = [], next = null, total = 0;
+      try {
+        do {
+          $('rtMsg').textContent = 'Making the report\u2026 ' + all.length + ' so far';
+          var r = await fetch(SUPABASE_URL + '/functions/v1/membership-sync', { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + SUPABASE_ANON_KEY },
+            body: JSON.stringify({ report_tag: tag, after: next }) });
+          var d = await r.json(); if (d.error) throw new Error(d.error);
+          all = all.concat(d.rows); total += d.total; next = d.next;
+        } while (next);
+        var today = new Date(), ago = function (dt) { return dt ? (today - new Date(dt + 'T12:00:00')) / 86400000 : null; };
+        var B = { '3m': 0, '12m': 0, '24m': 0, older: 0, never: 0 };
+        all.forEach(function (x) { var a = ago(x.last_order_date); if (a == null) B.never++; else if (a <= 92) B['3m']++; else if (a <= 365) B['12m']++; else if (a <= 730) B['24m']++; else B.older++; });
+        all.sort(function (a, c) { return String(c.last_order_date).localeCompare(String(a.last_order_date)); });
+        var q = function (v) { v = String(v == null ? '' : v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+        var csv = ['Name,Email,Last order,Last order date,Orders,Total spent,Shopify customer ID'].concat(all.map(function (x) { return [x.name, x.email, x.last_order, x.last_order_date, x.orders, x.spent.toFixed(2), x.id].map(q).join(','); })).join('\n');
+        var url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+        $('rtMsg').innerHTML = '<b>' + all.length + '</b> of ' + total + ' customers with \u201c' + esc(tag) + '\u201d have no membership here and no other member tag. Last order: ' +
+          '<b>' + B['3m'] + '</b> in the past 3 months, <b>' + B['12m'] + '</b> 3\u201312 months ago, <b>' + B['24m'] + '</b> 1\u20132 years ago, <b>' + B.older + '</b> longer ago, <b>' + B.never + '</b> never. ' +
+          '<a href="' + url + '" download="' + esc(tag) + '-no-membership.csv">Download the list (CSV)</a>';
+      } catch (e) { $('rtMsg').textContent = 'Report didn\u2019t finish: ' + e.message; }
+      rtBusy = false; b.disabled = false;
+    });
     $('rtStop').addEventListener('click', async function () {
       $('rtMsg').textContent = 'Stopping\u2026';
       try {
