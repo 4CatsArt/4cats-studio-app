@@ -227,6 +227,9 @@ button.pill { cursor: pointer; }
 .mat-cols { font-size: 10.5px; color: var(--muted); }
 .mat-row input:disabled { background: var(--soft); color: var(--ink); font-weight: 600; }
 .mat-parts { margin: 2px 0 8px 14px; padding-left: 10px; border-left: 2px solid var(--line-2); display: flex; flex-direction: column; gap: 4px; }
+.tpl-list { display: flex; flex-direction: column; gap: 5px; }
+.tpl-row { display: grid; grid-template-columns: 1fr 26px; gap: 6px; align-items: center; }
+.tpl-row .x { background: none; border: none; color: #888; cursor: pointer; font-size: 14px; }
 .part-row { display: grid; grid-template-columns: minmax(130px, 1.4fr) 80px 16px 56px 26px; gap: 6px; align-items: center; }
 .part-row input { width: 100%; min-height: 26px; padding: 3px 7px; font-size: 12px; }
 .part-row .times { font-size: 12px; color: var(--muted); text-align: center; }
@@ -443,7 +446,7 @@ input.bad-amount { border-color: #c0392b; background: #fdf0ee; }
       <div><label class="field-label" for="ed-base">Base printout (shared) <a href="#" class="small" onclick="openSheets('base');return false">manage</a></label><select id="ed-base" style="width:100%"></select></div>
       <div class="full"><label class="field-label">Steps printout (this project only)</label><div id="ed-steps-src"></div></div>
       <input type="file" id="ed-steps-file" accept=".pdf,application/pdf,image/png,image/jpeg,image/webp" style="display:none" onchange="stepsFileChosen(this)">
-      <div><label class="field-label" for="ed-template">Template <a href="#" class="small" onclick="openSheets('template');return false">manage</a></label><select id="ed-template" style="width:100%"></select></div>
+      <div><label class="field-label">Templates <a href="#" class="small" onclick="openSheets('template');return false">manage</a></label><div id="ed-templates" class="tpl-list"></div><a href="#" class="small" onclick="addTemplateRow();return false">+ Add another template</a></div>
       <div><label class="field-label" for="ed-marketing">Marketing photos link</label><input type="url" id="ed-marketing"></div>
       <div><label class="field-label" for="ed-metafield">Shopify project metafield</label><input type="text" id="ed-metafield"></div>
       <div class="full"><label class="field-label" for="ed-description">Description</label><textarea id="ed-description"></textarea></div>
@@ -615,7 +618,7 @@ const SHEET_LIBS = {
     intro: "Shared first printouts for projects that start from the same shape (bowl, cup, plate…). Choose one on each project under <strong>Base printout</strong>; the project's own steps go in its <strong>Steps printout</strong> link. Changing a link here updates every project that uses it. Edits save when you leave a field."
   },
   template: {
-    table: 'project_templates', field: 'template_id', select: 'ed-template',
+    table: 'project_templates', field: 'template_id', select: null,
     title: 'Templates', one: 'template', placeholder: 'Pumpkin face',
     intro: "Templates live here so they can be reused — even one made for a single project is ready if another project needs it later. Choose one on each project under <strong>Template</strong>. Changing a link here updates every project that uses it. Edits save when you leave a field."
   }
@@ -1117,6 +1120,7 @@ function renderLibrary() {
     (!needs || (needs === 'tags' ? !(p.tags || []).length
                : needs === 'supplies' ? !((p.tool_kit_ids || []).length || (p.tools_added || []).length || (p.materials || []).length || (p.prepped || []).length)
                : needs === 'printout_url' ? !(p.printout_url || p.printout_path)
+               : needs === 'template_id' ? !templateIdsOf(p).length
                : !p[needs])))
   document.getElementById('lib-count').textContent = list.length + ' of ' + library.length + ' projects'
   const body = document.getElementById('library-body')
@@ -1131,7 +1135,7 @@ function renderLibrary() {
       imgTag(p.image_url, 'ph', p.name) +
       '<div class="body"><div class="nm">' + esc(p.name) + '</div>' +
       '<div class="meta">' + esc([p.medium, 'makes ' + p.make_quantity, sheetData.base.byId[p.base_printout_id] ? 'base: ' + sheetData.base.byId[p.base_printout_id].name : '',
-        sheetData.template.byId[p.template_id] ? 'template: ' + sheetData.template.byId[p.template_id].name : '', p.is_active ? '' : 'archived'].filter(Boolean).join(', ')) + '</div>' +
+        templateNames(p), p.is_active ? '' : 'archived'].filter(Boolean).join(', ')) + '</div>' +
       ((p.tags || []).length ? '<div class="tags">' + p.tags.map(t => '<span class="tag">' + esc(t) + '</span>').join('') + '</div>' : '') +
       (missing.length ? '<div class="needs">Needs ' + missing.join(', ') + '</div>' : '') +
       '</div></button>'
@@ -1205,7 +1209,7 @@ function openProjectEditor(id, presetName, onSaved) {
   renderStepsField()
   document.getElementById('ed-base').innerHTML = sheetOptionsHtml('base', p.base_printout_id || '')
   document.getElementById('ed-metafield').value = p.shopify_metafield || ''
-  document.getElementById('ed-template').innerHTML = sheetOptionsHtml('template', p.template_id || '')
+  renderTemplateRows(templateIdsOf(p))
   document.getElementById('ed-marketing').value = p.marketing_photos_url || ''
   document.getElementById('ed-description').value = p.description || ''
   document.getElementById('ed-notes').value = p.notes || ''
@@ -1315,7 +1319,8 @@ async function saveProject() {
     printout_path: edSteps.mode === 'link' ? null : edSteps.path,
     base_printout_id: document.getElementById('ed-base').value || null,
     shopify_metafield: nz(document.getElementById('ed-metafield').value),
-    template_id: document.getElementById('ed-template').value || null,
+    template_ids: editorTemplateIds(),
+    template_id: editorTemplateIds()[0] || null,   // first one, for anything that still reads a single template
     marketing_photos_url: nz(document.getElementById('ed-marketing').value),
     description: nz(document.getElementById('ed-description').value),
     notes: nz(document.getElementById('ed-notes').value),
@@ -1804,7 +1809,40 @@ async function loadSheets(kind) {
   d.rows = data || []
   d.byId = {}; d.rows.forEach(r => { d.byId[r.id] = r })
 }
-function sheetUsageCount(kind, id) { const f = SHEET_LIBS[kind].field; return library.filter(p => p[f] === id).length }
+function sheetUsageCount(kind, id) {
+  if (kind === 'template') return library.filter(p => templateIdsOf(p).includes(id)).length
+  const f = SHEET_LIBS[kind].field; return library.filter(p => p[f] === id).length
+}
+
+/* ---------- several templates per project ----------
+   project_library.template_ids holds all of them, in order; template_id keeps
+   the first one so older readers (and the sheet import) still work. */
+function templateIdsOf(p) {
+  const ids = (p.template_ids || []).filter(Boolean)
+  return ids.length ? ids : (p.template_id ? [p.template_id] : [])
+}
+function templateNames(p) {
+  const names = templateIdsOf(p).map(id => sheetData.template.byId[id] && sheetData.template.byId[id].name).filter(Boolean)
+  return names.length ? (names.length > 1 ? 'templates: ' : 'template: ') + names.join(' + ') : ''
+}
+function renderTemplateRows(ids) {
+  if (!ids.length) ids = ['']
+  document.getElementById('ed-templates').innerHTML = ids.map(id =>
+    '<div class="tpl-row"><select class="tpl-sel" style="width:100%" aria-label="Template">' + sheetOptionsHtml('template', id) + '</select>' +
+    '<button type="button" class="x" aria-label="Remove template" onclick="removeTemplateRow(this)">×</button></div>').join('')
+}
+function currentTemplateSelections() { return Array.from(document.querySelectorAll('#ed-templates .tpl-sel')).map(s => s.value) }
+function editorTemplateIds() {
+  const seen = new Set()
+  return currentTemplateSelections().filter(id => id && !seen.has(id) && seen.add(id))
+}
+function addTemplateRow() { renderTemplateRows(currentTemplateSelections().concat([''])) }
+function removeTemplateRow(btn) {
+  const all = Array.from(document.querySelectorAll('#ed-templates .tpl-row'))
+  const i = all.indexOf(btn.closest('.tpl-row'))
+  const vals = currentTemplateSelections(); vals.splice(i, 1)
+  renderTemplateRows(vals)
+}
 
 // Dropdown options: active entries, plus the project's current one even if it
 // has since been archived (so saving never silently drops it).
@@ -1815,6 +1853,10 @@ function sheetOptionsHtml(kind, selectedId) {
     esc(r.name) + (r.is_active ? '' : ' (archived)') + (r.url || r.file_path ? '' : ' (no file or link yet)') + '</option>').join('')
 }
 function refreshEditorSheetSelect(kind) {
+  if (kind === 'template') {
+    if (document.getElementById('editor-modal').classList.contains('open')) renderTemplateRows(currentTemplateSelections())
+    return
+  }
   const sel = document.getElementById(SHEET_LIBS[kind].select)
   if (!sel || !document.getElementById('editor-modal').classList.contains('open')) return
   sel.innerHTML = sheetOptionsHtml(kind, sel.value)
