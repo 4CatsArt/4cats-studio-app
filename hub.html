@@ -1685,6 +1685,10 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
 /* Suggestions */
 .ideas-all { font-size: 13px; display: inline-flex; gap: 5px; align-items: center; margin-right: 8px; }
 .ideas-filter { font: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid #ddd6c6; border-radius: 8px; margin-right: 8px; }
+.idea-count { font-size: 12px; font-weight: 800; background: #c8232c; color: #fff; border-radius: 999px; padding: 2px 9px; }
+.idea-dates span.shared { background: #c8232c; color: #fff; }
+.idea-person { display: flex; flex-direction: column; gap: 3px; padding: 4px 0; border-top: 1px dashed #eee6d6; }
+.idea-person:first-of-type { border-top: 0; }
 .idea-studio { font-size: 12px; font-weight: 800; background: #e6f0fb; color: #1f4e8a; border-radius: 999px; padding: 2px 9px; }
 .idea-grp { font-size: 15px; margin: 18px 0 6px; } .idea-grp span { color: #999; font-weight: 400; }
 .idea-row { display: flex; gap: 12px; background: #fff; border: 1px solid #ece7dc; border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; }
@@ -6217,6 +6221,25 @@ function openIdeasPane() {
   if (!admin) document.getElementById('ideas-all').checked = false;   // studios see their own
   loadIdeasPane();
 }
+// Matching suggestions become one card: same studio and kind, the same workshop
+// (by name, ignoring capitals and punctuation; one starting with the other), and a
+// date in common (or no dates). PA/PD days: same studio and a date in common.
+function ideaNorm(t) { return String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+function ideasMatch(a, b) {
+  if (a.studio_id !== b.studio_id || a.kind !== b.kind || (a.status || 'new') !== (b.status || 'new')) return false;
+  const da = a.dates || [], db = b.dates || [];
+  const dateOk = !da.length || !db.length || da.some(d => db.includes(d));
+  if (a.kind === 'pa_days') return da.length && db.length && da.some(d => db.includes(d));
+  if (a.kind !== 'workshops') return false;
+  const na = ideaNorm(a.details), nb = ideaNorm(b.details);
+  if (na.length < 4 || nb.length < 4) return false;
+  return dateOk && (na === nb || (na.length >= 6 && nb.startsWith(na)) || (nb.length >= 6 && na.startsWith(nb)));
+}
+function ideaGroups(list) {
+  const groups = [];
+  list.forEach(x => { const g = groups.find(g => g.some(y => ideasMatch(x, y))); if (g) g.push(x); else groups.push([x]); });
+  return groups;
+}
 function ideaDefaultLink(x) {
   return 'https://world.4cats.com/?studio=' + encodeURIComponent(x.studio_id || '') + '#' + (/pa_days|camps/.test(x.kind) ? 'camps' : 'schedule');
 }
@@ -6247,46 +6270,58 @@ function drawIdeas() {
   let h = '<div class="ho-intro">What families suggested on 4Cats World. Mark <b>Date added</b> when you’ve put it on the schedule: the family gets an email with a link.</div>';
   groups.forEach(g => {
     const list = shown.filter(x => (x.status || 'new') === g[0]); if (!list.length) return;
-    h += '<h3 class="idea-grp">' + g[1] + ' <span>' + list.length + '</span></h3>' + list.map(x => {
-      const open = _ideaOpen === x.id;
+    const grouped = ideaGroups(list);
+    h += '<h3 class="idea-grp">' + g[1] + ' <span>' + grouped.length + '</span></h3>' + grouped.map(G => {
+      const x = G[0], key = G.map(y => y.id).join(','), open = _ideaOpen === key, many = G.length > 1;
+      const dates = [...new Set(G.flatMap(y => y.dates || []))].sort();
+      const shared = dates.filter(d => G.filter(y => (y.dates || []).includes(d)).length > 1);
+      const kids = G.reduce((n, y) => n + (y.kids || 0), 0);
+      const people = G.map(y => '<div class="idea-person"><span class="idea-who">' + esc(y.name || 'A family') + (y.email ? ' · <a href="mailto:' + esc(y.email) + '">' + esc(y.email) + '</a>' : '') + '</span>' +
+        '<span class="idea-when">' + esc(when(y.created_at)) + '</span>' + (y.school ? '<div class="idea-line"><b>School:</b> ' + esc(y.school) + '</div>' : '') +
+        (y.kids ? '<div class="idea-line"><b>Kids:</b> ' + y.kids + (y.ages ? ' (ages ' + esc(y.ages) + ')' : '') + '</div>' : '') +
+        (y.details ? '<div class="idea-text">' + esc(y.details) + '</div>' : '') + '</div>').join('');
+      const ids = "'" + key + "'";
       return '<div class="idea-row' + (x.status === 'new' ? ' is-new' : '') + '"><div class="idea-main">' +
         '<div class="idea-top"><span class="idea-kind">' + esc(IDEA_KIND_LABEL[x.kind] || x.kind) + '</span>' +
-          '<span class="idea-who">' + esc(x.name || 'A family') + (x.email ? ' · <a href="mailto:' + esc(x.email) + '">' + esc(x.email) + '</a>' : '') + '</span>' +
-          (allMode ? '<span class="idea-studio">' + esc(STUDIO_NAMES[x.studio_id] || x.studio_id || 'No studio') + '</span>' : '') +
-          '<span class="idea-when">' + esc(when(x.created_at)) + '</span></div>' +
-        (x.dates && x.dates.length ? '<div class="idea-dates">' + x.dates.map(d => '<span>' + esc(nice(d)) + '</span>').join('') + '</div>' : '') +
-        (x.school ? '<div class="idea-line"><b>School:</b> ' + esc(x.school) + '</div>' : '') +
-        (x.kids ? '<div class="idea-line"><b>Kids:</b> ' + x.kids + (x.ages ? ' (ages ' + esc(x.ages) + ')' : '') + '</div>' : '') +
-        (x.details ? '<div class="idea-text">' + esc(x.details) + '</div>' : '') +
-        (x.status === 'added' ? '<div class="idea-line soft">Added' + (x.status_by ? ' by ' + esc(x.status_by) : '') + (x.emailed_at ? ' · family emailed ' + esc(when(x.emailed_at)) : '') + (x.added_link ? ' · <a href="' + esc(x.added_link) + '" target="_blank" rel="noopener">link</a>' : '') + '</div>' : '') +
-        (open ? '<div class="idea-add"><label>Link for the family<input type="url" id="idea-link" value="' + esc(x.added_link || ideaDefaultLink(x)) + '"></label>' +
+          (many ? '<span class="idea-count">' + G.length + ' families' + (kids ? ' · ' + kids + ' kids' : '') + '</span>' : '') +
+          (allMode ? '<span class="idea-studio">' + esc(STUDIO_NAMES[x.studio_id] || x.studio_id || 'No studio') + '</span>' : '') + '</div>' +
+        (dates.length ? '<div class="idea-dates">' + dates.map(d => '<span' + (shared.includes(d) ? ' class="shared" title="Asked for by more than one family"' : '') + '>' + esc(nice(d)) + (shared.includes(d) ? ' ×' + G.filter(y => (y.dates || []).includes(d)).length : '') + '</span>').join('') + '</div>' : '') +
+        people +
+        (x.status === 'added' ? '<div class="idea-line soft">Added' + (x.status_by ? ' by ' + esc(x.status_by) : '') + (G.some(y => y.emailed_at) ? ' · ' + (many ? 'families' : 'family') + ' emailed' : '') + (x.added_link ? ' · <a href="' + esc(x.added_link) + '" target="_blank" rel="noopener">link</a>' : '') + '</div>' : '') +
+        (open ? '<div class="idea-add"><label>Link for the ' + (many ? 'families' : 'family') + '<input type="url" id="idea-link" value="' + esc(x.added_link || ideaDefaultLink(x)) + '"></label>' +
           '<span class="idea-help">Where they can book it: the World schedule (the usual), a Shopify product, or the camps page.</span>' +
-          '<label class="idea-chk"><input type="checkbox" id="idea-email" checked> Email ' + esc((x.name || 'the family').split(' ')[0]) + ' that it’s been added</label>' +
-          '<div class="idea-btns"><button class="ho-btn" onclick="_ideaOpen=null;drawIdeas()">Cancel</button><button class="ho-btn primary" onclick="ideaSet(\'' + x.id + '\',\'added\')">Save</button></div></div>' : '') +
+          '<label class="idea-chk"><input type="checkbox" id="idea-email" checked> Email ' + (many ? 'all ' + G.length + ' families' : esc((x.name || 'the family').split(' ')[0])) + ' that it’s been added</label>' +
+          '<div class="idea-btns"><button class="ho-btn" onclick="_ideaOpen=null;drawIdeas()">Cancel</button><button class="ho-btn primary" onclick="ideaSet(' + ids + ',\'added\')">Save</button></div></div>' : '') +
         '</div><div class="idea-acts">' +
-          (x.status !== 'added' && !open ? '<button class="ho-btn primary" onclick="_ideaOpen=\'' + x.id + '\';drawIdeas()">✓ Date added</button>' : '') +
-          (x.status === 'new' ? '<button class="ho-btn" onclick="ideaSet(\'' + x.id + '\',\'seen\')">Mark seen</button>' : '') +
-          (x.status !== 'declined' && x.status !== 'added' ? '<button class="ho-btn" onclick="ideaSet(\'' + x.id + '\',\'declined\')">Not this time</button>' : '') +
-          (x.status === 'declined' || x.status === 'seen' ? '<button class="ho-btn" onclick="ideaSet(\'' + x.id + '\',\'new\')">Move back to new</button>' : '') +
+          (x.status !== 'added' && !open ? '<button class="ho-btn primary" onclick="_ideaOpen=' + ids + ';drawIdeas()">✓ Date added</button>' : '') +
+          (x.status === 'new' ? '<button class="ho-btn" onclick="ideaSet(' + ids + ',\'seen\')">Mark seen</button>' : '') +
+          (x.status !== 'declined' && x.status !== 'added' ? '<button class="ho-btn" onclick="ideaSet(' + ids + ',\'declined\')">Not this time</button>' : '') +
+          (x.status === 'declined' || x.status === 'seen' ? '<button class="ho-btn" onclick="ideaSet(' + ids + ',\'new\')">Move back to new</button>' : '') +
         '</div></div>';
     }).join('');
   });
   body.innerHTML = h;
 }
-async function ideaSet(id, status) {
+async function ideaSet(idList, status) {
+  const ids = String(idList).split(',').filter(Boolean);
   const who = (_lastHeroData && _lastHeroData.firstName && _lastHeroData.firstName !== 'team') ? _lastHeroData.firstName : null;
-  const payload = { id, status, by: who };
-  if (status === 'added') { payload.link = (document.getElementById('idea-link') || {}).value || ''; payload.email = !!(document.getElementById('idea-email') || {}).checked; }
-  try {
-    const r = await fetch(SUPABASE_URL + '/functions/v1/idea-update', { method: 'POST', headers: await fnHeaders(), body: JSON.stringify(payload) });
-    const d = await r.json();
-    if (!r.ok || d.error) { alert(d.error || 'That didn’t save.'); return; }
-    if (status === 'added') alert(d.emailed ? 'Saved, and the family has been emailed. ✓' : (d.note || 'Saved.'));
-    _ideaOpen = null;
-    const i = _ideas.findIndex(x => x.id === id); if (i !== -1 && d.idea) _ideas[i] = Object.assign({}, _ideas[i], d.idea, d.emailed ? { emailed_at: new Date().toISOString() } : {});
-    drawIdeas();
-    if (typeof refreshCoordBadges === 'function') refreshCoordBadges();
-  } catch (e) { alert('That didn’t save: ' + e.message); }
+  const link = status === 'added' ? ((document.getElementById('idea-link') || {}).value || '') : '';
+  const email = status === 'added' ? !!(document.getElementById('idea-email') || {}).checked : false;
+  let emailed = 0, failed = [];
+  for (const id of ids) {
+    try {
+      const r = await fetch(SUPABASE_URL + '/functions/v1/idea-update', { method: 'POST', headers: await fnHeaders(), body: JSON.stringify({ id, status, by: who, link, email }) });
+      const d = await r.json();
+      if (!r.ok || d.error) { failed.push(d.error || 'not saved'); continue; }
+      if (d.emailed) emailed++;
+      const i = _ideas.findIndex(x => x.id === id); if (i !== -1 && d.idea) _ideas[i] = Object.assign({}, _ideas[i], d.idea, d.emailed ? { emailed_at: new Date().toISOString() } : {});
+    } catch (e) { failed.push(e.message); }
+  }
+  if (failed.length) alert('Some didn’t save: ' + failed[0]);
+  else if (status === 'added') alert(emailed ? 'Saved. ' + (emailed === 1 ? 'The family has' : emailed + ' families have') + ' been emailed. ✓' : 'Saved.');
+  _ideaOpen = null;
+  drawIdeas();
+  if (typeof refreshCoordBadges === 'function') refreshCoordBadges();
 }
 
 // ---------- Coordinator → Project interest (hub_project_interest.sql) ----------
