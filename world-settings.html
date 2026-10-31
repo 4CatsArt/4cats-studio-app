@@ -2799,7 +2799,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
         '<h3 class="mem-h">Remove a tag from everyone</h3>' +
         '<p class="help" style="margin:0 0 6px">Searches <b>every customer in Shopify</b> for the tag, e.g. <code>bookeo-member</code>. Count first, then remove. Only that tag comes off: anyone who also has another member tag, or a membership here, stays a member.</p>' +
         '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><input type="text" id="rtTag" placeholder="bookeo-member" style="max-width:220px">' +
-        '<button class="btn btn-plain" type="button" id="rtCount">Count</button><button class="btn btn-danger" type="button" id="rtGo">Remove it</button><span class="help" id="rtMsg"></span></div>' : '') +
+        '<button class="btn btn-plain" type="button" id="rtCount">Count</button><button class="btn btn-danger" type="button" id="rtGo">Remove it</button><button class="btn btn-plain" type="button" id="rtStop">Stop</button><span class="help" id="rtMsg"></span></div>' : '') +
       '</section>';
   }
   // ---- Appstle import ----
@@ -2906,17 +2906,33 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
         });
       });
     });
+    var rtBusy = false;
     var rtCall = async function (dry) {
       var tag = $('rtTag').value.trim(); if (!tag) { $('rtMsg').textContent = 'Type the tag first.'; return; }
+      if (rtBusy) { $('rtMsg').textContent = 'Still working on the last one\u2026'; return; }   // one run at a time
       if (!dry && !confirm('Remove the tag \u201c' + tag + '\u201d from every customer in Shopify who has it?')) return;
-      $('rtMsg').textContent = dry ? 'Counting\u2026' : 'Removing\u2026';
+      $('rtMsg').textContent = dry ? 'Counting\u2026' : 'Removing\u2026 (press Stop to stop)'; rtBusy = true;
+      $('rtGo').disabled = true; $('rtCount').disabled = true;
       try {
         var r = await fetch(SUPABASE_URL + '/functions/v1/membership-sync', { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + SUPABASE_ANON_KEY }, body: JSON.stringify({ remove_tag: tag, dry_run: dry }) });
         var d = await r.json();
-        $('rtMsg').textContent = d.error ? d.error : dry ? (d.count + (d.more ? '+' : '') + ' customers have \u201c' + tag + '\u201d.') : ('Removed from ' + d.removed + ' customers.' + (d.more ? ' Press again to carry on.' : ' All done \u2713'));
+        if (!d.error && dry) { rtBusy = false; $('rtGo').disabled = false; $('rtCount').disabled = false;
+          $('rtMsg').innerHTML = '<b>' + d.count + (d.more ? '+' : '') + '</b> customers have \u201c' + esc(tag) + '\u201d: <b>' + d.with_membership + '</b> have a membership here, <b>' + d.other_member_tag + '</b> have another member tag, and <b>' + d.only_this_tag + '</b> have only this tag (they\u2019d stop being members).' +
+            (d.sample && d.sample.length ? '<details style="margin-top:4px"><summary>Some of the ' + d.only_this_tag + '</summary>' + d.sample.map(esc).join('<br>') + '</details>' : '');
+          return;
+        }
+        $('rtMsg').textContent = d.error ? d.error : ('Removed from ' + d.removed + ' customers.' + (d.stopped ? ' Stopped.' : d.more ? ' Press again to carry on.' : ' All done \u2713'));
       } catch (e) { $('rtMsg').textContent = 'Didn\u2019t run: ' + e.message; }
+      finally { rtBusy = false; $('rtGo').disabled = false; $('rtCount').disabled = false; }
     };
     $('rtCount').addEventListener('click', function () { rtCall(true); });
+    $('rtStop').addEventListener('click', async function () {
+      $('rtMsg').textContent = 'Stopping\u2026';
+      try {
+        await fetch(SUPABASE_URL + '/functions/v1/membership-sync', { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + SUPABASE_ANON_KEY }, body: '{"stop_removal":true}' });
+        $('rtMsg').textContent = 'Stopped \u2713 Any removal in progress ends within a few seconds.';
+      } catch (e) { $('rtMsg').textContent = 'Didn\u2019t reach the server: ' + e.message; }
+    });
     $('rtGo').addEventListener('click', function () { rtCall(false); });
     sv.addEventListener('click', async function () {
       var S = (memSet && memSet.settings) || {};
