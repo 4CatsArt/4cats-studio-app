@@ -51,7 +51,10 @@ td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: middle;
 .shop-row td { color: var(--soft); }
 .day-head td { background: var(--snow); border-top: 2px solid var(--line); }
 .day-sp { margin-left: 10px; font-size: 14px; color: var(--soft); }
-.day-sp .spaces-in { width: 64px; } .pill.full { background: #fde2e2; color: #b91c1c; } .pill.closed { background: var(--off-bg); color: var(--soft); }
+.day-sp .spaces-in { width: 64px; }
+.shop-adj td { background: #f7f8ff; }
+.shop-adj-box { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 4px 0; }
+.shop-adj-box .spaces-in { width: 80px; margin-left: 6px; } .pill.full { background: #fde2e2; color: #b91c1c; } .pill.closed { background: var(--off-bg); color: var(--soft); }
 .msg { border-radius: 12px; padding: 10px 14px; margin: 0 0 14px; } .msg.ok { background: var(--live-bg); color: var(--live); } .msg.err { background: #fde2e2; color: #b91c1c; }
 .check { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; cursor: pointer; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -242,7 +245,7 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
     var nShop = days.filter(function (d) { return d.source === 'shopify'; }).length;
     if (hidden) h += '<p class="help">' + hidden + (hidden === 1 ? ' camp day with 0 spaces and nobody booked is hidden.' : ' camp days with 0 spaces and nobody booked are hidden.') + '</p>';
     h += '<p class="help">' + days.length + ' camp days' + (nShop ? ' (' + nShop + ' on Shopify, ' + (days.length - nShop) + ' made here)' : '') + (days.length >= 3000 ? ' (first 3,000 shown: narrow the dates)' : '') +
-      (nShop ? '. Shopify camp days are sold on 4cats.com and don\u2019t share spaces: change them in the Hub or Shopify, as now.' : '') + '</p>';
+      (nShop ? '. Shopify camp days are sold on 4cats.com and don\u2019t share spaces: use \u201cAdjust spaces\u201d on a day to change its spaces left (live on Shopify).' : '') + '</p>';
     var groups = [], byKey = {};
     days.forEach(function (d, i) { var k = d.studio_id + '|' + d.session_date; if (!byKey[k]) { byKey[k] = { studio: d.studio_id, date: d.session_date, rows: [] }; groups.push(byKey[k]); } byKey[k].rows.push([d, i]); });
     var PART = { full: 'Full day', am: 'Morning', pm: 'Afternoon' };
@@ -263,12 +266,121 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
         h += '<tr' + (shop ? ' class="shop-row"' : '') + '><td>' + esc(d.program) + (shop ? ' <span class="pill shop" title="Sold on Shopify: change its spaces in the Hub or Shopify">Shopify</span>' : ' <span class="help">' + esc(PART[d.part] || '') + '</span>') + '</td>' +
           '<td>' + esc(timeLabel(d.session_time)) + '</td><td>' + d.booked + (shop && d.capacity != null ? ' of ' + d.capacity : '') + '</td><td>' + st + '</td>' +
           '<td style="white-space:nowrap">' + (edit ? '<button class="link" type="button" data-open="' + i + '">' + (d.closed ? 'Reopen' : 'Close') + '</button>' +
-          (d.booked ? '' : '<button class="btn-danger link" type="button" data-del="' + i + '">Delete</button>') : '') + '</td></tr>';
+          (d.booked ? '' : '<button class="btn-danger link" type="button" data-del="' + i + '">Delete</button>') : '') +
+          (canEdit && shop ? '<button class="link" type="button" data-shopadj="' + i + '">Adjust spaces</button>' : '') + '</td></tr>' +
+          (canEdit && shop ? '<tr class="shop-adj" id="shopadj-' + i + '" hidden><td colspan="5"></td></tr>' : '');
       });
       h += '</tbody>';
     });
     h += '</table></section>';
     return h;
+  }
+
+  // ---- Adjust spaces left on Shopify camp days (live Shopify inventory) ----
+  // Same title matching and shopify-inventory function as the Hub's spaces adjuster.
+function buildShopifyTitle(sessionDate, sessionTime, sessionTitle) {
+  const d = new Date(sessionDate + 'T12:00:00')
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  const day = days[d.getDay()], month = months[d.getMonth()], date = d.getDate()
+  const suffix = date===1||date===21||date===31?'st':date===2||date===22?'nd':date===3||date===23?'rd':'th'
+  const [h, m] = sessionTime.split(':').map(Number)
+  const hour = h===0?12:h>12?h-12:h
+  const ampm = h<12?'am':'pm'
+  const timeStr = m===0?`${hour}${ampm}`:`${hour}:${String(m).padStart(2,'0')}${ampm}`
+  const starPrefix = (h===9&&m===0)?'*':''
+  const titleLower = sessionTitle.toLowerCase().trim()
+  const TITLE_MAP = {
+    // New clean titles (Supabase = Shopify)
+    'kids party':'Kids Party','splatter party':'Splatter Party','field trip':'Field Trip',
+    'thursday clay night':'Thursday Clay Night',
+    // Legacy mappings for backward compatibility
+    'party time slot':null,'splatter party time slot':null,'field trip time slot':null,
+    'adult get-together time slot':'Adult Get Togethers, Parties & Group Booking',
+    'wheel workshop (adult & teen)':'Wheel Workshop','wheel workshop':'Wheel Workshop',
+    'friday night mixer':'Friday Night Mixer','friday night mixer (ages 16+)':'Friday Night Mixer',
+    'sunday morning family time mixer':'Sunday Morning Family Time Mixer',
+    'sunday early bird workshop':'Sunday Early Bird Workshop',
+    'mixed media class for kids ($10 for members)':'Mixed Media Class',
+    'thursdays: clay night':'Thursday Clay Night','natureware mugs':'Natureware Mug',
+    'summer camp half day morning':'Summer Camp Half Day','summer camp half day afternoon':'Summer Camp Half Day',
+    'no school day camp (ages 6-12)':'PA/PD Day','pd day':'PA/PD Day','pa day':'PA/PD Day','pa/pd day':'PA/PD Day',
+    "mother's day celebration":"Mother's Day",'afternoon art meetup':'Afternoon Art Meetup',
+    'saturday early bird workshop':'Saturday Early Bird Workshop',
+    'dragons session (ages 5-12) class 1 of 5':'Dragons 5 Week Kids Session',
+    'early drop off (mixed media class)':null,
+  }
+  if (/\b(class|week|session|part)\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(sessionTitle)) return null
+  if (titleLower in TITLE_MAP && TITLE_MAP[titleLower] === null) return null
+  if (titleLower === 'weekend workshop') return null
+  if (/^weekend workshop:\s*/i.test(sessionTitle)) return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${sessionTitle.replace(/^weekend workshop:\s*/i,'').trim()}`
+  if (titleLower.includes('wednesday paint night')) return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | Wednesday Paint Night`
+  if (TITLE_MAP[titleLower]) return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${TITLE_MAP[titleLower]}`
+  const seriesMatch = sessionTitle.match(/(\|\s*\d+\s+Week\s+Session.*)/i)
+  const seriesSuffix = seriesMatch ? ` ${seriesMatch[1].trim()}` : ''
+  let cleanTitle = sessionTitle.replace(/\s*\|.*$/, '').trim()
+  return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${cleanTitle}${seriesSuffix}`
+}
+
+const STUDIO_VARIANT_MAP = {
+  'AB-YYC-ING':'AB / CALGARY - INGLEWOOD','AB-STA-STA':'AB / ST ALBERT',
+  'BC-RICH-GC':'BC / RICHMOND - GARDEN CITY','BC-RICH-STV':'BC / RICHMOND - STEVESTON',
+  'BC-SUR-SSR':'BC / SURREY - SOUTH','BC-YVR-KIT':'BC / VANCOUVER - KITSILANO',
+  'BC-YVR-MS':'BC / VANCOUVER - MAIN STREET','BC-YVR-UBC':'BC / VANCOUVER - UBC',
+  'BC-YYJ-CSV':'BC / VICTORIA - COOK STREET VILLAGE','BC-YYJ-ESQ':'BC / VICTORIA - ESQUIMALT',
+  'BC-YYJ-OB':'BC / VICTORIA - OAK BAY','BC-YYJ-VIC':'BC / VICTORIA - UPTOWN',
+  'ON-BRL-BRL':'ON / BURLINGTON - SOUTH','ON-CMB-GLT':'ON / CAMBRIDGE - GALT',
+  'ON-ERN-ERN':'ON / ERIN','ON-HAM-OS':'ON / HAMILTON - OTTAWA STREET',
+  'ON-HAM-WD':'ON / HAMILTON - WATERDOWN','ON-HAM-WH':'ON / HAMILTON - WEST HARBOUR',
+  'ON-KGN-AP':'ON / KINGSTON - ARLINGTON PARK','ON-LDN-BYR':'ON / LONDON - BYRON',
+  'ON-LDN-WVG':'ON / LONDON - WORTLEY VILLAGE','ON-MIS-PC':'ON / MISSISSAUGA - PORT CREDIT',
+  'ON-OAK-OAK':'ON / OAKVILLE - NORTH','ON-OAK-WST':'ON / OAKVILLE - WEST',
+  'ON-YOW-GLB':'ON / OTTAWA - THE GLEBE','ON-STC-STC':'ON / ST CATHARINES',
+  'ON-YYZ-AVE':'ON / TORONTO - AVENUE ROAD','ON-YYZ-BP':'ON / TORONTO - BABY POINT',
+  'ON-YYZ-LEA':'ON / TORONTO - LEASIDE','ON-YYZ-BEA':'ON / TORONTO - THE BEACHES',
+  'ON-WTR-WTR':'ON / WATERLOO - UPTOWN'
+}
+
+  async function fnHeaders() {
+    var token = SUPABASE_ANON_KEY;
+    try { var d = await sb.auth.getSession(); if (d.data && d.data.session) token = d.data.session.access_token; } catch (e) {}
+    return { apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
+  }
+  async function invCall(body) { return (await fetch(SUPABASE_URL + '/functions/v1/shopify-inventory', { method: 'POST', headers: await fnHeaders(), body: JSON.stringify(body) })).json(); }
+  var shopAdj = {};
+  async function shopAdjustOpen(i) {
+    var d = days[i], row = document.getElementById('shopadj-' + i); if (!row) return;
+    if (!row.hidden) { row.hidden = true; return; }
+    row.hidden = false;
+    var cell = row.firstChild;
+    var title = buildShopifyTitle(d.session_date, d.session_time || '00:00:00', d.program);
+    if (!title) { cell.innerHTML = '<span class="help">This camp day has no Shopify product of its own, so its spaces can\u2019t be changed here.</span>'; return; }
+    cell.innerHTML = '<span class="help">Checking Shopify\u2026</span>';
+    var v = null;
+    try { var r = await invCall({ action: 'get_all', product_title: title }); if (!r.error && r.variants) v = r.variants.filter(function (z) { return z.variant_title === STUDIO_VARIANT_MAP[d.studio_id]; })[0] || null; } catch (e) {}
+    if (!v) { cell.innerHTML = '<span class="help">Couldn\u2019t find ' + esc(nameById[d.studio_id] || d.studio_id) + ' on the Shopify product \u201c' + esc(title) + '\u201d, so nothing can be changed here.</span>'; return; }
+    shopAdj[i] = v;
+    var left = Number(v.inventory_quantity || 0);
+    cell.innerHTML = '<div class="shop-adj-box"><span><b>' + d.booked + '</b> booked \u00b7 <b>' + left + '</b> left on Shopify right now</span>' +
+      '<label>Spaces left <input class="spaces-in" type="number" min="-100" max="500" value="' + left + '" id="shopadj-in-' + i + '"></label>' +
+      '<button class="btn btn-berry" type="button" id="shopadj-go-' + i + '" style="min-height:34px;padding:0 14px">Save</button>' +
+      '<span class="help" id="shopadj-msg-' + i + '">0 or a negative number closes it. This changes live Shopify inventory.</span></div>';
+    var inp = document.getElementById('shopadj-in-' + i); inp.focus(); inp.select();
+    document.getElementById('shopadj-go-' + i).addEventListener('click', function () { shopAdjustSave(i); });
+    inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') shopAdjustSave(i); });
+  }
+  async function shopAdjustSave(i) {
+    var d = days[i], v = shopAdj[i], msg = document.getElementById('shopadj-msg-' + i), btn = document.getElementById('shopadj-go-' + i);
+    var qty = parseInt(document.getElementById('shopadj-in-' + i).value, 10);
+    if (isNaN(qty) || qty < -100 || qty > 500) { msg.textContent = 'Enter how many spaces should be left (0 or a negative number closes it).'; return; }
+    btn.disabled = true; msg.textContent = 'Saving\u2026';
+    var old = Number(v.inventory_quantity || 0), r = null;
+    try { r = await invCall({ action: 'set', inventory_item_id: v.inventory_item_id, quantity: qty, studio_id: d.studio_id, product_title: buildShopifyTitle(d.session_date, d.session_time || '00:00:00', d.program) }); } catch (e) {}
+    if (!r || !r.inventory_level) { msg.textContent = (r && r.error) ? r.error : 'Shopify didn\u2019t accept the change. Try again.'; btn.disabled = false; return; }
+    var up = await sb.rpc('camp_day_shopify_spaces_saved', { p_session: d.id, p_left: qty, p_old: old });
+    flash = up.error ? ['err', 'Saved on Shopify, but the camp day didn\u2019t update here (' + up.error.message + '). The nightly sync will catch it up.']
+      : ['ok', 'Spaces left set to ' + qty + ' for ' + (nameById[d.studio_id] || d.studio_id) + ', ' + niceDate(d.session_date) + ' (live on Shopify).'];
+    await loadDays();
   }
 
   // ---- Add camp days: work out the dates in the page, preview, create ----
@@ -386,6 +498,7 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
     }
     $('fEmpty').addEventListener('change', function () { filt.empty = this.checked; loadDays(); });
     $('fGo').addEventListener('click', function () { filt.from = $('f_from').value || todayStr(); filt.to = $('f_to').value || addDays(filt.from, 120); filt.studio = $('f_studio').value; filt.program = $('f_prog').value; loadDays(); });
+    app.querySelectorAll('[data-shopadj]').forEach(function (b) { b.addEventListener('click', function () { shopAdjustOpen(+b.dataset.shopadj); }); });
     app.querySelectorAll('[data-daysave],[data-dayreset]').forEach(function (b) { b.addEventListener('click', async function () {
       var key = b.dataset.daysave || b.dataset.dayreset, k = key.split('|');
       var v = b.dataset.daysave ? parseInt(app.querySelector('[data-dayspaces="' + key + '"]').value, 10) : null;
