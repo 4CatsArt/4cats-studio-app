@@ -225,6 +225,15 @@ button.pill { cursor: pointer; }
 .mat-row input, .mat-row select { width: 100%; min-height: 28px; padding: 4px 7px; }
 .mat-row .x { background: none; border: none; color: #888; cursor: pointer; font-size: 15px; }
 .mat-cols { font-size: 10.5px; color: var(--muted); }
+.mat-row input:disabled { background: var(--soft); color: var(--ink); font-weight: 600; }
+.mat-parts { margin: 2px 0 8px 14px; padding-left: 10px; border-left: 2px solid var(--line-2); display: flex; flex-direction: column; gap: 4px; }
+.part-row { display: grid; grid-template-columns: minmax(130px, 1.4fr) 80px 16px 56px 26px; gap: 6px; align-items: center; }
+.part-row input { width: 100%; min-height: 26px; padding: 3px 7px; font-size: 12px; }
+.part-row .times { font-size: 12px; color: var(--muted); text-align: center; }
+.part-row .x { background: none; border: none; color: #888; cursor: pointer; font-size: 14px; }
+.mat-parts .part-total { font-size: 11.5px; color: var(--muted); }
+.mat-split { font-size: 11px; margin: 0 0 6px 14px; }
+input.bad-amount { border-color: #c0392b; background: #fdf0ee; }
 .prep-row { display: grid; grid-template-columns: minmax(150px, 1.4fr) 80px minmax(120px, 1.4fr) 26px; gap: 6px; align-items: center; }
 .prep-row select, .prep-row input { width: 100%; min-height: 28px; padding: 4px 7px; }
 .prep-row .x { background: none; border: none; color: #888; cursor: pointer; font-size: 15px; }
@@ -1211,7 +1220,10 @@ function openProjectEditor(id, presetName, onSaved) {
     kits: (p.tool_kit_ids || []).filter(id => kitById[id]),
     added: (p.tools_added || []).filter(id => toolById[id]),
     removed: (p.tools_removed || []).filter(id => toolById[id]),
-    materials: (p.materials || []).map(m => Object.assign({}, m)),
+    materials: (p.materials || []).map(m => Object.assign({}, m, {
+      qty: m.qty == null ? '' : fmtAmount(m.qty, m.unit),
+      parts: (m.parts || []).map(x => ({ name: x.name || '', qty: x.qty == null ? '' : fmtAmount(x.qty, m.unit), count: x.count || 1 }))
+    })),
     prepped: (p.prepped || []).filter(x => prepById[x.id]).map(x => Object.assign({}, x))
   }
   document.getElementById('ed-tool-entry').value = ''
@@ -1314,17 +1326,24 @@ async function saveProject() {
     tool_kit_ids: edSup.kits.slice(),
     tools_added: edSup.added.slice(),
     tools_removed: edSup.removed.filter(id => kitToolIds().has(id)),
-    materials: edSup.materials.map(m => ({
-      key: m.key || null, name: m.name,
-      qty: m.qty === '' || m.qty == null || isNaN(Number(m.qty)) ? null : Number(m.qty),
-      unit: nz(m.unit), note: nz(m.note)
-    })),
+    materials: edSup.materials.map(m => {
+      const parts = (m.parts || []).map(x => ({ name: String(x.name || '').trim(), qty: parseAmount(x.qty), count: Math.max(1, parseInt(x.count, 10) || 1) }))
+        .filter(x => x.name || x.qty != null)
+      return {
+        key: m.key || null, name: m.name,
+        qty: parts.length ? partsTotal(parts) : parseAmount(m.qty),
+        unit: nz(m.unit), note: nz(m.note),
+        parts: parts.length ? parts : null
+      }
+    }),
     prepped: edSup.prepped.filter(x => prepById[x.id]).map(x => ({
       id: x.id,
       qty: x.qty === '' || x.qty == null || isNaN(Number(x.qty)) ? null : Number(x.qty),
       note: nz(x.note)
     }))
   }
+  const badAmt = edSup.materials.find(m => !amountOk(m.qty) || (m.parts || []).some(x => !amountOk(x.qty)))
+  if (badAmt) { toast('Check the amounts for ' + badAmt.name + '. Use a number or a fraction like 1/2 or 1 1/4.', true); return }
   const btn = document.getElementById('ed-save')
   btn.disabled = true
   const q = editing ? sb.from('project_library').update(row).eq('id', editing.id) : sb.from('project_library').insert(row)
@@ -1347,12 +1366,55 @@ async function saveProject() {
    (inventory_items); colour pools (clay, Ditto) show once as "any colour".
    Anything not in inventory yet can still be typed in and linked later. */
 const POOL_NAMES = { 'CLAY-TOTAL': 'Clay (any colour)', 'OBC-TOTAL': 'Ditto (any colour)' }
-const POOL_UNITS = { 'CLAY-TOTAL': 'g', 'OBC-TOTAL': 'pack' }
-const POOL_HINTS = { 'CLAY-TOTAL': 'after the slab' }
-const UNITS = ['g', 'kg', 'pack', 'each', 'sheet', 'ml', 'cm']
+const POOL_UNITS = { 'CLAY-TOTAL': 'g', 'OBC-TOTAL': 'bar' }
+const POOL_HINTS = { 'CLAY-TOTAL': 'after the slab', 'OBC-TOTAL': '3 bars per pack' }
+// Ditto is bought and counted in packs but measured per project in bars
+const BARS_PER_PACK = { 'OBC-TOTAL': 3 }
+function packEquivalent(m, total) {
+  const per = BARS_PER_PACK[m.key]
+  if (!per || m.unit !== 'bar' || !(total > 0)) return ''
+  return ' (' + fmtAmount(total / per) + ' pack)'
+}
+const UNITS = ['g', 'kg', 'pack', 'bar', 'each', 'sheet', 'ml', 'cm']
+
+/* Amounts can be typed as numbers or fractions: 2, 0.5, 1/2, 1 1/4, ½.
+   Stored as plain numbers (0.25); shown back as fractions where they fit. */
+const UNICODE_FRAC = { '½': ' 1/2', '⅓': ' 1/3', '⅔': ' 2/3', '¼': ' 1/4', '¾': ' 3/4', '⅛': ' 1/8', '⅜': ' 3/8', '⅝': ' 5/8', '⅞': ' 7/8' }
+function parseAmount(v) {
+  if (v == null) return null
+  if (typeof v === 'number') return isFinite(v) ? v : NaN
+  let t = String(v).trim().replace(/[½⅓⅔¼¾⅛⅜⅝⅞]/g, c => UNICODE_FRAC[c]).trim()
+  if (!t) return null
+  let m = t.match(/^(\d+)\s+(\d+)\s*\/\s*(\d+)$/)               // 1 1/4
+  if (m && +m[3]) return +m[1] + m[2] / m[3]
+  m = t.match(/^(\d+)\s*\/\s*(\d+)$/)                             // 1/4
+  if (m && +m[2]) return m[1] / m[2]
+  if (/^\d*\.?\d+$/.test(t)) return Number(t)                        // 2 or 0.5
+  return NaN
+}
+function amountOk(v) { return !Number.isNaN(parseAmount(v)) }
+const DECIMAL_UNITS = ['g', 'kg', 'ml', 'cm']   // measured amounts read better as 12.5 than 12 1/2
+function fmtAmount(n, unit) {
+  if (n == null || n === '' || !isFinite(n)) return ''
+  n = Number(n)
+  if (DECIMAL_UNITS.includes(unit)) return String(Math.round(n * 100) / 100)
+  const whole = Math.floor(n + 1e-9), frac = n - whole
+  if (frac < 1e-6) return String(whole)
+  for (const d of [2, 3, 4, 6, 8]) {
+    const k = Math.round(frac * d)
+    if (k > 0 && k < d && Math.abs(frac - k / d) < 1e-3) {
+      let a = k, b = d; while (a % 2 === 0 && b % 2 === 0) { a /= 2; b /= 2 }
+      return (whole ? whole + ' ' : '') + a + '/' + b
+    }
+  }
+  return String(Math.round(n * 1000) / 1000)
+}
+function partsTotal(parts) {
+  return (parts || []).reduce((sum, x) => { const q = parseAmount(x.qty); return sum + (q > 0 ? q * Math.max(1, parseInt(x.count, 10) || 1) : 0) }, 0)
+}
 function unitSelectHtml(i, cur) {
   const list = UNITS.includes(cur) || !cur ? UNITS : [cur].concat(UNITS)
-  return '<select onchange="edSup.materials[' + i + '].unit=this.value" aria-label="Unit">' +
+  return '<select onchange="edSup.materials[' + i + '].unit=this.value;if((edSup.materials[' + i + '].parts||[]).length)renderMaterials()" aria-label="Unit">' +
     list.map(u => '<option' + (u === cur ? ' selected' : '') + '>' + esc(u) + '</option>').join('') + '</select>'
 }
 const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
@@ -1525,13 +1587,60 @@ function renderMaterials() {
       if (!m.unit) m.unit = (opt && opt.unit) || 'each'
       const sub = !m.key ? '<small class="untracked">not in inventory yet</small>'
         : POOL_HINTS[m.key] ? '<small>' + esc(POOL_HINTS[m.key]) + '</small>' : ''
+      const hasParts = (m.parts || []).length > 0
+      const total = hasParts ? fmtAmount(partsTotal(m.parts), m.unit) : (m.qty == null ? '' : m.qty)
       return '<div class="mat-row">' +
         '<div class="mat-name">' + esc(m.name) + sub + '</div>' +
-        '<input type="number" min="0" step="any" value="' + esc(m.qty == null ? '' : m.qty) + '" oninput="edSup.materials[' + i + '].qty=this.value" aria-label="Amount per person">' +
+        '<input type="text" id="mat-total-' + i + '" value="' + esc(total) + '"' + (hasParts ? ' disabled title="Total of the pieces below"' : '') +
+          ' placeholder="e.g. 1/2" oninput="edSup.materials[' + i + '].qty=this.value;this.classList.toggle(\'bad-amount\',!amountOk(this.value))" aria-label="Amount per person">' +
         unitSelectHtml(i, m.unit || (opt && opt.unit) || 'each') +
         '<input type="text" value="' + esc(m.note || '') + '" placeholder="optional" oninput="edSup.materials[' + i + '].note=this.value" aria-label="Note">' +
-        '<button type="button" class="x" aria-label="Remove ' + esc(m.name) + '" onclick="removeMaterial(' + i + ')">×</button></div>'
+        '<button type="button" class="x" aria-label="Remove ' + esc(m.name) + '" onclick="removeMaterial(' + i + ')">×</button></div>' +
+        (hasParts ? partsHtml(m, i) : '<div class="mat-split"><a href="#" onclick="addPart(' + i + ');return false">+ Split by piece</a></div>')
     }).join('')
+}
+
+/* Pieces: how much of a material each part of the project takes,
+   e.g. Ditto: body 1 bar, head 1/2 bar, arms/legs 1/4 bar × 4.
+   The material's amount per person becomes the total of its pieces. */
+function partsHtml(m, i) {
+  const unit = esc(m.unit || '')
+  return '<div class="mat-parts">' +
+    '<div class="part-row mat-cols"><span>Piece</span><span>Amount (' + unit + ')</span><span></span><span>How many</span><span></span></div>' +
+    m.parts.map((x, j) => '<div class="part-row">' +
+      '<input type="text" value="' + esc(x.name || '') + '" placeholder="e.g. head" oninput="edSup.materials[' + i + '].parts[' + j + '].name=this.value" aria-label="Piece">' +
+      '<input type="text" value="' + esc(x.qty == null ? '' : x.qty) + '" placeholder="e.g. 1/2" class="' + (amountOk(x.qty) ? '' : 'bad-amount') + '" oninput="setPartQty(' + i + ',' + j + ',this)" aria-label="Amount for this piece">' +
+      '<span class="times">×</span>' +
+      '<input type="number" min="1" step="1" value="' + esc(x.count || 1) + '" oninput="edSup.materials[' + i + '].parts[' + j + '].count=this.value;updateMatTotal(' + i + ')" aria-label="How many of this piece">' +
+      '<button type="button" class="x" aria-label="Remove piece" onclick="removePart(' + i + ',' + j + ')">×</button></div>').join('') +
+    '<div class="part-total"><a href="#" onclick="addPart(' + i + ');return false">+ Add piece</a> <span id="mat-ptotal-' + i + '">' + partsTotalLabel(m) + '</span></div>' +
+    '</div>'
+}
+function partsTotalLabel(m) { const t = partsTotal(m.parts); return 'Total ' + fmtAmount(t, m.unit) + ' ' + esc(m.unit || '') + ' per person' + packEquivalent(m, t) }
+function updateMatTotal(i) {
+  const m = edSup.materials[i]
+  const t = document.getElementById('mat-total-' + i), l = document.getElementById('mat-ptotal-' + i)
+  if (t) t.value = fmtAmount(partsTotal(m.parts), m.unit)
+  if (l) l.textContent = 'Total ' + fmtAmount(partsTotal(m.parts), m.unit) + ' ' + (m.unit || '') + ' per person' + packEquivalent(m, partsTotal(m.parts))
+}
+function setPartQty(i, j, el) {
+  edSup.materials[i].parts[j].qty = el.value
+  el.classList.toggle('bad-amount', !amountOk(el.value))
+  updateMatTotal(i)
+}
+function addPart(i) {
+  const m = edSup.materials[i]
+  if (!m.parts) m.parts = []
+  // first piece starts with whatever amount was already there
+  m.parts.push({ name: '', qty: m.parts.length ? '' : (m.qty == null ? '' : m.qty), count: 1 })
+  renderMaterials()
+}
+function removePart(i, j) {
+  const m = edSup.materials[i]
+  m.parts.splice(j, 1)
+  if (!m.parts.length) m.qty = ''
+  else m.qty = fmtAmount(partsTotal(m.parts), m.unit)
+  renderMaterials()
 }
 
 function addMaterial(raw, allowUntracked) {
@@ -1542,8 +1651,8 @@ function addMaterial(raw, allowUntracked) {
   const dupe = edSup.materials.some(m => opt ? m.key === opt.key : (!m.key && m.name.toLowerCase() === name.toLowerCase()))
   if (dupe) { toast('That material is already on the list.'); return true }
   edSup.materials.push(opt
-    ? { key: opt.key, name: opt.name, qty: '', unit: opt.unit, note: '' }
-    : { key: null, name, qty: '', unit: 'each', note: '' })
+    ? { key: opt.key, name: opt.name, qty: '', unit: opt.unit, note: '', parts: [] }
+    : { key: null, name, qty: '', unit: 'each', note: '', parts: [] })
   edSup.materials.sort(byName)
   renderMaterials()
   return true
