@@ -2795,7 +2795,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
       (canEdit ? '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn btn-berry" type="button" id="mmSave">Save</button><button class="btn btn-plain" type="button" id="mmRun">Sync now</button><button class="btn btn-plain" type="button" id="mmRecheck" title="Re-applies the right tag to every current member (e.g. after cancelling in Appstle)">Recheck all tags</button><span class="help" id="mmMsg"></span></div>' : '') +
       (canEdit ? '<h3 class="mem-h">Import from Appstle</h3>' +
         '<p class="help" style="margin:0 0 6px">The Appstle export saved as CSV (in Numbers: File \u2192 Export To \u2192 CSV). Only active memberships are imported, covered until their next order date, with auto-renew off. Importing the same file again updates, never duplicates.</p>' +
-        '<input type="file" id="impFile" accept=".csv,text/csv"><div id="impOut"></div>' +
+        '<input type="file" id="impFile" accept=".csv,text/csv" multiple><span class="help"> You can select all the export files at once.</span><div id="impOut"></div>' +
         '<h3 class="mem-h">Remove a tag from everyone</h3>' +
         '<p class="help" style="margin:0 0 6px">Searches <b>every customer in Shopify</b> for the tag, e.g. <code>bookeo-member</code>. Count first, then remove. Only that tag comes off: anyone who also has another member tag, or a membership here, stays a member.</p>' +
         '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><input type="text" id="rtTag" placeholder="bookeo-member" style="max-width:220px">' +
@@ -2869,14 +2869,25 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     var sv = document.getElementById('mmSave'); if (!sv) return;
     var fi = document.getElementById('impFile');
     if (fi) fi.addEventListener('change', function () {
-      var f = fi.files && fi.files[0]; if (!f) return;
-      var rd = new FileReader();
-      rd.onload = function () {
-        var R = readAppstle(String(rd.result || '')), box = $('impOut');
-        if (R.error) { box.innerHTML = '<p class="msg err">' + esc(R.error) + '</p>'; impRows = null; return; }
+      var files = Array.prototype.slice.call(fi.files || []); if (!files.length) return;
+      Promise.all(files.map(function (f) { return f.text(); })).then(function (texts) {
+        // read each file, then put them together (a contract in two files counts once)
+        var parts = texts.map(function (t, i) { var r = readAppstle(String(t || '')); r.name = files[i].name; return r; });
+        var bad = parts.filter(function (r) { return r.error; })[0], box = $('impOut');
+        if (bad) { box.innerHTML = '<p class="msg err">' + esc(bad.name + ': ' + bad.error) + '</p>'; impRows = null; return; }
+        var R = { rows: [], skip: { not_active: 0, ended: 0, no_email: 0, blank: 0, unpaid: 0 }, by: {}, noStudio: 0, statuses: {}, read: 0, cols: parts[0].cols, unpaidList: [] }, seen = {};
+        parts.forEach(function (r) {
+          r.rows.forEach(function (x) { if (seen[x.external_id]) return; seen[x.external_id] = 1; R.rows.push(x);
+            var k = (x.plan === 'workshops' ? 'Workshops Only' : '4Cats Member') + (x.discount_kind ? ' \u00b7 ' + x.discount_kind.replace('_', ' ') : ''); R.by[k] = (R.by[k] || 0) + 1;
+            if (!x.studio_id) R.noStudio++; });
+          Object.keys(r.skip).forEach(function (k) { R.skip[k] += r.skip[k]; });
+          Object.keys(r.statuses).forEach(function (k) { R.statuses[k] = (R.statuses[k] || 0) + r.statuses[k]; });
+          R.read += r.read; r.unpaidList.forEach(function (x) { if (R.unpaidList.indexOf(x) === -1) R.unpaidList.push(x); });
+        });
+        R.files = files.length;
         impRows = R.rows;
         box.innerHTML = '<div class="imp-prev"><p><b>' + R.rows.length + ' memberships to import</b></p><ul>' + Object.keys(R.by).sort().map(function (k) { return '<li>' + esc(k) + ': ' + R.by[k] + '</li>'; }).join('') + '</ul>' +
-          '<p class="help">Read ' + R.read + ' rows (' + R.cols + ' columns)' + (R.skip.blank ? ', ' + R.skip.blank + ' of them empty' : '') + '. Status column: ' + Object.keys(R.statuses).map(function (k) { return esc(k) + ' ' + R.statuses[k]; }).join(', ') + '.</p>' +
+          '<p class="help">Read ' + R.read + ' rows from ' + R.files + (R.files === 1 ? ' file' : ' files') + ' (' + R.cols + ' columns)' + (R.skip.blank ? ', ' + R.skip.blank + ' of them empty' : '') + '. Status column: ' + Object.keys(R.statuses).map(function (k) { return esc(k) + ' ' + R.statuses[k]; }).join(', ') + '.</p>' +
           '<p class="help">Imported: active ones, plus cancelled or paused ones that paid and are still within their year (they turned off auto-renew). Skipped: ' + R.skip.ended + ' already ended' +
             (R.skip.not_active ? ', ' + R.skip.not_active + ' with another status' : '') + (R.skip.unpaid ? ', ' + R.skip.unpaid + ' cancelled or paused without a paid order' : '') + (R.skip.no_email ? ', ' + R.skip.no_email + ' without an email' : '') + '.' +
             (R.noStudio ? ' ' + R.noStudio + ' have no home studio we recognize (they still import).' : '') + '</p>' +
@@ -2893,8 +2904,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
           $('impMsg').textContent = 'Done \u2713 ' + added + ' added, ' + updated + ' updated. Shopify IDs are filled in by email over the next runs (every 20 minutes).';
           var g2 = await sb.rpc('world_membership_settings_get'); if (!g2.error) memSet = g2.data;
         });
-      };
-      rd.readAsText(f);
+      });
     });
     var rtCall = async function (dry) {
       var tag = $('rtTag').value.trim(); if (!tag) { $('rtMsg').textContent = 'Type the tag first.'; return; }
