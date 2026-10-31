@@ -282,6 +282,8 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
 .hl-text { flex: 1; display: flex; flex-direction: column; line-height: 1.25; }
 .hl-text span { font-size: 13px; color: #7a705e; }
 .hl-eye { border: 1px solid var(--line, #e8dfcd); background: #fff; border-radius: 999px; width: 34px; height: 30px; cursor: pointer; font-size: 15px; }
+.v-round { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 4px 0; }
+.v-round input { border: 1px solid var(--line, #e8dfcd); border-radius: 8px; padding: 5px 8px; font: inherit; margin-left: 4px; }
 </style>
 </head>
 <body>
@@ -631,10 +633,9 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
         <h3>The vote</h3>
         <div class="field"><label for="v_title">Title</label><input type="text" id="v_title" maxlength="80" placeholder="Choose Your Favourite Mug Design"></div>
         <div class="field"><label for="v_sub">Line under it</label><input type="text" id="v_sub" maxlength="160" placeholder="Which one will you make? Tap a design to learn more and book!"></div>
-        <div class="two">
-          <div class="field"><label for="v_start">Show from (optional)</label><input type="date" id="v_start"></div>
-          <div class="field"><label for="v_end">Until (optional)</label><input type="date" id="v_end"></div>
-        </div>
+        <div class="field"><label>Rounds</label><div id="v_rounds"></div>
+          <button class="btn btn-plain" type="button" id="v_addround" style="margin-top:6px">+ Add a round</button>
+          <span class="help">One round: a simple vote (dates optional). More rounds: voting on round 1’s designs closes and round 2’s opens, and so on. Finished rounds show their winner, and the final winner shows for a week after.</span></div>
         <div class="two">
           <div class="field"><label for="v_pri">Priority (higher shows first)</label><input type="number" id="v_pri" value="0"></div>
           <div class="field"><label>&nbsp;</label><label class="check"><input type="checkbox" id="v_active" checked> Switched on</label></div>
@@ -643,6 +644,8 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
       </div>
       <div class="group">
         <h3>Designs</h3>
+        <p class="help" style="margin:0 0 8px">Upload a picture and name it, or pick a <b>🎨 project</b> (its name and marketing picture are used unless you add your own, and families get <b>Choose a date</b>).</p>
+        <datalist id="projList"></datalist>
         <div id="v_opts"></div>
         <button class="btn btn-plain" type="button" id="v_add">+ Add a design</button>
         <input type="file" id="v_pic" accept="image/*" hidden>
@@ -2795,33 +2798,65 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
         (canEdit ? '<button class="btn btn-danger" type="button" data-polldel="' + esc(p.id) + '">Delete</button>' : '') + '</div></div>' +
         (opts.length ? '<table><thead><tr><th>Design</th><th>\u2764\ufe0f Love it</th><th>\ud83d\udc4d Like it</th><th>Votes</th></tr></thead><tbody>' + opts.map(function (x, i) {
           return '<tr><td>' + (x.o.image_url ? '<img src="' + esc(x.o.image_url) + '" alt="" style="width:34px;height:34px;object-fit:cover;border-radius:6px;vertical-align:middle;margin-right:8px">' : '') +
-            (i === 0 && x.all ? '\ud83c\udfc6 ' : '') + esc(x.o.label) + '</td><td><b>' + x.t.love + '</b></td><td>' + x.t.like + '</td><td class="tmeta">' + x.all + '</td></tr>';
+            (i === 0 && x.all ? '\ud83c\udfc6 ' : '') + (p.rounds && p.rounds.length > 1 ? '<span class="pill">Round ' + (x.o.round || 1) + '</span> ' : '') + (x.o.project_id ? '\ud83c\udfa8 ' : '') + esc(x.o.label) + '</td><td><b>' + x.t.love + '</b></td><td>' + x.t.like + '</td><td class="tmeta">' + x.all + '</td></tr>';
         }).join('') + '</tbody></table>' : '<div class="empty">No designs yet.</div>') + '</div>';
     });
     return h + '</section>';
   }
   var pollEditor = document.getElementById('pollEditor'), pollDraft = null, pollPicFor = null;
+  function drawRounds() {
+    var R = pollDraft.rounds;
+    $('v_rounds').innerHTML = R.map(function (r, i) {
+      return '<div class="v-round"><b>Round ' + (i + 1) + '</b>' +
+        '<label>From <input type="date" data-rstart="' + i + '" value="' + esc(r.starts_on || '') + '"></label>' +
+        '<label>to <input type="date" data-rend="' + i + '" value="' + esc(r.ends_on || '') + '"></label>' +
+        (R.length > 1 ? '<button class="link-btn" type="button" data-rdel="' + i + '">Remove</button>' : '') + '</div>';
+    }).join('');
+  }
+  function keepRounds() {
+    $('v_rounds').querySelectorAll('[data-rstart]').forEach(function (el) { pollDraft.rounds[+el.dataset.rstart].starts_on = el.value || null; });
+    $('v_rounds').querySelectorAll('[data-rend]').forEach(function (el) { pollDraft.rounds[+el.dataset.rend].ends_on = el.value || null; });
+  }
+  function projName(id) { var x = (featureChoices || []).filter(function (f) { return f.kind === 'project' && f.project_id === id; })[0]; return x ? x.title : ''; }
   function drawPollOpts() {
+    var multi = pollDraft.rounds.length > 1;
     $('v_opts').innerHTML = pollDraft.options.map(function (o, i) {
-      return '<div style="display:grid;grid-template-columns:64px 1fr 1fr auto;gap:8px;align-items:center;margin-bottom:8px">' +
+      return '<div style="display:grid;grid-template-columns:64px 1fr 1fr ' + (multi ? '110px ' : '') + 'auto;gap:8px;align-items:center;margin-bottom:8px">' +
         '<button type="button" data-vpic="' + i + '" title="Choose a picture" style="width:64px;height:64px;border-radius:10px;border:1px dashed #cbbfa5;background:#f6f3ea center/cover no-repeat' + (o.image_url ? ' url(\'' + esc(o.image_url).replace(/'/g, '') + '\')' : '') + ';cursor:pointer;font-size:11px">' + (o.image_url ? '' : 'Picture') + '</button>' +
-        '<input type="text" data-vlabel="' + i + '" value="' + esc(o.label || '') + '" placeholder="Design name, e.g. Snowman" maxlength="60">' +
-        '<input type="text" data-vurl="' + i + '" value="' + esc(o.url || '') + '" placeholder="Link (optional)">' +
+        '<span style="display:flex;flex-direction:column;gap:4px"><input type="text" data-vlabel="' + i + '" value="' + esc(o.label || '') + '" placeholder="' + (o.project_id ? esc(projName(o.project_id) || 'The project\u2019s name') : 'Design name, e.g. Snowman') + '" maxlength="60">' +
+          '<input type="search" list="projList" data-vproj="' + i + '" value="' + esc(o.project_id ? (projName(o.project_id) || o.project_name || '') : '') + '" placeholder="\ud83c\udfa8 or pick a project (optional)" autocomplete="off"></span>' +
+        (o.project_id ? '<span class="help">Families get <b>Choose a date</b> for this project.</span>' : '<input type="text" data-vurl="' + i + '" value="' + esc(o.url || '') + '" placeholder="Link (optional)">') +
+        (multi ? '<select data-vround="' + i + '">' + pollDraft.rounds.map(function (_, n) { return '<option value="' + (n + 1) + '"' + ((o.round || 1) === n + 1 ? ' selected' : '') + '>Round ' + (n + 1) + '</option>'; }).join('') + '</select>' : '') +
         '<span style="white-space:nowrap"><button class="link-btn" type="button" data-vmove="' + i + '" data-d="-1"' + (i ? '' : ' disabled') + '>\u2191</button>' +
         '<button class="link-btn" type="button" data-vmove="' + i + '" data-d="1"' + (i < pollDraft.options.length - 1 ? '' : ' disabled') + '>\u2193</button>' +
         '<button class="link-btn" type="button" data-vdel="' + i + '">Remove</button></span></div>';
     }).join('') || '<p class="help">No designs yet. Add one below.</p>';
   }
   function keepPollFields() {
+    keepRounds();
     $('v_opts').querySelectorAll('[data-vlabel]').forEach(function (el) { pollDraft.options[+el.dataset.vlabel].label = el.value; });
     $('v_opts').querySelectorAll('[data-vurl]').forEach(function (el) { pollDraft.options[+el.dataset.vurl].url = el.value; });
+    $('v_opts').querySelectorAll('[data-vround]').forEach(function (el) { pollDraft.options[+el.dataset.vround].round = +el.value; });
+    $('v_opts').querySelectorAll('[data-vproj]').forEach(function (el) {
+      var o = pollDraft.options[+el.dataset.vproj], v = el.value.trim();
+      if (!v) { o.project_id = null; return; }
+      var hit = (featureChoices || []).filter(function (f) { return f.kind === 'project' && f.title.toLowerCase() === v.toLowerCase(); })[0];
+      if (hit) { o.project_id = hit.project_id; o.project_name = hit.title; }
+    });
   }
   function openPoll(p) {
     pollDraft = p ? JSON.parse(JSON.stringify(p)) : { title: '', subtitle: '', active: true, priority: 0 };
-    pollDraft.options = p ? pollData.options.filter(function (o) { return o.poll_id === p.id; }).map(function (o) { return { id: o.id, label: o.label, image_url: o.image_url, url: o.url }; }) : [];
+    pollDraft.options = p ? pollData.options.filter(function (o) { return o.poll_id === p.id; }).map(function (o) { return { id: o.id, label: o.label, image_url: o.image_url, url: o.url, round: o.round || 1, project_id: o.project_id || null }; }) : [];
+    pollDraft.rounds = (p && p.rounds && p.rounds.length) ? p.rounds.map(function (r) { return { starts_on: r.starts_on, ends_on: r.ends_on }; })
+      : [{ starts_on: (p && p.starts_on) || null, ends_on: (p && p.ends_on) || null }];
     $('pollErr').hidden = true;
     $('v_title').value = pollDraft.title || ''; $('v_sub').value = pollDraft.subtitle || '';
-    $('v_start').value = pollDraft.starts_on || ''; $('v_end').value = pollDraft.ends_on || '';
+    drawRounds();
+    loadFeatureChoices('').then(function () {   // projects for the picker
+      $('projList').innerHTML = (featureChoices || []).filter(function (f) { return f.kind === 'project'; }).map(function (f) {
+        return '<option value="' + esc(f.title) + '" label="next ' + esc(niceDate(f.next_date)) + ' \u00b7 ' + f.studios + (f.studios === 1 ? ' studio' : ' studios') + '"></option>'; }).join('');
+      drawPollOpts();
+    });
     $('v_pri').value = pollDraft.priority || 0; $('v_active').checked = pollDraft.active !== false;
     $('pollSave').hidden = !canEdit; $('v_add').hidden = !canEdit;
     drawPollOpts();
@@ -2843,7 +2878,23 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
       });
     });
   }
-  $('v_add').addEventListener('click', function () { keepPollFields(); pollDraft.options.push({ label: '', image_url: null, url: '' }); drawPollOpts(); });
+  $('v_add').addEventListener('click', function () { keepPollFields(); pollDraft.options.push({ label: '', image_url: null, url: '', round: pollDraft.rounds.length }); drawPollOpts(); });
+  $('v_addround').addEventListener('click', function () {
+    keepPollFields();
+    var last = pollDraft.rounds[pollDraft.rounds.length - 1], next = null;
+    if (last.ends_on) { var d = new Date(last.ends_on + 'T12:00:00'); d.setDate(d.getDate() + 1); next = d.toISOString().slice(0, 10); }
+    pollDraft.rounds.push({ starts_on: next, ends_on: null }); drawRounds(); drawPollOpts();
+  });
+  $('v_rounds').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-rdel]'); if (!b) return;
+    keepPollFields();
+    var n = +b.dataset.rdel + 1;
+    if (pollDraft.options.some(function (o) { return (o.round || 1) === n; }) && !confirm('Remove round ' + n + '? Its designs move to the round before.')) return;
+    pollDraft.rounds.splice(n - 1, 1);
+    pollDraft.options.forEach(function (o) { if ((o.round || 1) >= n) o.round = Math.max(1, (o.round || 1) - 1); });
+    drawRounds(); drawPollOpts();
+  });
+  $('v_opts').addEventListener('change', function (e) { if (e.target.dataset && e.target.dataset.vproj !== undefined) { keepPollFields(); drawPollOpts(); } });
   $('v_opts').addEventListener('click', function (e) {
     var t = e.target.closest('button'); if (!t) return;
     keepPollFields();
@@ -2869,14 +2920,21 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
   $('pollSave').addEventListener('click', async function () {
     keepPollFields();
     var err = $('pollErr'); err.hidden = true;
+    var R = pollDraft.rounds, multi = R.length > 1;
     var p = Object.assign({}, pollDraft, {
       title: $('v_title').value.trim(), subtitle: $('v_sub').value.trim() || null,
-      starts_on: $('v_start').value || null, ends_on: $('v_end').value || null,
+      starts_on: R[0].starts_on || null, ends_on: R[R.length - 1].ends_on || null,
+      rounds: multi ? R : null,
       priority: parseInt($('v_pri').value, 10) || 0, active: $('v_active').checked,
-      options: pollDraft.options.filter(function (o) { return (o.label || '').trim(); })
+      options: pollDraft.options.filter(function (o) { return (o.label || '').trim() || o.project_id; }).map(function (o) {
+        return { id: o.id, label: (o.label || '').trim(), image_url: o.image_url, url: o.project_id ? null : o.url, round: multi ? (o.round || 1) : 1, project_id: o.project_id || null }; })
     });
+    delete p.project_name;
     if (!p.title) { err.textContent = 'Give the vote a title.'; err.hidden = false; return; }
-    if (p.options.length < 2) { err.textContent = 'Add at least two designs.'; err.hidden = false; return; }
+    if (multi && R.some(function (r) { return !r.starts_on || !r.ends_on; })) { err.textContent = 'Give every round its dates.'; err.hidden = false; return; }
+    var short = (multi ? R : [0]).map(function (_, n) { return p.options.filter(function (o) { return o.round === n + 1; }).length; });
+    var bad = short.findIndex(function (c) { return c < 2; });
+    if (bad !== -1) { err.textContent = multi ? 'Round ' + (bad + 1) + ' needs at least two designs.' : 'Add at least two designs.'; err.hidden = false; return; }
     this.disabled = true;
     var r = await sb.rpc('world_poll_save', { p: p });
     this.disabled = false;
