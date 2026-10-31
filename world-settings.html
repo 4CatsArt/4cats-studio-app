@@ -311,6 +311,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
 .mem-kinds { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 8px; }
 .imp-prev { border: 1px solid var(--line, #e8dfcd); border-radius: 12px; padding: 10px 14px; margin-top: 8px; background: #fffdf7; }
 .imp-prev ul { margin: 4px 0 6px; padding-left: 18px; }
+.imp-unpaid { margin: 4px 0 10px; font-size: 13px; } .imp-unpaid summary { cursor: pointer; font-weight: 700; color: #a35a00; }
 </style>
 </head>
 <body>
@@ -2817,9 +2818,14 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
   }
   function appstleStudio(attr) {   // {"What is your …": "BC - VICTORIA - UPTOWN"} → BC-YYJ-VIC
     var v = ''; try { var o = JSON.parse(attr || '{}'); v = o[Object.keys(o)[0]] || ''; } catch (e) { v = String(attr || ''); }
-    var parts = String(v).split('-').map(function (x) { return x.trim(); }), want = parts.slice(1).join(' ').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
+    var parts = String(v).split(/\s+-\s+|\s*-\s*/).map(function (x) { return x.trim(); }).filter(Boolean);
+    if (parts.length > 1 && /^(BC|AB|ON)$/i.test(parts[0])) parts = parts.slice(1);   // with or without the province
+    var norm = function (t) { return String(t).toUpperCase().replace(/[^A-Z0-9]+/g, ' ').replace(/\bSAINT\b/g, 'ST').trim(); };
+    var want = norm(parts.join(' '));
+    var OLD = { 'KINGSTON GARDINERS': 'ON-KGN-AP', 'OAKVILLE TRAFALGAR': 'ON-OAK-OAK' };   // old studio names
+    if (OLD[want]) return OLD[want];
     var hit = null;
-    STUDIOS.forEach(function (g) { g.list.forEach(function (st) { if (st[1].toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim() === want) hit = st[0]; }); });
+    STUDIOS.forEach(function (g) { g.list.forEach(function (st) { if (norm(st[1]) === want) hit = st[0]; }); });
     return hit;
   }
   function appstlePlan(title) {
@@ -2835,23 +2841,29 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     var need = ['ID', 'Status', 'Customer email', 'Next order date', 'Line 0 title'];
     var miss = need.filter(function (n) { return col(n) === -1; });
     if (miss.length) return { error: 'This doesn\u2019t look like the Appstle export: missing ' + miss.join(', ') + '.' };
-    var today = new Date().toISOString().slice(0, 10), out = [], skip = { not_active: 0, ended: 0, no_email: 0, blank: 0 }, by = {}, noStudio = 0, statuses = {};
+    var today = new Date().toISOString().slice(0, 10), out = [], skip = { not_active: 0, ended: 0, no_email: 0, blank: 0, unpaid: 0 }, unpaidList = [], by = {}, noStudio = 0, statuses = {};
     rows.slice(1).forEach(function (r) {
       var g = function (n) { var i = col(n); return i === -1 ? '' : String(r[i] || '').trim(); };
       if (!g('ID') && !g('Customer email')) { skip.blank++; return; }   // empty rows (Numbers adds some)
       var stv = g('Status') || '(blank)'; statuses[stv] = (statuses[stv] || 0) + 1;
-      if (g('Status').toLowerCase() !== 'active') { skip.not_active++; return; }
+      // "cancelled"/"paused" in Appstle usually means auto-renew was turned off after paying:
+      // still a member until the next order date, if the first order was paid
+      var status = g('Status').toLowerCase();
+      if (['active', 'cancelled', 'paused'].indexOf(status) === -1) { skip.not_active++; return; }
       var email = g('Customer email').toLowerCase(); if (!email) { skip.no_email++; return; }
       var ends = g('Next order date').slice(0, 10); if (!ends || ends < today) { skip.ended++; return; }
+      var fo = g('First order name'), paid = fo && !/unknown/i.test(fo) && Number(g('First order amount') || 0) > 0;
+      if (status !== 'active' && !paid) { skip.unpaid++; unpaidList.push(email + ' (' + status + ', ' + (g('Line 0 title').replace(/^Membership\s*-?\s*/i, '') || 'membership') + ')'); return; }
       var P = appstlePlan(g('Line 0 title')), st = appstleStudio(g('Line 0 Attributes'));
       if (!st) noStudio++;
       var k = (P.plan === 'workshops' ? 'Workshops Only' : '4Cats Member') + (P.discount_kind ? ' \u00b7 ' + P.discount_kind.replace('_', ' ') : '');
       by[k] = (by[k] || 0) + 1;
       out.push({ external_id: g('ID').replace(/\.0+$/, ''), email: email, name: g('Customer name'), plan: P.plan, discount_kind: P.discount_kind,
         starts_on: g('Created at').slice(0, 10), ends_on: ends, price_paid: g('Line 0 price amount') || null, studio_id: st, title: g('Line 0 title'),
-        notes: g('Cancellation date') ? 'Cancelled auto-renew in Appstle on ' + g('Cancellation date').slice(0, 10) : null });
+        notes: status === 'paused' ? 'Paused in Appstle' + (g('Paused on date') ? ' on ' + g('Paused on date').slice(0, 10) : '')
+          : g('Cancellation date') ? 'Turned off auto-renew in Appstle on ' + g('Cancellation date').slice(0, 10) : null });
     });
-    return { rows: out, skip: skip, by: by, noStudio: noStudio, statuses: statuses, read: rows.length - 1, cols: H.length };
+    return { rows: out, skip: skip, by: by, noStudio: noStudio, statuses: statuses, read: rows.length - 1, cols: H.length, unpaidList: unpaidList };
   }
   function bindMembership() {
     var sv = document.getElementById('mmSave'); if (!sv) return;
@@ -2865,7 +2877,10 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
         impRows = R.rows;
         box.innerHTML = '<div class="imp-prev"><p><b>' + R.rows.length + ' memberships to import</b></p><ul>' + Object.keys(R.by).sort().map(function (k) { return '<li>' + esc(k) + ': ' + R.by[k] + '</li>'; }).join('') + '</ul>' +
           '<p class="help">Read ' + R.read + ' rows (' + R.cols + ' columns)' + (R.skip.blank ? ', ' + R.skip.blank + ' of them empty' : '') + '. Status column: ' + Object.keys(R.statuses).map(function (k) { return esc(k) + ' ' + R.statuses[k]; }).join(', ') + '.</p>' +
-          '<p class="help">Skipped: ' + R.skip.not_active + ' not active, ' + R.skip.ended + ' already ended' + (R.skip.no_email ? ', ' + R.skip.no_email + ' without an email' : '') + '.' + (R.noStudio ? ' ' + R.noStudio + ' have no home studio we recognize (they still import).' : '') + '</p>' +
+          '<p class="help">Imported: active ones, plus cancelled or paused ones that paid and are still within their year (they turned off auto-renew). Skipped: ' + R.skip.ended + ' already ended' +
+            (R.skip.not_active ? ', ' + R.skip.not_active + ' with another status' : '') + (R.skip.unpaid ? ', ' + R.skip.unpaid + ' cancelled or paused without a paid order' : '') + (R.skip.no_email ? ', ' + R.skip.no_email + ' without an email' : '') + '.' +
+            (R.noStudio ? ' ' + R.noStudio + ' have no home studio we recognize (they still import).' : '') + '</p>' +
+          (R.unpaidList.length ? '<details class="imp-unpaid"><summary>Check these ' + R.unpaidList.length + ' by hand (no paid order found)</summary><ul>' + R.unpaidList.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul></details>' : '') +
           '<button class="btn btn-berry" type="button" id="impGo">Import ' + R.rows.length + ' memberships</button> <span class="help" id="impMsg"></span></div>';
         $('impGo').addEventListener('click', async function () {
           var b = this; b.disabled = true; var added = 0, updated = 0;
