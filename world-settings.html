@@ -309,6 +309,8 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
 .three { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 @media (max-width: 760px) { .three { grid-template-columns: 1fr; } }
 .mem-kinds { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 8px; }
+.imp-prev { border: 1px solid var(--line, #e8dfcd); border-radius: 12px; padding: 10px 14px; margin-top: 8px; background: #fffdf7; }
+.imp-prev ul { margin: 4px 0 6px; padding-left: 18px; }
 </style>
 </head>
 <body>
@@ -2789,11 +2791,105 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
       '<p class="help" style="margin:2px 0 8px">Turn on after the Appstle import has been checked. Adds the tag when someone becomes a member, and removes it when their membership ends.</p>' +
       '<label class="check"><input type="checkbox" id="mmLegacy"' + (S.remove_legacy_tags ? ' checked' : '') + dis + '> Remove the old member tags (' + esc((S.legacy_tags || []).join(', ')) + ')</label>' +
       '<p class="help" style="margin:2px 0 8px;color:#a35a00">Only after the booking widgets and Shopify discounts use the new tags, and Appstle is uninstalled.</p>' +
-      (canEdit ? '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn btn-berry" type="button" id="mmSave">Save</button><button class="btn btn-plain" type="button" id="mmRun">Sync now</button><span class="help" id="mmMsg"></span></div>' : '') +
+      (canEdit ? '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn btn-berry" type="button" id="mmSave">Save</button><button class="btn btn-plain" type="button" id="mmRun">Sync now</button><button class="btn btn-plain" type="button" id="mmRecheck" title="Re-applies the right tag to every current member (e.g. after cancelling in Appstle)">Recheck all tags</button><span class="help" id="mmMsg"></span></div>' : '') +
+      (canEdit ? '<h3 class="mem-h">Import from Appstle</h3>' +
+        '<p class="help" style="margin:0 0 6px">The Appstle export saved as CSV (in Numbers: File \u2192 Export To \u2192 CSV). Only active memberships are imported, covered until their next order date, with auto-renew off. Importing the same file again updates, never duplicates.</p>' +
+        '<input type="file" id="impFile" accept=".csv,text/csv"><div id="impOut"></div>' +
+        '<h3 class="mem-h">Remove a tag from everyone</h3>' +
+        '<p class="help" style="margin:0 0 6px">E.g. <code>bookeo-member</code>. Count first, then remove. Customers who also have a membership here keep it.</p>' +
+        '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><input type="text" id="rtTag" placeholder="bookeo-member" style="max-width:220px">' +
+        '<button class="btn btn-plain" type="button" id="rtCount">Count</button><button class="btn btn-danger" type="button" id="rtGo">Remove it</button><span class="help" id="rtMsg"></span></div>' : '') +
       '</section>';
+  }
+  // ---- Appstle import ----
+  function parseCsv(text) {   // RFC 4180: quotes, commas and line breaks inside quotes
+    var rows = [], row = [], f = '', q = false;
+    for (var i = 0; i < text.length; i++) {
+      var c = text[i];
+      if (q) { if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += c; }
+      else if (c === '"') q = true;
+      else if (c === ',') { row.push(f); f = ''; }
+      else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(f); rows.push(row); row = []; f = ''; }
+      else f += c;
+    }
+    if (f || row.length) { row.push(f); rows.push(row); }
+    return rows.filter(function (r) { return r.some(function (x) { return String(x).trim(); }); });
+  }
+  function appstleStudio(attr) {   // {"What is your …": "BC - VICTORIA - UPTOWN"} → BC-YYJ-VIC
+    var v = ''; try { var o = JSON.parse(attr || '{}'); v = o[Object.keys(o)[0]] || ''; } catch (e) { v = String(attr || ''); }
+    var parts = String(v).split('-').map(function (x) { return x.trim(); }), want = parts.slice(1).join(' ').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
+    var hit = null;
+    STUDIOS.forEach(function (g) { g.list.forEach(function (st) { if (st[1].toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim() === want) hit = st[0]; }); });
+    return hit;
+  }
+  function appstlePlan(title) {
+    var t = String(title || '').toLowerCase();
+    var plan = /workshop/.test(t) ? 'workshops' : 'member';
+    var dk = plan === 'workshops' ? null : /teen|student/.test(t) ? 'student' : /senior/.test(t) ? 'senior' : /military|veteran/.test(t) ? 'military' : /first responder/.test(t) ? 'first_responder' : /educator/.test(t) ? 'educator' : null;
+    return { plan: plan, discount_kind: dk };
+  }
+  var impRows = null;
+  function readAppstle(text) {
+    var rows = parseCsv(text); if (rows.length < 2) return { error: 'That file looks empty.' };
+    var H = rows[0].map(function (h) { return h.trim(); }), col = function (n) { return H.indexOf(n); };
+    var need = ['ID', 'Status', 'Customer email', 'Next order date', 'Line 0 title'];
+    var miss = need.filter(function (n) { return col(n) === -1; });
+    if (miss.length) return { error: 'This doesn\u2019t look like the Appstle export: missing ' + miss.join(', ') + '.' };
+    var today = new Date().toISOString().slice(0, 10), out = [], skip = { not_active: 0, ended: 0, no_email: 0 }, by = {}, noStudio = 0;
+    rows.slice(1).forEach(function (r) {
+      var g = function (n) { var i = col(n); return i === -1 ? '' : String(r[i] || '').trim(); };
+      if (g('Status').toLowerCase() !== 'active') { skip.not_active++; return; }
+      var email = g('Customer email').toLowerCase(); if (!email) { skip.no_email++; return; }
+      var ends = g('Next order date').slice(0, 10); if (!ends || ends < today) { skip.ended++; return; }
+      var P = appstlePlan(g('Line 0 title')), st = appstleStudio(g('Line 0 Attributes'));
+      if (!st) noStudio++;
+      var k = (P.plan === 'workshops' ? 'Workshops Only' : '4Cats Member') + (P.discount_kind ? ' \u00b7 ' + P.discount_kind.replace('_', ' ') : '');
+      by[k] = (by[k] || 0) + 1;
+      out.push({ external_id: g('ID').replace(/\.0+$/, ''), email: email, name: g('Customer name'), plan: P.plan, discount_kind: P.discount_kind,
+        starts_on: g('Created at').slice(0, 10), ends_on: ends, price_paid: g('Line 0 price amount') || null, studio_id: st, title: g('Line 0 title'),
+        notes: g('Cancellation date') ? 'Cancelled auto-renew in Appstle on ' + g('Cancellation date').slice(0, 10) : null });
+    });
+    return { rows: out, skip: skip, by: by, noStudio: noStudio };
   }
   function bindMembership() {
     var sv = document.getElementById('mmSave'); if (!sv) return;
+    var fi = document.getElementById('impFile');
+    if (fi) fi.addEventListener('change', function () {
+      var f = fi.files && fi.files[0]; if (!f) return;
+      var rd = new FileReader();
+      rd.onload = function () {
+        var R = readAppstle(String(rd.result || '')), box = $('impOut');
+        if (R.error) { box.innerHTML = '<p class="msg err">' + esc(R.error) + '</p>'; impRows = null; return; }
+        impRows = R.rows;
+        box.innerHTML = '<div class="imp-prev"><p><b>' + R.rows.length + ' memberships to import</b></p><ul>' + Object.keys(R.by).sort().map(function (k) { return '<li>' + esc(k) + ': ' + R.by[k] + '</li>'; }).join('') + '</ul>' +
+          '<p class="help">Skipped: ' + R.skip.not_active + ' not active, ' + R.skip.ended + ' already ended' + (R.skip.no_email ? ', ' + R.skip.no_email + ' without an email' : '') + '.' + (R.noStudio ? ' ' + R.noStudio + ' have no home studio we recognize (they still import).' : '') + '</p>' +
+          '<button class="btn btn-berry" type="button" id="impGo">Import ' + R.rows.length + ' memberships</button> <span class="help" id="impMsg"></span></div>';
+        $('impGo').addEventListener('click', async function () {
+          var b = this; b.disabled = true; var added = 0, updated = 0;
+          for (var i = 0; i < impRows.length; i += 200) {
+            $('impMsg').textContent = 'Importing\u2026 ' + Math.min(i + 200, impRows.length) + ' of ' + impRows.length;
+            var r = await sb.rpc('world_memberships_import', { p_rows: impRows.slice(i, i + 200), p_by: ($('who') && $('who').textContent) || null });
+            if (r.error) { $('impMsg').textContent = 'Stopped: ' + r.error.message + ' (' + added + ' added so far; importing again carries on safely).'; b.disabled = false; return; }
+            added += r.data.added; updated += r.data.updated;
+          }
+          $('impMsg').textContent = 'Done \u2713 ' + added + ' added, ' + updated + ' updated. Shopify IDs are filled in by email over the next runs (every 20 minutes).';
+          var g2 = await sb.rpc('world_membership_settings_get'); if (!g2.error) memSet = g2.data;
+        });
+      };
+      rd.readAsText(f);
+    });
+    var rtCall = async function (dry) {
+      var tag = $('rtTag').value.trim(); if (!tag) { $('rtMsg').textContent = 'Type the tag first.'; return; }
+      if (!dry && !confirm('Remove the tag \u201c' + tag + '\u201d from every customer in Shopify who has it?')) return;
+      $('rtMsg').textContent = dry ? 'Counting\u2026' : 'Removing\u2026';
+      try {
+        var r = await fetch(SUPABASE_URL + '/functions/v1/membership-sync', { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + SUPABASE_ANON_KEY }, body: JSON.stringify({ remove_tag: tag, dry_run: dry }) });
+        var d = await r.json();
+        $('rtMsg').textContent = d.error ? d.error : dry ? (d.count + (d.more ? '+' : '') + ' customers have \u201c' + tag + '\u201d.') : ('Removed from ' + d.removed + ' customers.' + (d.more ? ' Press again to carry on.' : ' All done \u2713'));
+      } catch (e) { $('rtMsg').textContent = 'Didn\u2019t run: ' + e.message; }
+    };
+    $('rtCount').addEventListener('click', function () { rtCall(true); });
+    $('rtGo').addEventListener('click', function () { rtCall(false); });
     sv.addEventListener('click', async function () {
       var S = (memSet && memSet.settings) || {};
       var lines = $('mmK').value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean);
@@ -2810,15 +2906,20 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
       if (r.error) { $('mmMsg').textContent = 'Not saved: ' + r.error.message; return; }
       memSet.settings = Object.assign({}, S, p); $('mmMsg').textContent = 'Saved \u2713';
     });
-    $('mmRun').addEventListener('click', async function () {
-      var b = this; b.disabled = true; $('mmMsg').textContent = 'Syncing\u2026';
+    $('mmRecheck').addEventListener('click', function () {
+      if (!confirm('Re-apply the right membership tag to every current member? It runs in the background over the next few hours.')) return;
+      runSync('{"recheck":true}', this);
+    });
+    $('mmRun').addEventListener('click', function () { runSync('{}', this); });
+    async function runSync(payload, b) {
+      b.disabled = true; $('mmMsg').textContent = 'Syncing\u2026';
       try {
-        var r = await fetch(SUPABASE_URL + '/functions/v1/membership-sync', { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + SUPABASE_ANON_KEY }, body: '{}' });
+        var r = await fetch(SUPABASE_URL + '/functions/v1/membership-sync', { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + SUPABASE_ANON_KEY }, body: payload });
         var d = await r.json();
         $('mmMsg').textContent = d.error ? 'Didn\u2019t run: ' + d.error : (d.expired || 0) + ' memberships ended. ' + (typeof d.tags === 'string' ? 'Tags: ' + d.tags : (d.tagged || 0) + ' customers\u2019 tags updated' + (d.failed ? ', ' + d.failed + ' didn\u2019t (see the function logs)' : '') + (d.more ? '; more to do, it carries on every 20 minutes.' : '.'));
       } catch (e) { $('mmMsg').textContent = 'Didn\u2019t run: ' + e.message; }
       b.disabled = false;
-    });
+    }
   }
 
   // ---------------- Stamp card (world_stamps.sql, stamp-cards Edge Function) ----------------
