@@ -1660,6 +1660,17 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
 .inv-emoji { line-height: 1; display: inline-block; }
 .inv-tile.picked { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 #inv-modal .inv-tiles { margin-bottom: 4px; }
+
+/* Studio hours (Studio info) */
+.hrs-grid { display: grid; grid-template-columns: 1fr; gap: 2px; max-width: 420px; }
+.hrs-row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 8px; border-radius: 8px; font-size: 14px; }
+.hrs-row.today { background: #fdf3d8; font-weight: 700; }
+.hrs-erow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 5px 0; border-bottom: 1px solid #f0ece2; font-size: 14px; }
+.hrs-name { width: 96px; font-weight: 700; }
+.hrs-chk { display: flex; align-items: center; gap: 4px; width: 70px; }
+.hrs-erow input[type=time], .hrs-erow input[type=date], .hrs-label { padding: 6px 8px; border: 1px solid #e6e1d4; border-radius: 8px; font: inherit; }
+.hrs-erow input:disabled { opacity: .4; }
+.hrs-label { width: 140px; }
 </style>
 </head>
 <body>
@@ -1981,6 +1992,7 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
   </main>
   <main class="main" id="info-pane" style="display:none">
     <div class="ho-head"><div class="pts-page-title" style="margin:0">ℹ️ Studio info</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+    <div class="ho-card" id="hours-card" style="margin-bottom:14px"></div>
     <div class="ho-card copied-view"><div id="info-view-content"></div></div>
     <div class="ho-card copied-view" style="margin-top:14px">
       <div class="ho-head" style="margin-bottom:10px"><div class="ho-title" style="font-size:17px">📱 iPad setup</div><span class="spacer"></span>
@@ -13666,7 +13678,7 @@ async function hubCopiedReady() {
 }
 async function openTicketsPane() { showOnlyPane('tickets-pane'); setActiveNav('nav-tickets'); await hubCopiedReady(); loadTicketsView(); }
 async function openMomentsPane() { showOnlyPane('moments-pane'); setActiveNav('nav-moments'); await hubCopiedReady(); loadMomentsView(); }
-async function openInfoPane() { showOnlyPane('info-pane'); setActiveNav('nav-info'); await hubCopiedReady(); loadInfoView(); renderLinksView(); }
+async function openInfoPane() { showOnlyPane('info-pane'); setActiveNav('nav-info'); loadHoursCard(); await hubCopiedReady(); loadInfoView(); renderLinksView(); }
 // Print the iPad QR codes for this studio (one sheet)
 function hubPrintQr() {
   const el = document.getElementById('qr-view-content'); if (!el) return;
@@ -14568,6 +14580,110 @@ function submitThreadReply(ticketId) {
   })
 }
 // ── CAMP PICKUP EMAIL ─────────────────────────────────────────
+
+// ---------- Studio hours (studio_hours.sql) ----------
+// Shown on 4Cats World → Your studio. Coordinators and home office can edit.
+const HRS_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+let _hours = null, _hoursEdit = null;
+function hrsTime(t) { if (!t) return ''; const [h, m] = t.split(':').map(Number); return (h % 12 || 12) + (m ? ':' + String(m).padStart(2, '0') : '') + (h >= 12 ? 'pm' : 'am'); }
+function hrsLine(d) { return !d || d.closed ? 'Closed' : hrsTime(d.open) + ' – ' + hrsTime(d.close); }
+function hrsDefault() { return HRS_DAYS.map((_, i) => ({ day: i + 1, closed: false, open: '10:00', close: '18:00' })); }
+async function loadHoursCard() {
+  const el = document.getElementById('hours-card'); if (!el) return;
+  if (!currentStudioId) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  el.innerHTML = '<div style="color:#bbb;font-size:12px">Loading hours…</div>';
+  const r = await sb.rpc('hub_studio_hours_get', { p_studio: currentStudioId });
+  if (r.error) { el.innerHTML = /function|schema/i.test(r.error.message) ? '<div class="goal-note">Studio hours aren’t set up yet (studio_hours.sql).</div>' : `<div class="goal-note">Couldn’t load hours: ${esc(r.error.message)}</div>`; return; }
+  _hours = r.data || null; _hoursEdit = null;
+  renderHoursCard();
+}
+function renderHoursCard() {
+  const el = document.getElementById('hours-card'); if (!el) return;
+  const canEdit = coordOrAdmin();
+  if (_hoursEdit) { renderHoursEditor(el); return; }
+  const H = _hours, today = new Date(), todayDay = (today.getDay() + 6) % 7 + 1;
+  const todayStr = today.toLocaleDateString('en-CA');
+  const upcoming = ((H && H.special) || []).filter(x => x.date >= todayStr).sort((a, b) => a.date < b.date ? -1 : 1);
+  let html = `<div class="ho-head" style="margin-bottom:8px"><div class="ho-title" style="font-size:17px">🕒 Studio hours</div><span class="spacer"></span>` +
+    (canEdit ? `<button class="ho-btn" onclick="editHours()">${H ? 'Edit' : 'Set the hours'}</button>` : '') + `</div>`;
+  if (!H || !(H.week || []).length) {
+    html += `<div class="goal-note">No hours set yet.${canEdit ? ' Set them here, and families see them on 4Cats World.' : ' A coordinator can set them.'}</div>`;
+  } else {
+    html += `<div class="hrs-grid">` + HRS_DAYS.map((name, i) => {
+      const d = (H.week || []).find(x => x.day === i + 1);
+      return `<div class="hrs-row${i + 1 === todayDay ? ' today' : ''}"><span>${name}</span><b>${esc(hrsLine(d))}</b></div>`;
+    }).join('') + `</div>`;
+    if (H.note) html += `<div class="goal-note" style="margin-top:8px">${esc(H.note)}</div>`;
+    if (upcoming.length) html += `<div style="margin-top:10px;font-size:13px"><b>Special days</b>` + upcoming.slice(0, 8).map(x =>
+      `<div class="hrs-row"><span>${esc(new Date(x.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))}${x.label ? ' · ' + esc(x.label) : ''}</span><b>${esc(hrsLine(x))}</b></div>`).join('') + `</div>`;
+    html += `<div class="goal-note" style="margin-top:8px;font-size:12px">Shown to families on 4Cats World.${H.updated_by ? ' Last changed by ' + esc(H.updated_by) + '.' : ''}</div>`;
+  }
+  el.innerHTML = html;
+}
+function editHours() {
+  if (!coordOrAdmin()) { openPinModal(); return; }
+  const H = _hours || {};
+  _hoursEdit = { week: (H.week && H.week.length ? H.week : hrsDefault()).map(x => Object.assign({}, x)), note: H.note || '', special: (H.special || []).map(x => Object.assign({}, x)) };
+  renderHoursCard();
+}
+function hrsKeep() {   // read what's typed into the draft
+  const el = document.getElementById('hours-card'); if (!el || !_hoursEdit) return;
+  el.querySelectorAll('[data-hd]').forEach(row => {
+    const d = _hoursEdit.week.find(x => x.day === +row.dataset.hd);
+    d.closed = !row.querySelector('.hrs-open').checked; d.open = row.querySelector('.hrs-o').value; d.close = row.querySelector('.hrs-c').value;
+  });
+  el.querySelectorAll('[data-hs]').forEach(row => {
+    const x = _hoursEdit.special[+row.dataset.hs];
+    x.date = row.querySelector('.hrs-date').value; x.label = row.querySelector('.hrs-label').value.trim();
+    x.closed = row.querySelector('.hrs-sclosed').checked; x.open = row.querySelector('.hrs-o').value; x.close = row.querySelector('.hrs-c').value;
+  });
+  const n = document.getElementById('hrs-note'); if (n) _hoursEdit.note = n.value;
+}
+function renderHoursEditor(el) {
+  const E = _hoursEdit;
+  el.innerHTML = `<div class="ho-head" style="margin-bottom:8px"><div class="ho-title" style="font-size:17px">🕒 Studio hours</div></div>` +
+    `<div class="hrs-edit">` + E.week.map(d => `<div class="hrs-erow" data-hd="${d.day}">
+      <span class="hrs-name">${HRS_DAYS[d.day - 1]}</span>
+      <label class="hrs-chk"><input type="checkbox" class="hrs-open"${d.closed ? '' : ' checked'} onchange="hrsKeep();renderHoursCard()"> Open</label>
+      <input type="time" class="hrs-o" value="${esc(d.open || '10:00')}"${d.closed ? ' disabled' : ''}> to <input type="time" class="hrs-c" value="${esc(d.close || '18:00')}"${d.closed ? ' disabled' : ''}></div>`).join('') +
+    `<button class="ho-btn" style="margin-top:6px" onclick="hrsCopyWeekdays()">Copy Monday to all weekdays</button></div>` +
+    `<div style="margin-top:12px"><div style="font-size:12px;color:#888;margin-bottom:4px">Note for families (optional)</div>
+      <input type="text" id="hrs-note" maxlength="160" value="${esc(E.note || '')}" placeholder="e.g. Hours may vary during camps" style="width:100%;padding:8px 10px;border:1px solid #e6e1d4;border-radius:8px;font:inherit"></div>` +
+    `<div style="margin-top:14px"><div style="font-size:13px;font-weight:700;margin-bottom:6px">Special days (holidays, closures, short days)</div>` +
+    (E.special.map((x, i) => `<div class="hrs-erow" data-hs="${i}">
+      <input type="date" class="hrs-date" value="${esc(x.date || '')}">
+      <input type="text" class="hrs-label" value="${esc(x.label || '')}" placeholder="e.g. Christmas" maxlength="40">
+      <label class="hrs-chk"><input type="checkbox" class="hrs-sclosed"${x.closed ? ' checked' : ''} onchange="hrsKeep();renderHoursCard()"> Closed</label>
+      <input type="time" class="hrs-o" value="${esc(x.open || '10:00')}"${x.closed ? ' disabled' : ''}> to <input type="time" class="hrs-c" value="${esc(x.close || '14:00')}"${x.closed ? ' disabled' : ''}>
+      <button class="ho-btn" onclick="hrsKeep();_hoursEdit.special.splice(${i},1);renderHoursCard()">Remove</button></div>`).join('') || '<div class="goal-note">None yet.</div>') +
+    `<button class="ho-btn" style="margin-top:6px" onclick="hrsKeep();_hoursEdit.special.push({ date: '', closed: true, label: '' });renderHoursCard()">+ Add a special day</button></div>` +
+    `<div style="display:flex;gap:8px;align-items:center;margin-top:14px"><button class="ho-btn primary" id="hrs-save" onclick="saveHours()">Save hours</button>
+      <button class="ho-btn" onclick="_hoursEdit=null;renderHoursCard()">Cancel</button><span id="hrs-msg" style="font-size:13px;color:#b91c1c"></span></div>`;
+}
+function hrsCopyWeekdays() {
+  hrsKeep();
+  const mon = _hoursEdit.week.find(x => x.day === 1);
+  _hoursEdit.week.forEach(x => { if (x.day >= 2 && x.day <= 5) { x.closed = mon.closed; x.open = mon.open; x.close = mon.close; } });
+  renderHoursCard();
+}
+async function saveHours() {
+  hrsKeep();
+  const E = _hoursEdit, msg = document.getElementById('hrs-msg');
+  const special = E.special.filter(x => x.date || x.label).map(x => x.closed ? { date: x.date, closed: true, label: x.label || null } : { date: x.date, closed: false, open: x.open, close: x.close, label: x.label || null });
+  const week = E.week.map(x => x.closed ? { day: x.day, closed: true } : { day: x.day, closed: false, open: x.open, close: x.close });
+  const badDay = week.find(x => !x.closed && !(x.open && x.close && x.close > x.open));
+  if (badDay) { msg.textContent = 'Check ' + HRS_DAYS[badDay.day - 1] + ': closing time needs to be after opening.'; return; }
+  const badSp = special.find(x => !x.date || (!x.closed && !(x.open && x.close && x.close > x.open)));
+  if (badSp) { msg.textContent = badSp.date ? 'Check the hours for ' + badSp.date + '.' : 'Each special day needs a date.'; return; }
+  const who = (_lastHeroData && _lastHeroData.firstName && _lastHeroData.firstName !== 'team') ? _lastHeroData.firstName : null;
+  const b = document.getElementById('hrs-save'); b.disabled = true;
+  const r = await sb.rpc('hub_studio_hours_save', { p_studio: currentStudioId, p_week: week, p_note: E.note || null, p_special: special, p_by: who });
+  b.disabled = false;
+  if (r.error) { msg.textContent = r.error.message; return; }
+  _hours = { week, note: (E.note || '').trim() || null, special, updated_by: who };
+  _hoursEdit = null; renderHoursCard();
+}
 
 async function loadInfoView() {
   const el = document.getElementById('info-view-content')
