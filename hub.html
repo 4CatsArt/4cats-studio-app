@@ -11566,8 +11566,10 @@ async function claimFlashChallenge(id) {
 // Studio-level cards (studio login is enough). _sessionPin is passed when
 // unlocked so the greeting can use the coordinator's name.
 // ---------- Kiln status (shown to customers on 4Cats World) ----------
-// Any studio login can change its own studio's status; customers see it on
-// World's home page, with how many days after making to book glazing.
+// Every studio login sees it; only the coordinator view (manager PIN) or an
+// admin login can change it. hub_kiln_set checks the PIN again on the server.
+// Customers see it on World's home page, with how many days after making to
+// book glazing.
 const KILN_STATES = { ok: ['🔥', 'Up and running', 7], behind: ['⏳', 'Running behind', 10], issue: ['🔧', 'Kiln issue', 18] };
 let _kiln = null;
 async function loadKilnCard(studioId) {
@@ -11584,27 +11586,35 @@ function drawKilnCard(msg) {
   const el = document.getElementById('card-kiln'), k = _kiln;
   if (!el || !k) return;
   const st = KILN_STATES[k.status] || KILN_STATES.ok;
+  const changed = k.updated_at ? 'Changed ' + new Date(k.updated_at).toLocaleString('en-CA', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + (k.updated_by ? ' by ' + esc(k.updated_by) : '') : 'Shown on 4Cats World.';
+  if (!coordOrAdmin()) {   // read-only for the plain studio view
+    el.innerHTML = `<div class="team-title">Kiln status</div>
+    <div class="kiln-now"><span class="kn-ico">${st[0]}</span><span>${esc(st[1])}<br><span style="font-weight:400;font-size:13px;color:#666">Customers see: book glazing ${k.days} days or more after making</span></span></div>
+    ${k.note ? `<div class="kiln-row" style="color:#555">“${esc(k.note)}”</div>` : ''}
+    <div class="kiln-meta">${changed} · Coordinators can change this in the coordinator view.</div>`;
+    return;
+  }
   el.innerHTML = `<div class="team-title">Kiln status</div>
     <div class="kiln-now"><span class="kn-ico">${st[0]}</span><span>${esc(st[1])}<br><span style="font-weight:400;font-size:13px;color:#666">Customers see: book glazing ${k.days} days or more after making</span></span></div>
     <div class="kiln-pick">${Object.keys(KILN_STATES).map(key => `<button type="button" class="${key}${k.status === key ? ' on' : ''}" onclick="kilnPick('${key}')">${KILN_STATES[key][0]} ${esc(KILN_STATES[key][1])}</button>`).join('')}</div>
     <div class="kiln-row">Book glazing after <input type="number" id="kiln-days" min="1" max="90" value="${k.days}" style="width:64px"> days</div>
     <div class="kiln-row"><input type="text" id="kiln-note" maxlength="140" placeholder="Note for customers (optional)" value="${esc(k.note)}" style="flex:1;min-width:180px">
       <button class="ho-btn primary" type="button" onclick="kilnSave()">Save</button></div>
-    <div class="kiln-meta">${msg ? esc(msg) : (k.updated_at ? 'Changed ' + new Date(k.updated_at).toLocaleString('en-CA', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + (k.updated_by ? ' by ' + esc(k.updated_by) : '') : 'Shown on 4Cats World.')}</div>`;
+    <div class="kiln-meta">${msg ? esc(msg) : changed}</div>`;
 }
 function kilnPick(key) {
-  if (!_kiln) return;
+  if (!_kiln || !coordOrAdmin()) return;
   _kiln.note = document.getElementById('kiln-note').value;
   _kiln.status = key;
   _kiln.days = KILN_STATES[key][2];   // suggested days for that state; change it before saving if needed
   drawKilnCard('Not saved yet: press Save.');
 }
 async function kilnSave() {
-  if (!_kiln) return;
+  if (!_kiln || !coordOrAdmin()) return;
   _kiln.days = parseInt(document.getElementById('kiln-days').value, 10) || 7;
   _kiln.note = document.getElementById('kiln-note').value.trim();
   const who = (typeof _me !== 'undefined' && _me && _me.name) ? _me.name : null;
-  const r = await sb.rpc('hub_kiln_set', { p_studio_id: _kiln.studioId, p_status: _kiln.status, p_glaze_days: _kiln.days, p_note: _kiln.note, p_by: who });
+  const r = await sb.rpc('hub_kiln_set', { p_studio_id: _kiln.studioId, p_status: _kiln.status, p_glaze_days: _kiln.days, p_note: _kiln.note, p_by: who, p_pin: _sessionPin || null });
   if (r.error) { drawKilnCard('Not saved: ' + r.error.message); return; }
   await loadKilnCard(_kiln.studioId);
   drawKilnCard('Saved ✓ Customers will see it on 4Cats World within a minute.');
@@ -11725,6 +11735,7 @@ async function submitCoordinatorPin() {
     loadStudioCards(data.studioId);
   } else {
     loadDailyHero(_sessionPin, data.studioId); // greeting switches to their name
+    drawKilnCard();                            // kiln status becomes editable
   }
   loadCoordinatorCards(data.studioId);
   loadFlashChallenges(data.studioId); // the SC can now claim
@@ -11751,6 +11762,7 @@ function endCoordinatorView(reload = true) {
     if (el) el.innerHTML = '';
   });
   _adjustStaff = null;
+  drawKilnCard();   // kiln status back to read-only (admin logins stay editable)
   const adminLogin = !!(_studioData && _studioData.isAdmin);
   if (paneVisible('points-pane') || paneVisible('instagram-pane') || paneVisible('occupancy-pane') || (paneVisible('ackc-pane') && _ackcMode === 'coord') ||
       (!adminLogin && (paneVisible('parties-pane') || paneVisible('families-pane') || paneVisible('notif-pane')))) showDashboardPane(); // coordinator-only pages
