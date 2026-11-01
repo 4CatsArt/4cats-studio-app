@@ -1721,6 +1721,10 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
 .fam-table tbody tr { cursor: pointer; } .fam-table tbody tr:hover, .fam-table tbody tr:focus { background: #fff8fb; outline: none; }
 .fam-table td.num { text-align: right; }
 .fam-sm { display: block; color: var(--ink-soft); font-size: 12px; }
+/* Camp badges on the family card */
+.fam-badgekid { padding: 6px 0; border-bottom: 1px dashed #eee; }
+.fam-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+.fam-badge { font-size: 12.5px; background: #fdf3d8; color: #6b4b00; border-radius: 999px; padding: 3px 10px; }
 /* Family card */
 .fam-h { font-size: 15px; margin: 18px 0 6px; padding-top: 10px; border-top: 1px solid #eee; }
 .fam-count { font-size: 12px; background: #f0ece4; border-radius: 999px; padding: 1px 8px; margin-left: 4px; font-weight: 700; }
@@ -6211,11 +6215,21 @@ async function famOpen(cid) {
   const { data, error } = await sb.rpc('hub_family_card', { p_customer: cid, p_pin: _sessionPin || null });
   if (error) { _fam.msg = famErr(error); famRender(); return; }
   _fam.open = data; _fam.msg = ''; famRender();
-  const ch = await sb.rpc('hub_family_changes_to_people', { p_customer: cid, p_pin: _sessionPin || null });
-  if (!ch.error && _fam.open && _fam.open.shopify_customer_id === data.shopify_customer_id) { _fam.open.changes = ch.data || []; famRender(); }
+  const [ch, bd] = await Promise.all([sb.rpc('hub_family_changes_to_people', { p_customer: cid, p_pin: _sessionPin || null }),
+    sb.rpc('hub_family_badges', { p_customer: cid, p_pin: _sessionPin || null })]);
+  if (_fam.open && _fam.open.shopify_customer_id === data.shopify_customer_id) {
+    if (!ch.error) _fam.open.changes = ch.data || [];
+    _fam.open.badges = bd.error ? null : (bd.data || []);   // null = hub_family_badges.sql not run yet
+    famRender();
+  }
 }
 // "4:45pm Fri Nov 13th | Make the Gift (Ages 5-10) | 3 Week Session" → "Make the Gift (Ages 5-10) · 3 Week Session"
 function famTitle(t) { const parts = String(t || '').split('|').map(x => x.trim()).filter(Boolean); if (parts.length > 1 && /^\*?\d/.test(parts[0])) parts.shift(); return parts.join(' · '); }
+// A family member's camp badges: the camper with the same first name (and last name, when both are known)
+function famBadgesFor(f, p) {
+  const list = f.badges || [], first = String(p.first_name || '').trim().toLowerCase(), full = (first + ' ' + String(p.last_name || '').trim().toLowerCase()).trim();
+  return list.filter(c => c.camper.toLowerCase() === full)[0] || list.filter(c => c.camper.toLowerCase().split(' ')[0] === first)[0] || null;
+}
 function famAdjLabel(n) { return n === 1 ? '1 year older' : n === 2 ? '2 years older' : n === -1 ? '1 year younger' : 'Their own age'; }
 function famRender() {
   const body = document.getElementById('fam-body'); if (!body) return;
@@ -6241,6 +6255,7 @@ function famRender() {
       return '<div class="fam-person' + (adj ? ' adj' : '') + '"><div class="fam-p-head"><b>' + famEsc(p.first_name + (p.last_name ? ' ' + p.last_name : '')) + '</b>' +
         '<span class="fam-meta">' + (p.age != null ? 'Age ' + p.age : (p.is_16_plus ? '16 or older' : 'No birthdate')) + (p.birthdate ? ' · born ' + famEsc(p.birthdate) : '') + (kid ? '' : ' · (themself)') + '</span>' +
         (adj ? '<span class="fam-pill warn">Can attend as ' + famEsc(famAdjLabel(adj)) + (p.age != null ? ' (age ' + (p.age + adj) + ')' : '') + '</span>' : '') + '</div>' +
+        (famBadgesFor(f, p) ? '<div class="fam-meta">🏅 ' + famBadgesFor(f, p).total + ' camp badge' + (famBadgesFor(f, p).total === 1 ? '' : 's') + '</div>' : '') +
         (p.medical_info ? '<div class="fam-med">⚕️ ' + famEsc(p.medical_info) + '</div>' : '') +
         (adj ? '<div class="fam-meta">' + famEsc(p.age_adjust_note || '') + ' — set by ' + famEsc(p.age_adjust_by || '?') + (p.age_adjust_at ? ' on ' + famEsc(String(p.age_adjust_at).slice(0, 10)) : '') + (p.age_adjust_until ? ' · until ' + famEsc(p.age_adjust_until) : '') + '</div>' : '') +
         '<details class="fam-adj"><summary>Edit name or birthdate</summary><div class="fam-adj-row">' +
@@ -6271,6 +6286,14 @@ function famRender() {
     const pv = f.past || {};
     h += '<h3 class="fam-h">Past year</h3><p class="fam-line">' + (pv.visits || 0) + ' visit' + (pv.visits === 1 ? '' : 's') + (pv.last_visit ? ' · last ' + famEsc(dl(pv.last_visit)) : '') + (pv.top_studio ? ' · usually at ' + famEsc(sn(pv.top_studio)) : '') + '</p>' +
       ((pv.recent || []).length ? '<details class="fam-adj"><summary>Recent visits</summary><div class="fam-rows">' + pv.recent.map(r => '<div class="fam-row2"><span class="fam-when"><b>' + famEsc(dl(r.date)) + '</b></span><span class="fam-what">' + famEsc(famTitle(r.title)) + '<span class="fam-meta">' + famEsc(sn(r.studio_id)) + '</span></span></div>').join('') + '</div></details>' : '');
+    // Camp badges (camp_daily_badges, from the badge ceremony)
+    if (f.badges && f.badges.length) {
+      h += '<h3 class="fam-h">🏅 Camp badges <span class="fam-count">' + f.badges.reduce((t, c) => t + c.total, 0) + '</span></h3>' + f.badges.map(c =>
+        '<div class="fam-badgekid"><b>' + famEsc(c.camper) + '</b> <span class="fam-meta">' + c.total + ' badge' + (c.total === 1 ? '' : 's') +
+        (c.first_date ? ' · ' + famEsc(dl(c.first_date)) + (c.last_date !== c.first_date ? ' – ' + famEsc(dl(c.last_date)) : '') : '') +
+        ((c.studios || []).length ? ' · ' + famEsc(c.studios.map(sn).join(', ')) : '') + '</span>' +
+        '<div class="fam-badges">' + (c.badges || []).map(b => '<span class="fam-badge" title="Last earned ' + famEsc(dl(b.last_date)) + '">🏅 ' + famEsc(b.name) + (b.times > 1 ? ' <b>×' + b.times + '</b>' : '') + '</span>').join('') + '</div></div>').join('');
+    }
     // Credits and rewards
     const cx = f.cancellations || [], st = f.stamps || {};
     h += '<h3 class="fam-h">Credits and rewards</h3><p class="fam-line">Stamp card: ' + (st.on_card || 0) + ' of 10' + (st.cards_done ? ' · ' + st.cards_done + ' card' + (st.cards_done === 1 ? '' : 's') + ' completed' : '') + (st.prizes_waiting ? ' · 🎁 ' + st.prizes_waiting + ' prize waiting' : '') + '</p>' +
