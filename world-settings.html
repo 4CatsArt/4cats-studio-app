@@ -2859,6 +2859,12 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
       '<h3 class="mem-h">Workshops Only: no member pricing on</h3><div class="mem-kinds">' + MEM_KINDS.map(function (k) {
         return '<label class="check"><input type="checkbox" class="mmX" value="' + k[0] + '"' + ((S.workshops_excludes || []).indexOf(k[0]) !== -1 ? ' checked' : '') + dis + '> ' + esc(k[1]) + '</label>'; }).join('') + '</div>' +
       '<div class="two"><div class="field"><label for="mmG">Grace days after a failed renewal</label><input type="number" id="mmG" min="0" max="30" value="' + esc(S.grace_days != null ? S.grace_days : 7) + '"' + dis + '><span class="help">They stay a member while their card is retried.</span></div></div>' +
+      '<h3 class="mem-h">Membership codes</h3><p class="help" style="margin:0 0 8px">Codes you\u2019ve given out for free memberships (one per person). Import them here and each works once in <b>My 4Cats \u2192 Membership \u2192 Redeem</b>: a year of membership, starting when it\u2019s redeemed (or when their current membership ends).</p>' +
+      '<div class="field"><label for="mcCodes">Codes (one per line, or copied from a spreadsheet column)</label><textarea id="mcCodes" rows="5" placeholder="FREEMEM-AB12&#10;FREEMEM-CD34"></textarea></div>' +
+      '<div class="two"><div class="field"><label for="mcPlan">Plan</label><select id="mcPlan"><option value="member">4Cats Member</option><option value="workshops">Workshops Only</option></select></div>' +
+      '<div class="field"><label for="mcNote">Note (shown to them as \u201cGift from \u2026\u201d, and groups the codes below)</label><input type="text" id="mcNote" value="4Cats" placeholder="e.g. 4Cats, or Neighbour membership"></div></div>' +
+      '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px"><button class="btn btn-berry" type="button" id="mcImport">Import codes</button><span class="help" id="mcMsg"></span></div>' +
+      '<div id="mcSummary"></div>' +
       '<h3 class="mem-h">Reminder emails</h3>' +
       (memSet.reminders === null ? '<p class="help">Run world_membership_reminders.sql to add reminder emails.</p>' :
         '<label class="check"><input type="checkbox" id="mmRem"' + (S.reminders ? ' checked' : '') + dis + '> Send membership reminder emails</label>' +
@@ -2960,7 +2966,29 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     });
     return { rows: out, skip: skip, by: by, noStudio: noStudio, statuses: statuses, read: rows.length - 1, cols: H.length, unpaidList: unpaidList };
   }
+  function mcLoadSummary() {
+    var box = document.getElementById('mcSummary'); if (!box) return;
+    sb.rpc('world_membership_codes_summary').then(function (r) {
+      if (r.error) { box.innerHTML = /function|does not exist/i.test(r.error.message) ? '<p class="help">Run world_membership_code_import.sql in Supabase to switch this on.</p>' : ''; return; }
+      box.innerHTML = (r.data || []).length ? '<table><thead><tr><th>Note</th><th>Plan</th><th>Codes</th><th>Used</th><th>Not used yet</th><th>Last used</th></tr></thead><tbody>' + r.data.map(function (x) {
+        return '<tr><td>' + esc(x.note || '') + '</td><td>' + (x.plan === 'workshops' ? 'Workshops Only' : '4Cats Member') + '</td><td>' + x.codes + '</td><td>' + x.used + '</td><td>' + x.unused + '</td><td>' + (x.last_used ? esc(niceDate(String(x.last_used).slice(0, 10))) : '\u2014') + '</td></tr>'; }).join('') + '</tbody></table>' : '';
+    });
+  }
   function bindMembership() {
+    mcLoadSummary();
+    var mci = document.getElementById('mcImport');
+    if (mci) mci.addEventListener('click', async function () {
+      var codes = document.getElementById('mcCodes').value.split(/[\n,;\t]+/).map(function (x) { return x.trim(); }).filter(Boolean), msg = document.getElementById('mcMsg');
+      if (!codes.length) { msg.textContent = 'Paste the codes first.'; return; }
+      mci.disabled = true; msg.textContent = 'Importing ' + codes.length + ' code' + (codes.length === 1 ? '' : 's') + '\u2026';
+      var r = await sb.rpc('world_membership_codes_import', { p_codes: codes, p_plan: document.getElementById('mcPlan').value, p_note: document.getElementById('mcNote').value });
+      mci.disabled = false;
+      if (r.error) { msg.textContent = 'Not imported: ' + r.error.message; return; }
+      var d = r.data || {};
+      msg.textContent = '\u2713 ' + d.added + ' added' + (d.already ? ' \u00b7 ' + d.already + ' were already in' : '') + (d.too_short ? ' \u00b7 ' + d.too_short + ' too short to be codes (skipped)' : '') + '.';
+      if (d.added) document.getElementById('mcCodes').value = '';
+      mcLoadSummary();
+    });
     var sv = document.getElementById('mmSave'); if (!sv) return;
     // Membership page pictures: upload now, saved with the rest when you press Save
     var redrawPics = function () { var sec = sv.closest('section'); if (!sec) return; var open = !sec.classList.contains('folded'); var tmp = document.createElement('div'); tmp.innerHTML = membershipHtml(); sec.replaceWith(tmp.firstChild); bindMembership(); };
