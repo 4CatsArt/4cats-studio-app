@@ -6302,11 +6302,23 @@ function famRender() {
         '<h4 class="fam-h4">🏅 Badges' + (b ? ' <span class="fam-count">' + b.total + '</span>' : '') + '</h4>' +
         (b ? '<p class="fam-meta" style="margin:0">Camp badges: ' + badgeMeta(b) + '</p>' + badgeChips(b) : '<p class="fam-meta">No badges yet.</p>') +
         '</div></details>';
-    }).join(''));
-    // Customer badges (the parent's own; camp badges not matched to a participant show here too)
-    h += sec('cbadges', '🏅 Customer badges', loose.reduce((t, c) => t + c.total, 0) || null,
-      '<p class="fam-meta">Badges for the customer themselves will show here once the badge system is built.</p>' +
-      (loose.length ? '<p class="fam-meta" style="margin-top:8px">Camp badges for campers not linked as participants:</p>' + loose.map(c => '<div class="fam-badgekid"><b>' + famEsc(c.camper) + '</b> <span class="fam-meta">' + badgeMeta(c) + '</span>' + badgeChips(c) + '</div>').join('') : ''));
+    }).join('') +
+    // Campers on this family's camp orders who aren't participants on World yet (their badges have nowhere to attach)
+    (loose.length ? '<h4 class="fam-h4" style="margin-top:14px">Campers not linked on World <span class="fam-count">' + loose.length + '</span></h4>' +
+      '<p class="fam-meta" style="margin:0 0 6px">On this family\'s camp orders, but not added as participants. Add them so their badges and age checks attach to them.</p>' +
+      loose.map((c, i) => {
+        const parts = String(c.camper).split(' '), fn = parts.shift() || '', ln = parts.join(' ');
+        return '<details class="fam-person-d loose" data-sec="loose-' + i + '"' + open('loose-' + i) + '><summary><b>' + famEsc(c.camper) + '</b> <span class="fam-meta">camper · not on World</span> <span class="fam-pill">🏅 ' + c.total + '</span></summary><div class="fam-person-body">' +
+          '<p class="fam-meta" style="margin:6px 0 0">Camp badges: ' + badgeMeta(c) + '</p>' + badgeChips(c) +
+          '<h4 class="fam-h4">Add as a participant</h4><div class="fam-edit">' +
+            '<label>First name <input type="text" id="fn-f-' + i + '" maxlength="40" value="' + famEsc(fn) + '"></label>' +
+            '<label>Last name <input type="text" id="fn-l-' + i + '" maxlength="40" value="' + famEsc(ln) + '"></label>' +
+            '<label>Birthdate <input type="date" id="fn-b-' + i + '"></label>' +
+            '<label>Relationship <select id="fn-r-' + i + '">' + Object.keys(REL).map(k => '<option value="' + k + '"' + (k === 'child' ? ' selected' : '') + '>' + REL[k] + '</option>').join('') + '</select></label>' +
+          '</div><button class="ho-btn" onclick="famAddPerson(' + i + ')">Add to family</button> <span class="fam-meta" id="fn-msg-' + i + '"></span></div></details>';
+      }).join('') : ''));
+    // Customer badges: the customer's own (none until the badge system is built)
+    h += sec('cbadges', '🏅 Customer badges', null, '<p class="fam-meta">' + famEsc(f.parent_name || 'The customer') + '\'s own badges will show here once the badge system is built. Kids\' badges are under Linked participants.</p>');
     // Upcoming
     const up = f.upcoming || [];
     h += sec('upcoming', 'Upcoming', up.length, up.length ? '<div class="fam-rows">' + up.map(u =>
@@ -6352,7 +6364,8 @@ function famRender() {
     const chg = f.changes || [];
     if (chg.length) h += sec('changes', 'Staff changes', chg.length, chg.map(c => {
       const d = c.detail || {}, fr = d.from || {}, to = d.to || {};
-      const diff = fr.first_name !== undefined ? Object.keys(to).filter(k => JSON.stringify(fr[k] ?? null) !== JSON.stringify(to[k] ?? null)).map(k => k.replace(/_/g, ' ') + ': ' + (fr[k] ?? '—') + ' → ' + (to[k] ?? '—')).join('; ')
+      const diff = c.action === 'person_add' || (!d.from && d.to && d.to.first_name) ? 'added ' + [to.first_name, to.last_name].filter(Boolean).join(' ') + (to.birthdate ? ' (' + to.birthdate + ')' : '') + ' as a participant'
+        : fr.first_name !== undefined ? Object.keys(to).filter(k => JSON.stringify(fr[k] ?? null) !== JSON.stringify(to[k] ?? null)).map(k => k.replace(/_/g, ' ') + ': ' + (fr[k] ?? '—') + ' → ' + (to[k] ?? '—')).join('; ')
         : (d.participant || '') + ': can attend as ' + famAdjLabel(d.to || 0) + (d.note ? ' — ' + d.note : '');
       return '<p class="fam-meta" style="margin:4px 0">' + famEsc(dl(c.at)) + ' · ' + famEsc(c.who) + ' · ' + famEsc(diff) + '</p>';
     }).join(''));
@@ -6382,6 +6395,16 @@ async function famSavePerson(id) {
   const { data, error } = await sb.rpc('hub_participant_update', { p_id: id, p, p_pin: _sessionPin || null });
   if (error) { m.textContent = famErr(error); return; }
   if (data && data.changed === false) { m.textContent = 'Nothing changed.'; return; }
+  famOpen(_fam.open.shopify_customer_id);
+}
+async function famAddPerson(i) {
+  const g = k => document.getElementById(k + i), m = document.getElementById('fn-msg-' + i);
+  const p = { first_name: g('fn-f-').value, last_name: g('fn-l-').value, birthdate: g('fn-b-').value || null, relationship: g('fn-r-').value, is_16_plus: false };
+  if (!p.birthdate) { m.textContent = 'Add their birthdate.'; return; }
+  m.textContent = 'Adding…';
+  const { error } = await sb.rpc('hub_participant_add', { p_customer: _fam.open.shopify_customer_id, p, p_pin: _sessionPin || null });
+  if (error) { m.textContent = famErr(error); return; }
+  _fam.secs = Object.assign({}, _fam.secs, { people: true });
   famOpen(_fam.open.shopify_customer_id);
 }
 async function famAddNote() {
