@@ -1791,6 +1791,11 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
 .ws-setup-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; } .ws-setup-row label { display: flex; flex-direction: column; font-size: 12px; font-weight: 700; gap: 2px; }
 .ws-setup-row input, .ws-setup-row select { font: inherit; font-size: 14px; font-weight: 400; padding: 5px 7px; border: 1px solid var(--line, #e5e0d6); border-radius: 8px; width: 90px; }
 .ws-setup-row label.wide input { width: 260px; } .ws-setup-row select { width: 130px; }
+.ws-pick { position: relative; display: inline-block; } .ws-pick input[type=text] { font: inherit; padding: 6px 10px; border: 1px solid var(--line, #e5e0d6); border-radius: 8px; width: 280px; max-width: 100%; box-sizing: border-box; }
+.ws-f .ws-pick { display: block; margin-top: 4px; } .ws-f .ws-pick input[type=text] { width: 100%; font-weight: 400; }
+.ws-pick-list { position: absolute; z-index: 50; left: 0; top: calc(100% + 4px); width: max(100%, 320px); max-height: 320px; overflow: auto; background: #fff; border: 1px solid var(--line, #e5e0d6); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.12); padding: 4px 0; font-weight: 400; }
+.ws-pick-g { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; color: #888; padding: 8px 12px 4px; }
+.ws-pick-o { padding: 7px 12px; cursor: pointer; } .ws-pick-o.hi, .ws-pick-o:hover { background: #fdf0f0; }
 </style>
 </head>
 <body>
@@ -3546,11 +3551,50 @@ async function loadPlanDay(date) {
 // Workshop times sold on World (no Shopify products): add, change spots, swap, hide or remove
 // on this day, and bulk-add across studios and weeks. Changes show on World straight away.
 let _wsProjects = null;   // every project (hub_ws_projects), loaded once
-function wsPickOpts(items) {
+// The workshop picker: a search box. On World first, then projects running now (next 60 days), then everything else.
+const _wsPick = {};   // pre → { list: [{ v, name, group }], hi }
+function wsPickList(items) {
   const onWorld = new Set(items.map(i => i.id));
   const others = (_wsProjects || []).filter(p => !p.item_id || !onWorld.has(p.item_id));
-  return `<optgroup label="On World">${items.map(i => `<option value="${escAttr(i.id)}">${esc(i.title)}</option>`).join('')}</optgroup>` +
-    (others.length ? `<optgroup label="All other projects (first time on World)">${others.map(p => `<option value="${p.item_id ? escAttr(p.item_id) : 'p:' + escAttr(p.id)}">${esc(p.name)}</option>`).join('')}</optgroup>` : '');
+  return items.map(i => ({ v: i.id, name: i.title, group: 'On World' }))
+    .concat(others.filter(p => p.current).map(p => ({ v: p.item_id || 'p:' + p.id, name: p.name, group: 'Running now (first time on World)' })))
+    .concat(others.filter(p => !p.current).map(p => ({ v: p.item_id || 'p:' + p.id, name: p.name, group: 'All other projects (first time on World)' })));
+}
+function wsPickerHtml(pre, items) {
+  _wsPick[pre] = { list: wsPickList(items), hi: 0 };
+  return `<span class="ws-pick"><input type="text" id="${pre}-find" placeholder="Type to search workshops…" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="${pre}-list"
+      onfocus="wsPickShow('${pre}')" oninput="wsPickShow('${pre}')" onkeydown="wsPickKey(event, '${pre}')" onblur="setTimeout(() => wsPickHide('${pre}'), 150)">
+    <input type="hidden" id="${pre}-item" value=""><div class="ws-pick-list" id="${pre}-list" role="listbox" hidden></div></span>`;
+}
+function wsPickMatches(pre) {
+  const q = (document.getElementById(pre + '-find').value || '').trim().toLowerCase();
+  const L = _wsPick[pre].list;
+  return (q ? L.filter(x => x.name.toLowerCase().includes(q)) : L).slice(0, 60);
+}
+function wsPickShow(pre) {
+  const box = document.getElementById(pre + '-list'), inp = document.getElementById(pre + '-find'), M = wsPickMatches(pre);
+  if (inp.value !== (_wsPick[pre].chosenName || '')) { document.getElementById(pre + '-item').value = ''; wsSetupToggle(pre); }   // typing again: nothing chosen yet
+  _wsPick[pre].hi = Math.min(_wsPick[pre].hi, Math.max(0, M.length - 1)); _wsPick[pre].shown = M;
+  let last = '';
+  box.innerHTML = M.length ? M.map((x, i) => (x.group !== last ? `<div class="ws-pick-g">${esc(last = x.group)}</div>` : '') +
+    `<div class="ws-pick-o${i === _wsPick[pre].hi ? ' hi' : ''}" role="option" onmousedown="event.preventDefault(); wsPickChoose('${pre}', ${i})">${esc(x.name)}</div>`).join('')
+    : '<div class="ws-pick-g">No match</div>';
+  box.hidden = false; inp.setAttribute('aria-expanded', 'true');
+}
+function wsPickHide(pre) { const box = document.getElementById(pre + '-list'); if (box) box.hidden = true; const inp = document.getElementById(pre + '-find'); if (inp) inp.setAttribute('aria-expanded', 'false'); }
+function wsPickChoose(pre, i) {
+  const x = (_wsPick[pre].shown || [])[i]; if (!x) return;
+  document.getElementById(pre + '-item').value = x.v; document.getElementById(pre + '-find').value = x.name; _wsPick[pre].chosenName = x.name;
+  wsPickHide(pre); wsSetupToggle(pre);
+  const go = document.getElementById(pre + '-go'); if (go && go.disabled !== undefined && pre === 'wsb') { go.disabled = true; const m = document.getElementById('wsb-msg'); if (m) m.textContent = ''; }
+}
+function wsPickKey(e, pre) {
+  const P = _wsPick[pre], n = (P.shown || []).length;
+  if (e.key === 'ArrowDown') { e.preventDefault(); if (document.getElementById(pre + '-list').hidden) wsPickShow(pre); else { P.hi = Math.min(n - 1, P.hi + 1); wsPickShow(pre); } }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); P.hi = Math.max(0, P.hi - 1); wsPickShow(pre); }
+  else if (e.key === 'Enter') { e.preventDefault(); if (n) wsPickChoose(pre, P.hi); }
+  else if (e.key === 'Escape') wsPickHide(pre);
+  else P.hi = 0;
 }
 function wsSetupHtml(pre) {
   return `<div class="ws-setup" id="${pre}-setup" hidden><b>First time on World</b> <span class="goal-note">· it books through Shopify checkout (no product needed)</span>
@@ -3570,6 +3614,7 @@ function wsSetupToggle(pre) {
 // The workshop to use: an existing one, or a project set up now (its first time on World)
 async function wsEnsureItem(pre) {
   const v = document.getElementById(pre + '-item').value;
+  if (!v) throw new Error('Choose a workshop (type to search).');
   if (!v.startsWith('p:')) return v;
   const tiers = []; String(document.getElementById(pre + '-tiers').value || '').replace(/(\d+)\s*(?:for|=|:)\s*\$?\s*([\d.]+)/gi, (_, n, pr) => { tiers.push([+n, +pr]); });
   const { data, error } = await sb.rpc('hub_ws_setup', { p_project: v.slice(2), p_kind: document.getElementById(pre + '-kind').value, p_min_age: +document.getElementById(pre + '-age').value,
@@ -3600,7 +3645,7 @@ function wsDayHtml() {
   return `<div class="ho-section-head">🎨 World workshops <span class="goal-note" style="font-weight:400">· sold on World, no Shopify products</span></div>
     ${rows || '<div class="ho-intro">No World workshops this day yet.</div>'}
     ${items.length || (_wsProjects || []).length ? `${wsSetupHtml('ws')}<div class="ws-add">
-      <select id="ws-item" onchange="wsSetupToggle('ws')">${wsPickOpts(items)}</select>
+      ${wsPickerHtml('ws', items)}
       <input type="time" id="ws-time" step="900" aria-label="Time">
       <label class="ws-spots">Spots <input type="number" id="ws-spots" min="1" max="200" value="12"></label>
       <button class="ho-btn primary" id="ws-go" data-label="+ Add to this day" onclick="wsAdd()">+ Add to this day</button>
@@ -3643,7 +3688,7 @@ function wsBulkOpen() {
   let el = document.getElementById('ws-bulk');
   if (!el) { el = document.createElement('dialog'); el.id = 'ws-bulk'; el.className = 'ws-dlg'; document.body.appendChild(el); }
   el.innerHTML = `<div class="ho-title" style="font-size:18px">Bulk add World workshops</div>
-    <label class="ws-f">Workshop<select id="wsb-item" onchange="wsSetupToggle('wsb')">${wsPickOpts(items)}</select></label>${wsSetupHtml('wsb')}
+    <div class="ws-f">Workshop${wsPickerHtml('wsb', items)}</div>${wsSetupHtml('wsb')}
     <div class="ws-f">Studios<div class="ws-studios">${Object.keys(STUDIO_NAMES).map(id => `<label><input type="checkbox" value="${escAttr(id)}"${id === _sessionStudioId ? ' checked' : ''}> ${esc(STUDIO_NAMES[id])}</label>`).join('')}</div></div>
     <div class="ws-two"><label class="ws-f">From<input type="date" id="wsb-from" value="${d}"></label><label class="ws-f">To<input type="date" id="wsb-to" value="${to}"></label></div>
     <div class="ws-f">Days<div class="ws-days">${days.map(x => `<label><input type="checkbox" value="${x[0]}"${x[0] === wd ? ' checked' : ''}> ${x[1]}</label>`).join('')}</div></div>
@@ -3662,6 +3707,7 @@ async function wsBulk(dry) {
   const times = (document.getElementById('wsb-times').value || '').split(/[\s,]+/).filter(Boolean).map(t => /^\d{1,2}$/.test(t) ? t + ':00' : t);
   if (times.some(t => !/^([01]?\d|2[0-3]):[0-5]\d$/.test(t))) { m.textContent = 'Check the times (24-hour, e.g. 11:00, 14:00, 18:30).'; return; }
   let item = document.getElementById('wsb-item').value;
+  if (!item) { m.textContent = 'Choose a workshop (type to search).'; return; }
   if (item.startsWith('p:')) {
     if (dry) { item = null; }   // first time on World: it's set up when you press Create
     else { try { item = await wsEnsureItem('wsb'); } catch (e) { m.textContent = e.message || String(e); return; } }
