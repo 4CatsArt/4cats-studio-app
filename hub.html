@@ -1787,6 +1787,10 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
 .ws-f small { font-weight: 400; color: #777; } .ws-two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .ws-studios { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 10px; font-weight: 400; max-height: 220px; overflow: auto; margin-top: 4px; border: 1px solid var(--line, #e5e0d6); border-radius: 8px; padding: 6px 8px; }
 .ws-days { display: flex; gap: 10px; flex-wrap: wrap; font-weight: 400; margin-top: 4px; }
+.ws-setup { border: 1px dashed #e0c36a; background: #fffbea; border-radius: 10px; padding: 8px 10px; margin: 8px 0 0; font-size: 14px; }
+.ws-setup-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; } .ws-setup-row label { display: flex; flex-direction: column; font-size: 12px; font-weight: 700; gap: 2px; }
+.ws-setup-row input, .ws-setup-row select { font: inherit; font-size: 14px; font-weight: 400; padding: 5px 7px; border: 1px solid var(--line, #e5e0d6); border-radius: 8px; width: 90px; }
+.ws-setup-row label.wide input { width: 260px; } .ws-setup-row select { width: 130px; }
 </style>
 </head>
 <body>
@@ -3527,7 +3531,10 @@ async function loadPlanDay(date) {
     const keepLists = (_plan && _plan.date === date && _plan.classLists) || {};
     // World workshops (admins): this day's times and the workshops to choose from (world_workshop_planner.sql)
     let ws = null;
-    if (planCanShifts()) { const w = await sb.rpc('hub_ws_range', { p_studio: st, p_from: date, p_to: date }); ws = w.error ? { error: w.error.message } : w.data; }
+    if (planCanShifts()) {
+      const w = await sb.rpc('hub_ws_range', { p_studio: st, p_from: date, p_to: date }); ws = w.error ? { error: w.error.message } : w.data;
+      if (!_wsProjects) { const pr = await sb.rpc('hub_ws_projects'); _wsProjects = pr.error ? [] : (pr.data || []); }
+    }
     _plan = { ws, date, team: team.data || [], sessions, events, staffBy, booked, extras, signins, kidsTeacher, campTeam, partyForms: keepForms, classLists: keepLists, roles, wheel, parties, dirty: false, msg: '' };
     renderPlanDay();
   } catch (e) {
@@ -3538,6 +3545,39 @@ async function loadPlanDay(date) {
 // ================= World workshops in the day planner (admins; world_workshop_planner.sql) =================
 // Workshop times sold on World (no Shopify products): add, change spots, swap, hide or remove
 // on this day, and bulk-add across studios and weeks. Changes show on World straight away.
+let _wsProjects = null;   // every project (hub_ws_projects), loaded once
+function wsPickOpts(items) {
+  const onWorld = new Set(items.map(i => i.id));
+  const others = (_wsProjects || []).filter(p => !p.item_id || !onWorld.has(p.item_id));
+  return `<optgroup label="On World">${items.map(i => `<option value="${escAttr(i.id)}">${esc(i.title)}</option>`).join('')}</optgroup>` +
+    (others.length ? `<optgroup label="All other projects (first time on World)">${others.map(p => `<option value="${p.item_id ? escAttr(p.item_id) : 'p:' + escAttr(p.id)}">${esc(p.name)}</option>`).join('')}</optgroup>` : '');
+}
+function wsSetupHtml(pre) {
+  return `<div class="ws-setup" id="${pre}-setup" hidden><b>First time on World</b> <span class="goal-note">· it books through Shopify checkout (no product needed)</span>
+    <div class="ws-setup-row">
+      <label>Kind<select id="${pre}-kind"><option value="workshop">Workshop</option><option value="mini_make">Mini Make</option></select></label>
+      <label>Regular $<input type="number" id="${pre}-price" min="1" step="0.01" value="39"></label>
+      <label class="wide">Member prices<input type="text" id="${pre}-tiers" value="1 for 29, 2 for 39, 3 for 49, 4 for 59"></label>
+      <label>Ages from<input type="number" id="${pre}-age" min="0" max="99" value="6"></label>
+      <label>Minutes<input type="number" id="${pre}-min" min="15" step="15" value="90"></label>
+    </div></div>`;
+}
+function wsSetupToggle(pre) {
+  const v = document.getElementById(pre + '-item').value, box = document.getElementById(pre + '-setup');
+  if (box) box.hidden = !v.startsWith('p:');
+  const go = document.getElementById(pre + '-go'); if (go && go.dataset.label) go.textContent = v.startsWith('p:') ? 'Set up and add' : go.dataset.label;
+}
+// The workshop to use: an existing one, or a project set up now (its first time on World)
+async function wsEnsureItem(pre) {
+  const v = document.getElementById(pre + '-item').value;
+  if (!v.startsWith('p:')) return v;
+  const tiers = []; String(document.getElementById(pre + '-tiers').value || '').replace(/(\d+)\s*(?:for|=|:)\s*\$?\s*([\d.]+)/gi, (_, n, pr) => { tiers.push([+n, +pr]); });
+  const { data, error } = await sb.rpc('hub_ws_setup', { p_project: v.slice(2), p_kind: document.getElementById(pre + '-kind').value, p_min_age: +document.getElementById(pre + '-age').value,
+    p_price: +document.getElementById(pre + '-price').value, p_tiers: tiers.sort((a, b) => a[0] - b[0]), p_minutes: +document.getElementById(pre + '-min').value });
+  if (error) throw error;
+  _wsProjects = null;   // reload: it's on World now
+  return data;
+}
 function wsTime(t) { const [h, m] = String(t).split(':').map(Number); return `${h % 12 || 12}${m ? ':' + String(m).padStart(2, '0') : ''}${h >= 12 ? 'pm' : 'am'}`; }
 function wsDayHtml() {
   const W = _plan.ws;
@@ -3559,14 +3599,14 @@ function wsDayHtml() {
   }).join('');
   return `<div class="ho-section-head">🎨 World workshops <span class="goal-note" style="font-weight:400">· sold on World, no Shopify products</span></div>
     ${rows || '<div class="ho-intro">No World workshops this day yet.</div>'}
-    ${items.length ? `<div class="ws-add">
-      <select id="ws-item">${itemOpts('')}</select>
+    ${items.length || (_wsProjects || []).length ? `${wsSetupHtml('ws')}<div class="ws-add">
+      <select id="ws-item" onchange="wsSetupToggle('ws')">${wsPickOpts(items)}</select>
       <input type="time" id="ws-time" step="900" aria-label="Time">
       <label class="ws-spots">Spots <input type="number" id="ws-spots" min="1" max="200" value="12"></label>
-      <button class="ho-btn primary" onclick="wsAdd()">+ Add to this day</button>
+      <button class="ho-btn primary" id="ws-go" data-label="+ Add to this day" onclick="wsAdd()">+ Add to this day</button>
       <button class="ho-btn" onclick="wsBulkOpen()">Bulk add…</button>
       <span class="plan-msg" id="ws-msg"></span></div>`
-    : '<div class="ho-intro">No World-only workshops yet: add them in World settings → Pages → World-only workshops.</div>'}`;
+    : '<div class="ho-intro">No projects found in the Projects library.</div>'}`;
 }
 async function wsReload(msg) {
   const w = await sb.rpc('hub_ws_range', { p_studio: _sessionStudioId, p_from: _plan.date, p_to: _plan.date });
@@ -3576,8 +3616,9 @@ async function wsReload(msg) {
   if (msg) { const m = document.getElementById('ws-msg'); if (m) m.textContent = msg; }
 }
 async function wsAdd() {
-  const item = document.getElementById('ws-item').value, time = document.getElementById('ws-time').value, spots = +document.getElementById('ws-spots').value, m = document.getElementById('ws-msg');
+  const time = document.getElementById('ws-time').value, spots = +document.getElementById('ws-spots').value, m = document.getElementById('ws-msg');
   if (!time) { m.textContent = 'Choose the time.'; return; }
+  let item; try { item = await wsEnsureItem('ws'); } catch (e) { m.textContent = e.message || String(e); return; }
   const { error } = await sb.rpc('hub_ws_add', { p_item: item, p_studio: _sessionStudioId, p_date: _plan.date, p_time: time, p_spots: spots });
   if (error) { m.textContent = error.message; return; }
   wsReload('Added ✓ It’s on World now.');
@@ -3602,7 +3643,7 @@ function wsBulkOpen() {
   let el = document.getElementById('ws-bulk');
   if (!el) { el = document.createElement('dialog'); el.id = 'ws-bulk'; el.className = 'ws-dlg'; document.body.appendChild(el); }
   el.innerHTML = `<div class="ho-title" style="font-size:18px">Bulk add World workshops</div>
-    <label class="ws-f">Workshop<select id="wsb-item">${items.map(i => `<option value="${escAttr(i.id)}">${esc(i.title)}</option>`).join('')}</select></label>
+    <label class="ws-f">Workshop<select id="wsb-item" onchange="wsSetupToggle('wsb')">${wsPickOpts(items)}</select></label>${wsSetupHtml('wsb')}
     <div class="ws-f">Studios<div class="ws-studios">${Object.keys(STUDIO_NAMES).map(id => `<label><input type="checkbox" value="${escAttr(id)}"${id === _sessionStudioId ? ' checked' : ''}> ${esc(STUDIO_NAMES[id])}</label>`).join('')}</div></div>
     <div class="ws-two"><label class="ws-f">From<input type="date" id="wsb-from" value="${d}"></label><label class="ws-f">To<input type="date" id="wsb-to" value="${to}"></label></div>
     <div class="ws-f">Days<div class="ws-days">${days.map(x => `<label><input type="checkbox" value="${x[0]}"${x[0] === wd ? ' checked' : ''}> ${x[1]}</label>`).join('')}</div></div>
@@ -3620,7 +3661,20 @@ async function wsBulk(dry) {
   const weekdays = [...el.querySelectorAll('.ws-days input:checked')].map(x => +x.value);
   const times = (document.getElementById('wsb-times').value || '').split(/[\s,]+/).filter(Boolean).map(t => /^\d{1,2}$/.test(t) ? t + ':00' : t);
   if (times.some(t => !/^([01]?\d|2[0-3]):[0-5]\d$/.test(t))) { m.textContent = 'Check the times (24-hour, e.g. 11:00, 14:00, 18:30).'; return; }
-  const args = { p_item: document.getElementById('wsb-item').value, p_studios: studios, p_from: document.getElementById('wsb-from').value, p_to: document.getElementById('wsb-to').value,
+  let item = document.getElementById('wsb-item').value;
+  if (item.startsWith('p:')) {
+    if (dry) { item = null; }   // first time on World: it's set up when you press Create
+    else { try { item = await wsEnsureItem('wsb'); } catch (e) { m.textContent = e.message || String(e); return; } }
+  }
+  if (dry && !item) {
+    // preview without a workshop yet: count the dates and times (nothing can be there already)
+    const from = planDateOf(document.getElementById('wsb-from').value), to = planDateOf(document.getElementById('wsb-to').value);
+    let n = 0; for (const d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) if (weekdays.includes(((d.getDay() + 6) % 7) + 1)) n++;
+    const total = n * times.length * studios.length;
+    m.textContent = total ? `This sets the project up on World and makes ${total} time${total === 1 ? '' : 's'} at ${studios.length} studio${studios.length === 1 ? '' : 's'}.` : 'Nothing to add: check the days, dates and times.';
+    document.getElementById('wsb-go').disabled = !total; return;
+  }
+  const args = { p_item: item, p_studios: studios, p_from: document.getElementById('wsb-from').value, p_to: document.getElementById('wsb-to').value,
     p_weekdays: weekdays, p_times: times, p_spots: +document.getElementById('wsb-spots').value, p_dry: dry };
   const { data, error } = await sb.rpc('hub_ws_bulk', args);
   if (error) { m.textContent = error.message; return; }
