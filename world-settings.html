@@ -363,6 +363,9 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
 .cb-gal-ed button { position: absolute; top: 2px; right: 2px; padding: 0 6px; min-height: 0; }
 .cb-opts { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-top: 4px; } .cb-opts .field { margin: 0; min-width: 160px; }
 .cb-pageopts { display: grid; gap: 4px; margin: 0 0 10px; }
+.sec-drag { position: relative; padding-left: 26px; } .sec-grip { position: absolute; left: 0; top: 10px; width: 22px; text-align: center; font-size: 18px; line-height: 1; color: #999; cursor: grab; user-select: none; }
+.sec-grip:hover { color: #333; } .sec-drag.dragging { opacity: .45; } .sec-drag.drop-before { box-shadow: 0 -3px 0 #c3090c; } .sec-drag.drop-after { box-shadow: 0 3px 0 #c3090c; }
+.sec-dragmode .sec-drag > .cls-sec > :not(b) { display: none !important; } .sec-dragmode .sec-drag > .cls-sec { padding-top: 8px; padding-bottom: 8px; } .sec-dragmode .sec-drag .cls-sec-tools { display: none; }
 </style>
 </head>
 <body>
@@ -3155,7 +3158,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
   }
   function classEditorHtml() {
     var c = clsDraft, studios = c.studios || [];
-    var secHtml = (c.sections || []).map(function (x, i) {
+    var secHtml = (c.sections || []).map(function (x, i) { var one = (function () {
       if (x.type === 'opts') return '';
       var tools = '<span class="cls-sec-tools"><button class="btn btn-plain" type="button" data-clsmv="' + i + '" data-d="-1"' + (i ? '' : ' disabled') + '>\u2191</button><button class="btn btn-plain" type="button" data-clsmv="' + i + '" data-d="1"' + (i < c.sections.length - 1 ? '' : ' disabled') + '>\u2193</button><button class="btn btn-plain" type="button" data-clsdel="' + i + '">Remove</button></span>';
       if (CB_DEFS[x.type]) return cbEdHtml(x, i, tools);
@@ -3167,6 +3170,9 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
         '</div><div class="field"><label>Describe the picture (for screen readers)</label><input type="text" data-clsalt="' + i + '" value="' + esc(x.alt || '') + '"></div></div>';
       return '<div class="cls-sec"><b>\ud83d\udcdd Text ' + tools + '</b><div class="field"><label>Heading (optional)</label><input type="text" data-clsh="' + i + '" value="' + esc(x.heading || '') + '"></div>' +
         '<div class="field"><label>Text</label><textarea rows="4" data-clsb="' + i + '">' + esc(x.body || '') + '</textarea></div></div>';
+    })();
+      // each section in a drag wrapper: grab the ⠿ handle to move it
+      return one ? '<div class="sec-drag" draggable="true" data-secidx="' + i + '"><span class="sec-grip" title="Drag to move" aria-label="Drag to move this section">\u283f</span>' + one + '</div>' : '';
     }).join('');
     return '<div class="cls-ed"><div class="two"><div class="field"><label for="clsName">Class name</label><input type="text" id="clsName" value="' + esc(c.name || '') + '" placeholder="Make the Gift"></div>' +
         '<div class="field"><label for="clsMatch">Sessions whose title contains <span style="font-weight:400">(Shopify classes only)</span></label><input type="text" id="clsMatch" value="' + esc(c.match && c.match !== c.name ? c.match : '') + '" placeholder="Leave blank to use the class name"><span class="help">For classes sold as Shopify products: every series whose title contains this shows on the page. Classes with timeslots (sold on World) can leave it blank: the class name is used.</span></div></div>' +
@@ -3532,6 +3538,31 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     });
     sec.querySelectorAll('[data-clsjoin]').forEach(function (x) { x.addEventListener('change', function () { keep(); clsDraft.sections[+x.dataset.clsjoin].stack = x.checked; redraw(); }); });
     cbBind(sec, keep, redraw);
+    // Drag and drop sections (the ⠿ handle); the page order is the order in clsDraft.sections
+    var dragFrom = null, fromGrip = false;
+    sec.addEventListener('mousedown', function (e) { fromGrip = !!(e.target.closest && e.target.closest('.sec-grip')); });
+    sec.addEventListener('touchstart', function (e) { fromGrip = !!(e.target.closest && e.target.closest('.sec-grip')); }, { passive: true });
+    sec.querySelectorAll('.sec-drag').forEach(function (d) {
+      d.addEventListener('dragstart', function (e) {
+        if (!fromGrip || e.target !== d) { if (e.target === d) e.preventDefault(); return; }   // only from the ⠿ handle (typing and selecting in fields stay normal)
+        e.stopPropagation(); dragFrom = +d.dataset.secidx;
+        var before = d.getBoundingClientRect().top;
+        setTimeout(function () { sec.classList.add('sec-dragmode'); window.scrollBy(0, d.getBoundingClientRect().top - before); }, 0); /* every section shrinks to its title while dragging; the one in hand stays under the mouse */ d.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', String(dragFrom)); } catch (er) {} });
+      d.addEventListener('dragend', function () { d.classList.remove('dragging'); fromGrip = false; sec.classList.remove('sec-dragmode'); sec.querySelectorAll('.sec-drag').forEach(function (x) { x.classList.remove('drop-before', 'drop-after'); }); });
+      d.addEventListener('dragover', function (e) {
+        if (dragFrom === null) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+        var r = d.getBoundingClientRect(), after = e.clientY > r.top + r.height / 2;
+        sec.querySelectorAll('.sec-drag').forEach(function (x) { x.classList.remove('drop-before', 'drop-after'); });
+        d.classList.add(after ? 'drop-after' : 'drop-before'); d.dataset.after = after ? '1' : '';
+      });
+      d.addEventListener('drop', function (e) {
+        e.preventDefault(); if (dragFrom === null) return;
+        var to = +d.dataset.secidx + (d.dataset.after ? 1 : 0), from = dragFrom; dragFrom = null;
+        keep();
+        var S = clsDraft.sections, item = S.splice(from, 1)[0]; if (to > from) to--; S.splice(to, 0, item);
+        redraw('Moved \u2713 Press Save to keep the new order.');
+      });
+    });
     $('clsAddTxt').addEventListener('click', function () { keep(); clsDraft.sections.push({ type: 'text', heading: '', body: '' }); redraw(); });
     sec.querySelectorAll('[data-clsmv]').forEach(function (b) { b.addEventListener('click', function () { keep(); var a = +b.dataset.clsmv, c2 = a + (+b.dataset.d), S2 = clsDraft.sections, t = S2[a]; S2[a] = S2[c2]; S2[c2] = t; redraw(); }); });
     sec.querySelectorAll('[data-clsdel]').forEach(function (b) { b.addEventListener('click', function () { keep(); clsDraft.sections.splice(+b.dataset.clsdel, 1); redraw(); }); });
@@ -3937,7 +3968,9 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
         text: 'It\u2019s like the Great Canadian pottery throw down but without Seth Rogen, no pressure and an hour and a half should be plenty of time, if you are on time.', note: 'So\u2026 please, please, please be on time so you don\u2019t miss a thing.' },
       { icon: '\ud83d\udcac', title: 'Ask Questions', lead: 'If you have questions, please ask during the workshop!', text: 'We\u2019re not clairvoyants \ud83d\udd2e but we do want to help and make this the best experience possible. Tell us while you\u2019re there so we can fix things on the spot.' }],
     glazing: { icon: '\ud83c\udfa8', title: 'Book Glazing', badge: 'Glazing is not included.', button: 'Book a glazing session',
-      bullets: ['You\u2019ll need to book a separate glazing session.', 'Your piece will be ready in 14 days (earliest), and you can come back any time within 14\u201360 days to glaze.', 'We won\u2019t email or call to remind you \u2014 so mark your calendar for 14 days after your workshop.', 'We suggest you book glazing now to save your spot. Glazing fills quickly.'] },
+      bullets: ['Glazing is a separate visit, so you\u2019ll book it on its own.', 'You\u2019ll get a ticket for your piece at the end of the workshop. Keep the number handy, or add it in My 4Cats \u2192 Your artwork.',
+        'We\u2019ll email you as soon as your piece is ready to glaze, usually about 14 days after your workshop. You\u2019ll see it in My 4Cats too.',
+        'You then have up to 60 days from your workshop to come back and glaze. We\u2019ll send a reminder before your time runs out.', 'Glazing spots fill quickly, so book your time as soon as you get the email.'] },
     bonus: { title: 'Bonus Reminders', items: [{ icon: '\ud83d\udc6a', title: 'Stick to your age group.', text: 'Workshops are designed that way for a reason. If you bring kids or extra guests not in the right age group, this can feel like hard work, not fun.' },
       { icon: '\ud83d\udeab', title: 'No observers.', text: 'Only registered makers can attend and join in.' }] }
   };
