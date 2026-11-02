@@ -1832,6 +1832,7 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
 .don-notes { font-size: 13px; color: #555; margin-top: 4px; } .don-two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .don-make { border: 1px dashed #ddd; border-radius: 10px; padding: 8px 10px; } .don-make summary { cursor: pointer; font-weight: 700; } .don-kinds { display: flex; gap: 12px; flex-wrap: wrap; margin: 6px 0; }
 .don-form [hidden] { display: none !important; }
+.ws-tag.kids { background: #eef7ff; color: #1e5a96; } .cl-pickup { font-size: 13px; font-weight: 700; color: #1e5a96; margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -3856,8 +3857,10 @@ function wsDayHtml() {
       ${wsPickerHtml('ws', items)}
       <input type="time" id="ws-time" step="900" aria-label="Time">
       <label class="ws-spots">Spots <input type="number" id="ws-spots" min="1" max="200" value="12"></label>
+      <label class="ws-spots">Who <select id="ws-who" title="Kids only = drop-off, children only"><option value="">Workshop’s default</option><option value="family">Families</option><option value="kids">Kids only (drop-off)</option></select></label>
       <button class="ho-btn primary" id="ws-go" data-label="+ Add to this day" onclick="wsAdd()">+ Add to this day</button>
       <button class="ho-btn" onclick="wsBulkOpen()">Bulk add…</button>
+      <button class="ho-btn" onclick="wsKidsSettings('ws')" title="Kids-only settings for the chosen workshop: default, ages, price">🧒 Kids-only settings…</button>
       <span class="plan-msg" id="ws-msg"></span></div>
       ${_wsProjectsErr ? `<div class="pp-note" style="color:#a33">Only World workshops are listed: the project list didn’t load (${esc(_wsProjectsErr)}).</div>` : ''}`
     : '<div class="ho-intro">No projects found in the Projects library.</div>'}`;
@@ -3873,7 +3876,8 @@ async function wsAdd() {
   const time = document.getElementById('ws-time').value, spots = +document.getElementById('ws-spots').value, m = document.getElementById('ws-msg');
   if (!time) { m.textContent = 'Choose the time.'; return; }
   let item; try { item = await wsEnsureItem('ws'); } catch (e) { m.textContent = e.message || String(e); return; }
-  const { error } = await sb.rpc('hub_ws_add', { p_item: item, p_studio: _sessionStudioId, p_date: _plan.date, p_time: time, p_spots: spots });
+  const who = (document.getElementById('ws-who') || {}).value || '';
+  const { error } = await sb.rpc('hub_ws_add', { p_item: item, p_studio: _sessionStudioId, p_date: _plan.date, p_time: time, p_spots: spots, p_kids: who === 'kids' ? true : who === 'family' ? false : null });
   if (error) { m.textContent = error.message; return; }
   wsReload('Added ✓ It’s on World now.');
 }
@@ -3881,6 +3885,33 @@ async function wsUpdate(id, change) {
   const { error } = await sb.rpc('hub_ws_update', Object.assign({ p_session: id }, change));
   if (error) { alert(error.message); }
   wsReload(error ? '' : 'Saved ✓');
+}
+async function wsKids(id, on) {
+  const { error } = await sb.rpc('hub_ws_kids', { p_session: id, p_on: on });
+  if (error) { alert(/hub_ws_kids/i.test(error.message) ? 'Run world_kids_only.sql in Supabase first.' : error.message); return; }
+  wsReload(on ? 'Kids only ✓' : 'Open to families ✓');
+}
+// A workshop's kids-only settings: the default for new times, ages, and its own price (e.g. Mini Make $20 / members $15)
+function wsKidsSettings(pre) {
+  const id = (document.getElementById(pre + '-item') || {}).value || '';
+  if (!id) { alert('Choose the workshop first (type to search).'); return; }
+  if (id.startsWith('p:')) { alert('Add a time for this workshop first (that sets it up on World), then its kids-only settings can be changed.'); return; }
+  const it = ((_plan.ws && _plan.ws.items) || []).find(x => x.id === id) || {}, mm = it.kind === 'mini_make';
+  openDutySheet(`<h3>🧒 Kids-only settings: ${esc(it.title || 'this workshop')}</h3>
+    <p class="ho-intro">Kids-only times are drop-off: children only, and booking asks who’s picking up.</p>
+    <div class="me-form"><label class="check" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="wk-def"${it.kids_default ? ' checked' : ''}> New times start as kids only</label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><label>Ages from<input type="number" id="wk-min" min="3" max="17" value="${escAttr(it.kids_min_age ?? '')}" placeholder="${mm ? 5 : 6}"></label>
+        <label>to<input type="number" id="wk-max" min="3" max="17" value="${escAttr(it.kids_max_age ?? '')}" placeholder="12"></label></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><label>Kids-only price ($)<input type="number" id="wk-price" min="0" step="0.01" value="${escAttr(it.kids_price ?? '')}" placeholder="Same as usual"></label>
+        <label>Member price ($)<input type="number" id="wk-mem" min="0" step="0.01" value="${escAttr(it.kids_member_price ?? '')}" placeholder="Same as usual"></label></div>
+      <p class="goal-note">Empty ages: ${mm ? '5' : '6'}–12. Empty prices: the workshop’s usual prices.</p><div id="wk-msg" class="goal-note"></div></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="wsKidsSave('${escAttr(id)}')">Save</button></div>`);
+}
+async function wsKidsSave(id) {
+  const n = k => { const v = document.getElementById(k).value; return v === '' ? null : +v; };
+  const { error } = await sb.rpc('hub_ws_kids_settings', { p_item: id, p_default: document.getElementById('wk-def').checked, p_min: n('wk-min'), p_max: n('wk-max'), p_price: n('wk-price'), p_member: n('wk-mem') });
+  if (error) { document.getElementById('wk-msg').textContent = /hub_ws_kids_settings/i.test(error.message) ? 'Run world_kids_only.sql in Supabase first.' : error.message; return; }
+  closeDutySheet(); wsReload('Kids-only settings saved ✓');
 }
 async function wsRemove(id) {
   if (!confirm('Remove this workshop time from World?')) return;
@@ -3903,6 +3934,7 @@ function wsBulkOpen() {
     <div class="ws-f">Days<div class="ws-days">${days.map(x => `<label><input type="checkbox" value="${x[0]}"${x[0] === wd ? ' checked' : ''}> ${x[1]}</label>`).join('')}</div></div>
     <div class="ws-two"><label class="ws-f">Times<input type="text" id="wsb-times" placeholder="11:00, 14:00"><small>24-hour, comma between (e.g. 11:00, 14:00, 18:30)</small></label>
       <label class="ws-f">Spots each<input type="number" id="wsb-spots" min="1" max="200" value="12"></label></div>
+    <div class="ws-f"><label class="ws-spots" style="display:inline-flex;gap:6px;align-items:center">Who <select id="wsb-who" title="Kids only = drop-off, children only"><option value="">Workshop’s default</option><option value="family">Families</option><option value="kids">Kids only (drop-off)</option></select></label> <button class="ho-btn" onclick="wsKidsSettings('wsb')">🧒 Kids-only settings…</button></div>
     <p class="plan-msg" id="wsb-msg" style="margin:8px 0"></p>
     <div style="display:flex;gap:8px;justify-content:flex-end"><button class="ho-btn" onclick="document.getElementById('ws-bulk').close()">Close</button>
       <button class="ho-btn" onclick="wsBulk(true)">Preview</button><button class="ho-btn primary" id="wsb-go" onclick="wsBulk(false)" disabled>Create</button></div>`;
@@ -3930,7 +3962,8 @@ async function wsBulk(dry) {
     document.getElementById('wsb-go').disabled = !total; return;
   }
   const args = { p_item: item, p_studios: studios, p_from: document.getElementById('wsb-from').value, p_to: document.getElementById('wsb-to').value,
-    p_weekdays: weekdays, p_times: times, p_spots: +document.getElementById('wsb-spots').value, p_dry: dry };
+    p_weekdays: weekdays, p_times: times, p_spots: +document.getElementById('wsb-spots').value, p_dry: dry,
+    p_kids: (w => w === 'kids' ? true : w === 'family' ? false : null)((document.getElementById('wsb-who') || {}).value || '') };
   const { data, error } = await sb.rpc('hub_ws_bulk', args);
   if (error) { m.textContent = error.message; return; }
   if (dry) {
@@ -3973,7 +4006,8 @@ function wsRowTools(x) {
   const today = localDateStr(new Date()), soon = (() => { const d = new Date(); d.setDate(d.getDate() + 5); return localDateStr(d); })();
   const quiet = t.show && t.spots > 0 && t.date >= today && t.date <= soon && t.booked / t.spots < 0.3;
   const itemOpts = (W.items || []).map(i => `<option value="${escAttr(i.id)}"${i.id === t.item_id ? ' selected' : ''}>${esc(i.title)}</option>`).join('');
-  return `<span class="ws-inline"><span class="ws-tag world">World</span>${quiet ? '<span class="ws-tag">Quiet</span>' : ''}
+  return `<span class="ws-inline"><span class="ws-tag world">World</span>${t.kids_only ? '<span class="ws-tag kids">Kids only</span>' : ''}${quiet ? '<span class="ws-tag">Quiet</span>' : ''}
+    ${t.booked ? '' : `<button class="ho-btn" onclick="wsKids('${escAttr(t.session_id)}', ${!t.kids_only})" title="${t.kids_only ? 'Open it to families' : 'Make it kids only (drop-off)'}">${t.kids_only ? 'Make family' : 'Make kids only'}</button>`}
     ${t.booked ? '' : `<select class="ws-swap" onchange="wsUpdate('${escAttr(t.session_id)}', { p_item: this.value })" title="Swap the workshop (nobody's booked yet)" aria-label="Swap the workshop">${itemOpts}</select>`}
     <span class="ws-count">Spots <input type="number" min="${Math.max(1, t.booked)}" max="200" value="${t.spots}" onchange="wsUpdate('${escAttr(t.session_id)}', { p_spots: +this.value })" aria-label="Spots"></span>
     <button class="ho-btn" onclick="wsUpdate('${escAttr(t.session_id)}', { p_show: ${!t.show} })">${t.show ? 'Hide' : 'Show'}</button>${t.show ? '' : '<span class="ws-tag off">Hidden</span>'}
@@ -4816,7 +4850,9 @@ async function toggleClassList(sessionId) {
         const a = b.ages || {};
         const ageRow = [a.kids_under_8 ? `<span class="age-pill u8">👶 ${a.kids_under_8} under 8${a.youngest_age != null && a.youngest_age < 8 ? ` (youngest ${a.youngest_age})` : ''}</span>` : '',
           a.kids_8_11 ? `<span class="age-pill k811">${a.kids_8_11} aged 8–11</span>` : '', a.kids_12_15 ? `<span class="age-pill k1215">${a.kids_12_15} aged 12–15</span>` : ''].filter(Boolean).join('');
-        return `<tr><td><b>${esc(b.customer_name || '—')}</b>${(kids[b.id] || []).length ? `<div class="cl-kids">🧒 ${esc(kids[b.id].join(', '))}</div>` : ''}${ageRow ? `<div class="age-row">${ageRow}</div>` : ''}</td>
+        const pick = (() => { try { const raw = typeof b.raw_payload === 'string' ? JSON.parse(b.raw_payload) : (b.raw_payload || {}); const pr = ((raw.line_items || [])[0] || {}).properties || [];
+          const f = k => (pr.find(x => x && x.name === k) || {}).value; return f('Pickup') ? { who: f('Pickup'), kids: !!f('Kids only') } : null; } catch (e) { return null; } })();
+        return `<tr><td><b>${esc(b.customer_name || '—')}</b>${pick ? `<div class="cl-pickup">🚗 Pickup: ${esc(pick.who)}${pick.kids ? ' <span class="ws-tag kids">Kids only</span>' : ''}</div>` : ''}${(kids[b.id] || []).length ? `<div class="cl-kids">🧒 ${esc(kids[b.id].join(', '))}</div>` : ''}${ageRow ? `<div class="age-row">${ageRow}</div>` : ''}</td>
           <td>${esc(b.qty)}</td>${glazing ? (() => {
             const orig = getGlazingPiece(b.raw_payload, b.event_date) || '', saved = glz[String(b.id)];
             return `<td class="glz-cell"><div class="glz-edit"><input id="glz-${escAttr(b.id)}" value="${escAttr(saved != null ? saved : orig)}" placeholder="What are they glazing?" maxlength="300">
