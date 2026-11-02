@@ -1775,6 +1775,18 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
 .fam-adj { margin-top: 6px; } .fam-adj summary { cursor: pointer; font-size: 13px; font-weight: 700; color: #99354e; }
 .fam-adj-row { display: flex; gap: 12px; flex-wrap: wrap; margin: 8px 0; font-size: 13px; } .fam-adj-row select, .fam-adj-row input { padding: 6px 8px; border: 1px solid #d0d0c8; border-radius: 6px; font: inherit; margin-left: 4px; }
 .fam-adj-note { display: flex; flex-direction: column; gap: 4px; font-size: 13px; margin-bottom: 8px; max-width: 560px; } .fam-adj-note input { padding: 7px 9px; border: 1px solid #d0d0c8; border-radius: 6px; font: inherit; }
+.ws-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ws-row .nm { flex: 1; min-width: 180px; } .ws-swap { font: inherit; font-weight: 700; border: 1px solid var(--line, #e5e0d6); border-radius: 8px; padding: 4px 6px; max-width: 100%; }
+.ws-count input { width: 60px; font: inherit; padding: 3px 6px; border: 1px solid var(--line, #e5e0d6); border-radius: 8px; }
+.ws-tag { display: inline-block; margin-left: 6px; font-size: 11px; font-weight: 800; padding: 2px 8px; border-radius: 999px; background: #fff3cd; color: #7a5b00; }
+.ws-tag.off { background: #eee; color: #555; } .ws-quiet { box-shadow: inset 3px 0 0 #f0b400; }
+.ws-add { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0 4px; } .ws-add select, .ws-add input { font: inherit; padding: 6px 8px; border: 1px solid var(--line, #e5e0d6); border-radius: 8px; }
+.ws-add .ws-spots input { width: 64px; margin-left: 4px; }
+.ws-dlg { border: 0; border-radius: 16px; padding: 20px; width: min(640px, 94vw); max-height: 90vh; overflow: auto; }
+.ws-f { display: block; margin: 10px 0 0; font-weight: 700; font-size: 14px; } .ws-f input[type=date], .ws-f input[type=text], .ws-f input[type=number], .ws-f select { display: block; width: 100%; box-sizing: border-box; font: inherit; font-weight: 400; padding: 7px 9px; border: 1px solid var(--line, #e5e0d6); border-radius: 8px; margin-top: 4px; }
+.ws-f small { font-weight: 400; color: #777; } .ws-two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.ws-studios { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 10px; font-weight: 400; max-height: 220px; overflow: auto; margin-top: 4px; border: 1px solid var(--line, #e5e0d6); border-radius: 8px; padding: 6px 8px; }
+.ws-days { display: flex; gap: 10px; flex-wrap: wrap; font-weight: 400; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -3413,7 +3425,7 @@ async function loadPlanDay(date) {
   try {
     const [team, sess] = await Promise.all([
       sb.rpc('hub_team_on_date', { p_studio_id: st, p_date: date }),
-      sb.from('sessions').select('id, title, session_date, session_time, session_type, duration_minutes, capacity, spaces_left_cache, show').eq('studio_id', st).eq('session_date', date).order('session_time')
+      sb.from('sessions').select('id, title, session_date, session_time, session_type, duration_minutes, capacity, spaces_left_cache, show, world_item_id').eq('studio_id', st).eq('session_date', date).order('session_time')
     ]);
     if (team.error) throw team.error;
     if (sess.error) throw sess.error;
@@ -3513,10 +3525,111 @@ async function loadPlanDay(date) {
     // Party forms already open stay open (and keep what's typed) when the day reloads.
     const keepForms = (_plan && _plan.date === date && _plan.partyForms) || {};
     const keepLists = (_plan && _plan.date === date && _plan.classLists) || {};
-    _plan = { date, team: team.data || [], sessions, events, staffBy, booked, extras, signins, kidsTeacher, campTeam, partyForms: keepForms, classLists: keepLists, roles, wheel, parties, dirty: false, msg: '' };
+    // World workshops (admins): this day's times and the workshops to choose from (world_workshop_planner.sql)
+    let ws = null;
+    if (planCanShifts()) { const w = await sb.rpc('hub_ws_range', { p_studio: st, p_from: date, p_to: date }); ws = w.error ? { error: w.error.message } : w.data; }
+    _plan = { ws, date, team: team.data || [], sessions, events, staffBy, booked, extras, signins, kidsTeacher, campTeam, partyForms: keepForms, classLists: keepLists, roles, wheel, parties, dirty: false, msg: '' };
     renderPlanDay();
   } catch (e) {
     body.innerHTML = `<div class="ho-card">Couldn't load that day: ${esc(e.message || e)}</div>`;
+  }
+}
+
+// ================= World workshops in the day planner (admins; world_workshop_planner.sql) =================
+// Workshop times sold on World (no Shopify products): add, change spots, swap, hide or remove
+// on this day, and bulk-add across studios and weeks. Changes show on World straight away.
+function wsTime(t) { const [h, m] = String(t).split(':').map(Number); return `${h % 12 || 12}${m ? ':' + String(m).padStart(2, '0') : ''}${h >= 12 ? 'pm' : 'am'}`; }
+function wsDayHtml() {
+  const W = _plan.ws;
+  if (!W) return '';
+  if (W.error) return `<div class="ho-section-head">🎨 World workshops</div><div class="ho-intro">${/function|does not exist/i.test(W.error) ? 'Run world_workshop_planner.sql in Supabase to switch this on.' : esc(W.error)}</div>`;
+  const items = W.items || [], times = W.times || [];
+  const today = localDateStr(new Date()), soon = (() => { const d = new Date(); d.setDate(d.getDate() + 5); return localDateStr(d); })();
+  const itemOpts = sel => items.map(i => `<option value="${escAttr(i.id)}"${i.id === sel ? ' selected' : ''}>${esc(i.title)}</option>`).join('');
+  const rows = times.map(t => {
+    const quiet = t.show && t.spots > 0 && t.date >= today && t.date <= soon && t.booked / t.spots < 0.3;
+    return `<div class="plan-sess ws-row${t.show ? '' : ' off'}${quiet ? ' ws-quiet' : ''}">
+      <span class="t">${esc(wsTime(t.time))}</span>
+      <span class="nm">${t.booked ? esc(t.title) : `<select class="ws-swap" onchange="wsUpdate('${escAttr(t.session_id)}', { p_item: this.value })" title="Swap the workshop (nobody's booked yet)">${itemOpts(t.item_id)}</select>`}
+        ${quiet ? '<span class="ws-tag">Quiet</span>' : ''}${t.show ? '' : '<span class="ws-tag off">Hidden</span>'}</span>
+      <span class="ws-count"><b>${t.booked}</b> / <input type="number" min="${Math.max(1, t.booked)}" max="200" value="${t.spots}" onchange="wsUpdate('${escAttr(t.session_id)}', { p_spots: +this.value })" aria-label="Spots"> booked</span>
+      <button class="ho-btn" onclick="wsUpdate('${escAttr(t.session_id)}', { p_show: ${!t.show} })">${t.show ? 'Hide' : 'Show'}</button>
+      ${t.booked ? '' : `<button class="ho-btn" onclick="wsRemove('${escAttr(t.session_id)}')">Remove</button>`}
+    </div>`;
+  }).join('');
+  return `<div class="ho-section-head">🎨 World workshops <span class="goal-note" style="font-weight:400">· sold on World, no Shopify products</span></div>
+    ${rows || '<div class="ho-intro">No World workshops this day yet.</div>'}
+    ${items.length ? `<div class="ws-add">
+      <select id="ws-item">${itemOpts('')}</select>
+      <input type="time" id="ws-time" step="900" aria-label="Time">
+      <label class="ws-spots">Spots <input type="number" id="ws-spots" min="1" max="200" value="12"></label>
+      <button class="ho-btn primary" onclick="wsAdd()">+ Add to this day</button>
+      <button class="ho-btn" onclick="wsBulkOpen()">Bulk add…</button>
+      <span class="plan-msg" id="ws-msg"></span></div>`
+    : '<div class="ho-intro">No World-only workshops yet: add them in World settings → Pages → World-only workshops.</div>'}`;
+}
+async function wsReload(msg) {
+  const w = await sb.rpc('hub_ws_range', { p_studio: _sessionStudioId, p_from: _plan.date, p_to: _plan.date });
+  _plan.ws = w.error ? { error: w.error.message } : w.data;
+  // the day's session list too (so "Everything on this day" shows the change)
+  await loadPlanDay(_plan.date);
+  if (msg) { const m = document.getElementById('ws-msg'); if (m) m.textContent = msg; }
+}
+async function wsAdd() {
+  const item = document.getElementById('ws-item').value, time = document.getElementById('ws-time').value, spots = +document.getElementById('ws-spots').value, m = document.getElementById('ws-msg');
+  if (!time) { m.textContent = 'Choose the time.'; return; }
+  const { error } = await sb.rpc('hub_ws_add', { p_item: item, p_studio: _sessionStudioId, p_date: _plan.date, p_time: time, p_spots: spots });
+  if (error) { m.textContent = error.message; return; }
+  wsReload('Added ✓ It’s on World now.');
+}
+async function wsUpdate(id, change) {
+  const { error } = await sb.rpc('hub_ws_update', Object.assign({ p_session: id }, change));
+  if (error) { alert(error.message); }
+  wsReload(error ? '' : 'Saved ✓');
+}
+async function wsRemove(id) {
+  if (!confirm('Remove this workshop time from World?')) return;
+  const { error } = await sb.rpc('hub_ws_remove', { p_session: id });
+  if (error) { alert(error.message); return; }
+  wsReload('Removed ✓');
+}
+// ---- Bulk add: a workshop at several studios, on chosen days of the week, at one or more times ----
+function wsBulkOpen() {
+  const items = (_plan.ws && _plan.ws.items) || [];
+  const d = _plan.date, to = (() => { const x = planDateOf(d); x.setDate(x.getDate() + 27); return localDateStr(x); })();
+  const days = [['1', 'Mon'], ['2', 'Tue'], ['3', 'Wed'], ['4', 'Thu'], ['5', 'Fri'], ['6', 'Sat'], ['7', 'Sun']];
+  const wd = String(((planDateOf(d).getDay() + 6) % 7) + 1);
+  let el = document.getElementById('ws-bulk');
+  if (!el) { el = document.createElement('dialog'); el.id = 'ws-bulk'; el.className = 'ws-dlg'; document.body.appendChild(el); }
+  el.innerHTML = `<div class="ho-title" style="font-size:18px">Bulk add World workshops</div>
+    <label class="ws-f">Workshop<select id="wsb-item">${items.map(i => `<option value="${escAttr(i.id)}">${esc(i.title)}</option>`).join('')}</select></label>
+    <div class="ws-f">Studios<div class="ws-studios">${Object.keys(STUDIO_NAMES).map(id => `<label><input type="checkbox" value="${escAttr(id)}"${id === _sessionStudioId ? ' checked' : ''}> ${esc(STUDIO_NAMES[id])}</label>`).join('')}</div></div>
+    <div class="ws-two"><label class="ws-f">From<input type="date" id="wsb-from" value="${d}"></label><label class="ws-f">To<input type="date" id="wsb-to" value="${to}"></label></div>
+    <div class="ws-f">Days<div class="ws-days">${days.map(x => `<label><input type="checkbox" value="${x[0]}"${x[0] === wd ? ' checked' : ''}> ${x[1]}</label>`).join('')}</div></div>
+    <div class="ws-two"><label class="ws-f">Times<input type="text" id="wsb-times" placeholder="11:00, 14:00"><small>24-hour, comma between (e.g. 11:00, 14:00, 18:30)</small></label>
+      <label class="ws-f">Spots each<input type="number" id="wsb-spots" min="1" max="200" value="12"></label></div>
+    <p class="plan-msg" id="wsb-msg" style="margin:8px 0"></p>
+    <div style="display:flex;gap:8px;justify-content:flex-end"><button class="ho-btn" onclick="document.getElementById('ws-bulk').close()">Close</button>
+      <button class="ho-btn" onclick="wsBulk(true)">Preview</button><button class="ho-btn primary" id="wsb-go" onclick="wsBulk(false)" disabled>Create</button></div>`;
+  el.querySelectorAll('input, select').forEach(x => x.addEventListener('change', () => { document.getElementById('wsb-go').disabled = true; document.getElementById('wsb-msg').textContent = ''; }));
+  el.showModal();
+}
+async function wsBulk(dry) {
+  const el = document.getElementById('ws-bulk'), m = document.getElementById('wsb-msg');
+  const studios = [...el.querySelectorAll('.ws-studios input:checked')].map(x => x.value);
+  const weekdays = [...el.querySelectorAll('.ws-days input:checked')].map(x => +x.value);
+  const times = (document.getElementById('wsb-times').value || '').split(/[\s,]+/).filter(Boolean).map(t => /^\d{1,2}$/.test(t) ? t + ':00' : t);
+  if (times.some(t => !/^([01]?\d|2[0-3]):[0-5]\d$/.test(t))) { m.textContent = 'Check the times (24-hour, e.g. 11:00, 14:00, 18:30).'; return; }
+  const args = { p_item: document.getElementById('wsb-item').value, p_studios: studios, p_from: document.getElementById('wsb-from').value, p_to: document.getElementById('wsb-to').value,
+    p_weekdays: weekdays, p_times: times, p_spots: +document.getElementById('wsb-spots').value, p_dry: dry };
+  const { data, error } = await sb.rpc('hub_ws_bulk', args);
+  if (error) { m.textContent = error.message; return; }
+  if (dry) {
+    m.textContent = data.times ? `This makes ${data.times} time${data.times === 1 ? '' : 's'} at ${studios.length} studio${studios.length === 1 ? '' : 's'}${data.skipped ? ` (${data.skipped} already there, skipped)` : ''}.` : `Nothing new to add${data.skipped ? ` (all ${data.skipped} are already there)` : ''}.`;
+    document.getElementById('wsb-go').disabled = !data.times;
+  } else {
+    m.textContent = `Created ${data.times} ✓ They’re on World now.`; document.getElementById('wsb-go').disabled = true;
+    wsReload();
   }
 }
 
@@ -3546,7 +3659,7 @@ function planNoteHtml(x) {
 }
 function planRowTools(x) {
   const open = !!_plan.classLists[x.id];
-  return `${planCanAdjust() ? `<button class="ho-btn spots-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Spots</button>` : ''}<button class="icon-pencil" title="Add a note" aria-label="Add a note to ${escAttr(x.title)}" onclick="planEditNote('${escAttr(x.id)}')">✏️</button>
+  return `${planCanAdjust() && !x.world_item_id ? `<button class="ho-btn spots-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Spots</button>` : ''}<button class="icon-pencil" title="Add a note" aria-label="Add a note to ${escAttr(x.title)}" onclick="planEditNote('${escAttr(x.id)}')">✏️</button>
     <button class="pf-btn cl${open ? ' open' : ''}" onclick="toggleClassList('${escAttr(x.id)}')">${open ? 'Close list' : 'Class list'}</button>`;
 }
 function planCheckedIn(x) {
@@ -3737,6 +3850,7 @@ function renderPlanDay() {
     <div class="plan-grid">${roleCards}</div>
     ${edit ? '<div class="ho-section-head">⏱ Timecards</div><div id="tc-box"><div class="goal-note">Loading…</div></div>' : ''}
     <div class="ho-section-head">Everything on this day</div>${sessRows || '<div class="ho-intro">Nothing running this day.</div>'}
+    ${planCanShifts() ? wsDayHtml() : ''}
     ${notRunning.length ? `<details class="plan-closed"><summary>Not running (${notRunning.length}) · 0 booked and no spots open</summary>
       ${notRunning.map(x => `<div class="plan-sess off"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}</span>
         ${planCanAdjust() ? (x.partySlot ? `<button class="ho-btn" onclick="planSlotOpenClose('${escAttr(x.id)}', true)">Reopen</button>`
