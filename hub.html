@@ -1861,6 +1861,7 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
 .ctw-jump select { font: inherit; padding: 4px 6px; border: 1px solid #ddd; border-radius: 8px; }
 .ctw-ages { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 700; } .ctw-ages input { width: 56px; font: inherit; padding: 3px 5px; border: 1px solid #ddd; border-radius: 6px; }
 .ctw-b.ph { background: repeating-linear-gradient(45deg, #fafafa 0 8px, #f1f1f1 8px 16px); border: 1px dashed #d4d4d4; color: #999; }
+.ct-del { color: #b91c1c; } .ct-del:disabled { opacity: .4; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -2812,6 +2813,7 @@ function ctDraw() {
       <span>Spots <input type="number" id="ct-b-spots" min="1" max="200" style="width:70px"> <button class="ho-btn sm" onclick="ctBulk('spots')">Set</button></span>
       <span>Ages <input type="number" id="ct-b-min" min="2" max="99" style="width:56px">–<input type="number" id="ct-b-max" min="2" max="99" style="width:56px"> <button class="ho-btn sm" onclick="ctBulk('ages')">Set</button></span>
       <button class="ho-btn sm" onclick="ctBulk('on')">On sale</button><button class="ho-btn sm" onclick="ctBulk('off')">Off sale</button>
+      <button class="ho-btn sm ct-del" onclick="ctDelete([..._ct.sel])">Delete</button>
       <button class="ho-btn sm" onclick="_ct.sel.clear();ctDraw()">Clear</button><span class="goal-note" id="ct-b-msg"></span></div>` : ''}
     ${_ct.mode === 'week' ? '' : R === null ? '<div class="goal-note">Loading…</div>' : !R.length ? '<div class="ho-intro">No timeslots match.</div>' : `<div class="goal-note" style="margin:4px 0">${R.length} timeslot${R.length === 1 ? '' : 's'}</div>
     <div class="oc-wrap"><table class="oc-table ct-table"><thead><tr><th><input type="checkbox" ${n && n === R.length ? 'checked' : ''} onchange="ctAll(this.checked)" aria-label="Select all"></th><th>Class</th><th>Studio</th><th>Day and time</th><th>Dates</th><th>Ages</th><th>Spots</th><th>Booked</th><th>On sale</th><th></th></tr></thead><tbody>${R.map(r => {
@@ -2821,11 +2823,23 @@ function ctDraw() {
         <td>${esc(STUDIO_NAMES[r.studio_id] || r.studio_id)}</td><td>${esc(wd)} ${esc(shortTime(r.start_time))}<br><small>${r.minutes} min · ${r.weeks} weeks</small></td>
         <td><small>${esc(ctDatesLine(r.dates))}</small>${(r.skip_dates || []).length ? `<br><small class="goal-note">no class ${esc(r.skip_dates.map(d => new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })).join(', '))}</small>` : ''}</td>
         <td>${r.min_age ?? ''}–${r.max_age ?? ''}</td><td>${r.spots}</td><td>${r.booked}</td><td>${r.active ? '✓' : '—'}</td>
-        <td>${_hoCan.edit ? `<button class="ho-btn sm" onclick="ctRedate('${escAttr(r.id)}')">Change dates</button>` : ''}</td></tr>`; }).join('')}</tbody></table></div>`}`;
+        <td style="white-space:nowrap">${_hoCan.edit ? `<button class="ho-btn sm" onclick="ctRedate('${escAttr(r.id)}')" title="Change the first date, time, weeks or skipped dates">Edit</button>
+          <button class="ho-btn sm ct-del" onclick="ctDelete(['${escAttr(r.id)}'])"${r.booked ? ' disabled title="Families are booked: use Off sale instead"' : ''}>Delete</button>` : ''}</td></tr>`; }).join('')}</tbody></table></div>`}`;
 }
 function ctFilter() { const v = id => (document.getElementById(id) || {}).value || ''; _ct.f = { page: v('ct-page'), studio: v('ct-studio'), from: v('ct-from'), to: v('ct-to') }; ctLoad(); }
 function ctPick(id, on) { if (on) _ct.sel.add(id); else _ct.sel.delete(id); ctDraw(); }
 function ctAll(on) { _ct.sel = new Set(on ? (_ct.rows || []).map(r => r.id) : []); ctDraw(); }
+// Delete timeslots (and their classes); ones with families booked are kept (hide them with Off sale instead)
+async function ctDelete(ids) {
+  const rows = (_ct.rows || []).filter(r => ids.includes(r.id)), booked = rows.filter(r => r.booked), free = rows.filter(r => !r.booked);
+  if (!free.length) { alert('Families are booked in ' + (booked.length === 1 ? 'that timeslot' : 'those timeslots') + ', so ' + (booked.length === 1 ? 'it' : 'they') + ' can\u2019t be deleted. Use Off sale to hide ' + (booked.length === 1 ? 'it' : 'them') + ' instead.'); return; }
+  const list = free.map(r => `• ${r.class_name} · ${STUDIO_NAMES[r.studio_id] || r.studio_id} · ${new Date(String(r.start_date).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })} ${shortTime(r.start_time)}`).join('\n');
+  if (!confirm(`Delete ${free.length} timeslot${free.length === 1 ? '' : 's'} and all ${free.length === 1 ? 'its' : 'their'} classes? This can\u2019t be undone.\n\n${list}` + (booked.length ? `\n\n(${booked.length} with families booked will be kept.)` : ''))) return;
+  let ok = 0; const errs = [];
+  for (const r of free) { const res = await sb.rpc('world_class_slot_remove', { p_slot: r.id }); if (res.error) errs.push(`${r.class_name} ${r.start_date}: ${res.error.message}`); else { ok++; _ct.sel.delete(r.id); } }
+  if (errs.length) alert(`${ok} deleted. Not deleted:\n` + errs.join('\n'));
+  ctLoad(); if (_ct.mode === 'week') ctWeekLoad();
+}
 async function ctBulk(what) {
   const ids = [..._ct.sel], rows = (_ct.rows || []).filter(r => _ct.sel.has(r.id)), msg = document.getElementById('ct-b-msg');
   const spots = +(document.getElementById('ct-b-spots') || {}).value || 0, mn = (document.getElementById('ct-b-min') || {}).value, mx = (document.getElementById('ct-b-max') || {}).value;
@@ -3172,7 +3186,7 @@ async function ctWeekGo() {
 let _ctr = null;
 function ctRedate(id) {
   const r = (_ct.rows || []).find(x => x.id === id); if (!r) return; _ctr = { r, prev: null };
-  openDutySheet(`<h3>Change dates: ${esc(r.class_name)}</h3><p class="ho-intro">${esc(STUDIO_NAMES[r.studio_id] || r.studio_id)} · ${r.booked} booked. Bookings move with their class.</p>
+  openDutySheet(`<h3>Edit: ${esc(r.class_name)}</h3><p class="ho-intro">${esc(STUDIO_NAMES[r.studio_id] || r.studio_id)} · ${r.booked} booked. Bookings move with their class.</p>
     <div class="me-form"><div class="don-two"><label>First class<input type="date" id="ctr-start" value="${escAttr(String(r.start_date).slice(0, 10))}"></label><label>Time<input type="time" id="ctr-time" value="${escAttr(String(r.start_time).slice(0, 5))}"></label></div>
       <div class="don-two"><label>Weeks<input type="number" id="ctr-weeks" min="1" max="20" value="${r.weeks}"></label>
         <label>Skip these dates (no class)<input type="text" id="ctr-skip" value="${escAttr((r.skip_dates || []).map(d => String(d).slice(0, 10)).join(', '))}" placeholder="2027-02-17, 2027-03-17"></label></div>
