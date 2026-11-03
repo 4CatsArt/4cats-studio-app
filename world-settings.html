@@ -3210,7 +3210,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     var c = clsDraft, studios = c.studios || [];
     var secHtml = (c.sections || []).map(function (x, i) { var one = (function () {
       if (c.__tpl && c.__tpl.kind === 'workshop' && x.type === 'wp') return wpPartEdHtml(x, i, c);
-      if (x.type === 'opts') return '';
+      if (x.type === 'opts' || x.type === 'meta') return '';   // (page options and a template's class details have their own fields)
       if (x.type === 'wp') return wpPartEdHtml(x, i, c);   // a workshop page's own part (workshop layout)
       var tools = '<span class="cls-sec-tools"><button class="btn btn-plain" type="button" data-clsmv="' + i + '" data-d="-1"' + (i ? '' : ' disabled') + '>\u2191</button><button class="btn btn-plain" type="button" data-clsmv="' + i + '" data-d="1"' + (i < c.sections.length - 1 ? '' : ' disabled') + '>\u2193</button><button class="btn btn-plain" type="button" data-clshide="' + i + '">' + (x.hidden ? 'Show' : 'Hide') + '</button><button class="btn btn-plain" type="button" data-clsdel="' + i + '">Remove</button></span>';
       if (CB_DEFS[x.type]) return cbEdHtml(x, i, tools);
@@ -3293,6 +3293,9 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     return '<div class="cls-ed tpl-ed"><p class="tpl-mode">\ud83d\udcd0 ' + (wk ? 'Workshop page layout' : 'Class page template') + (T.id ? '' : ' (new)') + '</p>' +
       '<div class="two"><div class="field"><label for="tplName">Template name</label><input type="text" id="tplName" maxlength="80" value="' + esc(T.name || '') + '" placeholder="' + (wk ? 'Workshop page' : 'e.g. Art class (multi-week)') + '"></div>' +
         '<div class="field"><label for="tplDesc">What it\u2019s for (optional)</label><input type="text" id="tplDesc" maxlength="300" value="' + esc(T.description || '') + '" placeholder="' + (wk ? 'The layout of every workshop page' : 'e.g. For drawing and painting classes') + '"></div></div>' +
+      (wk ? '' : (function () { var m = tplMetaOf(c.sections) || {};
+        return '<div class="two"><div class="field"><label for="tplBlurb">Short description (on the Kids Classes list)</label><input type="text" id="tplBlurb" maxlength="160" value="' + esc(m.blurb || '') + '" placeholder="e.g. Make waves with art inspired by\u2026"></div>' +
+          '<div class="field"><label for="tplFacts">Quick facts (one per line, shown as tags)</label><textarea id="tplFacts" rows="3" placeholder="Ages 5\u201312&#10;5 weeks \u00b7 1.5 hours&#10;Drop off">' + esc((m.facts || []).join('\n')) + '</textarea></div></div>'; })()) +
       (wk ? '<div class="field" style="max-width:420px"><label for="tplPrev">Preview it with this project</label><input type="text" id="tplPrev" value="' + esc(T.preview || 'Let It Glow Trees') + '" placeholder="A project name, e.g. Let It Glow Trees"><span class="help">The \ud83d\udcf1 preview shows this layout on that project\u2019s page, as you edit.</span></div>'
         : cbOptsHtml(c)) +
       '<h3 class="mem-h">' + (wk ? 'Workshop page (in order)' : 'Page (in order)') + '</h3><p class="help" style="margin:0 0 6px">' +
@@ -3323,9 +3326,17 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
       '<h4 class="tpl-h">Workshop page layout</h4>' + (Wk.length ? '<table class="tpl-t"><tbody>' + Wk.map(row).join('') + '</tbody></table>' : '<p class="help">The standard layout is in use: banner, facts, Get Ready + Book your spot, gallery, Hot Tips.</p>') +
       (canEdit ? '<button class="btn btn-plain" type="button" id="tplNewWk">' + (Wk.length ? '+ Another workshop layout' : '\u270f\ufe0f Customize the workshop page layout') + '</button>' : '') + '</div>';
   }
+  // A class template's class details (quick facts, short description), kept as a "meta" entry with its blocks
+  function tplMetaOf(sections) { return (sections || []).filter(function (x) { return x && x.type === 'meta'; })[0] || null; }
+  function tplApply(T, draft) {   // a new class from a template: its blocks, plus its quick facts and short description
+    var secs = JSON.parse(JSON.stringify(T.sections || [])), m = tplMetaOf(secs);
+    draft.sections = secs.filter(function (x) { return x.type !== 'meta'; });
+    if (m) { if (m.facts && m.facts.length) draft.facts = m.facts.slice(); if (m.blurb) draft.blurb = m.blurb; }
+    return draft;
+  }
   function tplClean(sections) {   // drop empty rows inside blocks, and empty text/picture sections (same as saving a class page)
     return (sections || []).filter(function (x) {
-      if (x.type === 'opts' || x.type === 'wp' || CB_DEFS[x.type]) {
+      if (x.type === 'opts' || x.type === 'wp' || x.type === 'meta' || CB_DEFS[x.type]) {
         if (x.items) x.items = x.items.filter(function (y) { return y && Object.keys(y).some(function (k) { return String(y[k] || '').trim() && k !== 'color'; }); });
         return true;
       }
@@ -3647,8 +3658,13 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     // Part 2 for every Part 1 timeslot (linked class pages): a plan with holiday checks, then create them all
     var p2 = $('csP2All'); if (p2) p2.addEventListener('click', async function () {
       var box = $('csP2Plan');
-      if (clsDraft.min_age == null || clsDraft.max_age == null) { box.innerHTML = '<p class="help" style="color:#c8232c">Set this class\u2019s ages (From / To) first, and Save.</p>'; return; }
+      // Ages: this class's (typed or saved), else each Part 1 timeslot's, else Part 1's class page
+      var num = function (id, v) { var e = $(id); return e && e.value !== '' ? +e.value : (v != null ? v : null); };
+      var myMin = num('clsMinAge', clsDraft.min_age), myMax = num('clsMaxAge', clsDraft.max_age);
+      var p1Page = (classRows || []).filter(function (x) { return x.id === clsDraft.part2_of; })[0] || {};
+      var agesFor = function (t) { return { min: myMin != null ? myMin : t.min_age != null ? t.min_age : p1Page.min_age, max: myMax != null ? myMax : t.max_age != null ? t.max_age : p1Page.max_age }; };
       var todo = (clsPart1Slots || []).filter(function (x) { return !x.taken; });
+      if (todo.some(function (t) { var a = agesFor(t); return a.min == null || a.max == null; })) { box.innerHTML = '<p class="help" style="color:#c8232c">Part 1 has no ages set either: add the ages (From / To) on this class first.</p>'; return; }
       box.innerHTML = '<p class="help">Checking dates\u2026</p>';
       var plan = [];
       for (var i = 0; i < todo.length; i++) {
@@ -3660,7 +3676,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
       box.innerHTML = '<div class="cs-p2list">' + plan.map(function (x, i) {
         var tm = String(x.t.start_time).slice(0, 5).split(':').map(Number);
         return '<div class="cs-p2row"><b>' + esc(studioNameOf(x.t.studio_id)) + '</b> \u00b7 ' + esc(fmt(x.start)) + ' at ' + ((tm[0] % 12) || 12) + (tm[1] ? ':' + String(tm[1]).padStart(2, '0') : '') + (tm[0] >= 12 ? 'pm' : 'am') + ' \u00b7 ' + x.t.weeks + ' weeks \u00b7 ' + x.t.spots + ' spots' +
-          (x.t.part_label ? ' <span class="help">(after ' + esc(x.t.part_label) + ')</span>' : '') +
+          ' \u00b7 ages ' + agesFor(x.t).min + '\u2013' + agesFor(x.t).max + (x.t.part_label ? ' <span class="help">(after ' + esc(x.t.part_label) + ')</span>' : '') +
           x.warn.map(function (w) { return '<label class="check"><input type="checkbox" class="csP2Skip" data-i="' + i + '" value="' + w.date + '" checked> Skip ' + esc(fmt(w.date)) + ' <span class="help">(' + esc(w.why) + ')</span></label>'; }).join('') + '</div>';
       }).join('') + '</div><div style="display:flex;gap:8px;margin-top:8px"><button class="btn btn-berry" type="button" id="csP2Go">Create all ' + plan.length + '</button><button class="btn btn-plain" type="button" id="csP2Cancel">Cancel</button><span class="help" id="csP2Msg"></span></div>';
       $('csP2Cancel').onclick = function () { box.innerHTML = ''; };
@@ -3670,7 +3686,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
           var x = plan[i], skips = Array.prototype.filter.call(box.querySelectorAll('.csP2Skip[data-i="' + i + '"]'), function (cb) { return cb.checked; }).map(function (cb) { return cb.value; });
           $('csP2Msg').textContent = 'Making ' + (i + 1) + ' of ' + plan.length + '\u2026';
           var r = await sb.rpc('world_class_slot_add', { p: { class_page_id: clsDraft.id, studio_id: x.t.studio_id, start_date: x.start, start_time: String(x.t.start_time).slice(0, 5), minutes: x.t.minutes,
-            weeks: x.t.weeks, spots: x.t.spots, skip_dates: skips, min_age: clsDraft.min_age, max_age: clsDraft.max_age, part_label: null, follows_slot: x.t.id } });
+            weeks: x.t.weeks, spots: x.t.spots, skip_dates: skips, min_age: agesFor(x.t).min, max_age: agesFor(x.t).max, part_label: null, follows_slot: x.t.id } });
           if (r.error) errs.push(studioNameOf(x.t.studio_id) + ': ' + r.error.message); else made++;
         }
         clsPart1Slots = null; reload();
@@ -3733,6 +3749,10 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     var keep = function () {   // copy the fields into the draft before redrawing
       if (clsDraft && clsDraft.__tpl) {   // template mode: its name, description, preview project and the blocks
         if ($('tplName')) clsDraft.__tpl.name = $('tplName').value; if ($('tplDesc')) clsDraft.__tpl.description = $('tplDesc').value; if ($('tplPrev')) clsDraft.__tpl.preview = $('tplPrev').value;
+        if ($('tplFacts') || $('tplBlurb')) {
+          var mt = tplMetaOf(clsDraft.sections); if (!mt) { mt = { type: 'meta' }; clsDraft.sections.unshift(mt); }
+          mt.facts = ($('tplFacts') ? $('tplFacts').value : '').split('\n').map(function (x) { return x.trim(); }).filter(Boolean); mt.blurb = $('tplBlurb') ? $('tplBlurb').value.trim() : '';
+        }
         clsDraft.name = clsDraft.__tpl.name || 'template';
         sec.querySelectorAll('[data-clsalt]').forEach(function (x) { clsDraft.sections[+x.dataset.clsalt].alt = x.value; });
         sec.querySelectorAll('[data-clsh]').forEach(function (x) { clsDraft.sections[+x.dataset.clsh].heading = x.value; });
@@ -3793,15 +3813,17 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
     });
     var at = $('clsAsTpl'); if (at) at.addEventListener('click', async function () {
       keep(); var name = prompt('Name for the new template (it copies this page\u2019s blocks and layout):', (clsDraft.name || 'Class') + ' layout'); if (!name) return;
-      var r = await sb.rpc('world_page_template_save', { p: { id: '', kind: 'class', name: name, description: 'Made from ' + (clsDraft.name || 'a class page'), sections: tplClean(JSON.parse(JSON.stringify(clsDraft.sections || []))) } });
+      var secsT = tplClean(JSON.parse(JSON.stringify(clsDraft.sections || []))).filter(function (x) { return x.type !== 'meta'; });
+      secsT.unshift({ type: 'meta', facts: (clsDraft.facts || []).slice(), blurb: clsDraft.blurb || '' });   // the class's tags and short description go with it
+      var r = await sb.rpc('world_page_template_save', { p: { id: '', kind: 'class', name: name, description: 'Made from ' + (clsDraft.name || 'a class page'), sections: secsT } });
       if (r.error) { $('clsMsg').textContent = 'Not saved: ' + r.error.message; return; }
       var lr = await sb.rpc('world_page_templates_list'); if (!lr.error) tplRows = lr.data || [];
       $('clsMsg').textContent = 'Template \u201c' + name + '\u201d saved \u2713 It\u2019s in the \u201c+ Add a class page\u201d choices now.';
     });
     var nb = $('clsNew'); if (nb) nb.addEventListener('click', function () {
       var kind = $('clsNewKind') ? $('clsNewKind').value : 'template', T = /^tpl:/.test(kind) ? (tplRows || []).filter(function (t) { return t.id === kind.slice(4); })[0] : null;
-      var secs = T ? JSON.parse(JSON.stringify(T.sections || [])) : kind === 'blank' ? [] : clsTemplateSections();
-      clsDraft = { name: '', match: '', slug: '', facts: [], sections: secs, studios: [], active: true, visibility: 'test', sort: (classRows || []).length };
+      clsDraft = { name: '', match: '', slug: '', facts: [], sections: [], studios: [], active: true, visibility: 'test', sort: (classRows || []).length };
+      if (T) tplApply(T, clsDraft); else clsDraft.sections = kind === 'blank' ? [] : clsTemplateSections();
       redraw(kind === 'blank' ? undefined : 'Started from ' + (T ? '\u201c' + T.name + '\u201d' : 'the class template') + ': fill in the blanks, then Save.');
     });
     sec.querySelectorAll('[data-clsedit]').forEach(function (b) { b.addEventListener('click', function () { var c = classRows.filter(function (x) { return x.id === b.dataset.clsedit; })[0]; clsDraft = JSON.parse(JSON.stringify(c)); redraw(); }); });
