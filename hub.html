@@ -2953,9 +2953,17 @@ async function ctWeekLoad() {
   _ctw.sess = null; ctDraw();
   if (!_ctw.studio) return;
   const to = new Date(_ctw.week + 'T12:00:00'); to.setDate(to.getDate() + 6);
-  const { data } = await sb.from('sessions').select('id, title, session_date, session_time, duration_minutes, world_class_slot_id, session_type, show, capacity, spaces_left_cache')
+  const { data } = await sb.from('sessions').select('id, title, session_date, session_time, duration_minutes, world_class_slot_id, session_type, show, capacity, spaces_left_cache, camp_program_id')
     .eq('studio_id', _ctw.studio).gte('session_date', _ctw.week).lte('session_date', localDateStr(to)).order('session_time');
-  _ctw.sess = data || []; ctDraw();
+  _ctw.sess = data || [];
+  // who's actually booked in each session (not spots minus spots left: a day closed by setting spots left to 0 would look full)
+  const ids = _ctw.sess.map(x => x.id), n = {};
+  for (let i = 0; i < ids.length; i += 150) {
+    const { data: bk } = await sb.from('bookings').select('session_id, qty').in('session_id', ids.slice(i, i + 150)).gt('qty', 0).is('returned_at', null);
+    (bk || []).forEach(b => { n[b.session_id] = (n[b.session_id] || 0) + b.qty; });
+  }
+  _ctw.sess.forEach(x => { x.__booked = n[x.id] || 0; });
+  ctDraw();
 }
 function ctWeekMove(n) { const d = new Date(_ctw.week + 'T12:00:00'); d.setDate(d.getDate() + 7 * n); _ctw.week = localDateStr(d); ctWeekLoad(); }
 function ctWeekPage() { return (_ct.pages || []).find(c => c.id === _ctw.page) || null; }
@@ -2985,15 +2993,22 @@ function ctWeekHtml() {
     const items = [];
     (_ctw.sess || []).filter(x => x.session_date === d).forEach(x => {
       // booked / spots (spots minus spots left); closed ones (0 spots, nobody booked) aren't shown
-      const cap = x.capacity, booked = cap != null && x.spaces_left_cache != null ? Math.max(0, cap - x.spaces_left_cache) : null;
-      if (cap === 0 && !booked) return;
-      const reg = cap != null ? `<span class="ctw-reg${booked && booked >= cap ? ' full' : ''}">${booked ?? 0}/${cap}</span>` : '';
+      const camp = !!x.camp_program_id || /camp|pa\s*\/?\s*pd|pa day|pd day/i.test(x.title || '');
+      const cap = x.capacity, booked = x.__booked || 0;
+      // party slots: their spots are in Shopify's inventory (0 here doesn't mean closed), so they always show, as Open or Booked
+      const party = x.session_type === 'party' || /party|get.?together/i.test(x.title || '');
+      // closed: no spots (or none left) and nobody booked, as on the Schedule (camps share their camp's spots, so they always show)
+      if (!booked && !camp && !party && (cap === 0 || x.spaces_left_cache === 0)) return;
+      const reg = party ? `<span class="ctw-reg${x.__booked ? ' full' : ''}">${x.__booked ? 'Booked' : 'Open'}</span>`
+        : cap ? `<span class="ctw-reg${booked >= cap ? ' full' : ''}">${booked}/${cap}</span>` : '';
       const m = toMin(x.session_time), cls = !!x.world_class_slot_id || x.session_type === 'class', tp = String(x.title || '').split(' | '), part = (String(x.title).match(/Class (\d+ of \d+)/) || [])[1];
       const name = tp.length > 1 && /^\*?\d{1,2}(:\d\d)?\s*(am|pm)\b/i.test(tp[0]) ? tp[1] : tp[0];   // Shopify titles start with the time and date ("6pm Sat Feb 13th | Kids Party")
-      const camp = /camp|pa\s*\/?\s*pd|pa day|pd day/i.test(x.title || ''), len = camp ? (/half/i.test(x.title || '') ? 180 : 420) : (x.duration_minutes || 60);   // camps and PA/PD days: 9am–4pm (half day 9–12)
-      const start = camp && m > 9 * 60 ? m : camp ? 9 * 60 : m;
+      // camps and PA/PD days: their own time and length (half day AM/PM); with no length, full day 9am–4pm (half day 3 hours)
+      const half = /half/i.test(x.title || ''), len = x.duration_minutes || (camp ? (half ? 180 : 420) : 60);
+      const start = camp && !x.duration_minutes && m < 9 * 60 ? 9 * 60 : m;
+      const hm = t => { const h2 = Math.floor(t / 60), m2 = t % 60; return ((h2 % 12) || 12) + (m2 ? ':' + String(m2).padStart(2, '0') : '') + (h2 >= 12 ? 'pm' : 'am'); };
       items.push({ s: start, e: start + len, html: (st, ht) => `<div class="ctw-b ${cls ? 'cls' : 'other'}${x.show === false ? ' hid' : ''}" style="${st};height:${ht}px" title="${escAttr(x.title)}">
-        ${reg}<b>${esc(camp ? '9am–' + (/half/i.test(x.title || '') ? '12pm' : '4pm') : shortTime(x.session_time))}</b> ${esc(name)}${part ? ` <small>· class ${esc(part)}</small>` : ''}</div>` });
+        ${reg}<b>${esc(camp ? hm(start) + '–' + hm(start + len) : shortTime(x.session_time))}</b> ${esc(name)}${part ? ` <small>· class ${esc(part)}</small>` : ''}</div>` });
     });
     pend.filter(x => x.date === d).forEach(x => {
       const i = _ctw.pending.indexOf(x), m = toMin(x.time);
