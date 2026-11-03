@@ -1853,6 +1853,8 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
 .ctw-b.cls { background: #dbe8ff; border: 1px solid #9fbdf0; color: #173a73; } .ctw-b.other { background: #eee; border: 1px solid #ddd; color: #666; } .ctw-b.hid { opacity: .5; }
 .ctw-b.new { background: #e7f7ec; border: 2px dashed #2f9a55; color: #135a2c; } .ctw-b.new.ghost { opacity: .6; }
 .ctw-x { position: absolute; top: 1px; right: 2px; border: 0; background: none; font-size: 14px; cursor: pointer; color: #135a2c; }
+.ctw-jump { display: inline-flex; align-items: center; gap: 4px; } .ctw-jump input { font: inherit; padding: 4px 6px; border: 1px solid #ddd; border-radius: 8px; }
+.ctw-reg { float: right; margin-left: 4px; font-weight: 800; font-size: 11px; background: rgba(255,255,255,.75); border-radius: 999px; padding: 0 6px; } .ctw-reg.full { background: #c8232c; color: #fff; }
 </style>
 </head>
 <body>
@@ -2951,7 +2953,7 @@ async function ctWeekLoad() {
   _ctw.sess = null; ctDraw();
   if (!_ctw.studio) return;
   const to = new Date(_ctw.week + 'T12:00:00'); to.setDate(to.getDate() + 6);
-  const { data } = await sb.from('sessions').select('id, title, session_date, session_time, duration_minutes, world_class_slot_id, session_type, show')
+  const { data } = await sb.from('sessions').select('id, title, session_date, session_time, duration_minutes, world_class_slot_id, session_type, show, capacity, spaces_left_cache')
     .eq('studio_id', _ctw.studio).gte('session_date', _ctw.week).lte('session_date', localDateStr(to)).order('session_time');
   _ctw.sess = data || []; ctDraw();
 }
@@ -2968,6 +2970,8 @@ function ctWeekHtml() {
     <select onchange="_ctw.page=this.value;ctDraw()"><option value="">Class to add…</option>${(_ct.pages || []).map(c => `<option value="${escAttr(c.id)}"${c.id === _ctw.page ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
     ${pg ? `<span class="goal-note">${pg.weeks || '?'} weeks · ${pg.minutes || 90} min · ages ${pg.min_age ?? '?'}–${pg.max_age ?? '?'}</span>` : ''}
     <span class="spacer"></span><button class="ho-btn sm" onclick="ctWeekMove(-1)">‹</button><b>${esc(wkLabel)}</b><button class="ho-btn sm" onclick="ctWeekMove(1)">›</button>
+    <label class="ctw-jump" title="Go to the week of a date">📅 <input type="date" value="${escAttr(_ctw.week)}" onchange="if(this.value){_ctw.week=ctWeekSunday(this.value);ctWeekLoad()}"></label>
+    <button class="ho-btn sm" onclick="_ctw.week=ctWeekSunday(localDateStr(new Date()));ctWeekLoad()">This week</button>
     ${_hoCan.edit && _ctw.pending.length ? `<button class="ho-btn primary" onclick="ctWeekCreate()">Create ${_ctw.pending.length} class time${_ctw.pending.length === 1 ? '' : 's'}</button>` : ''}</div>`;
   if (!_ctw.studio) return h + '<div class="ho-intro">Choose a studio to see its week.</div>';
   if (_ctw.sess === null) return h + '<div class="goal-note">Loading…</div>';
@@ -2980,12 +2984,16 @@ function ctWeekHtml() {
     // everything on this day (existing, new, and new classes' later weeks), laid out side by side when they overlap (up to 3)
     const items = [];
     (_ctw.sess || []).filter(x => x.session_date === d).forEach(x => {
+      // booked / spots (spots minus spots left); closed ones (0 spots, nobody booked) aren't shown
+      const cap = x.capacity, booked = cap != null && x.spaces_left_cache != null ? Math.max(0, cap - x.spaces_left_cache) : null;
+      if (cap === 0 && !booked) return;
+      const reg = cap != null ? `<span class="ctw-reg${booked && booked >= cap ? ' full' : ''}">${booked ?? 0}/${cap}</span>` : '';
       const m = toMin(x.session_time), cls = !!x.world_class_slot_id || x.session_type === 'class', tp = String(x.title || '').split(' | '), part = (String(x.title).match(/Class (\d+ of \d+)/) || [])[1];
       const name = tp.length > 1 && /^\*?\d{1,2}(:\d\d)?\s*(am|pm)\b/i.test(tp[0]) ? tp[1] : tp[0];   // Shopify titles start with the time and date ("6pm Sat Feb 13th | Kids Party")
       const camp = /camp|pa\s*\/?\s*pd|pa day|pd day/i.test(x.title || ''), len = camp ? (/half/i.test(x.title || '') ? 180 : 420) : (x.duration_minutes || 60);   // camps and PA/PD days: 9am–4pm (half day 9–12)
       const start = camp && m > 9 * 60 ? m : camp ? 9 * 60 : m;
       items.push({ s: start, e: start + len, html: (st, ht) => `<div class="ctw-b ${cls ? 'cls' : 'other'}${x.show === false ? ' hid' : ''}" style="${st};height:${ht}px" title="${escAttr(x.title)}">
-        <b>${esc(camp ? '9am–' + (/half/i.test(x.title || '') ? '12pm' : '4pm') : shortTime(x.session_time))}</b> ${esc(name)}${part ? ` <small>· class ${esc(part)}</small>` : ''}</div>` });
+        ${reg}<b>${esc(camp ? '9am–' + (/half/i.test(x.title || '') ? '12pm' : '4pm') : shortTime(x.session_time))}</b> ${esc(name)}${part ? ` <small>· class ${esc(part)}</small>` : ''}</div>` });
     });
     pend.filter(x => x.date === d).forEach(x => {
       const i = _ctw.pending.indexOf(x), m = toMin(x.time);
@@ -4295,13 +4303,13 @@ function wsDayHtml() {
       <button class="ho-btn primary" id="ws-go" data-label="+ Add to this day" onclick="wsAdd()">+ Add to this day</button>
       <button class="ho-btn" onclick="wsBulkOpen()">Bulk add…</button>
       <button class="ho-btn" onclick="wsKidsSettings('ws')" title="Kids-only settings for the chosen workshop: default, ages, price">🧒 Kids-only settings…</button>
+      <span class="plan-msg" id="ws-msg"></span>
     </div>
     <div class="ws-add ws-glz"><b>🎨 Add a glazing time</b>
       <label class="ws-spots">Time <input type="time" id="glz-time" step="900"></label>
       <label class="ws-spots">Spots <input type="number" id="glz-spots" min="1" max="200" value="12"></label>
       <label class="ws-spots">Length <input type="number" id="glz-min" min="15" max="600" step="15" value="90"> min</label>
-      <button class="ho-btn primary" id="glz-go" onclick="glzAdd()">+ Add glazing</button><span class="goal-note" id="glz-msg"></span>
-      <span class="plan-msg" id="ws-msg"></span></div>
+      <button class="ho-btn primary" id="glz-go" onclick="glzAdd()">+ Add glazing</button><span class="goal-note" id="glz-msg"></span></div>
       ${_wsProjectsErr ? `<div class="pp-note" style="color:#a33">Only World workshops are listed: the project list didn’t load (${esc(_wsProjectsErr)}).</div>` : ''}`
     : '<div class="ho-intro">No projects found in the Projects library.</div>'}`;
 }
