@@ -344,6 +344,13 @@ function goToCurrentMonth() {
 }
 
 /* ---------- data loading ---------- */
+// Payworks department numbers are 6 digits ("000010"). Opening the file in Excel or
+// Numbers strips the zeros ("10"), so pad them back before matching or saving.
+function padDept(d) {
+  const t = String(d == null ? '' : d).trim()
+  return /^\d+$/.test(t) ? t.padStart(6, '0') : t
+}
+
 let pendingPayrollUpload = null // { matched, unmapped, target: {monthDate, periodNumber}, payDate } or null
 
 async function handlePayrollCSVUpload(file) {
@@ -354,8 +361,9 @@ async function handlePayrollCSVUpload(file) {
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l)
   if (!lines.length) { alert('That file looks empty.'); return }
 
-  const raw = lines[0]
-  if (!/^\d{8}$/.test(raw)) { alert('Could not read a date (expected YYYYMMDD) from the first line of this file — is this a Payworks GL export?'); return }
+  const cell = v => String(v == null ? '' : v).replace(/^"|"$/g, '').trim()
+  const raw = cell(lines[0].split(',')[0])
+  if (!/^\d{8}$/.test(raw)) { alert('Could not read a date (expected YYYYMMDD) from the first line of this file. Is this the Payworks Journal Entry Export?'); return }
   const periodEndStr = raw.slice(0, 4) + '-' + raw.slice(4, 6) + '-' + raw.slice(6, 8)
 
   const payDate = payDateForWorkDate(periodEndStr)
@@ -365,17 +373,17 @@ async function handlePayrollCSVUpload(file) {
 
   const wagesByDept = {}
   for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(',')
+    const cols = lines[i].split(',').map(cell)
     if (cols.length >= 5 && cols[3] === 'Wages' && cols[1]) {
-      wagesByDept[cols[1]] = Math.abs(parseFloat(cols[4])) || 0
+      wagesByDept[padDept(cols[1])] = Math.abs(parseFloat(cols[4].replace(/[$\s]/g, ''))) || 0
     }
   }
-  if (!Object.keys(wagesByDept).length) { alert('No "Wages" rows found in this file — is this the right export?'); return }
+  if (!Object.keys(wagesByDept).length) { alert('No "Wages" rows found in this file. Is this the Payworks Journal Entry Export?'); return }
 
   const { data: mapRows, error } = await sb.from('payroll_department_map').select('*')
   if (error) { toast(error.message, true); return }
   const deptMap = {}
-  ;(mapRows || []).forEach(r => { deptMap[r.department_number] = r.studio_id })
+  ;(mapRows || []).forEach(r => { deptMap[padDept(r.department_number)] = r.studio_id })
 
   const matched = []
   const unmapped = []
@@ -1092,7 +1100,7 @@ function renderTable() {
       </label>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${payrollStatusChipsHtml()}</div>
     </div>
-    <div class="muted small" style="margin-top:6px">Parses a Payworks GL export and fills in the matching Pay 1/2/3 slot for every studio it covers (and Home Office).</div>
+    <div class="muted small" style="margin-top:6px">Upload the <b>Journal Entry Export</b> (CSV) from Payworks, one file per pay run. Fills in the matching Pay 1/2/3 slot for every studio it covers (and Home Office). Upload the file straight from Payworks rather than a copy re-saved in Excel or Numbers.</div>
     <div id="payroll-upload-preview"></div>
   </div>`
 
