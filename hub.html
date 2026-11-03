@@ -1839,6 +1839,8 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
 .ct-bulk { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; background: #fff6e5; border: 1px solid #f2d29b; border-radius: 10px; padding: 8px 12px; margin: 0 0 8px; }
 .ct-bulk input { font: inherit; padding: 4px 6px; border: 1px solid #ddd; border-radius: 6px; } .ct-table td { vertical-align: top; } .ct-table tr.ct-off { opacity: .55; }
 .ct-weeks { border-collapse: collapse; margin: 8px 0; } .ct-weeks td, .ct-weeks th { padding: 3px 10px; border-bottom: 1px solid #eee; text-align: left; } .ct-weeks tr.ct-ch td { font-weight: 700; color: #1d6b39; }
+.cta-studios { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 10px; margin: 6px 0; font-size: 14px; } .cta-plan { display: grid; gap: 6px; max-height: 340px; overflow-y: auto; }
+.cs-p2row { background: #fff; border: 1px solid #e3e8f5; border-radius: 10px; padding: 8px 10px; display: grid; gap: 2px; }
 </style>
 </head>
 <body>
@@ -2777,6 +2779,7 @@ function ctDraw() {
   const F = _ct.f, R = _ct.rows, studios = Object.keys(STUDIO_NAMES).sort((a, b) => (STUDIO_NAMES[a] || a).localeCompare(STUDIO_NAMES[b] || b)), n = _ct.sel.size;
   el.innerHTML = `<div class="ho-head"><div class="pts-page-title" style="margin:0">📚 Class times</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
     <div class="ho-intro">Kids class timeslots sold on World, across all classes. Class pages (pictures, prices, blocks) stay in World settings → Kids classes.</div>
+    ${_hoCan.edit ? '<button class="ho-btn primary" style="margin:0 0 8px" onclick="ctAddOpen()">+ Add class times</button>' : ''}
     <div class="act-filters"><select id="ct-page" onchange="ctFilter()"><option value="">All classes</option>${(_ct.pages || []).map(c => `<option value="${escAttr(c.id)}"${c.id === F.page ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
       <select id="ct-studio" onchange="ctFilter()"><option value="">All studios</option>${studios.map(x => `<option value="${escAttr(x)}"${x === F.studio ? ' selected' : ''}>${esc(STUDIO_NAMES[x] || x)}</option>`).join('')}</select>
       <label>Starting from <input type="date" id="ct-from" value="${escAttr(F.from)}" onchange="ctFilter()"></label><label>to <input type="date" id="ct-to" value="${escAttr(F.to)}" onchange="ctFilter()"></label></div>
@@ -2813,6 +2816,109 @@ async function ctBulk(what) {
   }
   if (errs.length) alert(`${ok} changed. Not changed:\n` + errs.join('\n'));
   ctLoad();
+}
+// ---- Holidays, long weekends, the Christmas break and camp days (the same check as World settings) ----
+function nthWeekday(y, m, wd, n) { var d = new Date(Date.UTC(y, m, 1)); var add = (wd - d.getUTCDay() + 7) % 7 + (n - 1) * 7; d.setUTCDate(1 + add); return d.toISOString().slice(0, 10); }
+function mondayBefore(y, m, day) { var d = new Date(Date.UTC(y, m, day)); d.setUTCDate(d.getUTCDate() - 1); while (d.getUTCDay() !== 1) d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10); }
+function easter(y) { var a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30,
+  i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451), mo = Math.floor((h + l - 7 * m + 114) / 31), da = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(Date.UTC(y, mo - 1, da)); }
+function isoAddD(iso, n) { var d = new Date(iso + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+function holidaysFor(prov, y) {
+  var e = easter(y), gf = new Date(e); gf.setUTCDate(gf.getUTCDate() - 2);
+  var L = [[y + '-01-01', 'New Year\u2019s Day'], [nthWeekday(y, 1, 1, 3), 'Family Day'], [gf.toISOString().slice(0, 10), 'Good Friday'], [mondayBefore(y, 4, 25), 'Victoria Day'],
+    [y + '-07-01', 'Canada Day'], [nthWeekday(y, 7, 1, 1), prov === 'BC' ? 'BC Day' : prov === 'AB' ? 'Heritage Day' : 'Civic Holiday'], [nthWeekday(y, 8, 1, 1), 'Labour Day'],
+    [nthWeekday(y, 9, 1, 2), 'Thanksgiving'], [y + '-12-25', 'Christmas Day']];
+  if (prov === 'BC') L.push([y + '-09-30', 'Truth and Reconciliation Day']);
+  if (prov === 'BC' || prov === 'AB') L.push([y + '-11-11', 'Remembrance Day']);
+  if (prov === 'ON') L.push([y + '-12-26', 'Boxing Day']);
+  return L;
+}
+// Each date's reason, if it's a holiday, a long-weekend Saturday/Sunday, the Christmas break, or a camp day (camps: { date: title })
+function classDateWarnings(dates, studio, camps) {
+  var prov = String(studio || '').slice(0, 2), H = {};
+  var years = {}; dates.forEach(function (d) { years[d.slice(0, 4)] = 1; years[+d.slice(0, 4) - 1] = 1; });
+  Object.keys(years).forEach(function (y) { holidaysFor(prov, +y).forEach(function (h) {
+    H[h[0]] = h[1];
+    var wd = new Date(h[0] + 'T12:00:00Z').getUTCDay();
+    if (wd === 1) { H[isoAddD(h[0], -1)] = H[isoAddD(h[0], -1)] || h[1] + ' long weekend'; H[isoAddD(h[0], -2)] = H[isoAddD(h[0], -2)] || h[1] + ' long weekend'; }
+    if (wd === 5) { H[isoAddD(h[0], 1)] = H[isoAddD(h[0], 1)] || h[1] + ' long weekend'; H[isoAddD(h[0], 2)] = H[isoAddD(h[0], 2)] || h[1] + ' long weekend'; }
+  }); });
+  var out = [];
+  dates.forEach(function (d) {
+    var md = d.slice(5), why = H[d] || (md >= '12-24' || md === '01-01' ? 'Christmas break' : '');
+    if (camps && camps[d]) why = (why ? why + ' \u00b7 ' : '') + 'camp day: ' + camps[d];
+    if (why) out.push({ date: d, why: why });
+  });
+  return out;
+}
+// Camp and PA/PD days at a studio on these dates (from the sessions)
+var csCampCache = {};
+async function campDaysAt(studio, dates) {
+  var key = studio + ':' + dates.join(','); if (csCampCache[key]) return csCampCache[key];
+  var m = {};
+  if (studio && dates.length) {
+    var r = await sb.from('sessions').select('session_date, title').eq('studio_id', studio).in('session_date', dates).or('title.ilike.%camp%,title.ilike.%pa day%,title.ilike.%pd day%,title.ilike.%pa/pd%');
+    (r.data || []).forEach(function (x) { if (!m[x.session_date]) m[x.session_date] = String(x.title).split('|')[0].trim(); });
+  }
+  return (csCampCache[key] = m);
+}
+function ctSlotDates(start, weeks, skip) { const out = []; const d = new Date(start + 'T12:00:00'); let g = 0; while (out.length < weeks && g < 60) { const iso = localDateStr(d); if (!skip.includes(iso)) out.push(iso); d.setDate(d.getDate() + 7); g++; } return out; }
+// ---- + Add class times: one class at several studios, days and times, with the holiday check ----
+let _cta = null;
+function ctAddOpen() {
+  const pg = (_ct.pages || []).find(c => c.id === _ct.f.page) || {};
+  const studios = Object.keys(STUDIO_NAMES).sort((a, b) => (STUDIO_NAMES[a] || a).localeCompare(STUDIO_NAMES[b] || b)), DAYS = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [7, 'Sun']];
+  _cta = { times: [] };
+  openDutySheet(`<h3>+ Add class times</h3><div class="me-form">
+    <label>Class<select id="cta-page" onchange="ctAddAges()"><option value="">Choose…</option>${(_ct.pages || []).map(c => `<option value="${escAttr(c.id)}"${c.id === pg.id ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+    <details open><summary><b>Studios</b> <span class="goal-note" id="cta-stsum">${_ct.f.studio ? '1 chosen' : 'none chosen'}</span></summary><div class="cta-studios">${studios.map(x => `<label><input type="checkbox" class="cta-st" value="${escAttr(x)}"${x === _ct.f.studio ? ' checked' : ''} onchange="ctAddSum()"> ${esc(STUDIO_NAMES[x] || x)}</label>`).join('')}</div></details>
+    <div><b>Days</b> <span class="bk-days">${DAYS.map(([n, l]) => `<label><input type="checkbox" class="cta-day" value="${n}"> ${l}</label>`).join('')}</span></div>
+    <div><b>Times</b> <span class="bk-chips" id="cta-times"></span> <input type="time" id="cta-time" step="900"> <button class="ho-btn sm" type="button" onclick="ctAddTime()">+ Add time</button></div>
+    <div class="don-two"><label>First week (classes start on or after)<input type="date" id="cta-start" min="${localDateStr(new Date())}"></label><label>Weeks<input type="number" id="cta-weeks" min="1" max="20" value="5"></label></div>
+    <div class="don-two"><label>Length (minutes)<input type="number" id="cta-min" min="30" max="300" step="15" value="90"></label><label>Spots<input type="number" id="cta-spots" min="1" max="200" value="15"></label></div>
+    <div class="don-two"><label>Ages from<input type="number" id="cta-amin" min="2" max="99"></label><label>to<input type="number" id="cta-amax" min="2" max="99"></label></div>
+    <button class="ho-btn" type="button" onclick="ctAddPreview()">Preview</button><div id="cta-out"></div></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="cta-go" disabled onclick="ctAddGo()">Create all</button></div>`);
+  ctAddAges();
+}
+function ctAddAges() { const id = (document.getElementById('cta-page') || {}).value, pg = (_ct.pages || []).find(c => c.id === id) || {};
+  if (pg.min_age != null) document.getElementById('cta-amin').value = pg.min_age; if (pg.max_age != null) document.getElementById('cta-amax').value = pg.max_age; }
+function ctAddSum() { const n = document.querySelectorAll('.cta-st:checked').length; document.getElementById('cta-stsum').textContent = n ? n + ' chosen' : 'none chosen'; }
+function ctAddTime() { const v = document.getElementById('cta-time').value; if (v && !_cta.times.includes(v)) { _cta.times.push(v); _cta.times.sort(); }
+  document.getElementById('cta-times').innerHTML = _cta.times.map((t, i) => `<span class="bk-chip">${esc(shortTime(t + ':00'))} <button type="button" onclick="_cta.times.splice(${i},1);ctAddTime()">×</button></span>`).join(''); }
+async function ctAddPreview() {
+  const v = id => document.getElementById(id).value, out = document.getElementById('cta-out');
+  const page = v('cta-page'), studios = [...document.querySelectorAll('.cta-st:checked')].map(x => x.value), days = [...document.querySelectorAll('.cta-day:checked')].map(x => +x.value);
+  const start = v('cta-start'), weeks = +v('cta-weeks') || 0;
+  const miss = !page ? 'Choose the class.' : !studios.length ? 'Choose the studios.' : !days.length ? 'Choose the days.' : !_cta.times.length ? 'Add the times.' : !start ? 'Choose the first week.' : !weeks ? 'Weeks: 1 to 20.' : '';
+  if (miss) { out.innerHTML = `<p class="goal-note" style="color:#b91c1c">${miss}</p>`; return; }
+  out.innerHTML = '<p class="goal-note">Checking dates…</p>';
+  const plan = [];
+  for (const st of studios) for (const dw of days) for (const tm of _cta.times) {
+    const d = new Date(start + 'T12:00:00'); while (((d.getDay() + 6) % 7) + 1 !== dw) d.setDate(d.getDate() + 1);   // the first of that weekday on/after the first week
+    const first = localDateStr(d), ds = ctSlotDates(first, weeks, []);
+    plan.push({ st, first, tm, warn: classDateWarnings(ds, st, await campDaysAt(st, ds)), ds });
+  }
+  _cta.plan = plan;
+  const f = d => new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
+  out.innerHTML = `<p><b>${plan.length}</b> timeslot${plan.length === 1 ? '' : 's'} (${weeks} weeks each):</p><div class="cta-plan">${plan.map((x, i) =>
+    `<div class="cs-p2row"><b>${esc(STUDIO_NAMES[x.st] || x.st)}</b> · ${esc(f(x.first))} at ${esc(shortTime(x.tm + ':00'))} <small class="goal-note">${esc(ctDatesLine(x.ds))}</small>${x.warn.map(w =>
+      `<label class="ba-check"><input type="checkbox" class="cta-skip" data-i="${i}" value="${w.date}" checked> Skip ${esc(f(w.date))} <span class="goal-note">(${esc(w.why)})</span></label>`).join('')}</div>`).join('')}</div>`;
+  document.getElementById('cta-go').disabled = false;
+}
+async function ctAddGo() {
+  const v = id => document.getElementById(id).value, b = document.getElementById('cta-go'); b.disabled = true;
+  let made = 0; const errs = [];
+  for (let i = 0; i < _cta.plan.length; i++) {
+    const x = _cta.plan[i], skips = [...document.querySelectorAll(`.cta-skip[data-i="${i}"]:checked`)].map(c => c.value);
+    b.textContent = `Making ${i + 1} of ${_cta.plan.length}…`;
+    const r = await sb.rpc('world_class_slot_add', { p: { class_page_id: v('cta-page'), studio_id: x.st, start_date: x.first, start_time: x.tm, minutes: +v('cta-min') || 90, weeks: +v('cta-weeks'),
+      spots: +v('cta-spots'), skip_dates: skips, min_age: v('cta-amin'), max_age: v('cta-amax'), part_label: null, follows_slot: null } });
+    if (r.error) errs.push(`${STUDIO_NAMES[x.st] || x.st} ${x.first} ${x.tm}: ${r.error.message}`); else made++;
+  }
+  closeDutySheet(); ctLoad();
+  alert(`Made ${made} timeslot${made === 1 ? '' : 's'}.` + (errs.length ? '\nNot made:\n' + errs.join('\n') : ''));
 }
 // Change a timeslot's dates: preview first (week by week, and who's booked), then do it and email the families
 let _ctr = null;
