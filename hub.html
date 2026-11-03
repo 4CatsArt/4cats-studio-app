@@ -2802,7 +2802,7 @@ function ctDraw() {
     <div class="ho-intro">Kids class timeslots sold on World, across all classes. Class pages (pictures, prices, blocks) stay in World settings → Kids classes.</div>
     <div class="ct-modes"><button class="ho-btn ${_ct.mode !== 'week' ? 'primary' : ''}" onclick="_ct.mode='list';ctDraw()">☰ List</button><button class="ho-btn ${_ct.mode === 'week' ? 'primary' : ''}" onclick="ctWeekOpen()">📅 Week view</button>
       ${_hoCan.edit ? '<button class="ho-btn" onclick="ctAddOpen()">+ Add class times</button>' : ''}
-      ${_hoCan.edit ? ctPart2Pages().map(pg => `<button class="ho-btn primary" onclick="_ctP2Id='${escAttr(pg.id)}';ctPart2Open()">⚡ Make ${esc(pg.name)} (Part 2) from ${esc(ctPart1Name(pg))}’s dates…</button>`).join('') : ''}</div>
+      ${_hoCan.edit ? ctPart2Pages().map(pg => `<button class="ho-btn primary" onclick="_ctP2Id='${escAttr(pg.id)}';ctPart2Open()">⚡ Make ${esc(ctPart2Name(pg))} from ${esc(ctPart1Name(pg))}’s dates…</button>`).join('') : ''}</div>
     ${_hoCan.edit && !ctPart2Pages().length ? '<div class="goal-note" style="margin:-2px 0 8px">Part 2 classes (e.g. Ringgold after Hokusai) get a “Make Part 2” button here once “This class is Part 2 of…” is set in World settings.</div>' : ''}
     ${_ct.mode === 'week' ? ctWeekHtml() : ''}
     <div class="act-filters"><select id="ct-page" onchange="ctFilter()"><option value="">All classes</option>${(_ct.pages || []).map(c => `<option value="${escAttr(c.id)}"${c.id === F.page ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
@@ -2919,16 +2919,22 @@ function ctSlotDates(start, weeks, skip) { const out = []; const d = new Date(st
 function ctChosenPageId() { return _ct.mode === 'week' ? (_ctw.page || _ct.f.page) : _ct.f.page; }
 function ctPart2Pages() {   // Part 2 classes to offer: the chosen class's (if it's a Part 1 or a Part 2), else all of them
   const P = _ct.pages || [], id = ctChosenPageId(), pg = P.find(c => c.id === id);
-  if (pg) return pg.part2_of ? [pg] : P.filter(c => c.part2_of === pg.id);
-  return P.filter(c => c.part2_of);
+  if (pg) return pg.part2_of || (pg.parts && pg.parts.labels) ? [pg] : P.filter(c => c.part2_of === pg.id);
+  return P.filter(c => c.part2_of || (c.parts && c.parts.labels));
 }
 let _ctP2Id = null;
 function ctPart2Page() { return (_ct.pages || []).find(c => c.id === _ctP2Id) || ctPart2Pages()[0] || null; }
-function ctPart1Name(pg) { pg = pg || ctPart2Page(); const p1 = pg && (_ct.pages || []).find(c => c.id === pg.part2_of); return p1 ? p1.name : 'Part 1'; }
+function ctPart1Name(pg) { pg = pg || ctPart2Page(); if (pg && !pg.part2_of && pg.parts) return pg.name + ' ' + (pg.parts.labels[0] || 'Part 1'); const p1 = pg && (_ct.pages || []).find(c => c.id === pg.part2_of); return p1 ? p1.name : 'Part 1'; }
+function ctPart2Name(pg) { return pg && !pg.part2_of && pg.parts ? pg.name + ' ' + (pg.parts.labels[1] || 'Part 2') : pg ? pg.name + ' (Part 2)' : 'Part 2'; }
 async function ctPart2Open() {
   const pg = ctPart2Page(); if (!pg) return;
   openDutySheet(`<h3>Make ${esc(pg.name)} (Part 2)</h3><p class="goal-note">Finding ${esc(ctPart1Name())} timeslots…</p>`);
-  const { data, error } = await sb.rpc('world_class_part1_slots', { p_page: pg.id });
+  let data, error;
+  if (!pg.part2_of && pg.parts) {
+    const r = await sb.rpc('hub_class_slots_find', { p: { page: pg.id, studio: '', from: '', to: '' } }); error = r.error;
+    const L = r.data || [], followed = new Set(L.map(x => x.follows_slot).filter(Boolean)), p1 = pg.parts.labels[0], p2 = pg.parts.labels[1];
+    data = L.filter(x => x.part_label !== p2 && !x.follows_slot).map(x => Object.assign({}, x, { taken: followed.has(x.id) }));
+  } else ({ data, error } = await sb.rpc('world_class_part1_slots', { p_page: pg.id }));
   if (error) { openDutySheet(`<h3>Make ${esc(pg.name)} (Part 2)</h3><p class="goal-note" style="color:#b91c1c">${esc(error.message)}</p><div class="sheet-actions"><button onclick="closeDutySheet()">Close</button></div>`); return; }
   let todo = (data || []).filter(t => !t.taken);
   const onlyStudio = _ct.mode === 'week' ? _ctw.studio : _ct.f.studio;
@@ -2943,7 +2949,7 @@ async function ctPart2Open() {
       min: t.min_age != null ? t.min_age : pg.min_age, max: t.max_age != null ? t.max_age : pg.max_age });   // the same age group as the Part 1 time it follows
   }
   _ct.p2 = plan;
-  openDutySheet(`<h3>Make ${esc(pg.name)} (Part 2): ${plan.length} timeslot${plan.length === 1 ? '' : 's'}</h3>
+  openDutySheet(`<h3>Make ${esc(ctPart2Name(pg))}: ${plan.length} timeslot${plan.length === 1 ? '' : 's'}</h3>
     <p class="goal-note">Each starts the week after its ${esc(ctPart1Name())} timeslot ends: same studio, time, length and spots. Linked, so families can register for both.</p>
     <div class="cta-plan">${plan.map((x, i) => `<div class="cs-p2row"><b>${esc(STUDIO_NAMES[x.t.studio_id] || x.t.studio_id)}</b> · ${esc(f(x.start))} at ${esc(shortTime(x.t.start_time))} · ${x.weeks} weeks · ${x.t.spots} spots · ages ${x.min ?? '?'}–${x.max ?? '?'}
       <small class="goal-note">${esc(ctDatesLine(x.ds))}</small>${x.warn.map(w => `<label class="ba-check"><input type="checkbox" class="ctp2-skip" data-i="${i}" value="${w.date}"${w.skip ? ' checked' : ''}> Skip ${esc(f(w.date))} <span class="goal-note">(${esc(w.why)})</span></label>`).join('')}</div>`).join('')}</div>
@@ -2956,7 +2962,7 @@ async function ctPart2Go() {
     const x = _ct.p2[i], skips = [...document.querySelectorAll(`.ctp2-skip[data-i="${i}"]:checked`)].map(c => c.value);
     b.textContent = `Making ${i + 1} of ${_ct.p2.length}…`;
     const r = await sb.rpc('world_class_slot_add', { p: { class_page_id: pg.id, studio_id: x.t.studio_id, start_date: x.start, start_time: String(x.t.start_time).slice(0, 5), minutes: pg.minutes || x.t.minutes,
-      weeks: x.weeks, spots: x.t.spots, skip_dates: skips, min_age: x.min, max_age: x.max, part_label: null, follows_slot: x.t.id } });
+      weeks: x.weeks, spots: x.t.spots, skip_dates: skips, min_age: x.min, max_age: x.max, part_label: !pg.part2_of && pg.parts ? (pg.parts.labels[1] || 'Part 2') : null, follows_slot: x.t.id } });
     if (r.error) errs.push(`${STUDIO_NAMES[x.t.studio_id] || x.t.studio_id} ${x.start}: ${r.error.message}`); else made++;
   }
   closeDutySheet(); ctLoad(); if (_ct.mode === 'week') ctWeekLoad();
@@ -2976,6 +2982,7 @@ function ctAddOpen() {
     <div class="don-two"><label>First week (classes start on or after)<input type="date" id="cta-start" min="${localDateStr(new Date())}"></label><label>Weeks<input type="number" id="cta-weeks" min="1" max="20" value="5"></label></div>
     <div class="don-two"><label>Length (minutes)<input type="number" id="cta-min" min="30" max="300" step="15" value="90"></label><label>Spots<input type="number" id="cta-spots" min="1" max="200" value="15"></label></div>
     <div class="don-two"><label>Ages from<input type="number" id="cta-amin" min="2" max="99"></label><label>to<input type="number" id="cta-amax" min="2" max="99"></label></div>
+    <label id="cta-partw" hidden>Part<select id="cta-part"></select></label>
     <button class="ho-btn" type="button" onclick="ctAddPreview()">Preview</button><div id="cta-out"></div></div>
     <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="cta-go" disabled onclick="ctAddGo()">Create all</button></div>`);
   ctAddAges();
@@ -2983,6 +2990,9 @@ function ctAddOpen() {
 function ctAddAges() {   // the class's own ages, number of classes and length
   const id = (document.getElementById('cta-page') || {}).value, pg = (_ct.pages || []).find(c => c.id === id) || {}, set = (k, v) => { if (v != null) document.getElementById(k).value = v; };
   set('cta-amin', pg.min_age); set('cta-amax', pg.max_age); set('cta-weeks', pg.weeks); set('cta-min', pg.minutes);
+  // a class in parts: which part these times are (Part 2s usually come from ⚡ Make Part 2)
+  const pw = document.getElementById('cta-partw'), ps = document.getElementById('cta-part'), L = pg.parts && pg.parts.labels;
+  if (pw) { pw.hidden = !L; if (L) ps.innerHTML = L.map(l => `<option value="${escAttr(l)}">${esc(l)}</option>`).join(''); }
 }
 function ctAddSum() { const n = document.querySelectorAll('.cta-st:checked').length; document.getElementById('cta-stsum').textContent = n ? n + ' chosen' : 'none chosen'; }
 function ctAddTime() { const v = document.getElementById('cta-time').value; if (v && !_cta.times.includes(v)) { _cta.times.push(v); _cta.times.sort(); }
@@ -3013,8 +3023,9 @@ async function ctAddGo() {
   for (let i = 0; i < _cta.plan.length; i++) {
     const x = _cta.plan[i], skips = [...document.querySelectorAll(`.cta-skip[data-i="${i}"]:checked`)].map(c => c.value);
     b.textContent = `Making ${i + 1} of ${_cta.plan.length}…`;
+    const partW = document.getElementById('cta-partw');
     const r = await sb.rpc('world_class_slot_add', { p: { class_page_id: v('cta-page'), studio_id: x.st, start_date: x.first, start_time: x.tm, minutes: +v('cta-min') || 90, weeks: +v('cta-weeks'),
-      spots: +v('cta-spots'), skip_dates: skips, min_age: v('cta-amin'), max_age: v('cta-amax'), part_label: null, follows_slot: null } });
+      spots: +v('cta-spots'), skip_dates: skips, min_age: v('cta-amin'), max_age: v('cta-amax'), part_label: partW && !partW.hidden ? v('cta-part') : null, follows_slot: null } });
     if (r.error) errs.push(`${STUDIO_NAMES[x.st] || x.st} ${x.first} ${x.tm}: ${r.error.message}`); else made++;
   }
   closeDutySheet(); ctLoad();
@@ -3059,6 +3070,7 @@ function ctWeekHtml() {
   const pend = _ctw.pending.filter(x => x.studio === _ctw.studio);
   let h = `<div class="ctw-bar"><select onchange="_ctw.studio=this.value;ctWeekLoad()"><option value="">Choose a studio…</option>${studios.map(x => `<option value="${escAttr(x)}"${x === _ctw.studio ? ' selected' : ''}>${esc(STUDIO_NAMES[x] || x)}</option>`).join('')}</select>
     <select onchange="_ctw.page=this.value;ctDraw()"><option value="">Class to add…</option>${(_ct.pages || []).map(c => `<option value="${escAttr(c.id)}"${c.id === _ctw.page ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+    ${pg && pg.parts && pg.parts.labels ? `<select onchange="_ctw.part=this.value;ctDraw()" title="Which part">${pg.parts.labels.map(l => `<option value="${escAttr(l)}"${(_ctw.part || pg.parts.labels[0]) === l ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>` : ''}
     ${pg ? `<span class="goal-note">${pg.weeks || '?'} weeks · ${pg.minutes || 90} min · ages ${pg.min_age ?? '?'}–${pg.max_age ?? '?'}</span>` : ''}
     <span class="spacer"></span><button class="ho-btn sm" onclick="ctWeekMove(-1)">‹</button><b>${esc(wkLabel)}</b><button class="ho-btn sm" onclick="ctWeekMove(1)">›</button>
     <label class="ctw-jump" title="Go to the week of a date">📅 <input type="date" value="${escAttr(_ctw.week)}" onchange="if(this.value){_ctw.week=ctWeekSunday(this.value);ctWeekLoad()}"></label>
@@ -3143,7 +3155,8 @@ function ctWeekClick(e, d) {
   // up to 3 at once: how many overlap at the busiest moment of the new class
   let most = 0; for (let t = m; t < m + len; t += 15) most = Math.max(most, busy.filter(x => x.s <= t && x.e > t).length);
   if (most >= 3) { alert('Up to 3 things at the same time: that time already has 3.'); return; }
-  _ctw.pending.push({ studio: _ctw.studio, page: pg.id, name: pg.name, date: d, time, weeks: pg.weeks || 5, minutes: pg.minutes || 90, spots: 15, min_age: pg.min_age, max_age: pg.max_age });
+  const part = pg.parts && pg.parts.labels ? (_ctw.part && pg.parts.labels.includes(_ctw.part) ? _ctw.part : pg.parts.labels[0]) : null;
+  _ctw.pending.push({ studio: _ctw.studio, page: pg.id, name: pg.name + (part ? ' · ' + part : ''), part, date: d, time, weeks: pg.weeks || 5, minutes: pg.minutes || 90, spots: 15, min_age: pg.min_age, max_age: pg.max_age });
   ctDraw();
 }
 // Create the placed class times: the holiday / camp day check, then make them
@@ -3175,7 +3188,7 @@ async function ctWeekGo() {
     const x = _ctw.pending[i], skips = [...document.querySelectorAll(`.ctw-skip[data-i="${i}"]:checked`)].map(c => c.value);
     b.textContent = `Making ${i + 1} of ${_ctw.pending.length}…`;
     const r = await sb.rpc('world_class_slot_add', { p: { class_page_id: x.page, studio_id: x.studio, start_date: x.date, start_time: x.time, minutes: x.minutes, weeks: x.weeks,
-      spots, skip_dates: skips, min_age: ageOf('ctw-amin', i), max_age: ageOf('ctw-amax', i), part_label: null, follows_slot: null } });
+      spots, skip_dates: skips, min_age: ageOf('ctw-amin', i), max_age: ageOf('ctw-amax', i), part_label: x.part || null, follows_slot: null } });
     if (r.error) errs.push(`${x.name} ${x.date} ${x.time}: ${r.error.message}`); else { made++; done.push(x); }
   }
   _ctw.pending = _ctw.pending.filter(x => !done.includes(x));
