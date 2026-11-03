@@ -394,6 +394,7 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
 .mc-tag.pc-later { background: #eef3ff; color: #2f4d9a; }
 #pcSec .field[hidden] { display: none !important; }
 .cs-warn { color: #a15c00; } .cs-warnbox { background: #fff6e5; border: 1px solid #f2d29b; border-radius: 10px; padding: 10px 12px; margin: 6px 0 10px; display: grid; gap: 4px; }
+.cs-p2 { background: #f4f7ff; } .cs-p2list { display: grid; gap: 6px; margin-top: 8px; } .cs-p2row { background: #fff; border: 1px solid #e3e8f5; border-radius: 10px; padding: 8px 10px; display: grid; gap: 2px; }
 </style>
 </head>
 <body>
@@ -3580,6 +3581,11 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
         '<td>' + (canEdit ? '<input type="checkbox" data-csactive="' + t.id + '"' + (t.active ? ' checked' : '') + '>' : (t.active ? 'Yes' : 'No')) + '</td>' +
         '<td>' + (canEdit ? '<button class="btn btn-plain" type="button" data-csdup="' + t.id + '">Duplicate</button>' + (t.booked ? '' : ' <button class="btn btn-plain" type="button" data-csdel="' + t.id + '">Remove</button>') : '') + '</td></tr>';
     }).join('') + '</tbody></table>' : '<p class="help">No timeslots yet.</p>';
+    if (canEdit && c.part2_of && (clsPart1Slots || []).filter(function (x) { return !x.taken; }).length) {
+      var nP1 = (clsPart1Slots || []).filter(function (x) { return !x.taken; }).length;
+      h += '<div class="cls-sec cs-p2"><b>\u26a1 Part 2 timeslots</b><p class="help" style="margin:4px 0 6px">Make this class\u2019s timeslots from Part 1\u2019s: same studio, time, length, weeks and spots, each starting the week after its Part 1 ends, linked so families can book both.</p>' +
+        '<button class="btn btn-berry" type="button" id="csP2All">Make Part 2 for all ' + nP1 + ' Part 1 timeslot' + (nP1 === 1 ? '' : 's') + '</button><div id="csP2Plan"></div></div>';
+    }
     if (canEdit) {
       var N = clsNewSlot || { studio_id: (clsSlots.length ? clsSlots[clsSlots.length - 1].studio_id : (c.studios || [])[0]) };
       h += '<div class="cls-sec" id="csNew"><b>+ Add a timeslot</b><div class="two" style="margin-top:6px"><div class="field"><label>Studio</label><select id="csStudio">' +
@@ -3637,6 +3643,39 @@ dialog.editor::backdrop { background: rgba(18, 61, 44, .55); }
       clsNewSlot = { studio_id: t.studio_id, start_date: nx.toISOString().slice(0, 10), start_time: String(t.start_time).slice(0, 5), minutes: t.minutes, weeks: t.weeks, spots: t.spots,
         skip_dates: [], min_age: t.page ? clsDraft.min_age : t.min_age, max_age: t.page ? clsDraft.max_age : t.max_age, part_label: $('csPart').value.trim(), follows_slot: t.id };   // linked: this class's own ages
       redraw();
+    });
+    // Part 2 for every Part 1 timeslot (linked class pages): a plan with holiday checks, then create them all
+    var p2 = $('csP2All'); if (p2) p2.addEventListener('click', async function () {
+      var box = $('csP2Plan');
+      if (clsDraft.min_age == null || clsDraft.max_age == null) { box.innerHTML = '<p class="help" style="color:#c8232c">Set this class\u2019s ages (From / To) first, and Save.</p>'; return; }
+      var todo = (clsPart1Slots || []).filter(function (x) { return !x.taken; });
+      box.innerHTML = '<p class="help">Checking dates\u2026</p>';
+      var plan = [];
+      for (var i = 0; i < todo.length; i++) {
+        var t = todo[i], last = (t.dates || []).slice(-1)[0] || t.start_date, nx = new Date(last + 'T12:00:00'); nx.setDate(nx.getDate() + 7);
+        var start = nx.toISOString().slice(0, 10), ds = clsSlotPreview(start, t.weeks, []);
+        plan.push({ t: t, start: start, warn: classDateWarnings(ds, t.studio_id, await campDaysAt(t.studio_id, ds)) });
+      }
+      var fmt = function (d) { return new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }); };
+      box.innerHTML = '<div class="cs-p2list">' + plan.map(function (x, i) {
+        var tm = String(x.t.start_time).slice(0, 5).split(':').map(Number);
+        return '<div class="cs-p2row"><b>' + esc(studioNameOf(x.t.studio_id)) + '</b> \u00b7 ' + esc(fmt(x.start)) + ' at ' + ((tm[0] % 12) || 12) + (tm[1] ? ':' + String(tm[1]).padStart(2, '0') : '') + (tm[0] >= 12 ? 'pm' : 'am') + ' \u00b7 ' + x.t.weeks + ' weeks \u00b7 ' + x.t.spots + ' spots' +
+          (x.t.part_label ? ' <span class="help">(after ' + esc(x.t.part_label) + ')</span>' : '') +
+          x.warn.map(function (w) { return '<label class="check"><input type="checkbox" class="csP2Skip" data-i="' + i + '" value="' + w.date + '" checked> Skip ' + esc(fmt(w.date)) + ' <span class="help">(' + esc(w.why) + ')</span></label>'; }).join('') + '</div>';
+      }).join('') + '</div><div style="display:flex;gap:8px;margin-top:8px"><button class="btn btn-berry" type="button" id="csP2Go">Create all ' + plan.length + '</button><button class="btn btn-plain" type="button" id="csP2Cancel">Cancel</button><span class="help" id="csP2Msg"></span></div>';
+      $('csP2Cancel').onclick = function () { box.innerHTML = ''; };
+      $('csP2Go').onclick = async function () {
+        var go = this, made = 0, errs = []; go.disabled = true;
+        for (var i = 0; i < plan.length; i++) {
+          var x = plan[i], skips = Array.prototype.filter.call(box.querySelectorAll('.csP2Skip[data-i="' + i + '"]'), function (cb) { return cb.checked; }).map(function (cb) { return cb.value; });
+          $('csP2Msg').textContent = 'Making ' + (i + 1) + ' of ' + plan.length + '\u2026';
+          var r = await sb.rpc('world_class_slot_add', { p: { class_page_id: clsDraft.id, studio_id: x.t.studio_id, start_date: x.start, start_time: String(x.t.start_time).slice(0, 5), minutes: x.t.minutes,
+            weeks: x.t.weeks, spots: x.t.spots, skip_dates: skips, min_age: clsDraft.min_age, max_age: clsDraft.max_age, part_label: null, follows_slot: x.t.id } });
+          if (r.error) errs.push(studioNameOf(x.t.studio_id) + ': ' + r.error.message); else made++;
+        }
+        clsPart1Slots = null; reload();
+        if (errs.length) alert('Made ' + made + '. Not made:\n' + errs.join('\n'));
+      };
     });
     var add = $('csAdd'); if (add) add.addEventListener('click', async function () {
       var p = { class_page_id: clsDraft.id, studio_id: $('csStudio').value, start_date: $('csStart').value, start_time: $('csTime').value, minutes: +$('csMin').value, weeks: +$('csWeeks').value, spots: +$('csSpots').value, skip_dates: skipList(),
