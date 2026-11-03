@@ -1836,6 +1836,9 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
 .act-filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 4px 0 10px; } .act-filters select, .act-filters input { font: inherit; padding: 6px 8px; border: 1px solid #ddd; border-radius: 8px; }
 .act-filters input[type=search] { flex: 1; min-width: 200px; } .act-area { font-size: 11px; font-weight: 800; background: #f3f0fa; border-radius: 999px; padding: 1px 8px; }
 .act-chs { font-size: 12px; } .act-ch { display: block; } .act-table td { vertical-align: top; }
+.ct-bulk { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; background: #fff6e5; border: 1px solid #f2d29b; border-radius: 10px; padding: 8px 12px; margin: 0 0 8px; }
+.ct-bulk input { font: inherit; padding: 4px 6px; border: 1px solid #ddd; border-radius: 6px; } .ct-table td { vertical-align: top; } .ct-table tr.ct-off { opacity: .55; }
+.ct-weeks { border-collapse: collapse; margin: 8px 0; } .ct-weeks td, .ct-weeks th { padding: 3px 10px; border-bottom: 1px solid #eee; text-align: left; } .ct-weeks tr.ct-ch td { font-weight: 700; color: #1d6b39; }
 </style>
 </head>
 <body>
@@ -1947,6 +1950,7 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
       <div class="nav-label">Home office</div>
       <button class="nav-item" id="nav-announce" onclick="openAnnouncePane()"><span class="ic">📢</span> Announcements</button>
       <button class="nav-item" id="nav-bulk" onclick="openBulkPane()"><span class="ic">➕</span> Bulk add</button>
+      <button class="nav-item" id="nav-ct" onclick="openCtPane()"><span class="ic">📚</span> Class times</button>
       <button class="nav-item" id="nav-don" onclick="openDonPane()"><span class="ic">🎁</span> Donations & giveaways</button>
       <button class="nav-item" id="nav-act" onclick="openActPane()"><span class="ic">🕘</span> Activity log</button>
       <button class="nav-item" id="nav-oc-overview" onclick="openOcOverview()"><span class="ic">✅</span> Open & close</button>
@@ -2237,6 +2241,7 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
   </main>
 
   <main class="main" id="bulk-pane" style="display:none"></main>
+  <main class="main" id="ct-pane" style="display:none"></main>
   <main class="main" id="don-pane" style="display:none"></main>
   <main class="main" id="act-pane" style="display:none"></main>
   <main class="main" id="plan-pane" style="display:none">
@@ -2743,6 +2748,116 @@ async function ackAnnouncement(id, btn) {
   const a = _annData.find(x => x.id === id);
   if (a) a.read_at = data || new Date().toISOString();
   renderAnnouncements();
+}
+
+// ---------- Home office → 📚 Class times (admins: hub_class_times.sql) ----------
+// World class timeslots across classes: filter by class, studio and dates; bulk edit spots, ages and on sale;
+// change a timeslot's dates (its bookings move with it) and email the families.
+let _ct = { f: { page: '', studio: '', from: '', to: '' }, rows: null, pages: null, sel: new Set(), err: '' };
+function openCtPane() {
+  if (!_hoCan.view) { alert('Class times is for home office admins.'); return; }
+  showOnlyPane('ct-pane'); setActiveNav('nav-ct');
+  if (!_ct.f.from) { const d = new Date(); _ct.f.from = localDateStr(new Date(d.getFullYear(), d.getMonth(), 1)); const e = new Date(d); e.setDate(e.getDate() + 180); _ct.f.to = localDateStr(e); }
+  if (!_ct.pages) sb.rpc('world_class_pages_list').then(r => { _ct.pages = r.error ? [] : (r.data || []); ctDraw(); });
+  ctLoad();
+}
+async function ctLoad() {
+  _ct.rows = null; ctDraw();
+  const { data, error } = await sb.rpc('hub_class_slots_find', { p: _ct.f });
+  _ct.err = error ? (/hub_class_slots_find/i.test(error.message) ? 'Run hub_class_times.sql in Supabase to switch this on.' : error.message) : '';
+  _ct.rows = error ? [] : (data || []); _ct.sel = new Set([..._ct.sel].filter(id => _ct.rows.some(r => r.id === id))); ctDraw();
+}
+function ctDatesLine(ds) {
+  const g = []; let last = null;
+  (ds || []).forEach(d => { const dt = new Date(d + 'T12:00:00'), mo = dt.toLocaleDateString('en-CA', { month: 'short' }); if (!last || last.mo !== mo) { last = { mo, days: [] }; g.push(last); } last.days.push(dt.getDate()); });
+  return g.map(x => x.mo + ' ' + x.days.join(', ')).join(' · ');
+}
+function ctDraw() {
+  const el = document.getElementById('ct-pane'); if (!el) return;
+  const F = _ct.f, R = _ct.rows, studios = Object.keys(STUDIO_NAMES).sort((a, b) => (STUDIO_NAMES[a] || a).localeCompare(STUDIO_NAMES[b] || b)), n = _ct.sel.size;
+  el.innerHTML = `<div class="ho-head"><div class="pts-page-title" style="margin:0">📚 Class times</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+    <div class="ho-intro">Kids class timeslots sold on World, across all classes. Class pages (pictures, prices, blocks) stay in World settings → Kids classes.</div>
+    <div class="act-filters"><select id="ct-page" onchange="ctFilter()"><option value="">All classes</option>${(_ct.pages || []).map(c => `<option value="${escAttr(c.id)}"${c.id === F.page ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+      <select id="ct-studio" onchange="ctFilter()"><option value="">All studios</option>${studios.map(x => `<option value="${escAttr(x)}"${x === F.studio ? ' selected' : ''}>${esc(STUDIO_NAMES[x] || x)}</option>`).join('')}</select>
+      <label>Starting from <input type="date" id="ct-from" value="${escAttr(F.from)}" onchange="ctFilter()"></label><label>to <input type="date" id="ct-to" value="${escAttr(F.to)}" onchange="ctFilter()"></label></div>
+    ${_ct.err ? `<div class="goal-note" style="color:#b91c1c">${esc(_ct.err)}</div>` : ''}
+    ${_hoCan.edit && n ? `<div class="ct-bulk"><b>${n} selected</b>
+      <span>Spots <input type="number" id="ct-b-spots" min="1" max="200" style="width:70px"> <button class="ho-btn sm" onclick="ctBulk('spots')">Set</button></span>
+      <span>Ages <input type="number" id="ct-b-min" min="2" max="99" style="width:56px">–<input type="number" id="ct-b-max" min="2" max="99" style="width:56px"> <button class="ho-btn sm" onclick="ctBulk('ages')">Set</button></span>
+      <button class="ho-btn sm" onclick="ctBulk('on')">On sale</button><button class="ho-btn sm" onclick="ctBulk('off')">Off sale</button>
+      <button class="ho-btn sm" onclick="_ct.sel.clear();ctDraw()">Clear</button><span class="goal-note" id="ct-b-msg"></span></div>` : ''}
+    ${R === null ? '<div class="goal-note">Loading…</div>' : !R.length ? '<div class="ho-intro">No timeslots match.</div>' : `<div class="goal-note" style="margin:4px 0">${R.length} timeslot${R.length === 1 ? '' : 's'}</div>
+    <div class="oc-wrap"><table class="oc-table ct-table"><thead><tr><th><input type="checkbox" ${n && n === R.length ? 'checked' : ''} onchange="ctAll(this.checked)" aria-label="Select all"></th><th>Class</th><th>Studio</th><th>Day and time</th><th>Dates</th><th>Ages</th><th>Spots</th><th>Booked</th><th>On sale</th><th></th></tr></thead><tbody>${R.map(r => {
+      const wd = new Date(String(r.start_date).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short' });
+      return `<tr class="${r.active ? '' : 'ct-off'}"><td><input type="checkbox" ${_ct.sel.has(r.id) ? 'checked' : ''} onchange="ctPick('${escAttr(r.id)}', this.checked)"></td>
+        <td><b>${esc(r.class_name)}</b>${r.part_label ? `<br><small>${esc(r.part_label)}</small>` : ''}${r.follows_slot ? '<br><small class="goal-note">Part 2</small>' : ''}</td>
+        <td>${esc(STUDIO_NAMES[r.studio_id] || r.studio_id)}</td><td>${esc(wd)} ${esc(shortTime(r.start_time))}<br><small>${r.minutes} min · ${r.weeks} weeks</small></td>
+        <td><small>${esc(ctDatesLine(r.dates))}</small>${(r.skip_dates || []).length ? `<br><small class="goal-note">no class ${esc(r.skip_dates.map(d => new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })).join(', '))}</small>` : ''}</td>
+        <td>${r.min_age ?? ''}–${r.max_age ?? ''}</td><td>${r.spots}</td><td>${r.booked}</td><td>${r.active ? '✓' : '—'}</td>
+        <td>${_hoCan.edit ? `<button class="ho-btn sm" onclick="ctRedate('${escAttr(r.id)}')">Change dates</button>` : ''}</td></tr>`; }).join('')}</tbody></table></div>`}`;
+}
+function ctFilter() { const v = id => (document.getElementById(id) || {}).value || ''; _ct.f = { page: v('ct-page'), studio: v('ct-studio'), from: v('ct-from'), to: v('ct-to') }; ctLoad(); }
+function ctPick(id, on) { if (on) _ct.sel.add(id); else _ct.sel.delete(id); ctDraw(); }
+function ctAll(on) { _ct.sel = new Set(on ? (_ct.rows || []).map(r => r.id) : []); ctDraw(); }
+async function ctBulk(what) {
+  const ids = [..._ct.sel], rows = (_ct.rows || []).filter(r => _ct.sel.has(r.id)), msg = document.getElementById('ct-b-msg');
+  const spots = +(document.getElementById('ct-b-spots') || {}).value || 0, mn = (document.getElementById('ct-b-min') || {}).value, mx = (document.getElementById('ct-b-max') || {}).value;
+  if (what === 'spots' && !spots) { msg.textContent = 'Type the number of spots.'; return; }
+  if (what === 'ages' && (mn === '' || mx === '' || +mn > +mx)) { msg.textContent = 'Type the ages (from – to).'; return; }
+  let ok = 0; const errs = [];
+  for (const r of rows) {
+    msg.textContent = `Saving ${ok + errs.length + 1} of ${rows.length}…`;
+    const res = what === 'ages' ? await sb.rpc('world_class_slot_ages', { p_slot: r.id, p_min: +mn, p_max: +mx })
+      : await sb.rpc('world_class_slot_update', { p_slot: r.id, p_spots: what === 'spots' ? spots : r.spots, p_active: what === 'on' ? true : what === 'off' ? false : r.active });
+    if (res.error) errs.push(`${r.class_name} · ${STUDIO_NAMES[r.studio_id] || r.studio_id}: ${res.error.message}`); else ok++;
+  }
+  if (errs.length) alert(`${ok} changed. Not changed:\n` + errs.join('\n'));
+  ctLoad();
+}
+// Change a timeslot's dates: preview first (week by week, and who's booked), then do it and email the families
+let _ctr = null;
+function ctRedate(id) {
+  const r = (_ct.rows || []).find(x => x.id === id); if (!r) return; _ctr = { r, prev: null };
+  openDutySheet(`<h3>Change dates: ${esc(r.class_name)}</h3><p class="ho-intro">${esc(STUDIO_NAMES[r.studio_id] || r.studio_id)} · ${r.booked} booked. Bookings move with their class.</p>
+    <div class="me-form"><div class="don-two"><label>First class<input type="date" id="ctr-start" value="${escAttr(String(r.start_date).slice(0, 10))}"></label><label>Time<input type="time" id="ctr-time" value="${escAttr(String(r.start_time).slice(0, 5))}"></label></div>
+      <div class="don-two"><label>Weeks<input type="number" id="ctr-weeks" min="1" max="20" value="${r.weeks}"></label>
+        <label>Skip these dates (no class)<input type="text" id="ctr-skip" value="${escAttr((r.skip_dates || []).map(d => String(d).slice(0, 10)).join(', '))}" placeholder="2027-02-17, 2027-03-17"></label></div>
+      <button class="ho-btn" onclick="ctRedatePreview()">Preview</button><div id="ctr-out"></div></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="ctr-go" disabled onclick="ctRedateGo()">Change the dates</button></div>`);
+}
+function ctrArgs() {
+  const v = id => document.getElementById(id).value;
+  return { p_slot: _ctr.r.id, p_start: v('ctr-start'), p_time: v('ctr-time'), p_weeks: +v('ctr-weeks') || 0,
+    p_skip: v('ctr-skip').split(/[\s,;]+/).map(x => x.trim()).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x)) };
+}
+async function ctRedatePreview() {
+  const out = document.getElementById('ctr-out'); out.innerHTML = '<p class="goal-note">Working it out…</p>';
+  const { data, error } = await sb.rpc('hub_class_slot_redate', Object.assign(ctrArgs(), { p_preview: true }));
+  if (error) { out.innerHTML = `<p class="goal-note" style="color:#b91c1c">${esc(error.message)}</p>`; document.getElementById('ctr-go').disabled = true; return; }
+  _ctr.prev = data;
+  const f = d => d ? new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }) : '—';
+  const n = Math.max((data.old || []).length, (data.new || []).length), fam = data.families || [];
+  out.innerHTML = `<table class="ct-weeks"><thead><tr><th>Week</th><th>Was</th><th>Now</th></tr></thead><tbody>${Array.from({ length: n }, (_, i) => {
+      const o = (data.old || [])[i], w = (data.new || [])[i], ch = String(o || '').slice(0, 10) !== String(w || '').slice(0, 10);
+      return `<tr class="${ch ? 'ct-ch' : ''}"><td>${i + 1}</td><td>${f(o)}</td><td>${w ? f(w) : '<i>removed</i>'}</td></tr>`; }).join('')}</tbody></table>
+    ${String(data.old_time).slice(0, 5) !== String(data.new_time).slice(0, 5) ? `<p class="goal-note">Time: ${esc(shortTime(data.old_time))} → <b>${esc(shortTime(data.new_time))}</b></p>` : ''}
+    ${fam.length ? `<label class="ba-check"><input type="checkbox" id="ctr-email" checked> Email the ${fam.length} famil${fam.length === 1 ? 'y' : 'ies'} booked the new dates</label>
+      <label>Note in the email (optional)<textarea id="ctr-msg" rows="2" placeholder="e.g. We moved week 3 for the holiday weekend."></textarea></label>
+      <p class="goal-note">${esc(fam.map(x => x.name || x.email).join(', '))}</p>` : '<p class="goal-note">Nobody\u2019s booked yet.</p>'}`;
+  document.getElementById('ctr-go').disabled = false;
+}
+async function ctRedateGo() {
+  const b = document.getElementById('ctr-go'); b.disabled = true; b.textContent = 'Changing…';
+  const email = document.getElementById('ctr-email') && document.getElementById('ctr-email').checked, note = (document.getElementById('ctr-msg') || {}).value || '';
+  const { data, error } = await sb.rpc('hub_class_slot_redate', Object.assign(ctrArgs(), { p_preview: false }));
+  if (error) { b.disabled = false; b.textContent = 'Change the dates'; alert('Not changed: ' + error.message); return; }
+  let sent = 0;
+  if (email && (data.families || []).length) {
+    try { const d = await staffBookingCall('staff_class_notify', { slot_id: _ctr.r.id, old_dates: (data.old || []).map(x => String(x).slice(0, 10)), new_dates: (data.new || []).map(x => String(x).slice(0, 10)), message: note }); sent = d.sent || 0; }
+    catch (e) { alert('The dates changed, but the emails didn\u2019t send: ' + e.message); }
+  }
+  closeDutySheet(); ctLoad();
+  if (sent) alert(`Dates changed. ${sent} famil${sent === 1 ? 'y' : 'ies'} emailed.`);
 }
 
 // ---------- Home office → Bulk add (admins: world_bulk_times.sql) ----------
@@ -10589,7 +10704,7 @@ async function requestPrize(prizeId) {
 
 // The page panes: only one shows at a time. Points + Instagram are
 // coordinator-only (their sidebar buttons only appear when unlocked).
-const PANES = ['act-pane', 'don-pane', 'bulk-pane', 'dashboard-main', 'hist-pane', 'ann-pane', 'concern-pane', 'concerns-pane', 'swaps-pane', 'chat-pane', 'dm-pane', 'devices-pane', 'etpl-pane', 'tickets-pane', 'moments-pane', 'info-pane', 'duties-pane', 'schedule-pane', 'points-pane', 'instagram-pane', 'occupancy-pane', 'inventory-pane', 'announce-pane', 'checklist-pane', 'oc-overview-pane', 'plan-pane', 'parties-pane', 'families-pane', 'notif-pane', 'ideas-pane', 'interest-pane', 'rules-pane', 'sick-pane', 'punch-pane', 'ts-pane', 'acks-pane', 'ackc-pane'];
+const PANES = ['ct-pane', 'act-pane', 'don-pane', 'bulk-pane', 'dashboard-main', 'hist-pane', 'ann-pane', 'concern-pane', 'concerns-pane', 'swaps-pane', 'chat-pane', 'dm-pane', 'devices-pane', 'etpl-pane', 'tickets-pane', 'moments-pane', 'info-pane', 'duties-pane', 'schedule-pane', 'points-pane', 'instagram-pane', 'occupancy-pane', 'inventory-pane', 'announce-pane', 'checklist-pane', 'oc-overview-pane', 'plan-pane', 'parties-pane', 'families-pane', 'notif-pane', 'ideas-pane', 'interest-pane', 'rules-pane', 'sick-pane', 'punch-pane', 'ts-pane', 'acks-pane', 'ackc-pane'];
 function showOnlyPane(id) {
   if (id !== 'chat-pane' && _chat && _chat.mode !== 'staff') chatStop();   // leaving Chat: stop checking for messages
   PANES.forEach(p => {
