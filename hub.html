@@ -2798,7 +2798,8 @@ function ctDraw() {
   el.innerHTML = `<div class="ho-head"><div class="pts-page-title" style="margin:0">📚 Class times</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
     <div class="ho-intro">Kids class timeslots sold on World, across all classes. Class pages (pictures, prices, blocks) stay in World settings → Kids classes.</div>
     <div class="ct-modes"><button class="ho-btn ${_ct.mode !== 'week' ? 'primary' : ''}" onclick="_ct.mode='list';ctDraw()">☰ List</button><button class="ho-btn ${_ct.mode === 'week' ? 'primary' : ''}" onclick="ctWeekOpen()">📅 Week view</button>
-      ${_hoCan.edit ? '<button class="ho-btn" onclick="ctAddOpen()">+ Add class times</button>' : ''}</div>
+      ${_hoCan.edit ? '<button class="ho-btn" onclick="ctAddOpen()">+ Add class times</button>' : ''}
+      ${_hoCan.edit && ctPart2Page() ? `<button class="ho-btn" onclick="ctPart2Open()">⚡ Make ${esc(ctPart2Page().name)} (Part 2) for ${esc(ctPart1Name())} timeslots…</button>` : ''}</div>
     ${_ct.mode === 'week' ? ctWeekHtml() : ''}
     <div class="act-filters"><select id="ct-page" onchange="ctFilter()"><option value="">All classes</option>${(_ct.pages || []).map(c => `<option value="${escAttr(c.id)}"${c.id === F.page ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
       <select id="ct-studio" onchange="ctFilter()"><option value="">All studios</option>${studios.map(x => `<option value="${escAttr(x)}"${x === F.studio ? ' selected' : ''}>${esc(STUDIO_NAMES[x] || x)}</option>`).join('')}</select>
@@ -2893,6 +2894,46 @@ function specialDaysFor(prov, y) {
   return L;
 }
 function ctSlotDates(start, weeks, skip) { const out = []; const d = new Date(start + 'T12:00:00'); let g = 0; while (out.length < weeks && g < 60) { const iso = localDateStr(d); if (!skip.includes(iso)) out.push(iso); d.setDate(d.getDate() + 7); g++; } return out; }
+// ---- ⚡ Make Part 2: for a class that's Part 2 of another (e.g. Ringgold after Hokusai), one timeslot per Part 1 timeslot,
+// starting the week after it ends (same studio, time, length, weeks, spots), linked so families can book both ----
+function ctPart2Page() { const pg = (_ct.pages || []).find(c => c.id === _ct.f.page); return pg && pg.part2_of ? pg : null; }
+function ctPart1Name() { const pg = ctPart2Page(), p1 = pg && (_ct.pages || []).find(c => c.id === pg.part2_of); return p1 ? p1.name : 'Part 1'; }
+async function ctPart2Open() {
+  const pg = ctPart2Page(); if (!pg) return;
+  openDutySheet(`<h3>Make ${esc(pg.name)} (Part 2)</h3><p class="goal-note">Finding ${esc(ctPart1Name())} timeslots…</p>`);
+  const { data, error } = await sb.rpc('world_class_part1_slots', { p_page: pg.id });
+  if (error) { openDutySheet(`<h3>Make ${esc(pg.name)} (Part 2)</h3><p class="goal-note" style="color:#b91c1c">${esc(error.message)}</p><div class="sheet-actions"><button onclick="closeDutySheet()">Close</button></div>`); return; }
+  let todo = (data || []).filter(t => !t.taken);
+  if (_ct.f.studio) todo = todo.filter(t => t.studio_id === _ct.f.studio);
+  if (!todo.length) { openDutySheet(`<h3>Make ${esc(pg.name)} (Part 2)</h3><p>Every ${esc(ctPart1Name())} timeslot${_ct.f.studio ? ' at ' + esc(STUDIO_NAMES[_ct.f.studio] || _ct.f.studio) : ''} already has its Part 2.</p><div class="sheet-actions"><button onclick="closeDutySheet()">Close</button></div>`); return; }
+  const f = d => new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
+  const plan = [];
+  for (const t of todo) {
+    const last = (t.dates || []).slice(-1)[0] || t.start_date, nx = new Date(String(last).slice(0, 10) + 'T12:00:00'); nx.setDate(nx.getDate() + 7);
+    const start = localDateStr(nx), weeks = pg.weeks || t.weeks, ds = ctSlotDates(start, weeks, []);
+    plan.push({ t, start, weeks, ds, warn: classDateWarnings(ds, t.studio_id, await campDaysAt(t.studio_id, ds)),
+      min: t.min_age != null ? t.min_age : pg.min_age, max: t.max_age != null ? t.max_age : pg.max_age });   // the same age group as the Part 1 time it follows
+  }
+  _ct.p2 = plan;
+  openDutySheet(`<h3>Make ${esc(pg.name)} (Part 2): ${plan.length} timeslot${plan.length === 1 ? '' : 's'}</h3>
+    <p class="goal-note">Each starts the week after its ${esc(ctPart1Name())} timeslot ends: same studio, time, length and spots. Linked, so families can register for both.</p>
+    <div class="cta-plan">${plan.map((x, i) => `<div class="cs-p2row"><b>${esc(STUDIO_NAMES[x.t.studio_id] || x.t.studio_id)}</b> · ${esc(f(x.start))} at ${esc(shortTime(x.t.start_time))} · ${x.weeks} weeks · ${x.t.spots} spots · ages ${x.min ?? '?'}–${x.max ?? '?'}
+      <small class="goal-note">${esc(ctDatesLine(x.ds))}</small>${x.warn.map(w => `<label class="ba-check"><input type="checkbox" class="ctp2-skip" data-i="${i}" value="${w.date}" checked> Skip ${esc(f(w.date))} <span class="goal-note">(${esc(w.why)})</span></label>`).join('')}</div>`).join('')}</div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="ctp2-go" onclick="ctPart2Go()">Create all ${plan.length}</button></div>`);
+}
+async function ctPart2Go() {
+  const pg = ctPart2Page(), b = document.getElementById('ctp2-go'); b.disabled = true;
+  let made = 0; const errs = [];
+  for (let i = 0; i < _ct.p2.length; i++) {
+    const x = _ct.p2[i], skips = [...document.querySelectorAll(`.ctp2-skip[data-i="${i}"]:checked`)].map(c => c.value);
+    b.textContent = `Making ${i + 1} of ${_ct.p2.length}…`;
+    const r = await sb.rpc('world_class_slot_add', { p: { class_page_id: pg.id, studio_id: x.t.studio_id, start_date: x.start, start_time: String(x.t.start_time).slice(0, 5), minutes: pg.minutes || x.t.minutes,
+      weeks: x.weeks, spots: x.t.spots, skip_dates: skips, min_age: x.min, max_age: x.max, part_label: null, follows_slot: x.t.id } });
+    if (r.error) errs.push(`${STUDIO_NAMES[x.t.studio_id] || x.t.studio_id} ${x.start}: ${r.error.message}`); else made++;
+  }
+  closeDutySheet(); ctLoad(); if (_ct.mode === 'week') ctWeekLoad();
+  alert(`Made ${made} ${pg.name} timeslot${made === 1 ? '' : 's'}.` + (errs.length ? '\nNot made:\n' + errs.join('\n') : ''));
+}
 // ---- + Add class times: one class at several studios, days and times, with the holiday check ----
 let _cta = null;
 function ctAddOpen() {
