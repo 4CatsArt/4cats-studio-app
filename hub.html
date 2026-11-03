@@ -2801,8 +2801,8 @@ function ctDraw() {
     <div class="ho-intro">Kids class timeslots sold on World, across all classes. Class pages (pictures, prices, blocks) stay in World settings → Kids classes.</div>
     <div class="ct-modes"><button class="ho-btn ${_ct.mode !== 'week' ? 'primary' : ''}" onclick="_ct.mode='list';ctDraw()">☰ List</button><button class="ho-btn ${_ct.mode === 'week' ? 'primary' : ''}" onclick="ctWeekOpen()">📅 Week view</button>
       ${_hoCan.edit ? '<button class="ho-btn" onclick="ctAddOpen()">+ Add class times</button>' : ''}
-      ${_hoCan.edit && ctPart2Page() ? `<button class="ho-btn primary" onclick="ctPart2Open()">⚡ Make ${esc(ctPart2Page().name)} (Part 2) from ${esc(ctPart1Name())}’s dates…</button>` : ''}</div>
-    ${_hoCan.edit && !ctPart2Page() ? '<div class="goal-note" style="margin:-2px 0 8px">To make a Part 2 (e.g. Ringgold after Hokusai): choose the Part 2 class above' + (_ct.mode === 'week' ? ' (Class to add)' : '') + '. It needs “This class is Part 2 of…” set in World settings.</div>' : ''}
+      ${_hoCan.edit ? ctPart2Pages().map(pg => `<button class="ho-btn primary" onclick="_ctP2Id='${escAttr(pg.id)}';ctPart2Open()">⚡ Make ${esc(pg.name)} (Part 2) from ${esc(ctPart1Name(pg))}’s dates…</button>`).join('') : ''}</div>
+    ${_hoCan.edit && !ctPart2Pages().length ? '<div class="goal-note" style="margin:-2px 0 8px">Part 2 classes (e.g. Ringgold after Hokusai) get a “Make Part 2” button here once “This class is Part 2 of…” is set in World settings.</div>' : ''}
     ${_ct.mode === 'week' ? ctWeekHtml() : ''}
     <div class="act-filters"><select id="ct-page" onchange="ctFilter()"><option value="">All classes</option>${(_ct.pages || []).map(c => `<option value="${escAttr(c.id)}"${c.id === F.page ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
       <select id="ct-studio" onchange="ctFilter()"><option value="">All studios</option>${studios.map(x => `<option value="${escAttr(x)}"${x === F.studio ? ' selected' : ''}>${esc(STUDIO_NAMES[x] || x)}</option>`).join('')}</select>
@@ -2860,6 +2860,8 @@ function holidaysFor(prov, y) {
 }
 // Each date's reason, if it's a holiday, a long-weekend Saturday/Sunday, the Christmas break, or a camp day (camps: { date: title })
 function classDateWarnings(dates, studio, camps) {
+  // holidays, long weekends and the Christmas break: flagged, not skipped unless ticked;
+  // spring camp (March Break): flagged and skipped unless unticked; PA/PD days and other camps: classes run as normal
   var prov = String(studio || '').slice(0, 2), H = {};
   var years = {}; dates.forEach(function (d) { years[d.slice(0, 4)] = 1; years[+d.slice(0, 4) - 1] = 1; });
   Object.keys(years).forEach(function (y) { holidaysFor(prov, +y).forEach(function (h) {
@@ -2870,9 +2872,9 @@ function classDateWarnings(dates, studio, camps) {
   }); });
   var out = [];
   dates.forEach(function (d) {
-    var md = d.slice(5), why = H[d] || (md >= '12-24' || md === '01-01' ? 'Christmas break' : '');
-    if (camps && camps[d]) why = (why ? why + ' \u00b7 ' : '') + 'camp day: ' + camps[d];
-    if (why) out.push({ date: d, why: why });
+    var md = d.slice(5), why = H[d] || (md >= '12-24' || md === '01-01' ? 'Christmas break' : ''), skip = false;
+    if (camps && camps[d]) { why = (why ? why + ' \u00b7 ' : '') + 'spring camp: ' + camps[d]; skip = true; }
+    if (why) out.push({ date: d, why: why, skip: skip });
   });
   return out;
 }
@@ -2882,7 +2884,7 @@ async function campDaysAt(studio, dates) {
   var key = studio + ':' + dates.join(','); if (csCampCache[key]) return csCampCache[key];
   var m = {};
   if (studio && dates.length) {
-    var r = await sb.from('sessions').select('session_date, title').eq('studio_id', studio).in('session_date', dates).or('title.ilike.%camp%,title.ilike.%pa day%,title.ilike.%pd day%,title.ilike.%pa/pd%');
+    var r = await sb.from('sessions').select('session_date, title').eq('studio_id', studio).in('session_date', dates).or('title.ilike.%spring%camp%,title.ilike.%march%break%');   // (only spring camp / March Break skips classes)
     (r.data || []).forEach(function (x) { if (!m[x.session_date]) m[x.session_date] = String(x.title).split('|')[0].trim(); });
   }
   return (csCampCache[key] = m);
@@ -2901,8 +2903,14 @@ function ctSlotDates(start, weeks, skip) { const out = []; const d = new Date(st
 // starting the week after it ends (same studio, time, length, weeks, spots), linked so families can book both ----
 // the class chosen: in the week view its "Class to add", else the class filter
 function ctChosenPageId() { return _ct.mode === 'week' ? (_ctw.page || _ct.f.page) : _ct.f.page; }
-function ctPart2Page() { const pg = (_ct.pages || []).find(c => c.id === ctChosenPageId()); return pg && pg.part2_of ? pg : null; }
-function ctPart1Name() { const pg = ctPart2Page(), p1 = pg && (_ct.pages || []).find(c => c.id === pg.part2_of); return p1 ? p1.name : 'Part 1'; }
+function ctPart2Pages() {   // Part 2 classes to offer: the chosen class's (if it's a Part 1 or a Part 2), else all of them
+  const P = _ct.pages || [], id = ctChosenPageId(), pg = P.find(c => c.id === id);
+  if (pg) return pg.part2_of ? [pg] : P.filter(c => c.part2_of === pg.id);
+  return P.filter(c => c.part2_of);
+}
+let _ctP2Id = null;
+function ctPart2Page() { return (_ct.pages || []).find(c => c.id === _ctP2Id) || ctPart2Pages()[0] || null; }
+function ctPart1Name(pg) { pg = pg || ctPart2Page(); const p1 = pg && (_ct.pages || []).find(c => c.id === pg.part2_of); return p1 ? p1.name : 'Part 1'; }
 async function ctPart2Open() {
   const pg = ctPart2Page(); if (!pg) return;
   openDutySheet(`<h3>Make ${esc(pg.name)} (Part 2)</h3><p class="goal-note">Finding ${esc(ctPart1Name())} timeslots…</p>`);
@@ -2924,7 +2932,7 @@ async function ctPart2Open() {
   openDutySheet(`<h3>Make ${esc(pg.name)} (Part 2): ${plan.length} timeslot${plan.length === 1 ? '' : 's'}</h3>
     <p class="goal-note">Each starts the week after its ${esc(ctPart1Name())} timeslot ends: same studio, time, length and spots. Linked, so families can register for both.</p>
     <div class="cta-plan">${plan.map((x, i) => `<div class="cs-p2row"><b>${esc(STUDIO_NAMES[x.t.studio_id] || x.t.studio_id)}</b> · ${esc(f(x.start))} at ${esc(shortTime(x.t.start_time))} · ${x.weeks} weeks · ${x.t.spots} spots · ages ${x.min ?? '?'}–${x.max ?? '?'}
-      <small class="goal-note">${esc(ctDatesLine(x.ds))}</small>${x.warn.map(w => `<label class="ba-check"><input type="checkbox" class="ctp2-skip" data-i="${i}" value="${w.date}" checked> Skip ${esc(f(w.date))} <span class="goal-note">(${esc(w.why)})</span></label>`).join('')}</div>`).join('')}</div>
+      <small class="goal-note">${esc(ctDatesLine(x.ds))}</small>${x.warn.map(w => `<label class="ba-check"><input type="checkbox" class="ctp2-skip" data-i="${i}" value="${w.date}"${w.skip ? ' checked' : ''}> Skip ${esc(f(w.date))} <span class="goal-note">(${esc(w.why)})</span></label>`).join('')}</div>`).join('')}</div>
     <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="ctp2-go" onclick="ctPart2Go()">Create all ${plan.length}</button></div>`);
 }
 async function ctPart2Go() {
@@ -2982,7 +2990,7 @@ async function ctAddPreview() {
   const f = d => new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
   out.innerHTML = `<p><b>${plan.length}</b> timeslot${plan.length === 1 ? '' : 's'} (${weeks} weeks each):</p><div class="cta-plan">${plan.map((x, i) =>
     `<div class="cs-p2row"><b>${esc(STUDIO_NAMES[x.st] || x.st)}</b> · ${esc(f(x.first))} at ${esc(shortTime(x.tm + ':00'))} <small class="goal-note">${esc(ctDatesLine(x.ds))}</small>${x.warn.map(w =>
-      `<label class="ba-check"><input type="checkbox" class="cta-skip" data-i="${i}" value="${w.date}" checked> Skip ${esc(f(w.date))} <span class="goal-note">(${esc(w.why)})</span></label>`).join('')}</div>`).join('')}</div>`;
+      `<label class="ba-check"><input type="checkbox" class="cta-skip" data-i="${i}" value="${w.date}"${w.skip ? ' checked' : ''}> Skip ${esc(f(w.date))} <span class="goal-note">(${esc(w.why)})</span></label>`).join('')}</div>`).join('')}</div>`;
   document.getElementById('cta-go').disabled = false;
 }
 async function ctAddGo() {
@@ -3134,7 +3142,7 @@ async function ctWeekCreate() {
       <label>Ages for all <span style="display:flex;gap:6px;align-items:center"><input type="number" id="ctw-amin-all" min="2" max="99" style="width:70px">–<input type="number" id="ctw-amax-all" min="2" max="99" style="width:70px"><button type="button" class="ho-btn sm" onclick="ctWeekAgesAll()">Set all</button></span></label></div>
     <div class="cta-plan">${plan.map((x, i) => `<div class="cs-p2row"><b>${esc(x.name)}</b> · ${esc(STUDIO_NAMES[x.studio] || x.studio)} · ${esc(f(x.date))} at ${esc(shortTime(x.time + ':00'))} · ${x.weeks} weeks · ${x.minutes} min
       <span class="ctw-ages">Ages <input type="number" class="ctw-amin" data-i="${i}" min="2" max="99" value="${escAttr(x.min_age ?? '')}">–<input type="number" class="ctw-amax" data-i="${i}" min="2" max="99" value="${escAttr(x.max_age ?? '')}"></span>
-      <small class="goal-note">${esc(ctDatesLine(x.ds))}</small>${x.warn.map(w => `<label class="ba-check"><input type="checkbox" class="ctw-skip" data-i="${i}" value="${w.date}" checked> Skip ${esc(f(w.date))} <span class="goal-note">(${esc(w.why)})</span></label>`).join('')}</div>`).join('')}</div></div>
+      <small class="goal-note">${esc(ctDatesLine(x.ds))}</small>${x.warn.map(w => `<label class="ba-check"><input type="checkbox" class="ctw-skip" data-i="${i}" value="${w.date}"${w.skip ? ' checked' : ''}> Skip ${esc(f(w.date))} <span class="goal-note">(${esc(w.why)})</span></label>`).join('')}</div>`).join('')}</div></div>
     <div class="sheet-actions"><button onclick="closeDutySheet()">Back</button><button class="primary" id="ctw-go" onclick="ctWeekGo()">Create all</button></div>`);
 }
 function ctWeekAgesAll() {
