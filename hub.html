@@ -2977,26 +2977,45 @@ function ctWeekHtml() {
     const today = d === localDateStr(new Date()), past = d < localDateStr(new Date());
     h += `<div class="ctw-day${past ? ' past' : ''}"><div class="ctw-dh${today ? ' today' : ''}">${esc(new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))}</div>
       <div class="ctw-col" data-ctwday="${d}" onclick="ctWeekClick(event, '${d}')">`;
+    // everything on this day (existing, new, and new classes' later weeks), laid out side by side when they overlap (up to 3)
+    const items = [];
     (_ctw.sess || []).filter(x => x.session_date === d).forEach(x => {
-      const m = toMin(x.session_time), len = x.duration_minutes || 60; if (m + len <= CTW_START || m >= CTW_END) return;
-      const cls = !!x.world_class_slot_id || x.session_type === 'class', tp = String(x.title || '').split(' | '), part = (String(x.title).match(/Class (\d+ of \d+)/) || [])[1];
+      const m = toMin(x.session_time), cls = !!x.world_class_slot_id || x.session_type === 'class', tp = String(x.title || '').split(' | '), part = (String(x.title).match(/Class (\d+ of \d+)/) || [])[1];
       const name = tp.length > 1 && /^\*?\d{1,2}(:\d\d)?\s*(am|pm)\b/i.test(tp[0]) ? tp[1] : tp[0];   // Shopify titles start with the time and date ("6pm Sat Feb 13th | Kids Party")
-      h += `<div class="ctw-b ${cls ? 'cls' : 'other'}${x.show === false ? ' hid' : ''}" style="top:${top(Math.max(m, CTW_START))}px;height:${Math.max(CTW_ROW, len / 15 * CTW_ROW) - 2}px" title="${escAttr(x.title)}" onclick="event.stopPropagation()">
-        <b>${esc(shortTime(x.session_time))}</b> ${esc(name)}${part ? ` <small>· class ${esc(part)}</small>` : ''}</div>`;
+      const camp = /camp|pa\s*\/?\s*pd|pa day|pd day/i.test(x.title || ''), len = camp ? (/half/i.test(x.title || '') ? 180 : 420) : (x.duration_minutes || 60);   // camps and PA/PD days: 9am–4pm (half day 9–12)
+      const start = camp && m > 9 * 60 ? m : camp ? 9 * 60 : m;
+      items.push({ s: start, e: start + len, html: (st, ht) => `<div class="ctw-b ${cls ? 'cls' : 'other'}${x.show === false ? ' hid' : ''}" style="${st};height:${ht}px" title="${escAttr(x.title)}">
+        <b>${esc(camp ? '9am–' + (/half/i.test(x.title || '') ? '12pm' : '4pm') : shortTime(x.session_time))}</b> ${esc(name)}${part ? ` <small>· class ${esc(part)}</small>` : ''}</div>` });
     });
     pend.filter(x => x.date === d).forEach(x => {
-      const i = _ctw.pending.indexOf(x), m = toMin(x.time), len = x.minutes;
-      h += `<div class="ctw-b new" style="top:${top(m)}px;height:${len / 15 * CTW_ROW - 2}px" onclick="event.stopPropagation()"><b>${esc(shortTime(x.time + ':00'))}</b> ${esc(x.name)} <small>new · ${x.weeks} weeks</small>
-        <button class="ctw-x" onclick="event.stopPropagation();_ctw.pending.splice(${i},1);ctDraw()" aria-label="Remove">×</button></div>`;
+      const i = _ctw.pending.indexOf(x), m = toMin(x.time);
+      items.push({ s: m, e: m + x.minutes, html: (st, ht) => `<div class="ctw-b new" style="${st};height:${ht}px"><b>${esc(shortTime(x.time + ':00'))}</b> ${esc(x.name)} <small>new · ${x.weeks} weeks</small>
+        <button class="ctw-x" onclick="event.stopPropagation();_ctw.pending.splice(${i},1);ctDraw()" aria-label="Remove">×</button></div>` });
     });
-    // new classes placed in earlier weeks show here too (on their later weeks)
     pend.forEach(x => {
       if (x.date === d) return;
       const k = Math.round((new Date(d + 'T12:00:00') - new Date(x.date + 'T12:00:00')) / (7 * 86400000));
-      if (k > 0 && k < x.weeks && Number.isInteger(k) && new Date(d + 'T12:00:00').getDay() === new Date(x.date + 'T12:00:00').getDay()) {
-        h += `<div class="ctw-b new ghost" style="top:${top(toMin(x.time))}px;height:${x.minutes / 15 * CTW_ROW - 2}px" onclick="event.stopPropagation()"><b>${esc(shortTime(x.time + ':00'))}</b> ${esc(x.name)} <small>new · class ${k + 1} of ${x.weeks}</small></div>`;
+      if (k > 0 && k < x.weeks && new Date(d + 'T12:00:00').getDay() === new Date(x.date + 'T12:00:00').getDay()) {
+        const m = toMin(x.time);
+        items.push({ s: m, e: m + x.minutes, html: (st, ht) => `<div class="ctw-b new ghost" style="${st};height:${ht}px"><b>${esc(shortTime(x.time + ':00'))}</b> ${esc(x.name)} <small>new · class ${k + 1} of ${x.weeks}</small></div>` });
       }
     });
+    items.sort((p1, p2) => p1.s - p2.s || p2.e - p1.e);
+    // groups of overlapping things: each gets a lane; the group's width is shared by its lanes
+    let grp = [], grpEnd = -1;
+    const flush = () => { const n = Math.max(1, ...grp.map(g => g.lane + 1)); grp.forEach(g => { g.n = n; }); grp = []; };
+    items.forEach(it => {
+      if (it.s >= grpEnd && grp.length) flush();
+      const used = grp.filter(g => g.e > it.s).map(g => g.lane); let lane = 0; while (used.includes(lane)) lane++;
+      it.lane = lane; grp.push(it); grpEnd = Math.max(grpEnd, it.e);
+    });
+    if (grp.length) flush();
+    items.forEach(it => {
+      if (it.e <= CTW_START || it.s >= CTW_END) return;
+      const w = 100 / it.n, st = `top:${top(Math.max(it.s, CTW_START))}px;left:calc(${it.lane * w}% + 2px);width:calc(${w}% - 4px);right:auto`;
+      h += it.html(st, Math.max(CTW_ROW, (Math.min(it.e, CTW_END) - Math.max(it.s, CTW_START)) / 15 * CTW_ROW) - 2);
+    });
+    _ctw.dayItems = _ctw.dayItems || {}; _ctw.dayItems[d] = items.map(it => ({ s: it.s, e: it.e }));
     h += '</div></div>';
   });
   return h + '</div>';
@@ -3007,6 +3026,10 @@ function ctWeekClick(e, d) {
   if (d < localDateStr(new Date())) { alert('That day has passed.'); return; }
   const rect = e.currentTarget.getBoundingClientRect(), y = e.clientY - rect.top;
   const m = CTW_START + Math.floor(y / CTW_ROW) * 15, time = String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+  const len = pg.minutes || 90, busy = ((_ctw.dayItems || {})[d] || []).filter(x => x.s < m + len && x.e > m);
+  // up to 3 at once: how many overlap at the busiest moment of the new class
+  let most = 0; for (let t = m; t < m + len; t += 15) most = Math.max(most, busy.filter(x => x.s <= t && x.e > t).length);
+  if (most >= 3) { alert('Up to 3 things at the same time: that time already has 3.'); return; }
   _ctw.pending.push({ studio: _ctw.studio, page: pg.id, name: pg.name, date: d, time, weeks: pg.weeks || 5, minutes: pg.minutes || 90, spots: 15, min_age: pg.min_age, max_age: pg.max_age });
   ctDraw();
 }
@@ -4272,6 +4295,12 @@ function wsDayHtml() {
       <button class="ho-btn primary" id="ws-go" data-label="+ Add to this day" onclick="wsAdd()">+ Add to this day</button>
       <button class="ho-btn" onclick="wsBulkOpen()">Bulk add…</button>
       <button class="ho-btn" onclick="wsKidsSettings('ws')" title="Kids-only settings for the chosen workshop: default, ages, price">🧒 Kids-only settings…</button>
+    </div>
+    <div class="ws-add ws-glz"><b>🎨 Add a glazing time</b>
+      <label class="ws-spots">Time <input type="time" id="glz-time" step="900"></label>
+      <label class="ws-spots">Spots <input type="number" id="glz-spots" min="1" max="200" value="12"></label>
+      <label class="ws-spots">Length <input type="number" id="glz-min" min="15" max="600" step="15" value="90"> min</label>
+      <button class="ho-btn primary" id="glz-go" onclick="glzAdd()">+ Add glazing</button><span class="goal-note" id="glz-msg"></span>
       <span class="plan-msg" id="ws-msg"></span></div>
       ${_wsProjectsErr ? `<div class="pp-note" style="color:#a33">Only World workshops are listed: the project list didn’t load (${esc(_wsProjectsErr)}).</div>` : ''}`
     : '<div class="ho-intro">No projects found in the Projects library.</div>'}`;
@@ -4296,6 +4325,18 @@ async function wsUpdate(id, change) {
   const { error } = await sb.rpc('hub_ws_update', Object.assign({ p_session: id }, change));
   if (error) { alert(error.message); }
   wsReload(error ? '' : 'Saved ✓');
+}
+// One glazing time on this day at this studio (World-only, like Bulk add's glazing times; world_bulk_times.sql)
+async function glzAdd() {
+  const v = id => (document.getElementById(id) || {}).value || '', m = document.getElementById('glz-msg'), time = v('glz-time');
+  if (!time) { m.textContent = 'Choose the time.'; return; }
+  const dow = ((new Date(_plan.date + 'T12:00:00').getDay() + 6) % 7) + 1, b = document.getElementById('glz-go'); b.disabled = true; m.textContent = 'Adding…';
+  const { data, error } = await sb.rpc('hub_bulk_glazing', { p: { studios: [_sessionStudioId], from: _plan.date, to: _plan.date, days: [dow], times: [time], skip: [],
+    spots: +v('glz-spots') || 12, minutes: +v('glz-min') || 90, price: null, member_price: null, preview: false } });
+  b.disabled = false;
+  if (error) { m.textContent = ''; alert('Not added: ' + (/hub_bulk_glazing/i.test(error.message) ? 'run world_bulk_times.sql in Supabase first.' : error.message)); return; }
+  if (!data || !data.made) { m.textContent = 'There\u2019s already a glazing time then.'; return; }
+  wsReload('Glazing added \u2713');
 }
 async function wsKids(id, on) {
   const { error } = await sb.rpc('hub_ws_kids', { p_session: id, p_on: on });
