@@ -3412,12 +3412,14 @@ async function openM2wPane() {
 }
 function m2wDraw() {
   const el = document.getElementById('mv-pane'); if (!el) return;
+  if (_m2w.mode === 'series') { el.innerHTML = m2sHtml(); return; }
   const R = _m2w.rows, groups = {};
   (R || []).forEach(r => { (groups[r.title] = groups[r.title] || []).push(r); });
   const nSel = _m2w.sel.size, selRows = (R || []).filter(r => _m2w.sel.has(r.id));
   const it = (_m2w.items || []).find(i => i.id === _m2w.item);
   el.innerHTML = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🔁 Move to World</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
-    <div class="ho-intro">Move a Shopify workshop (e.g. Make the Gift) to World: its upcoming dates keep their spots left and every booking, the Hub becomes the only place spots are kept, and the Shopify products are then set to Draft. Families book it on World, paid by Shopify invoice or Stripe (the World workshop's setting).</div>
+    <div class="nw-tabs"><button class="on">One-off workshops</button><button onclick="_m2w.mode='series';m2wDraw()">Multi-week series → Class times</button></div>
+    <div class="ho-intro">Move a Shopify workshop to World: its upcoming dates keep their spots left and every booking, the Hub becomes the only place spots are kept, and the Shopify products are then set to Draft. Families book it on World, paid by Shopify invoice or Stripe (the World workshop's setting).</div>
     <div class="mv-find"><input id="mv-q" placeholder="Workshop name, e.g. Make the Gift" value="${escAttr(_m2w.q)}" onkeydown="if(event.key==='Enter')m2wFind()">
       <label>From <input type="date" id="mv-from" value="${escAttr(_m2w.from || new Date().toLocaleDateString('en-CA'))}"></label>
       <button class="ho-btn primary" onclick="m2wFind()">Find dates</button><button class="ho-btn" onclick="m2wFind(true)">Find all workshops</button></div>
@@ -3512,6 +3514,62 @@ async function m2wGo() {
         ${(shop.kept || []).length ? `<br>Left active: ${shop.kept.map(k => `<br>· ${esc(k.title)}: ${esc(k.why)}`).join('')}` : ''}`
       : `<b>Next, in Shopify:</b> set the moved workshops' products to <b>Draft</b> (Products → search → tick → More actions → Set as draft).${shop && shop.error ? ` <small>(Drafting automatically didn't work: ${esc(shop.error)})</small>` : ''}`}`;
   _m2w.rows = null; _m2w.sel = new Set(); m2wDraw();
+}
+
+// ---- Move to World: multi-week series (e.g. Make the Gift: "3 Week Session" + "Class 2 of 3"…) → a class page's class times (hub_move_series.sql) ----
+let _m2s = { q: '', rows: null, sel: new Set(), pages: null, page: '', msg: '', hide: true, draft: true };
+async function m2sLoadPages() { if (_m2s.pages) return; const r = await sb.rpc('world_class_pages_list'); _m2s.pages = r.error ? [] : (r.data || []); m2wDraw(); }
+function m2sHtml() {
+  if (_m2s.pages === null) m2sLoadPages();
+  const R = _m2s.rows, groups = {}; (R || []).forEach(r => (groups[r.base] = groups[r.base] || []).push(r));
+  const real = r => Number(r.spots || 0) > 0 || Number(r.booked || 0) > 0;
+  const nSel = _m2s.sel.size, selRows = (R || []).filter(r => _m2s.sel.has(r.id)), empty = (R || []).filter(r => !_m2s.sel.has(r.id) && !real(r));
+  const pages = (_m2s.pages || []).slice().sort((x, y) => String(x.name).localeCompare(String(y.name)));
+  return `<div class="ho-head"><div class="pts-page-title" style="margin:0">🔁 Move to World</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+    <div class="nw-tabs"><button onclick="_m2w.mode='';m2wDraw()">One-off workshops</button><button class="on">Multi-week series → Class times</button></div>
+    <div class="ho-intro">For classes sold as a run of weeks on Shopify (week 1 "… | 3 Week Session", then "Class 2 of 3"…). Each real run becomes one <b>class time</b> on a World class page: its studio, start date, time, weeks and ages (from the title), with its spots. Its existing sessions are linked (no new sessions), and every booked family is put on all the weeks. Pricing and the page come from World settings → Kids classes.</div>
+    <div class="mv-find"><input id="ms-q" placeholder="Class name, e.g. Make the Gift" value="${escAttr(_m2s.q)}" onkeydown="if(event.key==='Enter')m2sFind()"><button class="ho-btn primary" onclick="m2sFind()">Find runs</button></div>
+    ${_m2s.msg ? `<div class="goal-note mv-msg">${_m2s.msg}</div>` : ''}
+    ${R === null ? '' : !R.length ? '<div class="goal-note">No upcoming Shopify runs match.</div>' : `<div class="mv-cols"><div class="mv-left">
+      ${Object.keys(groups).map(t => { const G = groups[t]; return `<div class="mv-group"><div class="mv-gh"><b>${esc(t)}</b><small>${G.length} run${G.length === 1 ? '' : 's'} · ${G.filter(real).length} real · ${G.reduce((a, r) => a + Number(r.booked || 0), 0)} kids booked</small></div>
+        <div class="oc-wrap"><table class="oc-table"><thead><tr><th></th><th>Studio</th><th>Starts</th><th>Time</th><th>Weeks found</th><th>Spots left</th><th>Booked</th></tr></thead><tbody>
+        ${G.map(r => `<tr><td><input type="checkbox" ${_m2s.sel.has(r.id) ? 'checked' : ''} onchange="this.checked?_m2s.sel.add('${r.id}'):_m2s.sel.delete('${r.id}');m2wDraw()"></td><td>${esc(STUDIO_NAMES[r.studio_id] || r.studio_id)}</td>
+          <td>${esc(new Date(r.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))}</td><td>${esc(shortTime(r.time))}</td>
+          <td>${Number(r.found) >= Number(r.weeks) ? `${r.found} of ${r.weeks}` : `<span style="color:#b45309">⚠ ${r.found} of ${r.weeks}</span>`}</td><td>${r.spots ?? '—'}</td><td>${r.booked}</td></tr>`).join('')}</tbody></table></div></div>`; }).join('')}
+    </div><div class="mv-right"><h4 style="margin:0 0 6px">Move ${nSel} run${nSel === 1 ? '' : 's'} to the class page:</h4>
+      <select id="ms-page" onchange="_m2s.page=this.value;m2wDraw()"><option value="">Choose the World class page…</option>${pages.map(pg => `<option value="${pg.id}"${_m2s.page === pg.id ? ' selected' : ''}>${esc(pg.name)}${pg.slug ? ' (' + esc(pg.slug) + ')' : ''}</option>`).join('')}</select>
+      ${empty.length ? `<label class="mv-hide"><input type="checkbox" ${_m2s.hide ? 'checked' : ''} onchange="_m2s.hide=this.checked"> Also hide the ${empty.length} empty run${empty.length === 1 ? '' : 's'} (0 spots, nobody booked) from schedules</label>` : ''}
+      <label class="mv-hide"><input type="checkbox" ${_m2s.draft ? 'checked' : ''} onchange="_m2s.draft=this.checked"> Set their Shopify products to Draft (only products no studio still sells on Shopify)</label>
+      <div class="mv-sum">${nSel ? `${nSel} class time${nSel === 1 ? '' : 's'} · ${selRows.reduce((a, r) => a + Number(r.booked || 0), 0)} kids booked (kept, on every week) · ${selRows.reduce((a, r) => a + Number(r.spots || 0), 0)} spots left (kept)` : 'Tick the runs to move.'}</div>
+      <button class="ho-btn primary" ${nSel && _m2s.page ? '' : 'disabled'} onclick="m2sGo()">🔁 Move to class times</button></div></div>`}`;
+}
+async function m2sFind() {
+  _m2s.q = (document.getElementById('ms-q').value || '').trim(); _m2s.msg = 'Looking…'; _m2s.rows = null; _m2s.sel = new Set(); m2wDraw();
+  const { data, error } = await sb.rpc('hub_series_preview', { p_search: _m2s.q, p_from: null });
+  _m2s.msg = error ? esc(/hub_series_preview/i.test(error.message) ? 'Run hub_move_series.sql in Supabase first.' : error.message) : '';
+  _m2s.rows = error ? null : (data || []);
+  (_m2s.rows || []).forEach(r => { if (Number(r.spots || 0) > 0 || Number(r.booked || 0) > 0) _m2s.sel.add(r.id); });
+  if (!_m2s.page && _m2s.pages) { const m = _m2s.pages.find(pg => String(pg.name || '').toLowerCase().includes(_m2s.q.toLowerCase())); if (m) _m2s.page = m.id; }
+  m2wDraw();
+}
+async function m2sGo() {
+  const R = _m2s.rows || [], ids = [..._m2s.sel], pg = (_m2s.pages || []).find(x => x.id === _m2s.page);
+  if (!pg || !ids.length || !confirm(`Move ${ids.length} run${ids.length === 1 ? '' : 's'} to class times on "${pg.name}"?\n\nTheir sessions are linked (none made), spots kept, and every booked family put on all the weeks.`)) return;
+  const originals = R.filter(r => _m2s.sel.has(r.id)).map(r => ({ date: r.date, time: r.time, title: r.title }));
+  _m2s.msg = 'Moving…'; m2wDraw();
+  const { data, error } = await sb.rpc('hub_move_series', { p_ids: ids, p_page: pg.id });
+  if (error) { _m2s.msg = esc('Not moved: ' + error.message); m2wDraw(); return; }
+  let hidden = 0;
+  const empty = R.filter(r => !_m2s.sel.has(r.id) && !Number(r.spots || 0) && !Number(r.booked || 0)).map(r => r.id);
+  if (_m2s.hide && empty.length) { const h = await sb.rpc('hub_hide_empty_series', { p_ids: empty }); hidden = h.error ? 0 : (h.data || 0); }
+  let shop = null;
+  if (_m2s.draft) { const r = await sb.functions.invoke('hub-shopify-draft', { body: { originals } }); shop = r.error ? { error: (r.data && r.data.error) || r.error.message } : (r.data || {}); }
+  _m2s.msg = `✓ <b>${data.class_times}</b> class time${data.class_times === 1 ? '' : 's'} on <b>${esc(data.page)}</b> · ${data.later_weeks_linked} later weeks linked · ${data.families_copied} family booking${data.families_copied === 1 ? '' : 's'} added to later weeks${hidden ? ` · hid ${hidden} empty run${hidden === 1 ? '' : 's'}` : ''}.
+    ${(data.skipped || []).length ? `<br>⚠ ${data.skipped.map(x => esc(x.why)).join('<br>⚠ ')}` : ''}
+    <br>${shop && !shop.error ? `<b>Shopify:</b> ${(shop.drafted || []).length ? `set <b>${shop.drafted.length}</b> product${shop.drafted.length === 1 ? '' : 's'} to Draft ✓` : 'no products drafted'}.${(shop.kept || []).length ? `<br>Left active: ${shop.kept.map(k => `<br>· ${esc(k.title)}: ${esc(k.why)}`).join('')}` : ''}`
+      : `<b>Next, in Shopify:</b> set the moved runs' products to <b>Draft</b>.${shop && shop.error ? ` <small>(Drafting automatically didn't work: ${esc(shop.error)})</small>` : ''}`}
+    <br>Check them in <b>Hub → Class times</b> and on the class page in World.`;
+  _m2s.rows = null; _m2s.sel = new Set(); m2wDraw();
 }
 
 // ---------- Home office → 📧 Newsletters (news_core.sql): subscribers at a glance, and the topics (tags) ----------
