@@ -1058,7 +1058,8 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
   var typo = null, typoDraft = null;
   var glazePage = null;
   var campPricing = null, salesRows = null, salesEditing = null, taxRows = null, memberPricing = null, priceTiers = null;
-  var crRows, crQ = '', crMsg = '';   // Credits (world_credits.sql): undefined = not loaded, null = not set up
+  var crRows, crQ = '', crMsg = '';
+  var partyPricing;   // Party pricing (world_party_pricing.sql): undefined = not loaded, null = not set up   // Credits (world_credits.sql): undefined = not loaded, null = not set up
   // Kinds of booking (member pricing and sales). Only camps are sold through World (Stripe) so far.
   var KINDS = [['camps', 'Camps', true], ['pa_days', 'PA/PD days', false], ['workshops', 'Workshops', false], ['wheel', 'Wheel workshops', false], ['mini_make', 'Mini Make', false], ['glazing', 'Glazing', false],
     ['classes', 'Classes', false], ['kids_parties', 'Kids parties', false], ['team_building', 'Team building and get-togethers', false], ['items', 'Items and kits', false]];
@@ -1439,6 +1440,7 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
     html += homeCardsHtml();
     html += creditsHtml();
     html += priceTiersHtml();
+    html += partyPricingHtml();
     html += memberPricingHtml();
     html += campPricingHtml();
     html += membershipHtml();
@@ -1488,6 +1490,7 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
     bindPolicyPages();
     bindMemberPricing();
     bindPriceTiers();
+    bindPartyPricing();
     bindCredits();
     bindCampPricing();
     bindSales();
@@ -2183,7 +2186,7 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
     ['home', '\ud83c\udfe0', 'Home page', ['Home page layout', 'Home page cards', 'Collections', 'Videos', 'Votes', 'Kiln status', '\u201cHow do I\u2026?\u201d tiles', 'Ideas from customers']],
     ['look', '\ud83c\udfa8', 'Look', ['What World shows', 'Themes', 'Seasonal effects', 'Typography', 'Fonts']],
     ['pages', '\ud83d\udcc4', 'Pages', ['Deals pages', 'Glazing page', 'Kids classes', 'Pottery Wheel', 'World-only workshops', 'Workshop pages', 'Parties', 'Get-Togethers', 'Policy pages']],
-    ['prices', '\ud83d\udcb2', 'Prices & sales', ['Membership', 'Membership codes', 'Membership invites', 'Prize codes', 'Credits', 'Price tiers', 'Member pricing', 'Camp pricing', 'Sales', 'Stamp card', 'Tax report']],
+    ['prices', '\ud83d\udcb2', 'Prices & sales', ['Membership', 'Membership codes', 'Membership invites', 'Prize codes', 'Credits', 'Price tiers', 'Party pricing', 'Member pricing', 'Camp pricing', 'Sales', 'Stamp card', 'Tax report']],
     ['site', '\ud83d\udd12', 'Site', ['Test site password']]
   ];
   var TAB_KEY = 'worldSettings.tab';
@@ -2466,6 +2469,62 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
       var on = b.dataset.on === '1'; if (!on && !confirm('Switch this credit off? Its codes stop working (one already used stays used).')) return;
       var r = await sb.rpc('world_credit_active', { p_group: b.dataset.cractive, p_active: on }); if (r.error) { alert(r.error.message); return; } crLoad();
     }); });
+  }
+
+  // ---------------- Party pricing (world_party_pricing.sql): Kids and Splatter party prices for World's own checkout ----------------
+  // One rate drives the time: $ per person per hour. The same sum as World and world-draft-checkout:
+  //   extras = extra guests × rate × art hours + (Kids, 90-min art) included guests × rate × the extra half hour
+  //          + every guest × rate × after-party hours + the big-group fee (× the art length) + (Splatter) canvas × guests
+  function ppSum(P, kind, o) {
+    var K = (P && P[kind]) || {}, rate = Number(P && P.rate) || 0, inc = Number(K.included) || 8, base1 = Number(K.art_hours) || 1;
+    var artH = kind === 'kids' && o.longArt ? (Number(K.long_art_hours) || 1.5) : base1, ppl = Math.max(1, o.people || inc);
+    var extras = Math.max(0, ppl - inc) * rate * artH + (kind === 'kids' ? inc * rate * (artH - base1) : 0) + ppl * rate * ((o.after || 0) / 60) +
+      (ppl >= (Number(K.big_at) || 9999) ? (Number(K.big_fee) || 0) * (artH / base1) : 0) + (kind === 'splatter' && o.canvas ? (Number(K.canvas) || 0) * ppl : 0);
+    var fixed = (kind === 'kids' && o.upgrade ? Number(K.upgrade) || 0 : 0) + (kind === 'kids' && o.custom ? Number(K.custom) || 0 : 0) + (kind === 'kids' ? (o.parents || 0) * (Number(K.parent_helper) || 0) : 0);
+    var base = Number(K.base) || 0;
+    return { base: base, extras: Math.round(extras * 100) / 100, fixed: fixed, total: Math.round((base + extras + fixed) * 100) / 100 };
+  }
+  function partyPricingHtml() {
+    if (partyPricing === undefined) { setTimeout(async function () { var r = await sb.rpc('world_setting_get', { p_key: 'party_pricing' }); partyPricing = r.error ? null : (r.data || null); var sec = document.getElementById('ppSec'); if (sec) { var tmp = document.createElement('div'); tmp.innerHTML = partyPricingHtml(); sec.replaceWith(tmp.firstChild); bindPartyPricing(); } }, 0); }
+    if (!partyPricing) return '<section class="panel" id="ppSec" style="margin-top:20px" data-foldname="Party pricing"><h2>Party pricing</h2><p class="sub">' + (partyPricing === null ? 'Run world_party_pricing.sql in Supabase to switch this on.' : 'Loading\u2026') + '</p></section>';
+    var P = partyPricing, K = P.kids || {}, S = P.splatter || {}, dis = canEdit ? '' : ' disabled';
+    var num = function (path, v, pre, post, step) { return '<span class="ty-num mp-in">' + (pre ? '<i>' + pre + '</i>' : '') + '<input type="number" min="0" step="' + (step || 1) + '" data-pp="' + path + '" value="' + esc(v == null ? '' : v) + '"' + dis + '>' + (post ? '<i>' + post + '</i>' : '') + '</span>'; };
+    var row = function (label, field, help) { return '<tr><td><b>' + label + '</b>' + (help ? '<br><span class="help">' + help + '</span>' : '') + '</td><td>' + field + '</td></tr>'; };
+    var ex = function (kind, o, label) { var r = ppSum(P, kind, o); return '<tr><td>' + label + '</td><td>$' + r.total.toFixed(2) + '</td><td class="help">base $' + r.base.toFixed(2) + (r.extras ? ' + time and guests $' + r.extras.toFixed(2) : '') + (r.fixed ? ' + extras $' + r.fixed.toFixed(2) : '') + '</td></tr>'; };
+    var a30 = 30, a45 = 45;
+    return '<section class="panel" id="ppSec" style="margin-top:20px" data-foldname="Party pricing"><div class="toolbar"><div class="grow"><h2>Party pricing</h2>' +
+      '<p class="sub" style="margin:0">What Kids and Splatter parties cost on World. One rate drives all the time: extra guests, 90-minute art and after-party time are each <b>per person, per hour</b>. Members save as set in Member pricing \u2192 Kids parties. (Used once parties book through World\u2019s own checkout.)</p></div></div>' +
+      '<table class="mp-table"><tbody>' + row('Per person, per hour', num('rate', P.rate, '$', 'per person per hour', 0.5), 'Extra guests, 90-minute art time and after-party time all use this') + '</tbody></table>' +
+      '<div class="two"><div><h3 class="mem-h">\ud83c\udf82 Kids Party</h3><table class="mp-table"><tbody>' +
+        row('Party price', num('kids.base', K.base, '$', '', 0.01)) + row('Guests included', num('kids.included', K.included, '', 'guests')) +
+        row('Big group', num('kids.big_at', K.big_at, '', 'guests or more') + ' ' + num('kids.big_fee', K.big_fee, '+$', '', 0.01), 'Times 1.5 with 90-minute art') +
+        row('Clay, painting or besties project', num('kids.upgrade', K.upgrade, '+$', '', 0.01)) + row('Custom project', num('kids.custom', K.custom, '+$', '', 0.01)) +
+        row('Parent helper (11+ parties)', num('kids.parent_helper', K.parent_helper, '$', 'each', 0.01)) + '</tbody></table></div>' +
+      '<div><h3 class="mem-h">\ud83c\udfa8 Splatter Party</h3><table class="mp-table"><tbody>' +
+        row('Party price', num('splatter.base', S.base, '$', '', 0.01)) + row('Guests included', num('splatter.included', S.included, '', 'guests')) +
+        row('Big group', num('splatter.big_at', S.big_at, '', 'guests or more') + ' ' + num('splatter.big_fee', S.big_fee, '+$', '', 0.01)) +
+        row('Canvas instead of paper', num('splatter.canvas', S.canvas, '+$', 'per guest', 0.01)) + '</tbody></table></div></div>' +
+      '<h3 class="mem-h">What families pay (regular price, before member savings and tax)</h3><table class="mp-table" id="ppEx"><tbody>' +
+        ex('kids', { people: K.included }, 'Kids Party, ' + K.included + ' guests') +
+        ex('kids', { people: 12, longArt: true, after: a30 }, 'Kids Party, 12 guests, 90-min art, 30 min after') +
+        ex('kids', { people: 16, after: a45, upgrade: true }, 'Kids Party, 16 guests, 45 min after, clay project') +
+        ex('splatter', { people: S.included }, 'Splatter Party, ' + S.included + ' guests') +
+        ex('splatter', { people: 10, after: a30, canvas: true }, 'Splatter Party, 10 guests, 30 min after, canvas') + '</tbody></table>' +
+      (canEdit ? '<div style="display:flex;gap:8px;align-items:center;margin-top:10px"><button class="btn btn-berry" type="button" id="ppSave">Save party pricing</button><span class="help" id="ppMsg"></span></div>' : '') +
+      '</section>';
+  }
+  function bindPartyPricing() {
+    var sec = document.getElementById('ppSec'); if (!sec || !partyPricing || !canEdit) return;
+    sec.querySelectorAll('[data-pp]').forEach(function (inp) { inp.addEventListener('change', function () {
+      var path = inp.dataset.pp.split('.'), o = partyPricing; for (var i = 0; i < path.length - 1; i++) o = o[path[i]] = o[path[i]] || {};
+      o[path[path.length - 1]] = inp.value === '' ? null : Number(inp.value);
+      var tmp = document.createElement('div'); tmp.innerHTML = partyPricingHtml(); var t2 = tmp.querySelector('#ppEx'); if (t2) $('ppEx').replaceWith(t2);
+      $('ppMsg').textContent = 'Not saved yet';
+    }); });
+    $('ppSave').addEventListener('click', async function () {
+      var b = this; b.disabled = true; var r = await sb.rpc('world_setting_set', { p_key: 'party_pricing', p_value: partyPricing }); b.disabled = false;
+      $('ppMsg').textContent = r.error ? 'Not saved: ' + r.error.message : 'Saved \u2713';
+    });
   }
 
   // ---------------- Price tiers (world_price_tiers.sql): named prices for World workshops ----------------
