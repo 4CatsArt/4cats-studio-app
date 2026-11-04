@@ -3409,7 +3409,10 @@ async function openM2wPane() {
   if (!_hoCan.edit) { alert('Moving workshops needs Studio Ops edit access.'); return; }
   showOnlyPane('mv-pane'); setActiveNav('nav-mv'); m2wDraw();
   const { data, error } = await sb.rpc('world_items_list');
-  _m2w.items = error ? [] : ((data && data.items) || []).filter(i => i.active !== false); m2wDraw();
+  _m2w.items = error ? [] : ((data && data.items) || []).filter(i => i.active !== false);
+  _m2w.projects = error ? [] : ((data && data.projects) || []);
+  const pt = await sb.rpc('world_setting_get', { p_key: 'price_tiers' });   // (world_price_tiers.sql)
+  _m2w.tiers = pt.error ? [] : ((pt.data && pt.data.tiers) || []); m2wDraw();
 }
 function m2wDraw() {
   const el = document.getElementById('mv-pane'); if (!el) return;
@@ -3458,7 +3461,8 @@ function m2wNewHtml() {
     ${P.rows ? `<div class="nw-pick-list">${P.rows.map((r, n) => `<button type="button" onclick="m2wProjChoose(${n})">${r.image ? `<img src="${escAttr(r.image)}" alt="">` : '<span class="nw-noimg"></span>'}<span>${esc(r.name)}</span></button>`).join('') || '<small class="goal-note">Nothing found.</small>'}</div>` : ''}
     ${P.id ? `<div class="goal-note">✓ ${esc(P.name)}</div>` : ''}
     <div class="don-two"><label>Kind<select id="mv-kind"><option value="workshop">Workshop</option><option value="mini_make">Mini Make</option></select></label><label>Length (min)<input type="number" id="mv-min" value="90"></label></div>
-    <div class="don-two"><label>Price per person<input type="number" step="0.01" id="mv-price" value="39"></label><label>Member price<input type="number" step="0.01" id="mv-mprice" placeholder="blank = Member pricing settings"></label></div>
+    ${(_m2w.tiers || []).length ? `<label>Price tier<select id="mv-tier" onchange="_m2w.proj=Object.assign(_m2w.proj||{},{tier:this.value});m2wDraw()">${(_m2w.tiers || []).map(t => `<option value="${escAttr(t.key)}"${(P.tier || 't39') === t.key ? ' selected' : ''}>${esc(t.name)}</option>`).join('')}<option value=""${P.tier === '' ? ' selected' : ''}>No tier (set the prices below)</option></select></label>` : ''}
+    ${(_m2w.tiers || []).length && (P.tier === undefined || P.tier) ? '<div class="goal-note">Prices come from the tier (World settings → Price tiers).</div>' : `<div class="don-two"><label>Price per person<input type="number" step="0.01" id="mv-price" value="39"></label><label>Member price<input type="number" step="0.01" id="mv-mprice" placeholder="blank = Member pricing settings"></label></div>`}
     <div class="don-two"><label>Ages from<input type="number" id="mv-amin" placeholder="optional"></label><label>to<input type="number" id="mv-amax" placeholder="optional"></label></div>
     <label>Paid by<select id="mv-pay"><option value="shopify">Shopify invoice (keeps payments in Shopify for now)</option><option value="stripe">Stripe</option></select></label>
     <button class="ho-btn primary sm" onclick="m2wNewSave()">Make this World workshop</button></div>`;
@@ -3467,12 +3471,15 @@ let _m2wPT = null;
 function m2wProjSearch(q) { _m2w.proj = Object.assign(_m2w.proj || {}, { q }); clearTimeout(_m2wPT); _m2wPT = setTimeout(async () => {
   const { data } = await sb.rpc('news_pick_list', { p_kind: 'project', p_search: q || null }); _m2w.proj.rows = data || []; m2wDraw();
   const i = document.getElementById('mv-pq'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }, 250); }
-function m2wProjChoose(n) { const r = _m2w.proj.rows[n]; _m2w.proj = { q: r.name, id: r.id, name: r.name }; m2wDraw(); }
+function m2wProjChoose(n) { const r = _m2w.proj.rows[n], pj = (_m2w.projects || []).find(x => x.id === r.id);
+  _m2w.proj = { q: r.name, id: r.id, name: r.name, tier: (pj && pj.price_tier) || 't39' }; m2wDraw(); }   // its project's default price tier
 async function m2wNewSave() {
   const v = id => (document.getElementById(id) || {}).value;
   if (!_m2w.proj || !_m2w.proj.id) { alert('Choose the project first.'); return; }
+  const tier = document.getElementById('mv-tier') ? v('mv-tier') : null;
   const { data, error } = await sb.rpc('world_item_save', { p: { project_id: _m2w.proj.id, kind: v('mv-kind'), minutes: +v('mv-min') || 90, price: +v('mv-price') || 0,
-    member_price: v('mv-mprice') || null, min_age: v('mv-amin') || null, max_age: v('mv-amax') || null, payment: v('mv-pay'), treats: true, active: true } });
+    member_price: v('mv-mprice') || null, min_age: v('mv-amin') || null, max_age: v('mv-amax') || null, payment: v('mv-pay'), treats: true, active: true,
+    ...(tier !== null ? { price_tier: tier } : {}) } });
   if (error) { alert('Not saved: ' + error.message); return; }
   const r = await sb.rpc('world_items_list'); _m2w.items = ((r.data && r.data.items) || []).filter(i => i.active !== false);
   _m2w.item = data; _m2w.newOpen = false; _m2w.proj = null; m2wDraw();
