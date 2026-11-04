@@ -1888,6 +1888,9 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
 .nw-rules select, .nw-num { font: inherit; padding: 4px 6px; border: 1px solid #ddd; border-radius: 6px; } .nw-num { width: 76px; } .nw-prov { display: flex; gap: 12px; margin: 4px 0; }
 .nw-studios { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 10px; font-size: 13px; max-height: 220px; overflow-y: auto; }
 .nw-count { background: #eef7ee; border: 1px solid #cfe8cf; border-radius: 10px; padding: 8px 10px; margin-top: 6px; font-size: 14px; }
+.nw-checks { background: #fff; border: 1px solid #e8e4f0; border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+.nw-checks .y { color: #1d6b39; } .nw-checks .n { color: #8a5a00; } .nw-checks .n small { color: #6b6b7b; } .nw-checks.ok { border-color: #bfe3c4; background: #f3fbf4; }
+.nw-sendrow { display: flex; gap: 10px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
 </style>
 </head>
 <body>
@@ -3544,9 +3547,37 @@ function nwCount() {
   clearTimeout(_nwCountT); _nwCountT = setTimeout(async () => {
     if (!_nw.issue || _nw.issue.is_template) return;
     const { data, error } = await sb.rpc('news_audience_count', { p_audience: _nw.issue.audience || { type: 'all' }, p_topics: _nw.issue.topics || [] });
-    _nw.count = error ? { error: error.message } : data; const el = document.getElementById('nw-count'); if (el) el.innerHTML = nwCountText(_nw.count);
+    _nw.count = error ? { error: error.message } : data; const el = document.getElementById('nw-count'); if (el) el.innerHTML = nwCountText(_nw.count); nwChecksRefresh();
   }, 500);
 }
+// The pre-send checklist: everything that must be right before a newsletter can go out (sending stays locked until all ✓)
+function nwChecks() {
+  const I = _nw.issue, B = I.blocks || [], url = u => /^(https?:\/\/|mailto:|tel:)/i.test(String(u || '').trim());
+  const pics = B.flatMap(b => b.type === 'image' ? [b.pic] : b.type === 'two_images' ? [b.a, b.b] : []).filter(x => x && x.url);
+  const links = B.flatMap(b => b.type === 'button' ? [b.url] : b.type === 'image' ? [b.pic && b.pic.link] : b.type === 'two_images' ? [b.a && b.a.link, b.b && b.b.link] : []).filter(Boolean);
+  const textLinks = B.filter(b => b.type === 'text').flatMap(b => [...String(b.text || '').matchAll(/\]\(([^)]*)\)/g)].map(m => m[1]));
+  const liveMissing = B.filter(b => NW_LIVE[b.type] && !b.ref).length;
+  const c = _nw.count;
+  return [
+    ['Subject', !!String(I.subject || '').trim(), 'Add a subject.'],
+    ['Preview text', !!String(I.preheader || '').trim(), 'Add the grey line that shows after the subject in inboxes.'],
+    ['Content', B.some(b => ['text', 'heading', 'image', 'project', 'class', 'deal', 'membership'].includes(b.type)), 'Add some blocks.'],
+    ['Every picture has a description', pics.every(x => String(x.alt || '').trim()), `${pics.filter(x => !String(x.alt || '').trim()).length} picture(s) need a description (screen readers, and when pictures don't load).`],
+    ['Every 4Cats block is chosen', !liveMissing, `${liveMissing} workshop / class / deal block(s) have nothing chosen.`],
+    ['Links work', links.concat(textLinks).every(url) && B.filter(b => b.type === 'button').every(b => b.label && url(b.url)), 'A button or link is missing its words or a proper web address (https://…).'],
+    ['Topics chosen', (I.topics || []).length > 0, 'Tick at least one topic (it decides who has opted out).'],
+    ['Audience', !!(c && !c.error && c.total > 0), c && !c.error ? 'Nobody matches this audience.' : 'Counting the audience…'],
+    ['Saved', !_nw.dirty && !!I.id, 'Save your changes.'],
+    ['Test sent', (I.test_count || 0) > 0 && !!I.last_test_at && (!I.updated_at || new Date(I.last_test_at) >= new Date(I.updated_at) - 2000), 'Send yourself a test of this version.'],
+  ];
+}
+function nwChecksHtml() {
+  const L = nwChecks(), ok = L.every(x => x[1]);
+  return `<h4 class="nw-h">Ready to send?</h4><div class="nw-checks ${ok ? 'ok' : ''}">${L.map(x => `<div class="${x[1] ? 'y' : 'n'}">${x[1] ? '✓' : '○'} <b>${esc(x[0])}</b>${x[1] ? '' : ` <small>${esc(x[2])}</small>`}</div>`).join('')}
+    <div class="nw-sendrow"><button class="ho-btn primary" disabled title="${ok ? 'Sending through Resend is the next step to build' : 'Finish the checklist first'}">📨 Schedule or send</button>
+    <small class="goal-note">${ok ? 'All set. Sending through Resend is being built next.' : 'Sending unlocks when every item has a ✓.'} The mailing address is checked when sending.</small></div></div>`;
+}
+function nwChecksRefresh() { const el = document.getElementById('nw-checks-wrap'); if (el && _nw.issue && !_nw.issue.is_template && _nw.issue.status !== 'sent') el.innerHTML = nwChecksHtml(); }
 function nwEditorHtml() {
   const I = _nw.issue, ro = I.status === 'sent' || !_hoCan.edit, T = ((_news.d && _news.d.topics) || []).filter(t => t.active);
   return `<div class="nw-bar"><button class="ho-btn" onclick="nwClose()">← ${I.is_template ? 'Templates' : 'Newsletters'}</button>
@@ -3566,6 +3597,7 @@ function nwEditorHtml() {
       ${ro ? '' : `<div class="nw-add"><span class="goal-note">Add:</span> ${NW_BLOCKS.map(x => `<button class="ho-btn sm" onclick="nwAdd('${x[0]}')">+ ${x[1]}</button>`).join(' ')}</div>`}
       ${I.id && !I.is_template ? `<h4 class="nw-h">Send a test</h4><div class="nw-test"><input id="nw-test-to" placeholder="you@4cats.com (up to 5, separated by commas)" value="${escAttr(_nw.testTo || '')}"><button class="ho-btn" onclick="nwTest()">✉ Send test</button></div>
         <div class="goal-note">Tests are marked [TEST]. Save first: tests use the saved version.</div>` : ''}
+      <div id="nw-checks-wrap">${I.id && !I.is_template && I.status !== 'sent' ? nwChecksHtml() : ''}</div>
       <div class="goal-note" id="nw-msg">${esc(_nw.msg || '')}</div>
     </div>
     <div class="nw-right"><div class="nw-dev"><button class="${_nw.device === 'desktop' ? 'on' : ''}" onclick="_nw.device='desktop';nwAfterDraw()">💻 Desktop</button><button class="${_nw.device === 'phone' ? 'on' : ''}" onclick="_nw.device='phone';nwAfterDraw()">📱 Phone</button></div>
@@ -3597,7 +3629,7 @@ function nwField(t) {
   if (t.dataset.nwtopic) nwCount();
   _nw.dirty = true; const st = document.querySelector('.nw-state'); if (st) st.textContent = '● Unsaved changes';
   if (t.dataset.nwi === 'subject' || t.dataset.nwi === 'preheader') { const ib = document.querySelector('.nw-inbox'); if (ib) ib.innerHTML = `<b>${esc(I.subject || '(no subject)')}</b><span>${esc(I.preheader || '')}</span>`; }
-  clearTimeout(_nw.t); _nw.t = setTimeout(nwPreview, 600);
+  clearTimeout(_nw.t); _nw.t = setTimeout(nwPreview, 600); nwChecksRefresh();
 }
 async function nwPreview() {
   if (!_nw.issue) return;
@@ -3623,7 +3655,7 @@ async function nwSave() {
   const I = _nw.issue; const m = document.getElementById('nw-msg');
   const { data, error } = await sb.rpc('news_issue_save', { p: { id: I.id, title: I.title, subject: I.subject, preheader: I.preheader, topics: I.topics || [], blocks: I.blocks || [], audience: I.audience || { type: 'all' }, is_template: !!I.is_template } });
   if (error) { if (m) m.textContent = 'Not saved: ' + error.message; return false; }
-  I.id = data; _nw.dirty = false; newsDraw(); nwPreview(); return true;
+  I.id = data; I.updated_at = new Date().toISOString(); _nw.dirty = false; newsDraw(); nwPreview(); nwCount(); return true;
 }
 async function nwTest() {
   const I = _nw.issue, m = document.getElementById('nw-msg');
@@ -3632,6 +3664,7 @@ async function nwTest() {
   if (m) m.textContent = 'Sending…';
   const { data, error } = await sb.functions.invoke('news-send', { body: { action: 'test', id: I.id, to: to.length ? to : undefined } });
   const mm = document.getElementById('nw-msg'); if (mm) mm.textContent = error ? 'Test not sent: ' + ((data && data.error) || error.message || error) : '✓ Test sent to ' + (data.to || []).join(', ');
+  if (!error) { I.test_count = (I.test_count || 0) + 1; I.last_test_at = new Date().toISOString(); I.updated_at = I.updated_at || I.last_test_at; nwChecksRefresh(); }
 }
 function nwClose() { if (_nw.dirty && !confirm('Leave without saving?')) return; _nw.issue = null; _nw.dirty = false; nwLoad(); }
 async function newsTopicSave(id) {
