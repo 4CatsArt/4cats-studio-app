@@ -2865,6 +2865,7 @@ function ctDraw() {
     ${_hoCan.edit && n ? `<div class="ct-bulk"><b>${n} selected</b>
       <span>Spots <input type="number" id="ct-b-spots" min="1" max="200" style="width:70px"> <button class="ho-btn sm" onclick="ctBulk('spots')">Set</button></span>
       <span>Ages <input type="number" id="ct-b-min" min="2" max="99" style="width:56px">–<input type="number" id="ct-b-max" min="2" max="99" style="width:56px"> <button class="ho-btn sm" onclick="ctBulk('ages')">Set</button></span>
+      <span>Time <input type="time" id="ct-b-time" step="300" style="width:120px"> <button class="ho-btn sm" onclick="ctBulk('time')">Set</button></span>
       <button class="ho-btn sm" onclick="ctBulk('on')">On sale</button><button class="ho-btn sm" onclick="ctBulk('off')">Off sale</button>
       <button class="ho-btn sm ct-del" onclick="ctDelete([..._ct.sel])">Delete</button>
       <button class="ho-btn sm" onclick="_ct.sel.clear();ctDraw()">Clear</button><span class="goal-note" id="ct-b-msg"></span></div>` : ''}
@@ -2931,10 +2932,19 @@ async function ctBulk(what) {
   const spots = +(document.getElementById('ct-b-spots') || {}).value || 0, mn = (document.getElementById('ct-b-min') || {}).value, mx = (document.getElementById('ct-b-max') || {}).value;
   if (what === 'spots' && !spots) { msg.textContent = 'Type the number of spots.'; return; }
   if (what === 'ages' && (mn === '' || mx === '' || +mn > +mx)) { msg.textContent = 'Type the ages (from – to).'; return; }
+  // Time: each class time and all its weeks' classes move to the new time (same dates, weeks and skipped dates)
+  const tm = ((document.getElementById('ct-b-time') || {}).value || '').slice(0, 5);
+  if (what === 'time') {
+    if (!/^\d{2}:\d{2}$/.test(tm)) { msg.textContent = 'Choose the new time.'; return; }
+    const bookedRows = rows.filter(r => Number(r.booked || 0) > 0), label = shortTime(tm + ':00');
+    if (!confirm(`Move ${rows.length} class time${rows.length === 1 ? '' : 's'} to ${label}? Every week of each class moves too.` +
+      (bookedRows.length ? `\n\n${bookedRows.length} of them have families booked (${bookedRows.reduce((a, r) => a + Number(r.booked || 0), 0)} spots). Their bookings move with the class, so let those families know about the new time.` : ''))) return;
+  }
   let ok = 0; const errs = [];
   for (const r of rows) {
     msg.textContent = `Saving ${ok + errs.length + 1} of ${rows.length}…`;
-    const res = what === 'ages' ? await sb.rpc('world_class_slot_ages', { p_slot: r.id, p_min: +mn, p_max: +mx })
+    const res = what === 'time' ? await sb.rpc('hub_class_slot_redate', { p_slot: r.id, p_start: String(r.start_date).slice(0, 10), p_time: tm + ':00', p_weeks: r.weeks, p_skip: r.skip_dates || [], p_preview: false })
+      : what === 'ages' ? await sb.rpc('world_class_slot_ages', { p_slot: r.id, p_min: +mn, p_max: +mx })
       : await sb.rpc('world_class_slot_update', { p_slot: r.id, p_spots: what === 'spots' ? spots : r.spots, p_active: what === 'on' ? true : what === 'off' ? false : r.active });
     if (res.error) errs.push(`${r.class_name} · ${STUDIO_NAMES[r.studio_id] || r.studio_id}: ${res.error.message}`); else ok++;
   }
@@ -3368,17 +3378,19 @@ function bulkDraw() {
     <div class="ho-intro">Make many World-only times at once. Families book and pay on World (no Shopify products). Times that are already there are skipped, never doubled.</div>
     <div class="bk-card"><div class="bk-kinds"><label><input type="radio" name="bk-kind" value="glazing"${B.kind === 'glazing' ? ' checked' : ''} onchange="bulkKind(this.value)"> 🎨 Glazing times</label>
       <label><input type="radio" name="bk-kind" value="get_together"${B.kind === 'get_together' ? ' checked' : ''} onchange="bulkKind(this.value)"> 🎨 Adult Get-Together time slots</label>
-      <label class="off" title="Coming next"><input type="radio" name="bk-kind" value="party" disabled> 🎉 Kids & Splatter party slots <span class="goal-note">(coming next)</span></label></div>
-    ${B.kind === 'get_together' ? '<div class="goal-note">One booking per slot. The price is set in World settings → Get-Togethers (Price for World-only times); extra guests and time come from the extras product.</div>' : ''}
+      <label><input type="radio" name="bk-kind" value="kids"${B.kind === 'kids' ? ' checked' : ''} onchange="bulkKind(this.value)"> 🎂 Kids party times</label>
+      <label><input type="radio" name="bk-kind" value="splatter"${B.kind === 'splatter' ? ' checked' : ''} onchange="bulkKind(this.value)"> 🖌️ Splatter party times</label></div>
+    ${B.kind === 'get_together' ? '<div class="goal-note">One booking per slot. Priced in World settings → Prices &amp; sales → Party pricing (Adult Get-Together).</div>' : ''}
+    ${bulkParty() ? `<div class="goal-note">Times come from each studio’s <b>Weekly Party Slot Schedule</b> (admin → Parties → Edit Party Slots); a time with room for 2 parties gets 2 spots. Kids and Splatter share the party room, so World only offers a time while a room is free. Priced in World settings → Party pricing.${B.kind === 'splatter' ? ' <b>Splatter:</b> choose only the studios that offer it (World settings → Parties → Splatter studios).' : ''}</div>` : ''}
     <div class="bk-sec"><b>Studios</b> <button class="ho-btn sm" onclick="bulkAllStudios(true)">All</button><button class="ho-btn sm" onclick="bulkAllStudios(false)">None</button>
       <div class="bk-studios">${groups.map(([pv, label]) => `<div><div class="bk-pv"><b>${label}</b> <button class="ho-btn sm" onclick="bulkProv('${pv}')">all</button></div>${ids.filter(id => id.startsWith(pv)).map(id =>
         `<label><input type="checkbox" class="bk-st" value="${escAttr(id)}"${B.studios.includes(id) ? ' checked' : ''}> ${esc(STUDIO_NAMES[id] || id)}</label>`).join('')}</div>`).join('')}</div></div>
     <div class="bk-sec bk-row"><label class="f">From<input type="date" id="bk-from" min="${today}" value="${escAttr(B.from || '')}"></label>
       <label class="f">To<input type="date" id="bk-to" min="${today}" value="${escAttr(B.to || '')}"></label>
-      <div><b>Days</b><div class="bk-days">${DAYS.map(([n, l]) => `<label><input type="checkbox" class="bk-day" value="${n}"${B.days.includes(n) ? ' checked' : ''}> ${l}</label>`).join('')}</div></div></div>
-    <div class="bk-sec"><b>Times</b> <span class="goal-note">(each one is made on every chosen day)</span>
+      <div><b>Days</b>${bulkParty() ? ' <span class="goal-note">(none ticked: every day in the schedule)</span>' : ''}<div class="bk-days">${DAYS.map(([n, l]) => `<label><input type="checkbox" class="bk-day" value="${n}"${B.days.includes(n) ? ' checked' : ''}> ${l}</label>`).join('')}</div></div></div>
+    ${bulkParty() ? '' : `<div class="bk-sec"><b>Times</b> <span class="goal-note">(each one is made on every chosen day)</span>
       <div class="bk-chips">${B.times.map((t, i) => `<span class="bk-chip">${esc(shortTime(t + ':00'))} <button onclick="_bulk.times.splice(${i},1);bulkKeep();bulkDraw()" aria-label="Remove">×</button></span>`).join('')}
-        <input type="time" id="bk-time" step="900"><button class="ho-btn sm" onclick="bulkAddTime()">+ Add time</button></div></div>
+        <input type="time" id="bk-time" step="900"><button class="ho-btn sm" onclick="bulkAddTime()">+ Add time</button></div></div>`}
     <div class="bk-sec bk-row">${B.kind === 'glazing' ? `<label class="f">Spots per time<input type="number" id="bk-spots" min="1" max="200" value="${escAttr(B.spots || 12)}"></label>` : ''}
       <label class="f">Length (minutes)<input type="number" id="bk-minutes" min="15" max="600" step="15" value="${escAttr(B.minutes || (B.kind === 'glazing' ? 90 : 120))}"></label>
       ${B.kind === 'glazing' ? `<label class="f">Price per person<input type="number" id="bk-price" min="0" step="0.01" value="${escAttr(B.price || 14)}"></label>
@@ -3389,24 +3401,27 @@ function bulkDraw() {
     <div class="bk-actions"><button class="ho-btn" onclick="bulkRun(true)">Preview</button><button class="ho-btn primary" onclick="bulkRun(false)"${R && R.preview && R.made ? '' : ' disabled title="Preview first"'}>Make ${R && R.preview ? R.made : ''} times</button>
       <span class="goal-note" id="bk-msg"></span></div>
     ${R ? `<div class="bk-res">${R.preview ? `<b>${R.made}</b> new time${R.made === 1 ? '' : 's'} would be made${R.skipped ? `, <b>${R.skipped}</b> already there (skipped)` : ''}.`
-        : `✅ Made <b>${R.made}</b> ${B.kind === 'get_together' ? 'time slot' : 'time'}${R.made === 1 ? '' : 's'}${R.skipped ? ` (${R.skipped} already there, skipped)` : ''}. They’re on World now.`}
+        : `✅ Made <b>${R.made}</b> ${B.kind === 'get_together' ? 'time slot' : bulkParty() ? 'party time' : 'time'}${R.made === 1 ? '' : 's'}${R.skipped ? ` (${R.skipped} already there, skipped)` : ''}. They’re on World now.`}
       ${R.preview && R.list && R.list.length ? `<div class="bk-list">${R.list.map(x => `<span>${esc(STUDIO_NAMES[x.studio_id] || x.studio_id)} · ${esc(new Date(x.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))} · ${esc(shortTime(x.time))}</span>`).join('')}${R.made > R.list.length ? `<span>…and ${R.made - R.list.length} more</span>` : ''}</div>` : ''}</div>` : ''}</div>`;
 }
 function bulkKind(k) { bulkKeep(); _bulk.kind = k; _bulk.res = null; _bulk.minutes = ''; bulkDraw(); }
+function bulkParty() { return _bulk.kind === 'kids' || _bulk.kind === 'splatter'; }   // (from the party slot schedule: world_party_move.sql)
 function bulkAllStudios(on) { document.querySelectorAll('.bk-st').forEach(x => { x.checked = on; }); bulkKeep(); _bulk.res = null; bulkDraw(); }
 function bulkProv(pv) { document.querySelectorAll('.bk-st').forEach(x => { if (x.value.startsWith(pv)) x.checked = true; }); bulkKeep(); _bulk.res = null; bulkDraw(); }
 function bulkAddTime() { const v = bulkVal('bk-time'); bulkKeep(); if (v && !_bulk.times.includes(v)) { _bulk.times.push(v); _bulk.times.sort(); } _bulk.res = null; bulkDraw(); }
 function bulkAddSkip() { const v = bulkVal('bk-skip'); bulkKeep(); if (v && !_bulk.skip.includes(v)) { _bulk.skip.push(v); _bulk.skip.sort(); } _bulk.res = null; bulkDraw(); }
 async function bulkRun(preview) {
   bulkKeep(); const B = _bulk, msg = document.getElementById('bk-msg');
-  const what = B.kind === 'get_together' ? 'Adult Get-Together time slots' : 'glazing times';
+  const what = B.kind === 'get_together' ? 'Adult Get-Together time slots' : B.kind === 'kids' ? 'Kids party times' : B.kind === 'splatter' ? 'Splatter party times' : 'glazing times';
   if (!preview && !confirm(`Make ${B.res ? B.res.made : ''} ${what} on World? They can be booked straight away.`)) return;
   msg.textContent = preview ? 'Working it out…' : 'Making them…';
-  const { data, error } = B.kind === 'get_together'
+  const { data, error } = bulkParty()
+    ? await sb.rpc('hub_bulk_party', { p: { kind: B.kind, studios: B.studios, from: B.from, to: B.to, days: B.days, from_schedule: true, skip: B.skip, minutes: +B.minutes || 120, preview } })
+    : B.kind === 'get_together'
     ? await sb.rpc('hub_bulk_party', { p: { kind: 'get_together', studios: B.studios, from: B.from, to: B.to, days: B.days, times: B.times, skip: B.skip, minutes: +B.minutes || 120, preview } })
     : await sb.rpc('hub_bulk_glazing', { p: { studios: B.studios, from: B.from, to: B.to, days: B.days, times: B.times, skip: B.skip,
         spots: +B.spots || 0, minutes: +B.minutes || 90, price: B.price, member_price: B.member, preview } });
-  if (error) { msg.textContent = /hub_bulk_(glazing|party)/i.test(error.message) ? 'Run ' + (B.kind === 'get_together' ? 'world_party_slots.sql' : 'world_bulk_times.sql') + ' in Supabase first.' : error.message; return; }
+  if (error) { msg.textContent = /hub_bulk_(glazing|party)|from_schedule/i.test(error.message) ? 'Run ' + (bulkParty() ? 'world_party_move.sql' : B.kind === 'get_together' ? 'world_party_slots.sql' : 'world_bulk_times.sql') + ' in Supabase first.' : error.message; return; }
   B.res = data; bulkDraw();
 }
 
@@ -3428,6 +3443,7 @@ function m2wDraw() {
   if (_m2w.mode === 'series') { el.innerHTML = m2sHtml(); return; }
   if (_m2w.mode === 'lineup') { el.innerHTML = m2lHtml(); return; }
   if (_m2w.mode === 'camps') { el.innerHTML = m2cHtml(); return; }
+  if (_m2w.mode === 'parties') { el.innerHTML = m2pHtml(); if (!_m2p.res && !_m2p.busy) m2pRun(true); return; }
   const R = _m2w.rows, groups = {};
   (R || []).forEach(r => { (groups[r.title] = groups[r.title] || []).push(r); });
   const nSel = _m2w.sel.size, selRows = (R || []).filter(r => _m2w.sel.has(r.id));
@@ -3535,7 +3551,7 @@ async function m2wGo() {
   _m2w.rows = null; _m2w.sel = new Set(); m2wDraw();
 }
 
-function m2Tabs(on) { return `<div class="nw-tabs">${[['', 'One-off workshops'], ['lineup', 'Lineups → by project'], ['series', 'Multi-week series → Class times'], ['camps', 'Camps & PA/PD days']].map(t => `<button class="${on === t[0] ? 'on' : ''}" onclick="_m2w.mode='${t[0]}';m2wDraw()">${t[1]}</button>`).join('')}</div>`; }
+function m2Tabs(on) { return `<div class="nw-tabs">${[['', 'One-off workshops'], ['lineup', 'Lineups → by project'], ['series', 'Multi-week series → Class times'], ['camps', 'Camps & PA/PD days'], ['parties', 'Kids & Splatter parties']].map(t => `<button class="${on === t[0] ? 'on' : ''}" onclick="_m2w.mode='${t[0]}';m2wDraw()">${t[1]}</button>`).join('')}</div>`; }
 
 // ---- Move to World: lineups ("… Week Workshop Lineup", project chosen at booking) → a World workshop per project (hub_move_lineups.sql) ----
 let _m2l = { q: '', rows: null, sel: new Set(), map: {}, names: {}, emptyItem: '', unchosenItem: '', rowItem: {}, hidePhantom: true, draft: true, msg: '' };
@@ -3634,6 +3650,30 @@ async function m2lGo() {
     <br>${shop && !shop.error ? `<b>Shopify:</b> ${(shop.drafted || []).length ? `set <b>${shop.drafted.length}</b> product${shop.drafted.length === 1 ? '' : 's'} to Draft ✓` : 'no products drafted'}.${(shop.kept || []).length ? ` ${shop.kept.length} left active (a studio still sells them on Shopify).` : ''}`
       : `<b>Next, in Shopify:</b> set the lineup's products to <b>Draft</b>.${shop && shop.error ? ` <small>(Drafting automatically didn't work: ${esc(shop.error)})</small>` : ''}`}`;
   _m2l.rows = null; _m2l.sel = new Set(); m2wDraw();
+}
+
+// ---- Move to World: Kids and Splatter parties → World-run (world_party_move.sql). All upcoming party times at once. ----
+let _m2p = { res: null, busy: false, msg: '' };
+function m2pHtml() {
+  const R = _m2p.res;
+  return `<div class="ho-head"><div class="pts-page-title" style="margin:0">🔁 Move to World</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+    ${m2Tabs('parties')}
+    <div class="ho-intro">Every upcoming <b>Kids Party</b> and <b>Splatter Party</b> time becomes <b>World-run</b>: booked on World (priced from World settings → Party pricing, paid by Shopify invoice), and the Hub keeps their spots (the nightly Shopify sync stops changing them). Each time keeps its <b>bookings</b> and open/closed state. Kids and Splatter share the party room, so World only offers a time while a room is free in the <b>Weekly Party Slot Schedule</b> (admin → Parties). The old “Party Time Slot” leftovers (no product, nobody booked) are hidden.</div>
+    ${_m2p.msg ? `<div class="goal-note mv-msg">${_m2p.msg}</div>` : ''}
+    ${!R ? '<div class="goal-note">Counting…</div>' : `<div class="mv-right" style="max-width:560px">
+      ${R.preview ? `<h4 style="margin:0 0 6px">Ready to move</h4>
+        <div class="mv-sum"><b>${R.kids}</b> Kids party times (<b>${R.kids_booked}</b> booked, kept) · <b>${R.splatter}</b> Splatter party times (<b>${R.splatter_booked}</b> booked, kept)${R.leftovers_hidden ? ` · <b>${R.leftovers_hidden}</b> leftover “Party Time Slot” times hidden` : ''}</div>
+        ${R.kids || R.splatter ? `<div class="goal-note">Then in Shopify: set the <b>Kids Party</b> and <b>Splatter Party</b> products (and their extras) to <b>Draft</b>. World keeps offering the times: World-run parties don't need the Shopify products.</div>
+        <button class="ho-btn primary" ${_m2p.busy ? 'disabled' : ''} onclick="m2pRun(false)">🔁 Make all party times World-run</button>` : '<div class="goal-note">Nothing left to move: every upcoming Kids and Splatter party time is World-run.</div>'}`
+      : `<h4 style="margin:0 0 6px">✅ Done</h4><div class="mv-sum"><b>${R.kids}</b> Kids and <b>${R.splatter}</b> Splatter party times are World-run (${R.kids_booked + R.splatter_booked} booked parties kept)${R.leftovers_hidden ? `, ${R.leftovers_hidden} leftovers hidden` : ''}.</div>
+        <div class="goal-note">Next: set the party products to Draft in Shopify. New party times: ➕ Bulk add → Kids or Splatter party times.</div>`}</div>`}`;
+}
+async function m2pRun(preview) {
+  if (!preview && !confirm('Make every upcoming Kids and Splatter party time World-run? Bookings are kept; from now on World books them and the Hub keeps their spots.')) return;
+  _m2p.busy = true; _m2p.msg = preview ? '' : 'Moving…'; m2wDraw();
+  const { data, error } = await sb.rpc('hub_party_move', { p_preview: preview });
+  _m2p.busy = false; _m2p.msg = error ? esc(/hub_party_move/i.test(error.message) ? 'Run world_party_move.sql in Supabase first.' : error.message) : '';
+  if (!error) _m2p.res = data; m2wDraw();
 }
 
 // ---- Move to World: camps and PA/PD days → World-run (Stripe on World only; hub_move_camps.sql). Nothing renamed or made. ----
@@ -4951,7 +4991,8 @@ async function loadPlanDay(date) {
   try {
     const [team, sess] = await Promise.all([
       sb.rpc('hub_team_on_date', { p_studio_id: st, p_date: date }),
-      sb.from('sessions').select('id, title, session_date, session_time, session_type, duration_minutes, capacity, spaces_left_cache, show, world_item_id').eq('studio_id', st).eq('session_date', date).order('session_time')
+      sb.from('sessions').select('id, title, session_date, session_time, session_type, duration_minutes, capacity, spaces_left_cache, show, world_item_id, world_party').eq('studio_id', st).eq('session_date', date).order('session_time')
+        .then(r => r.error && /world_party/.test(r.error.message) ? sb.from('sessions').select('id, title, session_date, session_time, session_type, duration_minutes, capacity, spaces_left_cache, show, world_item_id').eq('studio_id', st).eq('session_date', date).order('session_time') : r)
     ]);
     if (team.error) throw team.error;
     if (sess.error) throw sess.error;
@@ -5897,14 +5938,22 @@ function planSlotOpenClose(slotId, reopen) {
   openDutySheet(`<h3>${reopen ? 'Reopen' : 'Close'} the ${esc(shortTime(x.session_time))} party slot?</h3>
     <p>${esc(ptyDayLabel(_plan.date))} · ${esc(STUDIO_NAMES[_sessionStudioId] || '')}</p>
     <div class="ho-intro" style="margin:0">${reopen ? 'Customers will be able to book a party at this time again.' : 'Customers won’t be able to book a party at this time online.'}
-      This changes ${names.length} product${names.length === 1 ? '' : 's'} on Shopify: ${esc(names.join(', '))}.</div>
+      ${(x.slotProducts || []).some(p => p.world_party) ? 'This changes the party times on World (booked parties stay booked).' : `This changes ${names.length} product${names.length === 1 ? '' : 's'} on Shopify: ${esc(names.join(', '))}.`}</div>
     <div id="slot-msg" class="ho-intro" style="margin:8px 0 0"></div>
     <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="slot-go" onclick="planSlotGo('${escAttr(slotId)}', ${reopen ? 'true' : 'false'})">${reopen ? 'Reopen it' : 'Close it'}</button></div>`);
 }
 async function planSlotGo(slotId, reopen) {
   const x = _plan.sessions.find(z => z.id === slotId); if (!x) return;
   const msg = document.getElementById('slot-msg'), btn = document.getElementById('slot-go');
-  btn.disabled = true; msg.textContent = 'Updating Shopify…';
+  btn.disabled = true;
+  if ((x.slotProducts || []).some(p => p.world_party)) {   // World-run party times: no Shopify step
+    msg.textContent = 'Updating…';
+    const { data, error } = await sb.rpc('hub_party_slot_set', { p_studio: _sessionStudioId, p_date: x.session_date, p_time: x.session_time, p_open: !!reopen, p_pin: _sessionPin || null });
+    if (error) { msg.textContent = /hub_party_slot_set/i.test(error.message) ? 'Run world_party_move.sql in Supabase first.' : error.message; btn.disabled = false; return; }
+    closeDutySheet(); await loadPlanDay(_plan.date);
+    _plan.msg = `${shortTime(x.session_time)} party slot ${reopen ? 'reopened on World' : 'closed on World'}`; renderPlanDay(); return;
+  }
+  msg.textContent = 'Updating Shopify…';
   const call = async body => (await fetch(`${SUPABASE_URL}/functions/v1/shopify-inventory`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify(body) })).json();
   const qty = reopen ? 1 : 0, done = [], skipped = [];
   for (const p of (x.slotProducts || [])) {
