@@ -1899,6 +1899,7 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
 .mv-right select, .mv-new input, .mv-new select { font: inherit; padding: 6px 8px; border: 1px solid #ddd; border-radius: 8px; width: 100%; box-sizing: border-box; }
 .mv-new { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid #eee; padding-top: 8px; } .mv-new label { display: flex; flex-direction: column; font-size: 13px; font-weight: 700; gap: 2px; }
 .mv-sum { font-size: 13px; color: #555; }
+.mv-hide { font-size: 13px; display: flex; gap: 6px; align-items: flex-start; }
 </style>
 </head>
 <body>
@@ -3430,10 +3431,12 @@ function m2wDraw() {
           <td>${r.spots ?? '—'}</td><td>${r.booked}</td><td><small>${esc(r.shopify_status || '')}</small></td></tr>`).join('')}</tbody></table></div></div>`; }).join('')}
     </div>
     <div class="mv-right"><h4 style="margin:0 0 6px">Move ${nSel} date${nSel === 1 ? '' : 's'} to:</h4>
-      <select id="mv-item" onchange="_m2w.item=this.value;m2wDraw()"><option value="">Choose the World workshop…</option>${(_m2w.items || []).map(i => `<option value="${i.id}"${_m2w.item === i.id ? ' selected' : ''}>${esc(i.title)} · $${Number(i.price).toFixed(0)} · ${i.payment === 'shopify' ? 'Shopify invoice' : 'Stripe'}</option>`).join('')}</select>
+      <select id="mv-item" onchange="_m2w.item=this.value;m2wDraw()"><option value="">Choose the World workshop…</option>${(_m2w.items || []).slice().sort((x, y) => String(x.title || '').localeCompare(String(y.title || ''), 'en', { sensitivity: 'base' })).map(i => `<option value="${i.id}"${_m2w.item === i.id ? ' selected' : ''}>${esc(i.title)} · $${Number(i.price).toFixed(0)} · ${i.payment === 'shopify' ? 'Shopify invoice' : 'Stripe'}</option>`).join('')}</select>
       ${it ? `<div class="goal-note">${esc(it.kind === 'mini_make' ? 'Mini Make' : 'Workshop')} · $${Number(it.price).toFixed(2)}${it.member_price ? ` · members $${Number(it.member_price).toFixed(2)}` : ''} · paid by <b>${it.payment === 'shopify' ? 'Shopify invoice' : 'Stripe'}</b></div>` : ''}
       <button class="ho-btn sm" onclick="_m2w.newOpen=!_m2w.newOpen;m2wDraw()">${_m2w.newOpen ? '× Cancel' : '+ New World workshop'}</button>
       ${_m2w.newOpen ? m2wNewHtml() : ''}
+      ${(() => { const E = (R || []).filter(r => !_m2w.sel.has(r.id) && !Number(r.spots || 0) && !Number(r.booked || 0)); _m2w.empty = E.map(r => r.id);
+        return E.length ? `<label class="mv-hide"><input type="checkbox" ${_m2w.hideEmpty ? 'checked' : ''} onchange="_m2w.hideEmpty=this.checked"> Also hide the ${E.length} empty date${E.length === 1 ? '' : 's'} (0 spots, nobody booked) from schedules</label>` : ''; })()}
       <div class="mv-sum">${nSel ? `${nSel} date${nSel === 1 ? '' : 's'} · ${selRows.reduce((a, r) => a + Number(r.booked || 0), 0)} booked (kept) · ${selRows.reduce((a, r) => a + Number(r.spots || 0), 0)} spots left (kept)` : 'Tick the dates to move.'}</div>
       <button class="ho-btn primary" ${nSel && it ? '' : 'disabled'} onclick="m2wGo()">🔁 Move to World</button></div></div>`}`;
 }
@@ -3467,7 +3470,9 @@ async function m2wFind() {
   _m2w.msg = 'Looking…'; _m2w.rows = null; _m2w.sel = new Set(); m2wDraw();
   const { data, error } = await sb.rpc('hub_move_preview', { p_search: _m2w.q, p_from: _m2w.from || null });
   _m2w.msg = error ? esc(/hub_move_preview/i.test(error.message) ? 'Run hub_move_to_world.sql in Supabase first.' : error.message) : '';
-  _m2w.rows = error ? null : (data || []); (_m2w.rows || []).forEach(r => _m2w.sel.add(r.id)); m2wDraw();
+  _m2w.rows = error ? null : (data || []);
+  // only real dates start ticked (spots left or a booking); the empty "phantom" ones a single Shopify product makes at every studio aren't
+  (_m2w.rows || []).forEach(r => { if (Number(r.spots || 0) > 0 || Number(r.booked || 0) > 0) _m2w.sel.add(r.id); }); _m2w.hideEmpty = true; m2wDraw();
 }
 function m2wPick(ids, on) { ids.forEach(id => on ? _m2w.sel.add(id) : _m2w.sel.delete(id)); m2wDraw(); }
 async function m2wGo() {
@@ -3475,7 +3480,9 @@ async function m2wGo() {
   if (!it || !n || !confirm(`Move ${n} date${n === 1 ? '' : 's'} to the World workshop "${it.title}"?\n\nThey keep their spots left and bookings, and from now on the Hub keeps their spots (Shopify no longer does).`)) return;
   const { data, error } = await sb.rpc('hub_move_to_world', { p_ids: [..._m2w.sel], p_item: it.id });
   if (error) { _m2w.msg = esc('Not moved: ' + error.message); m2wDraw(); return; }
-  _m2w.msg = `✓ Moved <b>${data.moved}</b> date${data.moved === 1 ? '' : 's'} to <b>${esc(data.item)}</b> (paid by ${data.payment === 'shopify' ? 'Shopify invoice' : 'Stripe'}).<br>
+  let hidden = 0;
+  if (_m2w.hideEmpty && (_m2w.empty || []).length) { const h = await sb.rpc('hub_hide_empty_sessions', { p_ids: _m2w.empty }); hidden = h.error ? 0 : (h.data || 0); }
+  _m2w.msg = `✓ Moved <b>${data.moved}</b> date${data.moved === 1 ? '' : 's'} to <b>${esc(data.item)}</b> (paid by ${data.payment === 'shopify' ? 'Shopify invoice' : 'Stripe'}).${hidden ? ` Hid ${hidden} empty date${hidden === 1 ? '' : 's'}.` : ''}<br>
     <b>Next, in Shopify:</b> Products → search <b>${esc(_m2w.q)}</b> → tick those products → <b>More actions → Set as draft</b>, so they can't be bought on Shopify any more.`;
   _m2w.rows = null; _m2w.sel = new Set(); m2wDraw();
 }
