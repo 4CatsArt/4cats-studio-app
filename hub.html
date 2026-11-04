@@ -3415,6 +3415,7 @@ function m2wDraw() {
   const el = document.getElementById('mv-pane'); if (!el) return;
   if (_m2w.mode === 'series') { el.innerHTML = m2sHtml(); return; }
   if (_m2w.mode === 'lineup') { el.innerHTML = m2lHtml(); return; }
+  if (_m2w.mode === 'camps') { el.innerHTML = m2cHtml(); return; }
   const R = _m2w.rows, groups = {};
   (R || []).forEach(r => { (groups[r.title] = groups[r.title] || []).push(r); });
   const nSel = _m2w.sel.size, selRows = (R || []).filter(r => _m2w.sel.has(r.id));
@@ -3518,7 +3519,7 @@ async function m2wGo() {
   _m2w.rows = null; _m2w.sel = new Set(); m2wDraw();
 }
 
-function m2Tabs(on) { return `<div class="nw-tabs">${[['', 'One-off workshops'], ['lineup', 'Lineups → by project'], ['series', 'Multi-week series → Class times']].map(t => `<button class="${on === t[0] ? 'on' : ''}" onclick="_m2w.mode='${t[0]}';m2wDraw()">${t[1]}</button>`).join('')}</div>`; }
+function m2Tabs(on) { return `<div class="nw-tabs">${[['', 'One-off workshops'], ['lineup', 'Lineups → by project'], ['series', 'Multi-week series → Class times'], ['camps', 'Camps & PA/PD days']].map(t => `<button class="${on === t[0] ? 'on' : ''}" onclick="_m2w.mode='${t[0]}';m2wDraw()">${t[1]}</button>`).join('')}</div>`; }
 
 // ---- Move to World: lineups ("… Week Workshop Lineup", project chosen at booking) → a World workshop per project (hub_move_lineups.sql) ----
 let _m2l = { q: '', rows: null, sel: new Set(), map: {}, names: {}, emptyItem: '', unchosenItem: '', rowItem: {}, hidePhantom: true, draft: true, msg: '' };
@@ -3617,6 +3618,58 @@ async function m2lGo() {
     <br>${shop && !shop.error ? `<b>Shopify:</b> ${(shop.drafted || []).length ? `set <b>${shop.drafted.length}</b> product${shop.drafted.length === 1 ? '' : 's'} to Draft ✓` : 'no products drafted'}.${(shop.kept || []).length ? ` ${shop.kept.length} left active (a studio still sells them on Shopify).` : ''}`
       : `<b>Next, in Shopify:</b> set the lineup's products to <b>Draft</b>.${shop && shop.error ? ` <small>(Drafting automatically didn't work: ${esc(shop.error)})</small>` : ''}`}`;
   _m2l.rows = null; _m2l.sel = new Set(); m2wDraw();
+}
+
+// ---- Move to World: camps and PA/PD days → World-run (Stripe on World only; hub_move_camps.sql). Nothing renamed or made. ----
+let _m2c = { q: '', rows: null, sel: new Set(), hide: true, msg: '' };
+const m2cReal = r => Number(r[4] || 0) > 0 || Number(r[5] || 0) > 0;   // r = [id, title, studio, date, spots, booked]
+function m2cHtml() {
+  const R = _m2c.rows, groups = {};
+  (R || []).forEach(r => (groups[r[1]] = groups[r[1]] || []).push(r));
+  const sel = (R || []).filter(r => _m2c.sel.has(r[0])), empty = (R || []).filter(r => !_m2c.sel.has(r[0]) && !m2cReal(r) && !(Number(r[4]) < 0));
+  const fmt = d => new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' });
+  return `<div class="ho-head"><div class="pts-page-title" style="margin:0">🔁 Move to World</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+    ${m2Tabs('camps')}
+    <div class="ho-intro">Camps and PA/PD days become <b>World-run</b>: booked on World with Stripe only, and the Hub keeps their spots (the nightly Shopify sync stops changing them). Each day keeps its name, spots (a closing day stays below 0) and every booking: nothing is renamed or made. Afterwards, set the camp and PA/PD products to <b>Draft</b> in Shopify (Hextom bulk edit works well), then add the 4cats.com redirect.</div>
+    <div class="mv-find"><input id="mc-q" placeholder="Camp name, e.g. Winter Camp, PA/PD, Summer Camp (blank = all)" value="${escAttr(_m2c.q)}" onkeydown="if(event.key==='Enter')m2cFind()"><button class="ho-btn primary" onclick="m2cFind()">Find days</button></div>
+    ${_m2c.msg ? `<div class="goal-note mv-msg">${_m2c.msg}</div>` : ''}
+    ${R === null ? '' : !R.length ? '<div class="goal-note">No upcoming camp or PA/PD days still on Shopify match.</div>' : `<div class="mv-cols"><div class="mv-left">
+      <div class="oc-wrap"><table class="oc-table"><thead><tr><th></th><th>Camp</th><th>Days</th><th>Real days</th><th>Studios</th><th>Dates</th><th>Spots left</th><th>Booked</th></tr></thead><tbody>
+      ${Object.keys(groups).sort().map(t => { const G = groups[t], RL = G.filter(r => m2cReal(r) || Number(r[4]) < 0), on = RL.length && RL.every(r => _m2c.sel.has(r[0]));
+        return `<tr><td><input type="checkbox" ${on ? 'checked' : ''} onchange="m2cPick(${escAttr(JSON.stringify(t))}, this.checked)"></td><td><b>${esc(t)}</b></td><td>${G.length}</td><td>${RL.length}</td>
+          <td>${new Set(RL.map(r => r[2])).size}</td><td>${fmt(G[0][3])} – ${fmt(G[G.length - 1][3])}</td>
+          <td>${RL.reduce((a, r) => a + Math.max(Number(r[4] || 0), 0), 0)}${RL.some(r => Number(r[4]) < 0) ? ` <small title="days with spots below 0 (closing)">(${RL.filter(r => Number(r[4]) < 0).length} closing)</small>` : ''}</td>
+          <td>${G.reduce((a, r) => a + Number(r[5] || 0), 0)}</td></tr>`; }).join('')}
+      </tbody></table></div></div>
+    <div class="mv-right"><h4 style="margin:0 0 6px">Make ${sel.length} day${sel.length === 1 ? '' : 's'} World-run</h4>
+      <div class="mv-sum">${sel.reduce((a, r) => a + Number(r[5] || 0), 0)} kids booked (kept) · ${sel.reduce((a, r) => a + Math.max(Number(r[4] || 0), 0), 0)} spots left (kept, now kept by the Hub)</div>
+      ${empty.length ? `<label class="mv-hide"><input type="checkbox" ${_m2c.hide ? 'checked' : ''} onchange="_m2c.hide=this.checked"> Also hide the ${empty.length} empty days (0 spots, nobody booked) from schedules</label>` : ''}
+      <div class="goal-note">Then in Shopify: set these camps' products to <b>Draft</b> (Hextom). World keeps showing them: World-run days don't need the Shopify product.</div>
+      <button class="ho-btn primary" ${sel.length ? '' : 'disabled'} onclick="m2cGo()">🔁 Make World-run</button></div></div>`}`;
+}
+function m2cPick(t, on) { (_m2c.rows || []).filter(r => r[1] === t && (m2cReal(r) || Number(r[4]) < 0)).forEach(r => on ? _m2c.sel.add(r[0]) : _m2c.sel.delete(r[0])); m2wDraw(); }
+async function m2cFind() {
+  _m2c.q = (document.getElementById('mc-q').value || '').trim(); _m2c.msg = 'Looking…'; _m2c.rows = null; _m2c.sel = new Set(); m2wDraw();
+  const { data, error } = await sb.rpc('hub_camp_preview', { p_search: _m2c.q || '*', p_from: null });
+  _m2c.msg = error ? esc(/hub_camp_preview/i.test(error.message) ? 'Run hub_move_camps.sql in Supabase first.' : error.message) : '';
+  _m2c.rows = error ? null : (data || []);
+  (_m2c.rows || []).forEach(r => { if (m2cReal(r) || Number(r[4]) < 0) _m2c.sel.add(r[0]); });
+  m2wDraw();
+}
+async function m2cGo() {
+  const ids = [..._m2c.sel], R = _m2c.rows || [];
+  if (!ids.length || !confirm(`Make ${ids.length} camp and PA/PD day${ids.length === 1 ? '' : 's'} World-run?\n\nThey keep their names, spots and bookings. From now on they're booked on World (Stripe) only, and the Hub keeps their spots.`)) return;
+  _m2c.msg = 'Moving…'; m2wDraw();
+  let moved = 0, err = '';
+  for (let i = 0; i < ids.length; i += 1000) {
+    const { data, error } = await sb.rpc('hub_camp_move', { p_ids: ids.slice(i, i + 1000) });
+    if (error) { err = error.message; break; } moved += Number((data && data.moved) || 0);
+  }
+  let hidden = 0;
+  const empty = R.filter(r => !_m2c.sel.has(r[0]) && !m2cReal(r) && !(Number(r[4]) < 0)).map(r => r[0]);
+  if (!err && _m2c.hide && empty.length) for (let i = 0; i < empty.length; i += 1000) { const h = await sb.rpc('hub_hide_empty_sessions', { p_ids: empty.slice(i, i + 1000) }); hidden += h.error ? 0 : (h.data || 0); }
+  _m2c.msg = `${err ? `✗ Stopped: ${esc(err)}<br>` : ''}✓ <b>${moved}</b> day${moved === 1 ? '' : 's'} now World-run${hidden ? ` · hid ${hidden} empty day${hidden === 1 ? '' : 's'}` : ''}.<br><b>Next, in Shopify:</b> set these camps' products to <b>Draft</b> (Hextom bulk edit), then add the 4cats.com redirect.`;
+  _m2c.rows = null; _m2c.sel = new Set(); m2wDraw();
 }
 
 // ---- Move to World: multi-week series (e.g. Make the Gift: "3 Week Session" + "Class 2 of 3"…) → a class page's class times (hub_move_series.sql) ----
