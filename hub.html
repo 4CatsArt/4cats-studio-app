@@ -1918,6 +1918,7 @@ body.ps-open { overflow: hidden; } .ps-facts { font-size: 13px; color: var(--ink
 .ft-notes { background: #faf8fb; border-radius: 10px; padding: 8px 10px; margin: 0 0 8px; } .ft-note-l { display: flex; gap: 8px; align-items: center; font-size: 14px; }
 .ft-note-l input { flex: 1; font: inherit; padding: 8px 10px; border: 1px solid var(--line, #e7e3ef); border-radius: 10px; }
 .fam-tl-row.move .fam-tl-dot { background: #2563eb; } .fam-tl-row.credit .fam-tl-dot { background: #15803d; }
+.cl-away td { color: #9ca3af; } .cl-away td b { color: #9ca3af; font-weight: 600; } .mv-note.away { color: #b91c1c; }
 </style>
 </head>
 <body>
@@ -6289,20 +6290,36 @@ async function toggleClassList(sessionId) {
       const k = b.shopify_order_name + '|' + (b.shopify_line_item_id || b.id);
       if (seen.has(k)) return false; seen.add(k); return true;
     });
-    const kidsQ = rows.length ? await sb.from('booking_children').select('booking_id, child_index, child_name').in('booking_id', rows.map(b => b.id)).order('child_index') : { data: [] };
+    // "Can't make it?" (world_class_weeks.sql): kids away from this class today: joining another class (still listed here, greyed) or skipping
+    const away = {}, ghosts = [];
+    try {
+      const wc = await sb.from('class_week_changes').select('booking_id, kind, note, to_session, customer_name, qty').eq('from_session', x.id).is('undone_at', null);
+      if (!wc.error && (wc.data || []).length) {
+        const toIds = [...new Set(wc.data.map(c => c.to_session).filter(Boolean))];
+        const ts = toIds.length ? await sb.from('sessions').select('id, session_date, session_time').in('id', toIds) : { data: [] };
+        const tsMap = {}; ((ts.data) || []).forEach(t => { tsMap[t.id] = t; });
+        wc.data.forEach(c => {
+          const t = tsMap[c.to_session], why = c.kind === 'swap' ? 'joining ' + (t ? ptyDayLabel(t.session_date) + ' ' + shortTime(t.session_time || '') : 'another class') : c.kind === 'early_next' ? 'skipping, 15 min early next class' : 'skipping';
+          const line = 'Not coming today: ' + why + (c.note ? ' (' + c.note + ')' : '');
+          if (c.kind === 'swap') ghosts.push({ id: c.booking_id, customer_name: c.customer_name, qty: c.qty, line }); else away[c.booking_id] = line;
+        });
+      }
+    } catch (e) {}
+    const kidsQ = rows.length || ghosts.length ? await sb.from('booking_children').select('booking_id, child_index, child_name').in('booking_id', rows.map(b => b.id).concat(ghosts.map(g => g.id))).order('child_index') : { data: [] };
     const kids = {}; ((kidsQ.data) || []).forEach(k => { if (k.child_name) (kids[k.booking_id] = kids[k.booking_id] || []).push(k.child_name); });
     const glazing = x.session_type === 'glazing';
     // What each person is glazing: the studio's saved version (hub_glazing_pieces.sql), else the customer's choice
     let glz = {};
     if (glazing && rows.length) { try { const g = await sb.rpc('hub_glazing_pieces', { p_booking_ids: rows.map(b => String(b.id)) }); if (!g.error) glz = g.data || {}; } catch (e) {} }
-    const total = rows.reduce((n, b) => n + (b.qty || 0), 0);
+    const awayN = rows.reduce((n, b) => n + (away[b.id] ? (b.qty || 0) : 0), 0) + ghosts.reduce((n, g) => n + (g.qty || 0), 0);
+    const total = rows.reduce((n, b) => n + (away[b.id] ? 0 : (b.qty || 0)), 0);
     // Age groups across the class: under 8 (need one adult each), 8–11, 12–15.
     const agSum = rows.reduce((t, b) => { const a = b.ages || {}; t.u8 += a.kids_under_8 || 0; t.k811 += a.kids_8_11 || 0; t.k1215 += a.kids_12_15 || 0; return t; }, { u8: 0, k811: 0, k1215: 0 });
     const agBits = [agSum.u8 ? `<span class="age-pill u8">👶 Under 8: ${agSum.u8}</span>` : '', agSum.k811 ? `<span class="age-pill k811">8–11: ${agSum.k811}</span>` : '', agSum.k1215 ? `<span class="age-pill k1215">12–15: ${agSum.k1215}</span>` : ''].filter(Boolean).join('');
-    el.innerHTML = `<div class="cl-head"><b>${total}</b> ${planIsKids(x) ? 'enrolled' : 'booked'}${agBits ? `<span class="age-sum">${agBits}</span>` : ''}
+    el.innerHTML = `<div class="cl-head"><b>${total}</b> ${planIsKids(x) ? 'enrolled' : 'booked'}${awayN ? ` <span class="goal-note">(+ ${awayN} away today)</span>` : ''}${agBits ? `<span class="age-sum">${agBits}</span>` : ''}
         <span class="spacer"></span><button class="ho-btn" onclick="planEmail('${escAttr(x.id)}')">✉️ Email this class</button><button class="ho-btn" onclick="planEmailHistory('${escAttr(x.id)}')">Sent</button><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button>
 </div>
-      ${rows.length ? `<div class="oc-wrap"><table class="oc-table cl-table"><thead><tr><th>Name</th><th>Qty</th>${glazing ? '<th>Glazing</th>' : ''}<th>Extras</th><th>Phone</th><th>Order</th><th>Notes</th>${planMovable(x) || _hoCan.edit ? '<th></th>' : ''}</tr></thead><tbody>
+      ${rows.length || ghosts.length ? `<div class="oc-wrap"><table class="oc-table cl-table"><thead><tr><th>Name</th><th>Qty</th>${glazing ? '<th>Glazing</th>' : ''}<th>Extras</th><th>Phone</th><th>Order</th><th>Notes</th>${planMovable(x) || _hoCan.edit ? '<th></th>' : ''}</tr></thead><tbody>
       ${rows.map(b => {
         const ex = [b.hot_chocolate_qty ? `☕ ${b.hot_chocolate_qty}` : '', b.candy_bag_qty ? `🍬 ${b.candy_bag_qty}` : '', b.aftercare ? 'Aftercare' : '', b.early_arrival ? 'Early arrival' : ''].filter(Boolean).join(' · ');
         const note = esc((typeof getOrderNote === 'function' ? getOrderNote(b) : b.order_note) || '');
@@ -6311,16 +6328,17 @@ async function toggleClassList(sessionId) {
           a.kids_8_11 ? `<span class="age-pill k811">${a.kids_8_11} aged 8–11</span>` : '', a.kids_12_15 ? `<span class="age-pill k1215">${a.kids_12_15} aged 12–15</span>` : ''].filter(Boolean).join('');
         const pick = (() => { try { const raw = typeof b.raw_payload === 'string' ? JSON.parse(b.raw_payload) : (b.raw_payload || {}); const pr = ((raw.line_items || [])[0] || {}).properties || [];
           const f = k => (pr.find(x => x && x.name === k) || {}).value; return f('Pickup') ? { who: f('Pickup'), kids: !!f('Kids only') } : null; } catch (e) { return null; } })();
-        return `<tr><td><b>${esc(b.customer_name || '—')}</b>${pick ? `<div class="cl-pickup">🚗 Pickup: ${esc(pick.who)}${pick.kids ? ' <span class="ws-tag kids">Kids only</span>' : ''}</div>` : ''}${(kids[b.id] || []).length ? `<div class="cl-kids">🧒 ${esc(kids[b.id].join(', '))}</div>` : ''}${ageRow ? `<div class="age-row">${ageRow}</div>` : ''}</td>
+        return `<tr${away[b.id] ? ' class="cl-away"' : ''}><td><b>${esc(b.customer_name || '—')}</b>${pick ? `<div class="cl-pickup">🚗 Pickup: ${esc(pick.who)}${pick.kids ? ' <span class="ws-tag kids">Kids only</span>' : ''}</div>` : ''}${(kids[b.id] || []).length ? `<div class="cl-kids">🧒 ${esc(kids[b.id].join(', '))}</div>` : ''}${ageRow ? `<div class="age-row">${ageRow}</div>` : ''}</td>
           <td>${esc(b.qty)}</td>${glazing ? (() => {
             const orig = getGlazingPiece(b.raw_payload, b.event_date) || '', saved = glz[String(b.id)];
             return `<td class="glz-cell"><div class="glz-edit"><input id="glz-${escAttr(b.id)}" value="${escAttr(saved != null ? saved : orig)}" placeholder="What are they glazing?" maxlength="300">
               <button class="ho-btn" onclick="planSaveGlazing('${escAttr(b.id)}')">Save</button></div>
               ${saved != null && saved !== orig ? `<div class="goal-note">changed · customer chose: ${esc(orig || 'nothing')}</div>` : ''}<div class="glz-msg" id="glz-msg-${escAttr(b.id)}"></div></td>`; })() : ''}
           <td>${esc(ex)}</td><td>${esc(b.customer_phone || '')}</td><td>${b.shopify_order_name ? shopifyOrderLink(esc(b.shopify_order_name)) : ''}</td>
-          <td>${note}${b.move_note ? `<div class="mv-note">↪ ${esc(b.move_note)}</div>` : ''}</td>
+          <td>${note}${away[b.id] ? `<div class="mv-note away">🚫 ${esc(away[b.id])}</div>` : b.move_note ? `<div class="mv-note">↪ ${esc(b.move_note)}</div>` : ''}</td>
           ${planMovable(x) || _hoCan.edit ? `<td>${planMovable(x) ? `<button class="ho-btn mv-btn" onclick="planMoveBooking('${escAttr(b.id)}', '${escAttr(x.id)}', ${escAttr(JSON.stringify(b.customer_name || 'this booking'))})">Move</button>` : ''}${_hoCan.edit ? `<button class="ho-btn ba-btn" onclick="openBookingAdmin(['${escAttr(b.id)}'], ${escAttr(JSON.stringify(b.customer_name || 'this booking'))}, true)">Change / Cancel</button>` : ''}</td>` : ''}</tr>`;
-      }).join('')}</tbody></table></div>` : '<div class="goal-note" style="padding:8px 2px">No one booked yet.</div>'}`;
+      }).join('')}${ghosts.map(g => `<tr class="cl-away"><td><b>${esc(g.customer_name || '—')}</b>${(kids[g.id] || []).length ? `<div class="goal-note">${esc(kids[g.id].join(', '))}</div>` : ''}</td><td>${esc(g.qty || '')}</td>${glazing ? '<td></td>' : ''}<td></td><td></td><td></td>
+          <td><div class="mv-note away">🚫 ${esc(g.line)}</div></td>${planMovable(x) || _hoCan.edit ? '<td></td>' : ''}</tr>`).join('')}</tbody></table></div>` : '<div class="goal-note" style="padding:8px 2px">No one booked yet.</div>'}`;
     el.dataset.title = x.title; el.dataset.time = x.session_time || '';
   } catch (e) {
     el.innerHTML = `<div class="goal-note" style="padding:10px">Couldn't load the class list: ${esc(e.message || e)}</div>`;
