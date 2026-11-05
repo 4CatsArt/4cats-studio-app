@@ -365,6 +365,10 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .plan-shifts { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
 .plan-sess { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: #fff; margin-bottom: 8px; }
 .plan-sess .t { font-family: 'Fredoka', 'Inter', sans-serif; font-weight: 600; width: 64px; }
+.idea-report { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; margin: 0 0 14px; font-size: 14px; }
+.idea-report-pct { color: #6b6b63; }
+.idea-row.is-booked { background: #fff6cc !important; border-color: #f1d27a !important; }
+.idea-booked { background: #ffe58a; color: #6b4e00; border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 800; }
 .idea-auto { background: #f1e8fb; color: #5b2d82; border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 700; }
 .idea-pin { display: flex; align-items: stretch; gap: 0; margin: 0 0 12px; max-width: 100%; }
 .idea-pin-main { flex: 1; min-width: 0; text-align: left; background: #fff7d6; border: 1px solid #f1d27a; border-right: 0; border-radius: 999px 0 0 999px; padding: 8px 14px; font: inherit; font-size: 14px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -8863,7 +8867,7 @@ async function ptyDismiss(bookingId) {
 // New suggestions show here (no email to hello@). "Date added" emails the family
 // automatically with a link (idea-update Edge Function). Home office can see every studio.
 const IDEA_KIND_LABEL = { pa_days: 'PA/PD day', workshops: 'Workshop', class_times: 'Class times', camps: 'Camps', age_groups: 'Age groups', parties: 'Party idea', projects: 'Future project', other: 'Something else' };
-let _ideas = [], _ideaOpen = null, _ideaDecline = null;   // the "Date added" / "Not this time" box that's open
+let _ideas = [], _ideaOpen = null, _ideaDecline = null, _ideaBooked = {};   // the "Date added" / "Not this time" box that's open
 function openIdeasPane() {
   if (!coordOrAdmin()) { openPinModal(); return; }
   showOnlyPane('ideas-pane'); setActiveNav('nav-ideas');
@@ -8902,6 +8906,10 @@ async function loadIdeasPane() {
   const { data, error } = await sb.rpc('hub_ideas_list', { p_studio: _sessionStudioId, p_all: all });
   if (error) { body.innerHTML = '<div class="ho-intro">' + (/function|does not exist/i.test(error.message) ? 'Not set up yet: run world_ideas_hub.sql in Supabase.' : esc(error.message)) + '</div>'; return; }
   _ideas = data || [];
+  // Bookings on the workshop times families set up (hub_ideas_booked.sql): the report and yellow rows
+  _ideaBooked = {};
+  const withTime = _ideas.filter(x => x.session_id).map(x => x.id);
+  if (withTime.length) { try { const r = await sb.rpc('hub_ideas_booked', { p_ids: withTime }); if (!r.error) (r.data || []).forEach(b => { _ideaBooked[b.id] = b; }); } catch (e) {} }
   // studio filter: the studios that have suggestions
   const sel = document.getElementById('ideas-studio'), keep = sel.value;
   const ids = [...new Set(_ideas.map(x => x.studio_id).filter(Boolean))].sort((a, b) => (STUDIO_NAMES[a] || a).localeCompare(STUDIO_NAMES[b] || b));
@@ -8919,6 +8927,13 @@ function drawIdeas() {
     .slice().sort((a, b) => allMode ? ((STUDIO_NAMES[a.studio_id] || a.studio_id || '~').localeCompare(STUDIO_NAMES[b.studio_id] || b.studio_id || '~') || String((a.dates || [])[0] || a.created_at).localeCompare(String((b.dates || [])[0] || b.created_at))) : 0);
   if (!_ideas.length) { body.innerHTML = '<div class="ho-intro">No suggestions yet. Families send them from 4Cats World’s home page (“Suggest a date!”).</div>'; return; }
   let h = '<div class="ho-intro">What families suggested on 4Cats World. Mark <b>Date added</b> when you’ve put it on the schedule: the family gets an email with a link.</div>';
+  // The report: suggested workshops that families set up, and how many got booked
+  const setUp = shown.filter(x => x.session_id), gotBooked = setUp.filter(x => (_ideaBooked[x.id] || {}).booked > 0);
+  if (setUp.length) {
+    const people = gotBooked.reduce((n, x) => n + (+_ideaBooked[x.id].booked || 0), 0);
+    h += '<div class="idea-report">📈 <b>Suggested workshops</b>' + (only ? ' at ' + esc(STUDIO_NAMES[only] || only) : '') + ': <b>' + setUp.length + '</b> set up by families on World · <b>' + gotBooked.length + '</b> got bookings · <b>' + people + '</b> ' + (people === 1 ? 'person' : 'people') + ' booked' +
+      (setUp.length ? ' <span class="idea-report-pct">(' + Math.round(100 * gotBooked.length / setUp.length) + '% booked)</span>' : '') + '</div>';
+  }
   groups.forEach(g => {
     const list = shown.filter(x => (x.status || 'new') === g[0]); if (!list.length) return;
     const grouped = ideaGroups(list);
@@ -8933,8 +8948,10 @@ function drawIdeas() {
         (y.details ? '<div class="idea-text">' + esc(y.details) + '</div>' : '') + '</div>').join('');
       const ids = "'" + key + "'";
       const autoNew = x.auto_swap && !x.seen_at, canGo = !x.auto_swap && dates.length && (x.status === 'new' || x.status === 'seen');
-      return '<div class="idea-row' + (x.status === 'new' || autoNew ? ' is-new' : '') + '"><div class="idea-main">' +
+      const bk = G.reduce((n, y) => n + (+((_ideaBooked[y.id] || {}).booked) || 0), 0);
+      return '<div class="idea-row' + (x.status === 'new' || autoNew ? ' is-new' : '') + (bk ? ' is-booked' : '') + '"><div class="idea-main">' +
         '<div class="idea-top"><span class="idea-kind">' + esc(IDEA_KIND_LABEL[x.kind] || x.kind) + '</span>' +
+          (bk ? '<span class="idea-booked">🎉 ' + bk + ' booked</span>' : '') +
           (x.auto_swap ? '<span class="idea-auto" title="They tapped Book it on World, and an empty workshop time became this one">✨ Set up by the family on World</span>' : '') +
           (many ? '<span class="idea-count">' + G.length + ' families' + (kids ? ' · ' + kids + ' kids' : '') + '</span>' : '') +
           (allMode ? '<span class="idea-studio">' + esc(STUDIO_NAMES[x.studio_id] || x.studio_id || 'No studio') + '</span>' : '') + '</div>' +
