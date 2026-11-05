@@ -1919,6 +1919,7 @@ body.ps-open { overflow: hidden; } .ps-facts { font-size: 13px; color: var(--ink
 .ft-note-l input { flex: 1; font: inherit; padding: 8px 10px; border: 1px solid var(--line, #e7e3ef); border-radius: 10px; }
 .fam-tl-row.move .fam-tl-dot { background: #2563eb; } .fam-tl-row.credit .fam-tl-dot { background: #15803d; }
 .cl-away td { color: #9ca3af; } .cl-away td b { color: #9ca3af; font-weight: 600; } .mv-note.away { color: #b91c1c; }
+tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decoration: line-through; text-decoration-color: #9ca3af; }   /* (crossed out; the last cell, with the reason and Undo, stays readable) */
 </style>
 </head>
 <body>
@@ -6521,6 +6522,22 @@ async function buildKidsClassList(x, el) {
       const k = b.shopify_order_name + '|' + (b.shopify_line_item_id || b.id);
       if (seen.has(k)) return false; seen.add(k); return true;
     });
+    // "Can't make it?" (world_class_weeks.sql): who's away from this class this week, and who's joining it as a catch-up
+    window._wkMap = {};
+    try {
+      const [wOut, wIn] = await Promise.all([sb.from('class_week_changes').select('booking_id, kind, note, to_session').eq('from_session', x.id).is('undone_at', null),
+        sb.from('class_week_changes').select('booking_id, kind, note, from_session').eq('to_session', x.id).is('undone_at', null)]);
+      const sIds = [...new Set([...(wOut.data || []).map(c => c.to_session), ...(wIn.data || []).map(c => c.from_session)].filter(Boolean))];
+      const ss = sIds.length ? await sb.from('sessions').select('id, session_date, session_time').in('id', sIds) : { data: [] };
+      const sm = {}; (ss.data || []).forEach(t => { sm[t.id] = t; });
+      const lab = t => t ? ptyDayLabel(t.session_date) + ' ' + shortTime(t.session_time || '') : 'another class';
+      (wOut.data || []).forEach(c => { window._wkMap[c.booking_id] = { dir: 'out', kind: c.kind, note: c.note,
+        text: 'Not coming today: ' + (c.kind === 'swap' ? 'joining ' + lab(sm[c.to_session]) : c.kind === 'early_next' ? 'skipping, 15 min early next class' : 'skipping') + (c.note ? ' (' + c.note + ')' : '') }; });
+      (wIn.data || []).forEach(c => { window._wkMap[c.booking_id] = { dir: 'in', kind: c.kind, note: c.note, text: 'Catch-up: usually ' + lab(sm[c.from_session]) + (c.note ? ' (' + c.note + ')' : '') }; });
+      // kids joining another class this week: their booking moved there, so list it here too (greyed)
+      const gone = (wOut.data || []).filter(c => c.kind === 'swap').map(c => c.booking_id).filter(id => !bookings.some(b => b.id === id));
+      if (gone.length) { const g = await sb.from('bookings').select('*').in('id', gone); (g.data || []).forEach(b => bookings.push(Object.assign({}, b, { _away: true }))); }
+    } catch (e) { console.warn('class week changes:', e); }
     const orders = bookings.map(b => b.shopify_order_name).filter(Boolean);
     const bIds = bookings.map(b => b.id);
     const [tally, kids, att, cuFrom, cuTo] = await Promise.all([
@@ -6533,8 +6550,9 @@ async function buildKidsClassList(x, el) {
     const tallyData = {}; (tally.data || []).forEach(t => { (tallyData[t.shopify_order_name] = tallyData[t.shopify_order_name] || []).push(t); });
     const childrenData = {}; (kids.data || []).forEach(c => { (childrenData[c.booking_id] = childrenData[c.booking_id] || []).push(c); });
     const attendanceData = {}; (att.data || []).forEach(a => { attendanceData[`${a.shopify_order_name}|${(a.camper_name || '').toLowerCase().trim()}`] = a; });
-    const enrolled = bookings.filter(b => (b.qty || 0) > 0).reduce((n, b) => n + (b.qty || 0), 0) + (cuTo || []).length;
-    el.innerHTML = `<div class="cl-head"><b>${enrolled}</b> enrolled · tick ✓ for attendance, and Save after changing a child's details
+    const awayN = bookings.filter(b => (window._wkMap[b.id] || {}).dir === 'out').reduce((n, b) => n + (b.qty || 0), 0);
+    const enrolled = bookings.filter(b => (b.qty || 0) > 0).reduce((n, b) => n + (b.qty || 0), 0) + (cuTo || []).length - awayN;
+    el.innerHTML = `<div class="cl-head"><b>${enrolled}</b> enrolled${awayN ? ` (+ ${awayN} away today)` : ''} · tick ✓ for attendance, and Save after changing a child's details
         <span class="spacer"></span><button class="ho-btn" onclick="planEmail('${escAttr(x.id)}')">✉️ Email this class</button><button class="ho-btn" onclick="planEmailHistory('${escAttr(x.id)}')">Sent</button><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button></div>
       ${bookings.length || (cuTo || []).length
         ? `<div class="booking-table-wrap">${buildSeriesTable(bookings, tallyData, attendanceData, x.id, _plan.date, _sessionStudioId, x.session_time || '', childrenData, cuFrom || {}, cuTo || [], x.title)}</div>`
@@ -6764,6 +6782,44 @@ function buildCampTable(bookings, tallyData, attendanceData, sessionId, dateLabe
    Class"). Changes for the Hub: the Schedule's date, who made it, and the
    Hub's own refresh (planAfterCatchup) instead of the Day view's.
    ========================================================================== */
+// ---- "Can't make it?" for staff (hub_class_week, world_class_weeks.sql): the same choices families have, no 1-hour cut-off ----
+async function openWeekModal(bookingId, camperName) {
+  document.getElementById('week-modal')?.remove()
+  const m = document.createElement('div'); m.id = 'week-modal'; m.className = 'modal-overlay'
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:9999'
+  m.innerHTML = `<div style="background:#fff;border-radius:14px;padding:20px;width:min(460px,94vw);max-height:90vh;overflow:auto"><h3 style="margin:0 0 6px">Can’t make it this week</h3>
+    <div class="goal-note" style="margin-bottom:10px">${esc(camperName || '')}</div><div id="wm-body" class="goal-note">Loading…</div></div>`
+  m.addEventListener('click', e => { if (e.target === m) m.remove() })
+  document.body.appendChild(m)
+  const r = await sb.rpc('hub_class_week', { p_action: 'options', p_booking: bookingId })
+  const body = document.getElementById('wm-body'); if (!body) return
+  if (r.error) { body.textContent = r.error.message; return }
+  const opts = r.data || []
+  body.className = ''
+  body.innerHTML = `<label style="display:block;font-size:13px;margin-bottom:10px">Note (from the parent, optional)<input id="wm-note" maxlength="300" placeholder="e.g. sick, away that weekend" style="display:block;width:100%;margin-top:4px;padding:6px 8px;border:1px solid #d1d5db;border-radius:8px"></label>
+    <div style="display:grid;gap:8px;margin-bottom:12px;font-size:14px">
+      ${opts.length ? opts.map(o => `<label style="display:flex;gap:8px;align-items:flex-start"><input type="radio" name="wm" value="swap|${escAttr(o.session_id)}"> Join the class on <b>${esc(ptyDayLabel(o.date))} ${esc(shortTime(o.time || ''))}</b> instead <span class="goal-note">(${o.booked} booked, ${o.spaces_left} left)</span></label>`).join('')
+        : '<div class="goal-note">No other class times this week (same class and week) with kids booked and room.</div>'}
+      <label style="display:flex;gap:8px;align-items:flex-start"><input type="radio" name="wm" value="early_next"> Skip this week, and come <b>15 minutes early</b> to the next class</label>
+      <label style="display:flex;gap:8px;align-items:flex-start"><input type="radio" name="wm" value="skip"> Just skip this week (no credit)</label></div>
+    <div id="wm-msg" class="goal-note" style="color:#b91c1c"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" onclick="document.getElementById('week-modal').remove()">Cancel</button><button class="btn" style="background:#1f2937;color:#fff" id="wm-go">Save</button></div>`
+  document.getElementById('wm-go').onclick = async () => {
+    const pick = document.querySelector('#week-modal input[name=wm]:checked'), msg = document.getElementById('wm-msg')
+    if (!pick) { msg.textContent = 'Choose one.'; return }
+    const [kind, to] = pick.value.split('|')
+    const { error } = await sb.rpc('hub_class_week', { p_action: 'apply', p_booking: bookingId, p_kind: kind, p_to: to || null, p_note: document.getElementById('wm-note').value.trim() || null })
+    if (error) { msg.textContent = error.message; return }
+    document.getElementById('week-modal').remove()
+    planAfterCatchup()
+  }
+}
+async function hubWeekUndo(bookingId) {
+  if (!confirm('Undo this week’s change, and keep them in their usual class?')) return
+  const { error } = await sb.rpc('hub_class_week', { p_action: 'undo', p_booking: bookingId })
+  if (error) { alert(error.message); return }
+  planAfterCatchup()
+}
 function openCatchupModal(originSessionId, bookingId, camperName, dateLabel, originSessionTime) {
   document.getElementById('catchup-modal')?.remove()
   const modal = document.createElement('div')
@@ -15972,11 +16028,15 @@ function buildSeriesTable(bookings, tallyData, attendanceData, sessionId, dateLa
   seriesTableSort = { col: null, dir: 1 }
 
   function catchupControl(bookingId, camperName) {
+    const wk = (window._wkMap || {})[bookingId]
+    if (wk) return { rowStyle: wk.dir === 'out' ? 'opacity:0.6;background:#f6f6f6" class="wk-away' : '',   // (away this week: greyed and crossed out)
+      html: `<div style="font-size:11px;color:${wk.dir === 'out' ? '#b91c1c' : '#1d4ed8'};margin-top:4px;white-space:normal">${wk.dir === 'out' ? '🚫' : '↪'} ${esc(wk.text)}</div>` +
+        `<button onclick="hubWeekUndo('${bookingId}')" style="margin-top:4px;padding:3px 8px;background:#fff;border:0.5px solid #d1d5db;border-radius:6px;font-size:11px;cursor:pointer">Undo</button>` }
     const cu = catchupOriginMap[catchupKey(bookingId, camperName)]
     if (cu) {
       return { rowStyle: 'opacity:0.55;background:#fff8ec', html: `<div style="font-size:11px;color:#b06a00;margin-top:4px;white-space:normal">will be absent — joining ${catchupTargetLabel(cu)}${cu.note ? ' (' + cu.note + ')' : ''} <button onclick="removeCatchupTransfer('${cu.id}')" style="margin-left:4px;padding:1px 6px;background:none;border:0.5px solid #e0c8a0;border-radius:5px;font-size:10px;color:#b06a00;cursor:pointer">✕</button></div>` }
     }
-    return { rowStyle: '', html: `<button onclick="openCatchupModal('${sessionId}','${bookingId}',${jsArg((camperName||''))},${jsArg(dateLabel)},'${sessionTime||''}')" style="margin-top:4px;padding:3px 8px;background:#f0f6ff;border:0.5px solid #c5d8f0;border-radius:6px;font-size:11px;color:#2d6a9f;cursor:pointer;white-space:nowrap">Catch-up →</button>` }
+    return { rowStyle: '', html: `<button onclick="openWeekModal('${bookingId}',${jsArg((camperName||''))})" style="margin-top:4px;padding:3px 8px;background:#f0f6ff;border:0.5px solid #c5d8f0;border-radius:6px;font-size:11px;color:#2d6a9f;cursor:pointer;white-space:nowrap">Can’t make it?</button>` }
   }
 
   bookings.forEach(b => {
