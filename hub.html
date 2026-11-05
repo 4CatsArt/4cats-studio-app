@@ -365,6 +365,7 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .plan-shifts { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
 .plan-sess { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: #fff; margin-bottom: 8px; }
 .plan-sess .t { font-family: 'Fredoka', 'Inter', sans-serif; font-weight: 600; width: 64px; }
+.plan-sess.cu15 { background: #fff8e6; border-color: #f5d48a; padding: 6px 12px; } .plan-sess.cu15 .nm { font-size: 14px; }
 .plan-sess .nm { flex: 1 1 200px; font-weight: 700; color: var(--ink); }
 .plan-sess .sub { font-size: 12px; color: var(--ink-soft); font-weight: 500; }
 /* Party forms — copied from the schedule's Day view, only inside the Schedule page */
@@ -5170,6 +5171,25 @@ async function loadPlanDay(date) {
     } catch (e) { /* no slot schedule: show party products as before */ }
     const kidsTeacher = {};
     sessions.filter(planIsKids).forEach(x => { kidsTeacher[x.id] = (staffBy[x.id] || {}).teacher || ''; });
+    // "Can't make it?" → skip + 15 min early (world_class_weeks.sql): a little 15-minute catch-up row before the class they're coming early to
+    const early = [];
+    if (ids.length) {
+      try {
+        const ec = await sb.from('class_week_changes').select('booking_id, next_session, note, customer_name, qty').in('next_session', ids).eq('kind', 'early_next').is('undone_at', null);
+        if (!ec.error && (ec.data || []).length) {
+          const bc = await sb.from('booking_children').select('booking_id, child_index, child_name').in('booking_id', ec.data.map(c => c.booking_id)).order('child_index');
+          const kidsOf = {}; ((bc.data) || []).forEach(k => { if (k.child_name) (kidsOf[k.booking_id] = kidsOf[k.booking_id] || []).push(k.child_name); });
+          const by = {};
+          ec.data.forEach(c => {
+            const sx = (sess.data || []).find(z => z.id === c.next_session); if (!sx) return;
+            const e = by[sx.id] = by[sx.id] || { session: sx, kids: [] };
+            const nm = (kidsOf[c.booking_id] || []).join(', ') || c.customer_name || 'A student';
+            e.kids.push(nm + (c.note ? ' (' + c.note + ')' : ''));
+          });
+          Object.keys(by).forEach(k => early.push(by[k]));
+        }
+      } catch (e) { /* table not there yet: no catch-up rows */ }
+    }
     // Camp teams (hub_camp_team.sql): one lead + teachers per camp day
     let campTeam = {};
     const campIds = sessions.filter(planIsCamp).map(x => x.id);
@@ -5183,7 +5203,7 @@ async function loadPlanDay(date) {
       const w = await sb.rpc('hub_ws_range', { p_studio: st, p_from: date, p_to: date }); ws = w.error ? { error: w.error.message } : w.data;
       if (!_wsProjects || _wsProjectsErr) { const pr = await sb.rpc('hub_ws_projects'); _wsProjects = pr.error ? [] : (pr.data || []); _wsProjectsErr = pr.error ? pr.error.message : ''; if (pr.error) console.warn('hub_ws_projects:', pr.error); }
     }
-    _plan = { ws, date, team: team.data || [], sessions, events, staffBy, booked, extras, signins, kidsTeacher, campTeam, partyForms: keepForms, classLists: keepLists, roles, wheel, parties, dirty: false, msg: '' };
+    _plan = { ws, date, early, team: team.data || [], sessions, events, staffBy, booked, extras, signins, kidsTeacher, campTeam, partyForms: keepForms, classLists: keepLists, roles, wheel, parties, dirty: false, msg: '' };
     renderPlanDay();
   } catch (e) {
     body.innerHTML = `<div class="ho-card">Couldn't load that day: ${esc(e.message || e)}</div>`;
@@ -5631,6 +5651,8 @@ function renderPlanDay() {
         ${planRowExtras(x)}${planCount(x)}<span class="kind-chip kind-${sessionKind(x.title)[1]}">${esc(sessionKind(x.title)[0])}</span>${x.session_type === 'party' ? (planCanAdjust() ? (x.partySlot
           ? `<button class="ho-btn spots-btn" onclick="planSlotOpenClose('${escAttr(x.id)}', ${x.slotClosed ? 'true' : 'false'})">${x.slotClosed ? 'Reopen' : 'Close slot'}</button>`
           : `<button class="ho-btn spots-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Spots</button>`) : '') : planRowTools(x)}</div>${planNoteHtml(x)}<div class="pf-wrap" data-cl="${escAttr(x.id)}"></div>`]),
+    ...(P.early || []).map(e => { const m = hmM(e.session.session_time) - 15, t = String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+      return [m, `<div class="plan-sess cu15"><span class="t">${esc(shortTime(t))}</span><span class="nm">15-min catch-up · ${esc(e.session.title)}<div class="sub">Coming 15 minutes early to catch up on a missed class: <b>${esc(e.kids.join(' · '))}</b>. They stay for the ${esc(shortTime(e.session.session_time))} class.</div></span><span class="kind-chip">15 min</span></div>`]; }),
     ...(P.events || []).map(x => [-1, `<div class="plan-sess" style="background:#fff4dd;border-color:#ffd998"><span class="t">🎪</span><span class="nm">${esc(x.title)}<div class="sub">Event · staffing is set on the event</div></span></div>`])
   ].sort((a, b) => a[0] - b[0]).map(r => r[1]).join('');
   // Party forms: keep the open forms' own elements (and anything typed) across redraws.
