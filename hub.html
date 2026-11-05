@@ -366,6 +366,13 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .plan-sess { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: #fff; margin-bottom: 8px; }
 .plan-sess .t { font-family: 'Fredoka', 'Inter', sans-serif; font-weight: 600; width: 64px; }
 .plan-sess.cu15 { background: #fff8e6; border-color: #f5d48a; padding: 6px 12px; } .plan-sess.cu15 .nm { font-size: 14px; }
+/* Schedule: workshop times set up from World's "Suggest a date" */
+.sug-s { width: 22px; height: 22px; border-radius: 50%; border: 0; background: #7b3fa0; color: #fff; font: 800 12px/22px 'Inter', sans-serif; padding: 0; cursor: pointer; flex: none; }
+.plan-sess { position: relative; }
+.sug-pop { position: absolute; z-index: 30; right: 12px; top: 100%; margin-top: 4px; background: #fff; border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.15); padding: 10px 12px; min-width: 230px; max-width: 300px; font-size: 14px; cursor: default; }
+.sug-pop .sub { color: #6b6b63; font-size: 12px; margin-top: 2px; }
+.sug-pop .who { margin-top: 8px; }
+.sug-name { background: none; border: 0; padding: 0; font: inherit; font-weight: 700; color: #7b3fa0; text-decoration: underline; cursor: pointer; }
 .plan-sess .nm { flex: 1 1 200px; font-weight: 700; color: var(--ink); }
 .plan-sess .sub { font-size: 12px; color: var(--ink-soft); font-weight: 500; }
 /* Party forms — copied from the schedule's Day view, only inside the Schedule page */
@@ -1712,14 +1719,7 @@ body.preview-mode .nav-item.dev-only { display: flex !important; }
 .ho-btn.primary { background: #c8232c; border-color: #c8232c; color: #fff; }
 @media (max-width: 640px) { .idea-row { flex-direction: column; } .idea-acts { flex-direction: row; flex-wrap: wrap; } }
 
-/* Schedule: workshop times set up from World's "Suggest a date" */
-.sug-s { width: 22px; height: 22px; border-radius: 50%; border: 0; background: #7b3fa0; color: #fff; font: 800 12px/22px 'Inter', sans-serif; padding: 0; cursor: pointer; flex: none; }
-.plan-sess { position: relative; }
-.sug-pop { position: absolute; z-index: 30; right: 12px; top: 100%; margin-top: 4px; background: #fff; border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.15); padding: 10px 12px; min-width: 230px; max-width: 300px; font-size: 14px; cursor: default; }
-.sug-pop .sub { color: #6b6b63; font-size: 12px; margin-top: 2px; }
-.sug-pop .who { margin-top: 8px; }
-.sug-name { background: none; border: 0; padding: 0; font: inherit; font-weight: 700; color: #7b3fa0; text-decoration: underline; cursor: pointer; }
-/* Families → owner-only "Mark as member" */
+/* Families → "Mark as member" (owners, and home office with "Can fix memberships" ticked in admin) */
 .fam-comp { margin-top: 10px; padding: 10px 12px; border: 1px dashed #c9b8f0; border-radius: 10px; background: #faf8ff; }
 .fam-comp-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin: 8px 0; }
 .fam-comp-row label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
@@ -4345,12 +4345,13 @@ async function donDelete(id) {
 // (admin_can): view → can look; edit → can write. The database enforces the
 // same rule for writes (hub_announcements_write_access.sql).
 let _hoCan = { view: false, edit: false };
-let _hubOwner = false;   // Renée and Joey (admin_owners): owner-only tools like marking members
+let _hubOwner = false;     // Renée and Joey (admin_owners)
+let _hubMemberFix = false; // can use "Mark as member": owners, or "Can fix memberships" ticked in admin (hub_member_fixers.sql)
 let _hoAnns = [], _hoReadsBy = {}, _hoReadsOk = true, _hoEditing = null;
 
 async function setupHomeOffice(data) {
   const g = document.getElementById('nav-group-homeoffice');
-  _hoCan = { view: false, edit: false }; _hubOwner = false;
+  _hoCan = { view: false, edit: false }; _hubOwner = false; _hubMemberFix = false;
   if (!data || !data.isAdmin) { if (g) g.style.display = 'none'; return; }
   const [v, e] = await Promise.all([
     sb.rpc('admin_can', { p_section: 'ops', p_level: 'view' }),
@@ -4358,7 +4359,8 @@ async function setupHomeOffice(data) {
   ]);
   _hoCan = { view: v.data === true, edit: e.data === true };
   if (g) g.style.display = _hoCan.view ? '' : 'none';
-  try { const o = await sb.rpc('hub_is_owner'); _hubOwner = o.data === true; } catch (x) { _hubOwner = false; }   // hub_member_comp.sql
+  try { const o = await sb.rpc('hub_is_owner'); _hubOwner = o.data === true; } catch (x) { _hubOwner = false; }
+  try { const m = await sb.rpc('hub_can_fix_members'); _hubMemberFix = m.error ? _hubOwner : m.data === true; } catch (x) { _hubMemberFix = _hubOwner; }
 }
 
 function openAnnouncePane() {
@@ -5205,6 +5207,14 @@ async function loadPlanDay(date) {
         }
       } catch (e) { /* table not there yet: no catch-up rows */ }
     }
+    // Workshop times a customer set up from World's "Suggest a date" (hub_ws_suggested.sql): the little "S"
+    const suggested = {};
+    if (ids.length) {
+      try {
+        const sg = await sb.rpc('hub_ws_suggested', { p_sessions: ids, p_pin: _sessionPin || null });
+        if (!sg.error) (sg.data || []).forEach(x => { suggested[x.session_id] = x; });
+      } catch (e) { /* not set up yet: no S */ }
+    }
     // Camp teams (hub_camp_team.sql): one lead + teachers per camp day
     let campTeam = {};
     const campIds = sessions.filter(planIsCamp).map(x => x.id);
@@ -5217,14 +5227,6 @@ async function loadPlanDay(date) {
     if (planCanShifts()) {
       const w = await sb.rpc('hub_ws_range', { p_studio: st, p_from: date, p_to: date }); ws = w.error ? { error: w.error.message } : w.data;
       if (!_wsProjects || _wsProjectsErr) { const pr = await sb.rpc('hub_ws_projects'); _wsProjects = pr.error ? [] : (pr.data || []); _wsProjectsErr = pr.error ? pr.error.message : ''; if (pr.error) console.warn('hub_ws_projects:', pr.error); }
-    }
-    // Workshop times a customer set up from World's "Suggest a date" (hub_ws_suggested.sql): the little "S"
-    const suggested = {};
-    if (ids.length) {
-      try {
-        const sg = await sb.rpc('hub_ws_suggested', { p_sessions: ids, p_pin: _sessionPin || null });
-        if (!sg.error) (sg.data || []).forEach(x => { suggested[x.session_id] = x; });
-      } catch (e) { /* not set up yet: no S */ }
     }
     _plan = { ws, date, early, suggested, team: team.data || [], sessions, events, staffBy, booked, extras, signins, kidsTeacher, campTeam, partyForms: keepForms, classLists: keepLists, roles, wheel, parties, dirty: false, msg: '' };
     renderPlanDay();
@@ -8522,7 +8524,7 @@ function famRender() {
     const tm = t => { if (!t) return ''; const [h, m] = t.split(':').map(Number); return (h % 12 || 12) + (m ? ':' + String(m).padStart(2, '0') : '') + (h >= 12 ? 'pm' : 'am'); };
     const FLAGS = { allergy: ['⚕️', 'Allergy'], support: ['🤝', 'Needs extra support'], payment: ['💳', 'Ask about payment'], vip: ['⭐', 'VIP'], heads_up: ['👀', 'Heads up'] };
     const REL = { child: 'Child', myself: 'The customer', partner: 'Partner', grandchild: 'Grandchild', friend: 'Friend', other: 'Other' };
-    const PLAN = { member: '4Cats Member', workshops: 'Workshops Only' }, SRC = { world: 'joined on World', gift: 'gift', appstle: 'Appstle', bookeo: 'Bookeo', tag: 'Shopify tag', comp: 'added by an owner' };
+    const PLAN = { member: '4Cats Member', workshops: 'Workshops Only' }, SRC = { world: 'joined on World', gift: 'gift', appstle: 'Appstle', bookeo: 'Bookeo', tag: 'Shopify tag', comp: 'added by home office' };
     const open = k => _fam.secs && _fam.secs[k] ? ' open' : '';
     const sec = (k, title, count, body) => '<details class="fam-sec" data-sec="' + k + '"' + open(k) + '><summary>' + title + (count != null ? ' <span class="fam-count">' + count + '</span>' : '') + '</summary><div class="fam-sec-body">' + body + '</div></details>';
     const flags = (f.notes || []).filter(n => n.flag);
@@ -8620,10 +8622,10 @@ function famRender() {
       : '<p class="fam-meta">No cancellations.</p>');
     // Membership
     const mem = (f.memberships || [])[0];
-    h += sec('membership', 'Membership', null, mem ? '<p class="fam-line">' + famEsc(PLAN[mem.plan] || mem.plan) + ' · ' + famEsc(mem.status) + (mem.ends_on ? ' · until ' + famEsc(dl(mem.ends_on)) : '') +
+    h += sec('membership', 'Membership', null, (mem ? '<p class="fam-line">' + famEsc(PLAN[mem.plan] || mem.plan) + ' · ' + famEsc(mem.status) + (mem.ends_on ? ' · until ' + famEsc(dl(mem.ends_on)) : '') +
       (mem.auto_renew ? ' · renews automatically' : '') + (mem.source ? ' · ' + famEsc(SRC[mem.source] || mem.source) : '') + (mem.discount_kind ? ' · ' + famEsc(mem.discount_kind) + ' price' : '') + '</p>' +
       ((f.memberships || []).length > 1 ? '<p class="fam-meta">' + (f.memberships.length - 1) + ' earlier membership' + (f.memberships.length > 2 ? 's' : '') + ' on file.</p>' : '')
-      : '<p class="fam-meta">Not a member.</p>') .replace(/<\/div><\/details>$/, famCompHtml(f, PLAN, dl) + '</div></details>');
+      : '<p class="fam-meta">Not a member.</p>') + famCompHtml(f, mem));
     // Past year
     const pv = f.past || {};
     h += sec('past', 'Past year', pv.visits || 0, '<p class="fam-line">' + (pv.visits || 0) + ' visit' + (pv.visits === 1 ? '' : 's') + (pv.last_visit ? ' · last ' + famEsc(dl(pv.last_visit)) : '') + (pv.top_studio ? ' · usually at ' + famEsc(sn(pv.top_studio)) : '') + '</p>' +
@@ -8666,26 +8668,30 @@ function famRender() {
   }
   body.innerHTML = h;
 }
-// Owners only (hub_member_comp.sql): mark a family as a member, with an optional end date (blank = until ended)
-function famCompHtml(f, PLAN, dl) {
-  if (!_hubOwner || !f.shopify_customer_id) return '';
+// "Mark as member" (hub_member_comp.sql + hub_member_fixers.sql): free membership, with an optional end date
+function famCompHtml(f, mem) {
+  if (!_hubMemberFix || !f.shopify_customer_id) return '';
   const comp = (f.memberships || []).find(m => m.source === 'comp' && m.status === 'active');
-  const today = new Date(), min = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
+  const t = new Date(), min = t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0');
+  const noteReq = !_hubOwner;
   if (!_fam.compOpen) return '<div class="fam-comp"><button class="ho-btn" onclick="_fam.compOpen=true;famRender()">' + (comp ? '✏️ Change this membership' : '⭐ Mark as member') + '</button>' +
-    (comp ? ' <button class="ho-btn" onclick="famCompEnd()">End membership</button>' : '') + ' <small class="fam-meta">Owners only</small></div>';
-  return '<div class="fam-comp"><b>' + (comp ? 'Change membership' : '⭐ Mark as member') + '</b> <small class="fam-meta">(owners only, free, no payment)</small>' +
+    (comp ? ' <button class="ho-btn" onclick="famCompEnd()">End membership</button>' : '') +
+    (mem && !comp && mem.status === 'active' ? ' <small class="fam-meta">Already a member another way: only add one here if that one is wrong.</small>' : '') + '</div>';
+  return '<div class="fam-comp"><b>' + (comp ? 'Change membership' : '⭐ Mark as member') + '</b> <small class="fam-meta">(free, no payment)</small>' +
     '<div class="fam-comp-row"><label>Plan <select id="fc-plan"><option value="member"' + (comp && comp.plan === 'workshops' ? '' : ' selected') + '>4Cats Member</option><option value="workshops"' + (comp && comp.plan === 'workshops' ? ' selected' : '') + '>Workshops Only</option></select></label>' +
     '<label>Ends on <small>(optional)</small> <input type="date" id="fc-end" min="' + min + '" value="' + famEsc(comp && comp.ends_on ? String(comp.ends_on).slice(0, 10) : '') + '"></label>' +
-    '<label class="fc-note">Note <input id="fc-note" maxlength="200" placeholder="e.g. neighbour business"></label></div>' +
-    '<small class="fam-meta">Leave the end date blank and they stay a member until you end it.</small>' +
-    '<div class="fam-comp-row"><button class="ho-btn primary" onclick="famCompSave()">Save</button><button class="ho-btn" onclick="_fam.compOpen=false;famRender()">Cancel</button></div></div>';
+    '<label class="fc-note">Note' + (noteReq ? ' <small>(required)</small>' : '') + ' <input id="fc-note" maxlength="200" placeholder="e.g. Student member until Aug 14 2027, showed as not a member"></label></div>' +
+    '<small class="fam-meta">Leave the end date blank and they stay a member until it\'s ended. Every change is recorded with your name.</small>' +
+    '<div class="fam-comp-row"><button class="ho-btn primary" onclick="famCompSave()">Save</button><button class="ho-btn" onclick="_fam.compOpen=false;famRender()">Cancel</button>' +
+    '<span class="fam-meta" id="fc-msg" style="color:#b91c1c"></span></div></div>';
 }
 async function famCompSave() {
   const f = _fam.open; if (!f) return;
-  const v = id => (document.getElementById(id) || {}).value || '';
+  const v = id => (document.getElementById(id) || {}).value || '', msg = document.getElementById('fc-msg');
+  if (!_hubOwner && !v('fc-note').trim()) { msg.textContent = 'Add a note saying why.'; return; }
   const { error } = await sb.rpc('hub_member_comp_save', { p_customer: f.shopify_customer_id, p_email: f.email || null, p_name: f.parent_name || null,
     p_plan: v('fc-plan') || 'member', p_ends_on: v('fc-end') || null, p_note: v('fc-note') || null });
-  if (error) { alert(/hub_member_comp_save/.test(error.message) ? 'Run hub_member_comp.sql in Supabase first.' : error.message); return; }
+  if (error) { msg.textContent = /hub_member_comp_save/.test(error.message) ? 'Run hub_member_comp.sql in Supabase first.' : error.message; return; }
   _fam.compOpen = false; famOpen(f.shopify_customer_id);
 }
 async function famCompEnd() {
@@ -13540,7 +13546,7 @@ async function chatMount(hostId, mode) {
   chatStop();
   _chat = { host: hostId, mode, threads: [], open: null, msgs: [], last: 0, as: null, pin: null, pinUntil: 0, people: null };
   const host = document.getElementById(hostId); if (!host) return;
-  host.innerHTML = `<div class="chat-wrap${mode === 'staff' ? ' phone' : ''}"><div class="chat-list" id="chat-list"><div class="goal-note" style="padding:12px">Loading…</div></div>
+  host.innerHTML = `${mode === 'admin' ? `<input id="chat-search" class="chat-find" style="margin-bottom:10px" placeholder="Search chats: a person, a studio or a word in the last message…" oninput="_chat.filter = this.value; chatRenderThreads()" autocomplete="off">` : ''}<div class="chat-wrap${mode === 'staff' ? ' phone' : ''}"><div class="chat-list" id="chat-list"><div class="goal-note" style="padding:12px">Loading…</div></div>
     <div class="chat-room" id="chat-room"><div class="chat-empty">Choose a chat.</div></div></div>`;
   await chatLoadThreads();
   if (!_chat) return;
@@ -13554,7 +13560,16 @@ async function chatLoadThreads() {
   const list = document.getElementById('chat-list'); if (!list || !_chat) return;
   if (error) { list.innerHTML = `<div class="goal-note" style="padding:12px">${esc(/hub_chat_threads/i.test(error.message) ? 'Chat isn’t set up yet (hub_chat.sql).' : error.message)}</div>`; return; }
   _chat.threads = data || [];
-  const studios = _chat.threads.filter(t => t.kind === 'studio'), mine = _chat.threads.filter(t => t.kind === 'direct' && !t.watching), watch = _chat.threads.filter(t => t.kind === 'direct' && t.watching);
+  chatRenderThreads();
+  chatBadges();
+  if (_chat.mode === 'staff') pushCardRender(); else if (_chat.mode === 'admin') pushAdminRender();
+}
+function chatRenderThreads() {
+  const list = document.getElementById('chat-list'); if (!list || !_chat) return;
+  const q = String(_chat.filter || '').trim().toLowerCase();
+  const hit = t => !q || [t.title, STUDIO_NAMES[t.studio_id], t.last && t.last.who, t.last && t.last.body].some(x => String(x || '').toLowerCase().includes(q));
+  const shown = _chat.threads.filter(hit);
+  const studios = shown.filter(t => t.kind === 'studio'), mine = shown.filter(t => t.kind === 'direct' && !t.watching), watch = shown.filter(t => t.kind === 'direct' && t.watching);
   const row = t => `<button class="chat-thread${_chat.open === t.id ? ' on' : ''}" onclick="chatOpen('${escAttr(t.id)}')">
       ${t.kind === 'studio' ? '<span class="chat-ic">🏠</span>' : t.other ? hubAvatarHtml({ name: t.other.name, avatar_key: t.other.avatar_key, staff_id: t.other.staff_id }, 32) : '<span class="chat-ic">👥</span>'}
       <span class="chat-tmain"><b>${esc(t.title)}</b><span class="goal-note">${t.last ? esc((t.last.who ? (/^home office$/i.test(t.last.who) ? t.last.who : t.last.who.split(' ')[0]) + ': ' : '') + t.last.body) : 'No messages yet'}</span></span>
@@ -13563,10 +13578,8 @@ async function chatLoadThreads() {
     ${_chat.mode === 'admin' ? '<div id="push-admin"></div>' : ''}
     ${studios.length ? `<div class="chat-sec">Studio chat${studios.length === 1 ? '' : 's'}</div>${studios.map(row).join('')}` : ''}
     ${mine.length ? `<div class="chat-sec">Private messages</div>${mine.map(row).join('')}` : ''}
-    ${watch.length ? `<details class="chat-watch"${_chat.mode === 'admin' ? '' : ''}><summary class="chat-sec">Private messages you can see (${watch.length})</summary>${watch.map(row).join('')}</details>` : ''}
-    ${!_chat.threads.length ? '<div class="goal-note" style="padding:12px">No chats yet.</div>' : ''}`;
-  chatBadges();
-  if (_chat.mode === 'staff') pushCardRender(); else if (_chat.mode === 'admin') pushAdminRender();
+    ${watch.length ? `<details class="chat-watch"${_chat.watchOpen || q ? ' open' : ''} ontoggle="if (!(_chat.filter || '').trim()) _chat.watchOpen = this.open"><summary class="chat-sec">${_chat.mode === 'admin' ? 'Private messages, all studios' : 'Private messages'} (${watch.length})</summary>${watch.map(row).join('')}</details>` : ''}
+    ${!_chat.threads.length ? '<div class="goal-note" style="padding:12px">No chats yet.</div>' : !shown.length ? '<div class="goal-note" style="padding:12px">No chats match.</div>' : ''}`;
 }
 function chatBadges() {
   if (!_chat) return;
@@ -13588,7 +13601,9 @@ async function chatOpen(id) {
   document.querySelector('#' + _chat.host + ' .chat-wrap').classList.add('room-open');
   document.querySelectorAll('.chat-thread').forEach(b => b.classList.toggle('on', b.getAttribute('onclick').includes(id)));
   const room = document.getElementById('chat-room');
-  const privacy = t.kind === 'direct' ? `<div class="chat-note">${t.watching ? '👀 You’re viewing a private chat. Read-only.' : '🔒 Private, but home office and your studio’s managers can read private messages.'}</div>` : '';
+  const privacy = t.kind === 'direct' ? `<div class="chat-note">${t.watching ? '👀 You’re viewing a private chat. Read-only.'
+    : t.other_studio ? 'You don’t work at the same studio any more, so this chat is read-only.'
+    : '🔒 Private chat. As part of running the Hub, home office has access to all messages, including private ones.'}</div>` : '';
   room.innerHTML = `<div class="chat-head"><button class="ho-btn chat-back" onclick="document.querySelector('#${_chat.host} .chat-wrap').classList.remove('room-open')">←</button><b>${esc(t.title || 'Chat')}</b></div>
     ${privacy}<div class="chat-msgs" id="chat-msgs"><div class="goal-note" style="padding:12px">Loading…</div></div>
     ${t.can_post ? `<div class="chat-compose">${_chat.mode === 'studio' ? '<div id="chat-as" class="chat-as"></div>' : ''}
@@ -13679,9 +13694,9 @@ async function chatRemove(id) {
 async function chatNewDirect() {
   if (!_chat.people) { const r = await sb.rpc('hub_chat_people', {}); _chat.people = r.error ? [] : (r.data || []); }
   openDutySheet(`<h3>New private message</h3>
-    <input id="chat-find" class="chat-find" placeholder="Search for someone…" oninput="chatFilterPeople(this.value)" autocomplete="off">
+    <input id="chat-find" class="chat-find" placeholder="Search for someone at your studio…" oninput="chatFilterPeople(this.value)" autocomplete="off">
     <div class="chat-people" id="chat-people"></div>
-    <div class="goal-note" style="margin-top:8px">Home office and your studio’s managers can read private messages.</div>
+    <div class="goal-note" style="margin-top:8px">You can message anyone at your studio. As part of running the Hub, home office has access to all messages, including private ones.</div>
     <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button></div>`);
   chatFilterPeople('');
   setTimeout(() => { const f = document.getElementById('chat-find'); if (f) f.focus(); }, 50);
@@ -13690,7 +13705,7 @@ function chatFilterPeople(q) {
   q = String(q || '').toLowerCase().trim();
   const list = (_chat.people || []).filter(p => !q || p.name.toLowerCase().includes(q) || String(STUDIO_NAMES[p.home_studio_id] || '').toLowerCase().includes(q)).slice(0, 40);
   document.getElementById('chat-people').innerHTML = list.map(p => `<button class="chat-person" onclick="chatStartDirect('${escAttr(p.staff_id)}')">${hubAvatarHtml(p, 30)}<span><b>${esc(p.name)}</b>${p.home_studio_id ? `<span class="goal-note"> · ${esc(STUDIO_NAMES[p.home_studio_id] || p.home_studio_id)}</span>` : ''}</span></button>`).join('')
-    || '<div class="goal-note">No one found.</div>';
+    || `<div class="goal-note">${(_chat.people || []).length ? 'No one found.' : 'No one else works at your studio yet.'}</div>`;
 }
 async function chatStartDirect(staffId) {
   const { data, error } = await sb.rpc('hub_chat_direct', { p_other: staffId });
