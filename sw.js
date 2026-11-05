@@ -7,7 +7,7 @@ self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 self.addEventListener('push', (e) => {
   let d = {};
   try { d = e.data ? e.data.json() : {}; } catch (_) { d = { body: e.data ? e.data.text() : '' }; }
-  e.waitUntil(self.registration.showNotification(d.title || '4Cats Hub', {
+  e.waitUntil(self.registration.showNotification(d.title || '4Cats Team', {
     body: d.body || '',
     icon: 'hub-icon-192.png',
     badge: 'hub-badge-96.png',       // Android's small status bar icon: a white shape on transparent (Android only uses the shape)
