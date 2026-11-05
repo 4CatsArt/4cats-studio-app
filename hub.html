@@ -8863,7 +8863,7 @@ async function ptyDismiss(bookingId) {
 // New suggestions show here (no email to hello@). "Date added" emails the family
 // automatically with a link (idea-update Edge Function). Home office can see every studio.
 const IDEA_KIND_LABEL = { pa_days: 'PA/PD day', workshops: 'Workshop', class_times: 'Class times', camps: 'Camps', age_groups: 'Age groups', parties: 'Party idea', projects: 'Future project', other: 'Something else' };
-let _ideas = [], _ideaOpen = null;
+let _ideas = [], _ideaOpen = null, _ideaDecline = null;   // the "Date added" / "Not this time" box that's open
 function openIdeasPane() {
   if (!coordOrAdmin()) { openPinModal(); return; }
   showOnlyPane('ideas-pane'); setActiveNav('nav-ideas');
@@ -8923,7 +8923,7 @@ function drawIdeas() {
     const list = shown.filter(x => (x.status || 'new') === g[0]); if (!list.length) return;
     const grouped = ideaGroups(list);
     h += '<h3 class="idea-grp">' + g[1] + ' <span>' + grouped.length + '</span></h3>' + grouped.map(G => {
-      const x = G[0], key = G.map(y => y.id).join(','), open = _ideaOpen === key, many = G.length > 1;
+      const x = G[0], key = G.map(y => y.id).join(','), open = _ideaOpen === key, declining = _ideaDecline === key, many = G.length > 1;
       const dates = [...new Set(G.flatMap(y => y.dates || []))].sort();
       const shared = dates.filter(d => G.filter(y => (y.dates || []).includes(d)).length > 1);
       const kids = G.reduce((n, y) => n + (y.kids || 0), 0);
@@ -8945,12 +8945,15 @@ function drawIdeas() {
           '<span class="idea-help">Where they can book it: the World schedule (the usual), a Shopify product, or the camps page.</span>' +
           '<label class="idea-chk"><input type="checkbox" id="idea-email" checked> Email ' + (many ? 'all ' + G.length + ' families' : esc((x.name || 'the family').split(' ')[0])) + ' that it’s been added</label>' +
           '<div class="idea-btns"><button class="ho-btn" onclick="_ideaOpen=null;drawIdeas()">Cancel</button><button class="ho-btn primary" onclick="ideaSet(' + ids + ',\'added\')">Save</button></div></div>' : '') +
+        (declining ? '<div class="idea-add"><label>A note from the studio (optional)<textarea id="idea-note" maxlength="600" rows="3" placeholder="e.g. Saturdays are full with parties until January, but we’d love to see you on a weekday!"></textarea></label>' +
+          (G.some(y => y.email) ? '<label class="idea-chk"><input type="checkbox" id="idea-email" checked> Email ' + (many ? 'all ' + G.length + ' families' : esc((x.name || 'the family').split(' ')[0])) + ' a kind note' + (x.kind === 'workshops' ? ' (with the next dates it’s on here, if any)' : '') + '</label>' : '<span class="idea-help">No email on this one, so nothing is sent.</span>') +
+          '<div class="idea-btns"><button class="ho-btn" onclick="_ideaDecline=null;drawIdeas()">Cancel</button><button class="ho-btn primary" onclick="ideaSet(' + ids + ',\'declined\')">Save: not this time</button></div></div>' : '') +
         '</div><div class="idea-acts">' +
           (autoNew ? '<button class="ho-btn primary" onclick="ideaSeen(' + ids + ')">✓ Mark as seen</button>' : '') +
           (canGo && !open ? '<button class="ho-btn" onclick="ideaGoTo(' + ids + ')">📅 Go to this date</button>' : '') +
-          (x.status !== 'added' && !open ? '<button class="ho-btn primary" onclick="_ideaOpen=' + ids + ';drawIdeas()">✓ Date added</button>' : '') +
+          (x.status !== 'added' && !open && !declining ? '<button class="ho-btn primary" onclick="_ideaOpen=' + ids + ';_ideaDecline=null;drawIdeas()">✓ Date added</button>' : '') +
           (x.status === 'new' ? '<button class="ho-btn" onclick="ideaSet(' + ids + ',\'seen\')">Mark seen</button>' : '') +
-          (x.status !== 'declined' && x.status !== 'added' ? '<button class="ho-btn" onclick="ideaSet(' + ids + ',\'declined\')">Not this time</button>' : '') +
+          (x.status !== 'declined' && x.status !== 'added' && !declining ? '<button class="ho-btn" onclick="_ideaDecline=' + ids + ';_ideaOpen=null;drawIdeas()">Not this time…</button>' : '') +
           (x.status === 'declined' || x.status === 'seen' ? '<button class="ho-btn" onclick="ideaSet(' + ids + ',\'new\')">Move back to new</button>' : '') +
         '</div></div>';
     }).join('');
@@ -8993,7 +8996,12 @@ function ideaPinRender() {
     (_ideaPin.open ? '<div class="idea-pin-box"><label>Link for the ' + (many ? 'families' : 'family') + '<input type="url" id="idea-link" value="' + esc(x.added_link || ideaDefaultLink(x)) + '"></label>' +
       '<label class="idea-chk"><input type="checkbox" id="idea-email" checked> Email ' + (many ? 'all ' + G.length + ' families' : esc((x.name || 'the family').split(' ')[0])) + ' that it’s been added</label>' +
       '<div class="idea-btns"><button class="ho-btn" onclick="_ideaPin.open=false;ideaPinRender()">Cancel</button>' +
+      '<button class="ho-btn" onclick="ideaPinDecline()">Can’t add it…</button>' +
       '<button class="ho-btn primary" onclick="ideaPinSave()">✓ Date added</button></div></div>' : '');
+}
+function ideaPinDecline() {   // back to Suggestions, with the "Not this time" box open on it
+  if (!_ideaPin) return; const key = _ideaPin.key; _ideaPin = null; ideaPinRender();
+  _ideaDecline = key; _ideaOpen = null; openIdeasPane();
 }
 async function ideaPinSave() {
   if (!_ideaPin) return;
@@ -9006,11 +9014,12 @@ async function ideaSet(idList, status) {
   const ids = String(idList).split(',').filter(Boolean);
   const who = (_lastHeroData && _lastHeroData.firstName && _lastHeroData.firstName !== 'team') ? _lastHeroData.firstName : null;
   const link = status === 'added' ? ((document.getElementById('idea-link') || {}).value || '') : '';
-  const email = status === 'added' ? !!(document.getElementById('idea-email') || {}).checked : false;
+  const email = status === 'added' || status === 'declined' ? !!(document.getElementById('idea-email') || {}).checked : false;
+  const note = status === 'added' || status === 'declined' ? ((document.getElementById('idea-note') || {}).value || '').trim() : '';
   let emailed = 0, failed = [];
   for (const id of ids) {
     try {
-      const r = await fetch(SUPABASE_URL + '/functions/v1/idea-update', { method: 'POST', headers: await fnHeaders(), body: JSON.stringify({ id, status, by: who, link, email }) });
+      const r = await fetch(SUPABASE_URL + '/functions/v1/idea-update', { method: 'POST', headers: await fnHeaders(), body: JSON.stringify({ id, status, by: who, link, email, note }) });
       const d = await r.json();
       if (!r.ok || d.error) { failed.push(d.error || 'not saved'); continue; }
       if (d.emailed) emailed++;
@@ -9018,8 +9027,8 @@ async function ideaSet(idList, status) {
     } catch (e) { failed.push(e.message); }
   }
   if (failed.length) alert('Some didn’t save: ' + failed[0]);
-  else if (status === 'added') alert(emailed ? 'Saved. ' + (emailed === 1 ? 'The family has' : emailed + ' families have') + ' been emailed. ✓' : 'Saved.');
-  _ideaOpen = null;
+  else if (status === 'added' || status === 'declined') alert(emailed ? 'Saved. ' + (emailed === 1 ? 'The family has' : emailed + ' families have') + ' been emailed. ✓' : 'Saved.');
+  _ideaOpen = null; _ideaDecline = null;
   drawIdeas();
   if (typeof refreshCoordBadges === 'function') refreshCoordBadges();
 }
