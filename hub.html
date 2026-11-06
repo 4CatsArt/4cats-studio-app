@@ -4060,6 +4060,7 @@ function rpEditPanelsHtml() {
 // removal, drop / change / move a new time) → Approve and publish (removals are checked again: anything booked meanwhile stays).
 // The rules (agreed Nov 6 2026):
 //   staff per day (👥 Studio staffing): closed = nothing; 1 staff + a kids class = no kids workshop; 2+ = both
+//   everything by time: a time runs when a teacher is free for all of it (a class or wheel takes theirs only for its own hours)
 //   weekdays: a kids-only workshop at the first kids class time (or the studio's kids workshop time), then in the evening a
 //     Mini Make, a glazing and a workshop, 15 minutes apart, from when the kids class / workshop ends, all done by 9:30pm
 //   weekend mornings with no kids class at 9am (or 2+ staff and just one class): 9:00 workshop, 9:15 glazing, 9:30 Mini Make
@@ -4107,15 +4108,17 @@ function asKind(s, items) {
   if (/field trip/i.test(t)) return 'field';
   if (/\bp[ad] day|pa\/pd|no[\s-]school/i.test(t)) return 'paday';
   if (/camp/i.test(t)) return 'camp';
-  if (s.class_slot || /class \d+ of|\d+ week session|\bkids class\b/i.test(t) || (!s.item && /\bclass(es)?\b/i.test(t))) return 'class';   // (any class, booked or not, takes the teacher; never removed)
-  if (/wheel/i.test(t)) return 'wheel';
+  const series = !!(s.class_slot || /class \d+ of|\d+ week session|\bkids class\b/i.test(t) || (!s.item && /\bclass(es)?\b/i.test(t)));
+  s._series = series;   // (a class series: never removed)
+  if (/wheel/i.test(t)) return 'wheel';    // wheel (a workshop or an adult wheel class): takes the teacher, but isn't a kids class
+  if (series) return 'class';              // a kids class: booked or not, takes the teacher; never removed
   if ((it && it.kind === 'glazing') || /glaz/i.test(t)) return 'glazing';
   if ((it && (it._mini || it.kind === 'mini_make')) || /mini\s*make/i.test(t)) return s.kids_only ? 'kidsws' : 'mini';
   if (s.kids_only) return 'kidsws';
   return 'workshop';
 }
 function asRemovable(s, k, today, nowMin) {
-  if (s.booked > 0 || s.protected || s.staff_only) return false;
+  if (s.booked > 0 || s.protected || s.staff_only || s._series) return false;   // (never a class series, wheel classes included)
   if (!['workshop', 'glazing', 'mini', 'wheel', 'kidsws'].includes(k)) return false;
   if (!s.item && !/glaz|mini\s*make|wheel/i.test(s.title || '')) return false;   // (older Shopify workshops stay: the publish step leaves them too)
   if (s.date < today || (s.date === today && asMin(s.time) <= nowMin)) return false;
@@ -4228,16 +4231,26 @@ function asBuild(W, onlyId) {
           const firsts = [kidsT].concat(kept.filter(s => ['class', 'kidsws', 'workshop', 'glazing', 'mini', 'wheel'].includes(s.k)).map(s => s.start)).filter(x => x != null);
           if (firsts.length) { const brk = Math.min(...firsts) - 15; D.workEnd = brk + 300; if (D.workEnd < 21 * 60 + 30) D.notes.push(`1 staff: done by ${asT(D.workEnd)} (5 hours after the ${asT(brk)} break)`); }
         }
-        let eve = 18 * 60;
-        if (kidsT != null) {
-          const hasKids = kept.some(s => s.k === 'kidsws');
-          const kidsAdded = !(classes.length && staff === 1) && !hasKids && add(kidsT, 'kidsws', classes.length ? 'at the kids class time' : 'kids workshop time');
-          const ends = (kidsAdded ? [kidsT + 120] : [kidsT]).concat(classes.map(c => c.start + AS_CLASS_LEN(c)), kept.filter(s => s.k === 'kidsws').map(s => s.start + (s.len || 120)));
-          eve = asCeil15(Math.max(...ends));
-        } else D.notes.push('No kids class or kids workshop time: evening from 6pm');
+        // Everything by time: a time can run when a teacher is free for all of it (classes, wheel and the rest
+        // take theirs only for their own hours), and it fits before the day ends.
+        // The kids workshop: at the first kids class time, or the studio's kids workshop time, whichever has a teacher free
+        let eve = 18 * 60, kidsEnd = null;
+        const hasKids = kept.some(s => s.k === 'kidsws');
+        if (hasKids) kidsEnd = Math.max(...kept.filter(s => s.k === 'kidsws').map(s => s.start + (s.len || 120)));
+        else {
+          const tries = [...new Set([classes.length ? classes[0].start : null, row.kids_time ? asMin(row.kids_time) : null].filter(x => x != null))];
+          for (const kt of tries) { if (add(kt, 'kidsws', kt === (classes[0] || {}).start ? 'at the kids class time' : 'kids workshop time')) { kidsEnd = kt + 120; break; } }
+          if (!tries.length) D.notes.push('No kids class or kids workshop time: evening from 6pm');
+        }
+        // The evening (a Mini Make, a glazing and a workshop): from when the kids workshop ends (or the kids time, or 6pm),
+        // each at the first 15-minute mark with a teacher free that still finishes in time
+        if (kidsEnd != null) eve = asCeil15(kidsEnd); else if (kidsT != null) eve = asCeil15(kidsT);
         const have = k => kept.some(s => s.k === k && s.start >= 17 * 60);
         let t = eve;
-        [['mini'], ['glazing'], ['workshop']].forEach(([k]) => { if (!have(k)) { if (add(t, k, 'evening')) t += 15; else if (add(t + 15, k, 'evening')) t += 30; } });
+        ['mini', 'glazing', 'workshop'].forEach(k => {
+          if (have(k)) return;
+          for (let x = t; x <= 21 * 60; x += 15) { if (add(x, k, 'evening')) { t = x + 15; return; } }
+        });
       }
       // the plan matches what's already there (same workshop, same time): keep the existing time instead of
       // removing it and adding the same one again
@@ -4376,7 +4389,7 @@ function asCounts(s, rem, same) {
   const b = +s.booked || 0, cap = s.capacity == null ? null : +s.capacity, left = s.left != null ? Math.max(0, +s.left) : (cap != null ? Math.max(0, cap - b) : null);
   const leftTxt = left != null ? ` · ${left} left` : '';
   if (s.k === 'party') return b ? 'party · booked' : 'party';
-  if (s.k === 'class') return `class · ${b} enrolled${leftTxt}`;
+  if (s.k === 'class' || (s.k === 'wheel' && s._series)) return `${s.k === 'wheel' ? 'wheel class' : 'class'} · ${b} enrolled${leftTxt}`;
   if (s.k === 'group' || s.k === 'field') return b ? 'booked' : 'open';
   if (rem) return `${b} booked · off`;
   return `${b} booked${leftTxt}${same ? ' · stays, same as the plan' : ''}`;
