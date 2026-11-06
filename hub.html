@@ -4074,7 +4074,8 @@ function rpEditPanelsHtml() {
 //   a kids class (90 minutes), kids-only workshop, wheel, booked party (its real length), booked field trip or group event takes a teacher fully;
 //     1-staff studios get 45 minutes after a booked party for lunch
 //   never on stat holidays or studio closures; small studios (1–2 staff) get no weekday workshops during camps (not PA/PD days)
-//   1 staff on a weekday: everything done within 5 hours of their break, which ends 15 minutes before the first class / kids workshop
+//   1 staff on a weekday: everything done within 5 hours of their break, which ends 15 minutes before the first class / kids workshop;
+//     if what's already on runs past that, a 30-minute break goes in the first gap (15 minutes after a class) and takes the teacher
 //   a new time that matches an existing empty one (same workshop, same time) keeps the existing one instead
 //   a PA/PD day: asks first — close the evening, or open with how many staff (until answered, nothing is proposed that day)
 //   kids-only times: only workshops ticked 🧒 Good for kids (Workshops manager)
@@ -4173,6 +4174,7 @@ function asBuild(W, onlyId) {
       kept.forEach(s => {
         const lb = `${asT(s.start)} ${fdClean(s.title)}`;
         if (s.k === 'class') ded.push([s.start, s.start + AS_CLASS_LEN(s), lb + ' (class)']);
+        else if (s.k === 'wheel' && s._series) ded.push([s.start, s.start + (+s.len || 90), lb + ' (wheel class)']);   // wheel classes: 90 minutes unless set
         else if (s.k === 'kidsws' || s.k === 'wheel') ded.push([s.start, s.start + (s.len || 120), lb]);
         else if (s.k === 'party' && s.booked > 0) { const len = s.party_minutes || 105; ded.push([s.start, s.start + len, lb + ' (party)']); if (staff === 1) ded.push([s.start + len, s.start + len + 45, 'lunch after the party']); }
         else if ((s.k === 'field' || s.k === 'group') && s.booked > 0) ded.push([s.start, s.start + (s.len || 120), lb]);
@@ -4232,6 +4234,22 @@ function asBuild(W, onlyId) {
         if (staff === 1) {
           const firsts = [kidsT].concat(kept.filter(s => ['class', 'kidsws', 'workshop', 'glazing', 'mini', 'wheel'].includes(s.k)).map(s => s.start)).filter(x => x != null);
           if (firsts.length) { const brk = Math.min(...firsts) - 15; D.workEnd = brk + 300; if (D.workEnd < 21 * 60 + 30) D.notes.push(`1 staff: done by ${asT(D.workEnd)} (5 hours after the ${asT(brk)} break)`); }
+          // what's already on the schedule runs past that (e.g. a 7:30–9:00 wheel class): they need a 30-minute break in the
+          // middle. It goes in the first free gap, 15 minutes after an earlier class or time ends, and takes the teacher.
+          const pub = kept.filter(s => ['workshop', 'glazing', 'mini'].includes(s.k) && s.booked > 0).map(s => [s.start, s.start + (s.len || (s.k === 'mini' ? 90 : 120))]);
+          const lastEnd = Math.max(0, ...ded.map(x => x[1]), ...pub.map(x => x[1]));
+          if (D.workEnd && lastEnd > D.workEnd) {
+            const busy = ded.map(x => [x[0], x[1]]).concat(pub);
+            const free = (a, b) => !busy.some(x => x[0] < b && x[1] > a);
+            const cands = [...new Set(busy.map(x => x[1] + 15).filter(t => t + 30 <= D.workEnd))].sort((a, b) => a - b);
+            const bs = cands.find(t => free(t, t + 30));
+            if (bs != null) {
+              ded.push([bs, bs + 30, `${asT(bs)} staff break`]);
+              D.workEnd = Math.min(21 * 60 + 30, bs + 30 + 300);
+              D.notes = D.notes.filter(n => !/^1 staff: done by/.test(n));
+              D.notes.push(`1 staff: break ${asT(bs)}–${asT(bs + 30)} (the day runs past 5 hours)`);
+            } else D.notes.push('⚠ No time for a 30-minute break: the day runs past 5 hours with no gap (check staffing)');
+          }
         }
         // Everything by time: a time can run when a teacher is free for all of it (classes, wheel and the rest
         // take theirs only for their own hours), and it fits before the day ends.
