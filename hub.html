@@ -403,6 +403,8 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .rp-up { width: 104px; height: 104px; border: 2px dashed var(--border); border-radius: 10px; display: flex !important; align-items: center; justify-content: center; cursor: pointer; color: #2f6fb0; font-weight: 700; text-align: center; }
 .rp-vt input { font: inherit; font-size: 13px; padding: 5px 6px; border: 1px solid var(--border); border-radius: 8px; } .rp-vt td { white-space: nowrap; vertical-align: top; } .rp-dims input { margin: 0 2px; }
 .rp-card > .ho-btn { justify-self: start; } .rp-vt th, .rp-vt td { padding: 6px 6px; }
+.rp-ship { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px; margin: 8px 0; max-width: 980px; }
+.rp-ship.on { display: grid; gap: 8px; } .rp-ship label { display: flex; gap: 8px; align-items: center; } .rp-money input { width: 100px; font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; margin-left: 4px; }
 .rp-foot { display: flex; gap: 8px; max-width: 1150px; margin: 14px 0 30px; }
 @media (max-width: 900px) { .rp-grid { grid-template-columns: 1fr; } }
 /* 🖼️ Workshops manager */
@@ -3691,10 +3693,27 @@ async function bulkRun(preview) {
 // how sales and stock connect), weight and size (for ShipStation).
 const RP_CATS = [['art_kit', 'Art kit'], ['merch', 'Merch'], ['supplies', 'Supplies'], ['gift', 'Gift'], ['other', 'Other']];
 const RP_TAX = [['goods', 'Goods (GST + PST in BC, GST in AB, HST in ON)'], ['services', 'Services'], ['none', 'No tax']];
-let _rp = { rows: null, err: '', q: '', cat: '', where: '', show: 'active', edit: null, msg: '' };
-async function openRpPane() {
+let _rp = { rows: null, err: '', q: '', cat: '', where: '', show: 'active', edit: null, msg: '', ship: null, shipOpen: false };
+async function openRpPane() { // (async: also loads the shipping setting)
   if (!_hoCan.edit) { alert('Products needs Studio Ops edit access.'); return; }
   showOnlyPane('rp-pane'); setActiveNav('nav-rp'); _rp.edit = null; rpDraw(); rpLoad();
+  const sh = await sb.rpc('hub_retail_shipping_get'); _rp.ship = sh.error ? { err: /hub_retail_shipping/.test(sh.error.message) ? 'Run retail_shipping.sql in Supabase first.' : sh.error.message } : (sh.data || {}); rpDraw();
+}
+// 🚚 Shipping (World settings 'retail_shipping'): free over an amount of shop items, else a flat rate
+function rpShipHtml() {
+  const S = _rp.ship;
+  const line = !S ? 'Loading…' : S.err ? esc(S.err) : `${S.free_over != null ? `Free over <b>$${Number(S.free_over).toFixed(2)}</b> of shop items` : 'No free shipping'}, otherwise <b>$${Number(S.flat_rate || 0).toFixed(2)}</b>`;
+  if (!_rp.shipOpen || !S || S.err) return `<div class="rp-ship">🚚 <span>Shipping: ${line}</span>${S && !S.err ? '<button class="ho-btn sm" onclick="_rp.shipOpen=true;rpDraw()">Edit</button>' : ''}</div>`;
+  return `<div class="rp-ship on"><b>🚚 Shipping</b>
+    <label>Free shipping when shop items come to<span class="rp-money">$<input id="rp-free" type="number" step="0.01" min="0" value="${escAttr(S.free_over ?? '')}" placeholder="blank: never free"></span></label>
+    <label>Otherwise, shipping is<span class="rp-money">$<input id="rp-flat" type="number" step="0.01" min="0" value="${escAttr(S.flat_rate ?? '')}"></span></label>
+    <p class="fd-sm">Only shop items (kits, supplies, merch) count toward free shipping, before tax. Workshops, classes, camps, parties and memberships in the same cart never do. Pickup at a studio is always free.</p>
+    <div><button class="ho-btn primary sm" onclick="rpShipSave()">Save</button> <button class="ho-btn sm" onclick="_rp.shipOpen=false;rpDraw()">Cancel</button></div></div>`;
+}
+async function rpShipSave() {
+  const { data, error } = await sb.rpc('hub_retail_shipping_set', { p: { free_over: document.getElementById('rp-free').value, flat_rate: document.getElementById('rp-flat').value } });
+  if (error) { alert('Not saved: ' + error.message); return; }
+  _rp.ship = data; _rp.shipOpen = false; _rp.msg = '✓ Shipping saved.'; rpDraw();
 }
 async function rpLoad() {
   const { data, error } = await sb.rpc('hub_retail_list');
@@ -3710,6 +3729,7 @@ function rpDraw() {
     && (!P.cat || r.category === P.cat) && (P.show === 'all' || (P.show === 'active' ? r.active : !r.active))
     && (!P.where || (P.where === 'online' ? r.sell_online : P.where === 'studio' ? r.sell_in_studio : P.where === 'both' ? r.sell_online && r.sell_in_studio : !r.sell_online && !r.sell_in_studio)));
   el.innerHTML = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🛍️ Products</div><span class="spacer"></span><button class="ho-btn primary" onclick="rpOpen(null)">+ New product</button><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+    ${rpShipHtml()}
     <div class="ho-intro">Everything 4Cats sells: art kits first. Each product says where it’s sold (🌐 World’s shop, shipped from the warehouse, and/or 🏪 the front desk). Each variant’s <b>SKU</b> is the same as its inventory item, which is how sales and stock connect.</div>
     <div class="fd-filters"><input id="rp-q" type="search" placeholder="Search name, SKU or tag" value="${escAttr(P.q)}" oninput="_rp.q=this.value;clearTimeout(_rp.t);_rp.t=setTimeout(()=>{rpDraw();const i=document.getElementById('rp-q');if(i){i.focus();i.setSelectionRange(i.value.length,i.value.length)}},250)">
       <select onchange="_rp.cat=this.value;rpDraw()"><option value="">All kinds</option>${RP_CATS.map(c => `<option value="${c[0]}"${P.cat === c[0] ? ' selected' : ''}>${c[1]}</option>`).join('')}</select>
