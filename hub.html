@@ -411,6 +411,8 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .as-dn { font-size: 11px; color: #6b6b63; } .as-dn.warn { color: #9b1b22; font-weight: 700; }
 .as-e { border-radius: 8px; padding: 4px 6px; font-size: 12px; line-height: 1.3; display: grid; gap: 2px; } .as-e span { color: #6b6b63; font-size: 11px; }
 .as-e.rem { text-decoration: line-through; color: #9b1b22; cursor: pointer; } .as-e.rem span { text-decoration: none; } .as-e.old[onclick] { cursor: pointer; outline: 1px dashed #d9b4b4; }
+.as-view { display: inline-flex; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; } .as-view button { font: inherit; font-size: 13px; font-weight: 700; border: 0; background: #fff; padding: 5px 12px; cursor: pointer; }
+.as-view button.on { background: #1f2a24; color: #fff; } .as-newtag { font-style: normal; font-size: 10px; font-weight: 800; color: #fff; background: #1d6b39; border-radius: 4px; padding: 0 4px; vertical-align: 1px; }
 .as-e.drop { background: #fff; border: 1px dashed #ccc; color: #9a9a92; cursor: pointer; }
 .as-e.new select, .as-e.new input { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid #b9dcc3; border-radius: 6px; background: #fff; max-width: 100%; }
 .as-er { display: flex; gap: 4px; align-items: center; } .as-x { border: 0; background: none; cursor: pointer; color: #6b6b63; margin-left: auto; font-size: 13px; }
@@ -4051,7 +4053,7 @@ const AS_WEEKEND_BIG = [['12:00', 'glazing'], ['12:15', 'mini'], ['12:30', 'work
 const AS_WEEKEND_LATE = [['15:30', 'glazing'], ['15:45', 'workshop'], ['16:00', 'mini'], ['16:15', 'workshop'], ['16:30', 'glazing'], ['16:45', 'workshop'], ['17:00', 'workshop'], ['17:15', 'mini']];
 const AS_DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 const AS_KIND_LABEL = { workshop: 'Workshop', glazing: 'Glazing', mini: 'Mini Make', kidsws: 'Kids workshop' };
-let _as = { week: null, prov: '', data: null, plan: null, busy: false, msg: '', err: '', done: null, open: {} };
+let _as = { week: null, prov: '', data: null, plan: null, busy: false, msg: '', err: '', done: null, open: {}, view: 'changes' };
 const asMin = t => { const [h, m] = String(t || '0:0').split(':').map(Number); return h * 60 + (m || 0); };
 const asHM = m => String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
 const asT = m => { const h = Math.floor(m / 60), mm = m % 60; return (h % 12 || 12) + (mm ? ':' + String(mm).padStart(2, '0') : '') + (h >= 12 ? 'pm' : 'am'); };
@@ -4111,7 +4113,10 @@ function asBuild(W) {
       const dow = new Date(d + 'T12:00:00').getDay(), weekend = dow === 0 || dow === 6, staff = row ? (+row[AS_DAYS[dow]] || 0) : 0;
       const D = { date: d, dow, staff, entries: [], notes: [] };
       S.days.push(D);
-      const ss = all.filter(s => s.date === d).map(s => Object.assign({}, s, { k: asKind(s, items), start: asMin(s.time), len: +s.minutes || 0 }));
+      // only what's really running at this studio: a time that's hidden, or has 0 spots and nobody booked, isn't running (the
+      // "phantom" times a Shopify product holds at every studio, as World's schedule treats them): not counted, not shown, not touched
+      const running = s => s.show !== false && (s.booked > 0 || (+s.capacity > 0 && !(s.left != null && +s.left <= 0 && +s.capacity === 0)) || (s.capacity == null && s.left != null && +s.left > 0));
+      const ss = all.filter(s => s.date === d && running(s)).map(s => Object.assign({}, s, { k: asKind(s, items), start: asMin(s.time), len: +s.minutes || 0 }));
       // the empty times come off (unless unticked)
       ss.forEach(s => { s.remove = asRemovable(s, s.k, today, nowMin); if (s.remove) out.removeCount++;
         D.entries.push({ t: 'old', s, keep: !s.remove }); });
@@ -4212,7 +4217,8 @@ function asDraw() {
   if (!P) { el.innerHTML = h; return; }
   const sum = asCount();
   h += `<div class="as-sum"><span><b>${sum.add}</b> new times</span><span><b>${sum.rem}</b> empty times coming off</span><span><b>${P.studios.length}</b> studios</span>
-    <span class="as-key"><i class="k-old"></i>stays <i class="k-rem"></i>comes off <i class="k-new"></i>new</span></div>
+    <span class="as-view" role="group" aria-label="Show"><button class="${_as.view !== 'after' ? 'on' : ''}" onclick="_as.view='changes';asDraw()">Changes</button><button class="${_as.view === 'after' ? 'on' : ''}" onclick="_as.view='after';asDraw()">After publishing</button></span>
+    <span class="as-key">${_as.view === 'after' ? '<i class="k-old"></i>on the schedule <i class="k-new"></i>new' : '<i class="k-old"></i>stays <i class="k-rem"></i>comes off <i class="k-new"></i>new'}</span></div>
     <div class="as-studios">${P.studios.map((S, si) => asStudioHtml(S, si)).join('')}</div>
     <div class="as-foot"><span>${sum.add} new · ${sum.rem} off</span><button class="fd-pay" ${_as.busy || (!sum.add && !sum.rem) ? 'disabled' : ''} onclick="asPublish()">Approve and publish</button></div>`;
   el.innerHTML = h;
@@ -4225,6 +4231,7 @@ function asStudioHtml(S, si) {
   let h = `<div class="as-studio"><button class="as-sh" onclick="_as.open['${S.id}']=${open ? 'false' : 'true'};asDraw()"><b>${esc(STUDIO_NAMES[S.id] || S.id)}</b><span>${n} new · ${r} off${warn ? ' · ⚠ check' : ''}</span><span class="spacer"></span>${open ? '▾' : '▸'}</button>`;
   if (S.notes.length) h += `<p class="as-note">${S.notes.map(esc).join(' ')}</p>`;
   if (!open) return h + '</div>';
+  if (_as.view === 'after') return h + asAfterHtml(S) + '</div>';
   h += '<div class="as-week">' + S.days.map((D, di) => `<div class="as-day${D.staff === 0 ? ' closed' : ''}"><div class="as-dh">${new Date(D.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', day: 'numeric' })}<span>${D.staff ? D.staff + (D.staff >= 4 ? '+' : '') + ' staff' : ''}</span></div>` +
     D.notes.map(x => `<div class="as-dn${x.startsWith('⚠') ? ' warn' : ''}">${esc(x)}</div>`).join('') +
     D.entries.map((e, ei) => {
@@ -4241,6 +4248,23 @@ function asStudioHtml(S, si) {
         `<span>${esc(AS_KIND_LABEL[e.k])} · ${e.spots} spots</span></div>`;
     }).join('') + '</div>').join('') + '</div></div>';
   return h;
+}
+// "After publishing": the week as it will be, kept and new times together, in time order (read-only)
+function asAfterHtml(S) {
+  const items = _as.plan.items, shown = ['workshop', 'glazing', 'mini', 'wheel', 'kidsws', 'class', 'party', 'field', 'group', 'camp', 'paday'];
+  return '<div class="as-week">' + S.days.map(D => {
+    const list = [];
+    D.entries.forEach(e => {
+      if (e.t === 'old') { const s = e.s; if (s.remove && !e.keep) return; if (!shown.includes(s.k) || (['party', 'group', 'field'].includes(s.k) && !s.booked)) return;
+        list.push({ start: s.start, title: fdClean(s.title), sub: s.k === 'class' ? 'class' : s.k === 'party' ? 'party' : s.booked ? s.booked + ' booked' : '', cls: 'old' }); }
+      else if (e.on) { const it = items[e.item] || {}; list.push({ start: e.start, title: it.title || AS_KIND_LABEL[e.k], sub: `${AS_KIND_LABEL[e.k]} · ${e.spots} spots`, cls: 'new', tag: true }); }
+    });
+    list.sort((a, b) => a.start - b.start);
+    const closed = D.notes.find(x => /^(Closed|🎌|Camp day|Past)/.test(x));
+    return `<div class="as-day${D.staff === 0 ? ' closed' : ''}"><div class="as-dh">${new Date(D.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', day: 'numeric' })}<span>${D.staff ? D.staff + (D.staff >= 4 ? '+' : '') + ' staff' : ''}</span></div>` +
+      (closed ? `<div class="as-dn">${esc(closed)}</div>` : '') +
+      (list.length ? list.map(x => `<div class="as-e ${x.cls}"><div><b>${asT(x.start)}</b>${x.tag ? ' <i class="as-newtag">new</i>' : ''}</div><div>${esc(x.title)}</div>${x.sub ? `<span>${esc(x.sub)}</span>` : ''}</div>`).join('') : (closed ? '' : '<div class="as-dn">Nothing on</div>')) + '</div>';
+  }).join('') + '</div>';
 }
 function asToggleRem(si, di, ei) { const e = _as.plan.studios[si].days[di].entries[ei]; e.keep = !e.keep; asDraw(); }
 function asNew(si, di, ei, k, v) { const e = _as.plan.studios[si].days[di].entries[ei]; if (k === 'start') v = Math.round(v / 15) * 15; e[k] = v; asDraw(); }
