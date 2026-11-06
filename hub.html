@@ -427,6 +427,8 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .as-e.cls0 { background: #fdebc8; outline: 1px solid #f0c674; } .as-e.cls0 span { color: #8a5a00; font-weight: 700; }
 .as-pad.low { border-color: #e5a3a3; background: #fdecec; } .as-padlow { color: #9b1b22; font-weight: 700; } .as-padn.low { color: #9b1b22; background: #fdecec; }
 .stf-sep { width: 1px; align-self: stretch; background: var(--border); }
+.as-addb { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 2px; } .as-addb button { font: inherit; font-size: 11px; font-weight: 700; color: #1d6b39; background: #fff; border: 1px dashed #9ccaa9; border-radius: 6px; padding: 2px 6px; cursor: pointer; }
+.as-addb button:hover { background: #e3f4e8; }
 .as-pad { display: grid; gap: 3px; font-size: 12px; background: #eef7ff; border: 1px solid #cfe3f7; border-radius: 8px; padding: 5px 6px; } .as-pad.ask { background: #fff4d6; border-color: #e8cf8a; }
 .as-pad select { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 6px; } .as-padn { color: #8a5a00; background: #fff4d6; border-radius: 999px; padding: 2px 10px; }
 .as-view { display: inline-flex; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; } .as-view button { font: inherit; font-size: 13px; font-weight: 700; border: 0; background: #fff; padding: 5px 12px; cursor: pointer; }
@@ -4067,6 +4069,7 @@ function rpEditPanelsHtml() {
 //     1-staff studios get 45 minutes after a booked party for lunch
 //   never on stat holidays or studio closures; small studios (1–2 staff) get no weekday workshops during camps (not PA/PD days)
 //   1 staff on a weekday: everything done within 5 hours of their break, which ends 15 minutes before the first class / kids workshop
+//   a new time that matches an existing empty one (same workshop, same time) keeps the existing one instead
 //   a PA/PD day: asks first — close the evening, or open with how many staff (until answered, nothing is proposed that day)
 //   kids-only times: only workshops ticked 🧒 Good for kids (Workshops manager)
 //   Featured workshops first, then the most popular; never the same project twice in a day; only workshops in their "Offered" dates;
@@ -4171,12 +4174,14 @@ function asBuild(W, onlyId) {
       const starts = new Set(kept.filter(s => ['workshop', 'glazing', 'mini', 'kidsws'].includes(s.k)).map(s => s.start));
       const usedToday = new Set(kept.map(s => s.item && items[s.item] ? items[s.item].project_id : null).filter(Boolean));
       const spots = k => k === 'kidsws' ? (+set.spots_kids || 15) : staff >= 3 ? (+set.spots_big || 18) : (+set.spots_small || 12);
-      const pick = (k, wantDitto) => {
+      const pick = (k, wantDitto, start) => {
         if (k === 'glazing') return glazingItem || null;
         const ok = pool.filter(i => (k === 'mini' ? i._mini : !i._mini && i.kind !== 'glazing')
           && (!i.offer_from || i.offer_from <= d) && (!i.offer_until || i.offer_until >= d) && !usedToday.has(i.project_id)
           && (k !== 'kidsws' || i.kids_ok));   // (kids-only times: only 🧒 Good for kids workshops)
-        const score = i => (wantDitto && isDitto(i) ? 5000 : 0) + (i.featured ? 1000 : 0) + (+i.likes || 0) * 3 + (+i.booked90 || 0) - (usedWeek[i.project_id] || 0) * 400;
+        // an empty time of the same kind already at this time: keep its workshop if it's still allowed (it stays, no change)
+        const there = new Set(ss.filter(s => s.remove && s.start === start && s.item && s.k === (k === 'kidsws' ? 'kidsws' : k)).map(s => s.item));
+        const score = i => (there.has(i.id) ? 100000 : 0) + (wantDitto && isDitto(i) ? 5000 : 0) + (i.featured ? 1000 : 0) + (+i.likes || 0) * 3 + (+i.booked90 || 0) - (usedWeek[i.project_id] || 0) * 400;
         ok.sort((a, b) => score(b) - score(a) || String(a.title).localeCompare(String(b.title)));
         return ok[0] || null;
       };
@@ -4185,7 +4190,7 @@ function asBuild(W, onlyId) {
         if (end > endLimit || starts.has(start)) return false;
         if (k === 'kidsws' ? maxDed(start, end) >= staff : !floorFree(start, end)) return false;
         const wantDitto = weekend && k === 'workshop' && !dittoWeekend;
-        const it = pick(k, wantDitto); if (!it) { D.short = D.short || {}; D.short[k] = (D.short[k] || 0) + 1; return false; }
+        const it = pick(k, wantDitto, start); if (!it) { D.short = D.short || {}; D.short[k] = (D.short[k] || 0) + 1; return false; }
         D.entries.push({ t: 'new', k, start, len, item: it.id, spots: spots(k), kids: k === 'kidsws', why, on: true });
         starts.add(start); if (it.project_id) { usedToday.add(it.project_id); usedWeek[it.project_id] = (usedWeek[it.project_id] || 0) + 1; }
         if (k === 'kidsws') ded.push([start, end]);
@@ -4230,6 +4235,14 @@ function asBuild(W, onlyId) {
         let t = eve;
         [['mini'], ['glazing'], ['workshop']].forEach(([k]) => { if (!have(k)) { if (add(t, k, 'evening')) t += 15; else if (add(t + 15, k, 'evening')) t += 30; } });
       }
+      // the plan matches what's already there (same workshop, same time): keep the existing time instead of
+      // removing it and adding the same one again
+      D.entries.filter(e => e.t === 'new').forEach(e => {
+        const o = D.entries.find(x => x.t === 'old' && x.s.remove && !x.keep && !x.same && x.s.item === e.item && x.s.start === e.start);
+        if (!o) return;
+        o.keep = true; o.same = true; e.dup = true; out.removeCount--; out.addCount--;
+      });
+      D.entries = D.entries.filter(e => !e.dup);
       // ran out of different projects for the day (never the same project twice)
       Object.keys(D.short || {}).forEach(k => D.notes.push(k === 'kidsws' ? 'Kids workshop left empty: no 🧒 Good for kids workshop in its dates (tick some in Workshops)'
         : `${D.short[k]} ${AS_KIND_LABEL[k].toLowerCase()} time${D.short[k] === 1 ? '' : 's'} left empty: no other ${k === 'glazing' ? 'glazing item' : AS_KIND_LABEL[k].toLowerCase() + ' in its dates'} to offer`));
@@ -4295,14 +4308,14 @@ function asStudioHtml(S, si) {
         const s = e.s, rem = s.remove && !e.keep;
         if (!['workshop', 'glazing', 'mini', 'wheel', 'kidsws', 'class', 'party', 'field', 'group', 'camp', 'paday'].includes(s.k)) return '';
         if (['party', 'group', 'field'].includes(s.k) && !s.booked) return '';
-        return `<div class="as-e ${rem ? 'rem' : 'old'}${s.k === 'class' && !s.booked ? ' cls0' : ''}"${s.remove ? ` onclick="asToggleRem(${si},${di},${ei})" title="${rem ? 'Comes off (0 bookings). Tap to keep it.' : 'Kept. Tap to take it off.'}"` : ''}><b>${asT(s.start)}</b> ${esc(fdClean(s.title))}<span>${s.k === 'party' ? 'party' : s.k === 'class' ? (s.booked ? `class · ${s.booked} enrolled` : 'class · 0 enrolled') : s.booked ? s.booked + ' booked' : rem ? 'off' : '0, kept'}</span></div>`;
+        return `<div class="as-e ${rem ? 'rem' : 'old'}${s.k === 'class' && !s.booked ? ' cls0' : ''}"${s.remove ? ` onclick="asToggleRem(${si},${di},${ei})" title="${rem ? 'Comes off (0 bookings). Tap to keep it.' : 'Kept. Tap to take it off.'}"` : ''}><b>${asT(s.start)}</b> ${esc(fdClean(s.title))}<span>${s.k === 'party' ? 'party' : s.k === 'class' ? (s.booked ? `class · ${s.booked} enrolled` : 'class · 0 enrolled') : s.booked ? s.booked + ' booked' : rem ? 'off' : e.same ? '0 · stays, same as the plan' : '0, kept'}</span></div>`;
       }
       if (!e.on) return `<div class="as-e drop" onclick="asNew(${si},${di},${ei},'on',true)" title="Tap to add it back"><b>${asT(e.start)}</b> ${esc(AS_KIND_LABEL[e.k])} <span>left out</span></div>`;
       const it = items[e.item] || {}, opts = e.k === 'glazing' ? [] : P.pool.filter(i => (e.k === 'mini' ? i._mini : !i._mini && i.kind !== 'glazing') && (e.k !== 'kidsws' || i.kids_ok || i.id === e.item));
       return `<div class="as-e new"><div class="as-er"><input type="time" step="900" value="${asHM(e.start)}" onchange="asNew(${si},${di},${ei},'start',asMin(this.value))"><button class="as-x" onclick="asNew(${si},${di},${ei},'on',false)" title="Leave this one out">✕</button></div>` +
         (opts.length ? `<select onchange="asNew(${si},${di},${ei},'item',this.value)">${opts.map(i => `<option value="${escAttr(i.id)}"${i.id === e.item ? ' selected' : ''}>${esc(i.title)}${i.featured ? ' ⭐' : ''}</option>`).join('')}</select>` : `<b>${esc(it.title || 'Glazing')}</b>`) +
-        `<span>${esc(AS_KIND_LABEL[e.k])} · ${e.spots} spots</span></div>`;
-    }).join('') + '</div>').join('') + '</div></div>';
+        `<span>${esc(AS_KIND_LABEL[e.k])} · ${e.spots} spots${e.manual ? ' · added by you' : ''}</span></div>`;
+    }).join('') + (D.staff && !D.notes.some(x => /^(Closed|🎌|Past)/.test(x)) ? `<div class="as-addb"><button onclick="asAddManual(${si},${di},'workshop')" title="Add a workshop time">+ Workshop</button><button onclick="asAddManual(${si},${di},'kidsws')" title="Add a kids-only workshop time">+ Kids</button><button onclick="asAddManual(${si},${di},'glazing')" title="Add a glazing time">+ Glazing</button></div>` : '') + '</div>').join('') + '</div></div>';
   return h;
 }
 // "After publishing": the week as it will be, kept and new times together, in time order (read-only)
@@ -4312,7 +4325,7 @@ function asAfterHtml(S) {
     const list = [];
     D.entries.forEach(e => {
       if (e.t === 'old') { const s = e.s; if (s.remove && !e.keep) return; if (!shown.includes(s.k) || (['party', 'group', 'field'].includes(s.k) && !s.booked)) return;
-        list.push({ start: s.start, title: fdClean(s.title), sub: s.k === 'class' ? (s.booked ? `class · ${s.booked} enrolled` : 'class · 0 enrolled') : s.k === 'party' ? 'party' : s.booked ? s.booked + ' booked' : '', cls: 'old' + (s.k === 'class' && !s.booked ? ' cls0' : '') }); }
+        list.push({ start: s.start, title: fdClean(s.title), sub: s.k === 'class' ? (s.booked ? `class · ${s.booked} enrolled` : 'class · 0 enrolled') : s.k === 'party' ? 'party' : s.booked ? s.booked + ' booked' : e.same ? 'stays (same as the plan)' : '', cls: 'old' + (s.k === 'class' && !s.booked ? ' cls0' : '') }); }
       else if (e.on) { const it = items[e.item] || {}; list.push({ start: e.start, title: it.title || AS_KIND_LABEL[e.k], sub: `${AS_KIND_LABEL[e.k]} · ${e.spots} spots`, cls: 'new', tag: true }); }
     });
     list.sort((a, b) => a.start - b.start);
@@ -4332,6 +4345,23 @@ function asPadSet(st, d, v) {
   if (v === '') delete _as.pad[k]; else _as.pad[k] = v;
   const P = _as.plan, i = P.studios.findIndex(x => x.id === st); if (i < 0 || !_as.data) return;
   const one = asBuild(_as.data, st).studios[0]; if (one) P.studios[i] = one;   // just this studio's week again
+  asDraw();
+}
+// + Workshop / + Kids / + Glazing: a one-off time added by hand (4pm to start; change the time and the workshop in the box)
+function asAddManual(si, di, k) {
+  const P = _as.plan, S = P.studios[si], D = S.days[di], set = (_as.data && _as.data.settings) || {};
+  const usedToday = new Set(D.entries.map(e => e.t === 'new' ? (P.items[e.item] || {}).project_id : e.s.item && P.items[e.s.item] ? P.items[e.s.item].project_id : null).filter(Boolean));
+  let it;
+  if (k === 'glazing') it = P.glazingItem;
+  else {
+    const ok = P.pool.filter(i => !i._mini && i.kind !== 'glazing' && (!i.offer_from || i.offer_from <= D.date) && (!i.offer_until || i.offer_until >= D.date) && (k !== 'kidsws' || i.kids_ok));
+    const score = i => (usedToday.has(i.project_id) ? -100000 : 0) + (i.featured ? 1000 : 0) + (+i.likes || 0) * 3 + (+i.booked90 || 0);
+    it = ok.sort((a, b) => score(b) - score(a))[0];
+  }
+  if (!it) { alert(k === 'glazing' ? 'There’s no glazing item to add.' : k === 'kidsws' ? 'No 🧒 Good for kids workshop is offered on this date (tick some in Workshops).' : 'No workshop is offered on this date.'); return; }
+  const spots = k === 'kidsws' ? (+set.spots_kids || 15) : (D.staff >= 3 ? (+set.spots_big || 18) : (+set.spots_small || 12));
+  D.entries.push({ t: 'new', k, start: 16 * 60, len: 120, item: it.id, spots, kids: k === 'kidsws', on: true, manual: true });
+  D.entries.sort((a, b) => (a.t === 'old' ? a.s.start : a.start) - (b.t === 'old' ? b.s.start : b.start));
   asDraw();
 }
 function asToggleRem(si, di, ei) { const e = _as.plan.studios[si].days[di].entries[ei]; e.keep = !e.keep; asDraw(); }
