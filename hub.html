@@ -405,6 +405,9 @@ a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: cente
 .rp-card > .ho-btn { justify-self: start; } .rp-vt th, .rp-vt td { padding: 6px 6px; }
 .rp-ship { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px; margin: 8px 0; max-width: 980px; }
 .rp-ship.on { display: grid; gap: 8px; } .rp-ship label { display: flex; gap: 8px; align-items: center; } .rp-money input { width: 100px; font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; margin-left: 4px; }
+.rp-drop { display: flex; align-items: center; justify-content: center; border: 2px dashed var(--border); border-radius: 14px; padding: 22px; font-weight: 800; color: #2f6fb0; cursor: pointer; background: #fff; max-width: 980px; margin: 8px 0; }
+.rp-bulk img { width: 54px; height: 54px; object-fit: cover; border-radius: 8px; } .rp-bulk select { font: inherit; font-size: 13px; padding: 5px 6px; border: 1px solid var(--border); border-radius: 8px; max-width: 320px; }
+.rp-bulk tr.rp-nomatch td { background: #fdf3d8; } .rp-bulk td { white-space: normal; vertical-align: middle; }
 .rp-foot { display: flex; gap: 8px; max-width: 1150px; margin: 14px 0 30px; }
 @media (max-width: 900px) { .rp-grid { grid-template-columns: 1fr; } }
 /* 🖼️ Workshops manager */
@@ -3693,10 +3696,10 @@ async function bulkRun(preview) {
 // how sales and stock connect), weight and size (for ShipStation).
 const RP_CATS = [['art_kit', 'Art kit'], ['merch', 'Merch'], ['supplies', 'Supplies'], ['gift', 'Gift'], ['other', 'Other']];
 const RP_TAX = [['goods', 'Goods (GST + PST in BC, GST in AB, HST in ON)'], ['services', 'Services'], ['none', 'No tax']];
-let _rp = { rows: null, err: '', q: '', cat: '', where: '', show: 'active', edit: null, msg: '', ship: null, shipOpen: false };
+let _rp = { rows: null, err: '', q: '', cat: '', where: '', show: 'active', edit: null, msg: '', ship: null, shipOpen: false, view: 'list', bulk: null, panels: null, panel: null };
 async function openRpPane() { // (async: also loads the shipping setting)
   if (!_hoCan.edit) { alert('Products needs Studio Ops edit access.'); return; }
-  showOnlyPane('rp-pane'); setActiveNav('nav-rp'); _rp.edit = null; rpDraw(); rpLoad();
+  showOnlyPane('rp-pane'); setActiveNav('nav-rp'); _rp.edit = null; _rp.view = 'list'; rpDraw(); rpLoad(); rpPanelsLoad();
   const sh = await sb.rpc('hub_retail_shipping_get'); _rp.ship = sh.error ? { err: /hub_retail_shipping/.test(sh.error.message) ? 'Run retail_shipping.sql in Supabase first.' : sh.error.message } : (sh.data || {}); rpDraw();
 }
 // 🚚 Shipping (World settings 'retail_shipping'): free over an amount of shop items, else a flat rate
@@ -3724,11 +3727,13 @@ const rpMoney = n => n == null || n === '' ? '' : '$' + Number(n).toFixed(2);
 function rpDraw() {
   const el = document.getElementById('rp-pane'); if (!el) return;
   if (_rp.edit) { el.innerHTML = rpEditHtml(); return; }
+  if (_rp.view === 'bulk') { el.innerHTML = rpBulkHtml(); return; }
+  if (_rp.view === 'panels') { el.innerHTML = rpPanelsHtml() + (_rp.msg ? `<p class="fd-ok">${esc(_rp.msg)}</p>` : ''); return; }
   const P = _rp, R = P.rows || [], q = P.q.trim().toLowerCase();
   const rows = R.filter(r => (!q || (r.name + ' ' + (r.variants || []).map(v => v.sku || '').join(' ') + ' ' + (r.tags || []).join(' ')).toLowerCase().includes(q))
     && (!P.cat || r.category === P.cat) && (P.show === 'all' || (P.show === 'active' ? r.active : !r.active))
     && (!P.where || (P.where === 'online' ? r.sell_online : P.where === 'studio' ? r.sell_in_studio : P.where === 'both' ? r.sell_online && r.sell_in_studio : !r.sell_online && !r.sell_in_studio)));
-  el.innerHTML = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🛍️ Products</div><span class="spacer"></span><button class="ho-btn primary" onclick="rpOpen(null)">+ New product</button><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+  el.innerHTML = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🛍️ Products</div><span class="spacer"></span><button class="ho-btn" onclick="_rp.view='bulk';_rp.msg='';rpDraw()">📷 Bulk pictures</button><button class="ho-btn" onclick="_rp.view='panels';_rp.msg='';rpDraw()">📄 Info panels</button><button class="ho-btn primary" onclick="rpOpen(null)">+ New product</button><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
     ${rpShipHtml()}
     <div class="ho-intro">Everything 4Cats sells: art kits first. Each product says where it’s sold (🌐 World’s shop, shipped from the warehouse, and/or 🏪 the front desk). Each variant’s <b>SKU</b> is the same as its inventory item, which is how sales and stock connect.</div>
     <div class="fd-filters"><input id="rp-q" type="search" placeholder="Search name, SKU or tag" value="${escAttr(P.q)}" oninput="_rp.q=this.value;clearTimeout(_rp.t);_rp.t=setTimeout(()=>{rpDraw();const i=document.getElementById('rp-q');if(i){i.focus();i.setSelectionRange(i.value.length,i.value.length)}},250)">
@@ -3796,6 +3801,7 @@ function rpEditHtml() {
           <td><input type="checkbox" ${v.active !== false ? 'checked' : ''} onchange="rpV(${i},'active',this.checked)"></td><td>${E.variants.length > 1 ? `<button class="fd-x" onclick="_rp.edit.variants.splice(${i},1);rpDraw()" aria-label="Remove">×</button>` : ''}</td></tr>`; }).join('') +
       `</tbody></table></div><button class="ho-btn sm" onclick="_rp.edit.variants.push({name:'',sku:'',active:true});rpDraw()">+ Add a variant</button>
       <p class="fd-sm">The SKU should match the item in the inventory system, so stock and sales connect. Weight is the packed weight, for shipping.</p></section>
+    ${rpEditPanelsHtml()}
     <section class="rp-card rp-wide"><h4>Staff notes</h4><textarea rows="2" oninput="rpF('notes',this.value)">${esc(E.notes || '')}</textarea></section>
     </div>
     <div class="rp-foot">${E.id ? '<button class="ho-btn" onclick="rpDelete()">Delete product</button>' : ''}<span class="spacer"></span><button class="ho-btn" onclick="rpClose()">Cancel</button><button class="ho-btn primary" onclick="rpSave()">Save</button></div>`;
@@ -3809,17 +3815,8 @@ function rpPic(i, dir) {
 }
 async function rpUpload(inp) {
   const files = [...(inp.files || [])]; if (!files.length) return;
-  const m = () => document.getElementById('rp-upmsg');
-  for (let k = 0; k < files.length; k++) {
-    if (m()) m().textContent = `Uploading ${k + 1} of ${files.length}…`;
-    let f = files[k]; try { f = await nwShrink(f); } catch (e) { /* the original */ }
-    if (f.size > 8 * 1024 * 1024) { alert(files[k].name + ' is over 8 MB; please use a smaller picture.'); continue; }
-    const path = `${_rp.edit.id || 'new'}/${Date.now()}-${String(files[k].name).toLowerCase().replace(/[^a-z0-9.]+/g, '-')}`;
-    const { error } = await sb.storage.from('retail-media').upload(path, f, { contentType: f.type, upsert: false });
-    if (error) { alert('Upload didn’t work: ' + error.message); continue; }
-    _rp.edit.images.push(sb.storage.from('retail-media').getPublicUrl(path).data.publicUrl); _rp.edit.dirty = true;
-  }
-  rpDraw();
+  const urls = await rpUploadFiles(files, _rp.edit.id || 'new', (k, n) => { const e = document.getElementById('rp-upmsg'); if (e) e.textContent = `Uploading ${k + 1} of ${n}…`; });
+  urls.filter(Boolean).forEach(u => _rp.edit.images.push(u)); _rp.edit.dirty = true; rpDraw();
 }
 function rpClose() { if (_rp.edit && _rp.edit.dirty && !confirm('Leave without saving your changes?')) return; _rp.edit = null; rpDraw(); }
 async function rpSave() {
@@ -3840,6 +3837,145 @@ async function rpDelete() {
   const { error } = await sb.rpc('hub_retail_delete', { p_id: E.id });
   if (error) { _rp.msg = 'Not deleted: ' + error.message; rpDraw(); return; }
   _rp.edit = null; _rp.msg = `Deleted ${E.name}.`; rpLoad();
+}
+// ---- Shared: upload pictures to retail-media (resized first) → their public addresses ----
+async function rpUploadFiles(files, folder, onStep) {
+  const urls = [];
+  for (let k = 0; k < files.length; k++) {
+    if (onStep) onStep(k, files.length);
+    let f = files[k]; try { f = await nwShrink(f); } catch (e) { /* the original */ }
+    if (f.size > 8 * 1024 * 1024) { alert(files[k].name + ' is over 8 MB; please use a smaller picture.'); urls.push(null); continue; }
+    const path = `${folder}/${Date.now()}-${k}-${String(files[k].name).toLowerCase().replace(/[^a-z0-9.]+/g, '-')}`;
+    const { error } = await sb.storage.from('retail-media').upload(path, f, { contentType: f.type, upsert: false });
+    if (error) { alert('Upload didn’t work for ' + files[k].name + ': ' + error.message); urls.push(null); continue; }
+    urls.push(sb.storage.from('retail-media').getPublicUrl(path).data.publicUrl);
+  }
+  return urls;
+}
+// ---- 📷 Bulk pictures: drop many photos; each goes to the product its file name matches ----
+// "Sculpt and Bake Dog Kit.jpg" → Sculpt & Bake: Dog Kit (main picture); "… Dog Kit 2.jpg", "… Dog Kit (3).jpg" → its 2nd, 3rd
+const rpNorm = s => String(s || '').toLowerCase().replace(/&/g, ' and ').replace(/[’']/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+function rpMatchFile(name) {
+  let base = String(name).replace(/\.[a-z0-9]+$/i, ''), n = 1;
+  const whole = (_rp.rows || []).filter(p => rpNorm(p.name) === rpNorm(base));   // (a product whose own name ends in a number)
+  if (whole.length === 1) return { product: whole[0].id, order: 1, maybe: null };
+  const m = base.match(/^(.*?)[\s_-]*(?:\((\d{1,2})\)|[\s_-](\d{1,2}))$/);
+  if (m && m[1].trim()) { base = m[1]; n = +(m[2] || m[3]); }
+  const f = rpNorm(base), loose = s => s.replace(/\b(kit|the|a)\b/g, ' ').replace(/\s+/g, ' ').trim();
+  const P = (_rp.rows || []).map(p => ({ p, n: rpNorm(p.name) }));
+  let hit = P.filter(x => x.n === f);
+  if (!hit.length) hit = P.filter(x => loose(x.n) === loose(f));
+  if (!hit.length && f.length >= 4) { const c = P.filter(x => x.n.includes(f) || f.includes(x.n)); if (c.length === 1) hit = c; }
+  return { product: hit.length === 1 ? hit[0].p.id : '', order: n, maybe: hit.length > 1 ? hit.map(x => x.p.name) : null };
+}
+function rpBulkPick(inp) {
+  const files = [...(inp.files || [])].filter(f => /^image\//.test(f.type));
+  _rp.bulk = { items: files.map(f => Object.assign({ file: f, url: URL.createObjectURL(f) }, rpMatchFile(f.name))), busy: false, msg: '' };
+  rpDraw();
+}
+function rpBulkHtml() {
+  const B = _rp.bulk, P = (_rp.rows || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+  let h = `<div class="ho-head"><div class="pts-page-title" style="margin:0">📷 Bulk pictures</div><span class="spacer"></span><button class="ho-btn" onclick="_rp.view='list';_rp.bulk=null;rpDraw()">← All products</button></div>
+    <div class="ho-intro">Name each photo after its product: <b>Sculpt and Bake Dog Kit.jpg</b> is its main picture, <b>Sculpt and Bake Dog Kit 2.jpg</b> its second, and so on. (Punctuation doesn’t matter.) Check the matches, change any that are wrong, then upload. Pictures are added after the ones a product already has.</div>
+    <label class="rp-drop">📷 Choose photos (as many as you like)<input type="file" accept="image/*" multiple onchange="rpBulkPick(this)" hidden></label>`;
+  if (!B || !B.items.length) return h;
+  const matched = B.items.filter(x => x.product).length;
+  h += `<p class="fd-sm"><b>${matched}</b> of ${B.items.length} photos matched to a product${B.items.length - matched ? ` · <b class="fd-warn">${B.items.length - matched} need a product chosen</b> (or they’re skipped)` : ''}.</p>
+    <div class="fd-tbl-wrap"><table class="fd-tbl rp-bulk"><thead><tr><th></th><th>Photo</th><th>Product</th><th>Picture #</th></tr></thead><tbody>` +
+    B.items.map((x, i) => `<tr class="${x.product ? '' : 'rp-nomatch'}"><td><img src="${escAttr(x.url)}" alt=""></td><td>${esc(x.file.name)}${x.maybe ? `<br><span class="fd-warn">could be: ${esc(x.maybe.slice(0, 3).join(', '))}</span>` : ''}</td>
+      <td><select onchange="_rp.bulk.items[${i}].product=this.value;rpDraw()"><option value="">(skip this photo)</option>${P.map(p => `<option value="${p.id}"${p.id === x.product ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}</select></td>
+      <td><input type="number" min="1" max="20" value="${x.order}" style="width:60px" onchange="_rp.bulk.items[${i}].order=+this.value||1"></td></tr>`).join('') + '</tbody></table></div>' +
+    `<p class="fd-sm" id="rp-bmsg">${esc(B.msg || '')}</p><button class="ho-btn primary" ${matched && !B.busy ? '' : 'disabled'} onclick="rpBulkGo()">Upload ${matched} photo${matched === 1 ? '' : 's'}</button>`;
+  return h;
+}
+async function rpBulkGo() {
+  const B = _rp.bulk, todo = B.items.filter(x => x.product).sort((a, b) => a.product.localeCompare(b.product) || a.order - b.order);
+  B.busy = true; rpDraw();
+  const msg = t => { B.msg = t; const e = document.getElementById('rp-bmsg'); if (e) e.textContent = t; };
+  const urls = await rpUploadFiles(todo.map(x => x.file), 'bulk', (k, n) => msg(`Uploading ${k + 1} of ${n}…`));
+  const by = {}; todo.forEach((x, i) => { if (urls[i]) (by[x.product] = by[x.product] || []).push(urls[i]); });
+  let done = 0, err = 0;
+  for (const pid of Object.keys(by)) { msg(`Adding to products… ${++done} of ${Object.keys(by).length}`); const { error } = await sb.rpc('hub_retail_add_images', { p_product: pid, p_urls: by[pid] }); if (error) err++; }
+  const n = urls.filter(Boolean).length;
+  _rp.bulk = null; _rp.view = 'list'; _rp.msg = `✓ ${n} photo${n === 1 ? '' : 's'} added to ${Object.keys(by).length} product${Object.keys(by).length === 1 ? '' : 's'}.` + (err ? ` ${err} product${err === 1 ? '' : 's'} didn’t save; try those again.` : '');
+  await rpLoad();
+}
+// ---- 📄 Info panels: shared content (a link that opens a pop-up on the product page), on products by tag or ticked ----
+async function rpPanelsLoad() {
+  const { data, error } = await sb.rpc('hub_retail_panels');
+  _rp.panels = error ? { err: /hub_retail_panels/.test(error.message) ? 'Run retail_panels.sql in Supabase first.' : error.message } : (data || []);
+  rpDraw();
+}
+function rpPanelsFor(prod) {   // the panels on a product: by tag (auto) or ticked
+  const P = Array.isArray(_rp.panels) ? _rp.panels : [], tags = new Set((prod.tags || []).map(t => String(t).trim().toLowerCase()));
+  return P.map(x => ({ x, byTag: (x.tags || []).find(t => tags.has(t)) || null, ticked: (x.product_ids || []).includes(prod.id) }));
+}
+function rpPanelsHtml() {
+  const P = _rp.panels;
+  if (_rp.panel) return rpPanelEditHtml();
+  let h = `<div class="ho-head"><div class="pts-page-title" style="margin:0">📄 Info panels</div><span class="spacer"></span><button class="ho-btn primary" onclick="rpPanelOpen(null)">+ New info panel</button><button class="ho-btn" onclick="_rp.view='list';rpDraw()">← All products</button></div>
+    <div class="ho-intro">Shared content for many products, like <b>How to bake Ditto clay</b>. On World it’s a link on the product page that opens a pop-up. A panel goes on every product with one of its tags, and on any product ticked for it. Edit it once and every product shows the change.</div>`;
+  if (!P) return h + '<p class="fd-sm">Loading…</p>';
+  if (P.err) return h + `<p class="fd-msg">${esc(P.err)}</p>`;
+  const R = _rp.rows || [];
+  return h + `<div class="fd-tbl-wrap"><table class="fd-tbl rp-tbl"><thead><tr><th>Panel</th><th>Link on the product page</th><th>On products</th><th></th></tr></thead><tbody>` +
+    P.map(x => { const n = R.filter(p => rpPanelsFor(p).some(z => z.x.id === x.id && (z.byTag || z.ticked))).length;
+      return `<tr class="${x.active ? '' : 'rp-off'}" onclick="rpPanelOpen('${x.id}')"><td><b>${esc(x.name)}</b>${x.active ? '' : ' <span class="fd-pill">off</span>'}${x.body ? '' : ' <span class="fd-warn">no text yet</span>'}</td><td>${esc(x.label)}</td>
+        <td>${(x.tags || []).map(t => `<span class="fd-pill">tag: ${esc(t)}</span>`).join(' ')}${(x.product_ids || []).length ? ` <span class="fd-pill">+${x.product_ids.length} ticked</span>` : ''} <span class="fd-sm">· ${n} product${n === 1 ? '' : 's'}</span></td><td>Edit ›</td></tr>`; }).join('') + '</tbody></table></div>';
+}
+function rpPanelOpen(id) {
+  const x = id ? (_rp.panels || []).find(y => y.id === id) : null;
+  _rp.panel = x ? JSON.parse(JSON.stringify(x)) : { name: '', label: '', body: '', images: [], tags: [], product_ids: [], active: true };
+  rpDraw(); window.scrollTo(0, 0);
+}
+function rpPanelEditHtml() {
+  const X = _rp.panel, set = k => `oninput="_rp.panel.${k}=this.value"`;
+  return `<div class="ho-head"><div class="pts-page-title" style="margin:0">📄 ${X.id ? esc(X.name) : 'New info panel'}</div><span class="spacer"></span><button class="ho-btn" onclick="_rp.panel=null;rpDraw()">← All panels</button><button class="ho-btn primary" onclick="rpPanelSave()">Save</button></div>
+    <div class="rp-grid"><section class="rp-card"><h4>The panel</h4>
+      <label>Name <span class="fd-sm">(for staff)</span><input value="${escAttr(X.name)}" placeholder="e.g. Ditto baking instructions" ${set('name')}></label>
+      <label>Link on the product page<input value="${escAttr(X.label)}" placeholder="e.g. How to bake Ditto clay" ${set('label')}></label>
+      <label>On every product tagged <span class="fd-sm">(commas)</span><input value="${escAttr((X.tags || []).join(', '))}" placeholder="e.g. ditto" oninput="_rp.panel.tags=this.value.split(',')"></label>
+      <p class="fd-sm">${(X.product_ids || []).length ? `Also on ${X.product_ids.length} product${X.product_ids.length === 1 ? '' : 's'} ticked in their editor.` : 'You can also tick it on single products, in the product’s editor.'}</p>
+      <label class="fd-chk"><input type="checkbox" ${X.active ? 'checked' : ''} onchange="_rp.panel.active=this.checked"> <b>On</b> <span class="fd-sm">(off: not shown on any product)</span></label></section>
+    <section class="rp-card"><h4>Pictures <span class="fd-sm">(optional, shown in the pop-up)</span></h4>
+      <div class="rp-pics">${(X.images || []).map((u, i) => `<figure><img src="${escAttr(u)}" alt=""><figcaption><button onclick="_rp.panel.images.splice(${i},1);rpDraw()" aria-label="Remove">×</button></figcaption></figure>`).join('')}
+        <label class="rp-up">+ Add pictures<input type="file" accept="image/*" multiple onchange="rpPanelUpload(this)" hidden></label></div><p class="fd-sm" id="rp-pmsg"></p></section>
+    <section class="rp-card rp-wide"><h4>What the pop-up says</h4>
+      <textarea rows="12" placeholder="# Baking your Ditto creation&#10;Preheat the oven to …&#10;- Bake on a tray lined with parchment&#10;- …" ${set('body')}>${esc(X.body || '')}</textarea>
+      <p class="fd-sm">Start a line with # for a heading or - for a bullet; a blank line starts a new paragraph.</p></section></div>
+    <div class="rp-foot">${X.id ? '<button class="ho-btn" onclick="rpPanelDelete()">Delete panel</button>' : ''}<span class="spacer"></span><button class="ho-btn" onclick="_rp.panel=null;rpDraw()">Cancel</button><button class="ho-btn primary" onclick="rpPanelSave()">Save</button></div>`;
+}
+async function rpPanelUpload(inp) {
+  const files = [...(inp.files || [])]; if (!files.length) return;
+  const urls = await rpUploadFiles(files, 'panels', (k, n) => { const e = document.getElementById('rp-pmsg'); if (e) e.textContent = `Uploading ${k + 1} of ${n}…`; });
+  _rp.panel.images.push(...urls.filter(Boolean)); rpDraw();
+}
+async function rpPanelSave() {
+  const X = _rp.panel;
+  const { error } = await sb.rpc('hub_retail_panel_save', { p: { id: X.id || null, name: X.name, label: X.label, body: X.body, images: X.images, tags: X.tags, product_ids: X.product_ids, active: X.active, sort: X.sort || 0 } });
+  if (error) { alert('Not saved: ' + error.message); return; }
+  _rp.panel = null; _rp.msg = `✓ Saved ${X.name}.`; await rpPanelsLoad();
+}
+async function rpPanelDelete() {
+  const X = _rp.panel; if (!confirm(`Delete the “${X.name}” panel? It comes off every product.`)) return;
+  const { error } = await sb.rpc('hub_retail_panel_delete', { p_id: X.id }); if (error) { alert(error.message); return; }
+  _rp.panel = null; await rpPanelsLoad();
+}
+// In a product's editor: tick a panel on or off for this product (saved straight away)
+async function rpPanelTick(panelId, on) {
+  const E = _rp.edit; if (!E.id) { alert('Save the product first, then tick its info panels.'); rpDraw(); return; }
+  const { error } = await sb.rpc('hub_retail_panel_product', { p_panel: panelId, p_product: E.id, p_on: on });
+  if (error) { alert('Not saved: ' + error.message); return; }
+  const x = (_rp.panels || []).find(y => y.id === panelId); if (x) { const s = new Set(x.product_ids || []); if (on) s.add(E.id); else s.delete(E.id); x.product_ids = [...s]; }
+  rpDraw();
+}
+function rpEditPanelsHtml() {
+  const E = _rp.edit, P = _rp.panels;
+  if (!P) return '<section class="rp-card rp-wide"><h4>📄 Info panels</h4><p class="fd-sm">Loading…</p></section>';
+  if (P.err || !P.length) return `<section class="rp-card rp-wide"><h4>📄 Info panels</h4><p class="fd-sm">${P.err ? esc(P.err) : 'No info panels yet. Make them with 📄 Info panels on the Products page.'}</p></section>`;
+  return `<section class="rp-card rp-wide"><h4>📄 Info panels <span class="fd-sm">(links that open a pop-up on the product page)</span></h4>` +
+    rpPanelsFor(E).map(z => `<label class="fd-chk"><input type="checkbox" ${z.byTag || z.ticked ? 'checked' : ''} ${z.byTag ? 'disabled' : ''} onchange="rpPanelTick('${z.x.id}',this.checked)">
+      <span><b>${esc(z.x.label)}</b> <span class="fd-sm">${esc(z.x.name)}${z.byTag ? ` · on because it’s tagged “${esc(z.byTag)}”` : ''}${z.x.active ? '' : ' · panel is off'}</span></span></label>`).join('') + '</section>';
 }
 // ---------- Home office → 🖼️ Workshops manager (world_workshops_manager.sql) ----------
 // Every current World workshop (A–Z): next and last date, times left, studios, bookings and interest; Live (on World's
@@ -3873,7 +4009,7 @@ function wsmDraw() {
   const th = (k, l, cls) => `<th class="${cls || ''}"><button class="fd-th${W.sort === k ? ' on' : ''}" onclick="wsmSort('${k}')">${l}${W.sort === k ? (W.desc ? ' ▼' : ' ▲') : ''}</button></th>`;
   const studios = [...new Set(R.flatMap(r => r.studios || []))].sort((a, b) => (STUDIO_NAMES[a] || a).localeCompare(STUDIO_NAMES[b] || b));
   el.innerHTML = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🖼️ Workshops</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
-    <div class="ho-intro">Every current World workshop. <b>Live</b> shows it on World’s Workshops page. <b>Retire</b> takes it out of Suggest a date now; once its last date is over it drops off World’s Workshops page and off this list. <b>⭐ Featured</b> (up to 5) rise to the top of World’s Workshops page and <b>⬇ Bottom</b> (up to 5) sit at the bottom; the rest go in between, most popular first. Schedule dates with ➕ Bulk add.</div>
+    <div class="ho-intro">Every current World workshop. <b>Live</b> shows it on World’s Workshops page. <b>Retire</b> takes it out of Suggest a date now; once its last date is over it drops off World’s Workshops page and off this list. <b>⭐ Featured</b> (up to 10) rise to the top of World’s Workshops page and <b>⬇ Bottom</b> (up to 5) sit at the bottom; the rest go in between, most popular first. Schedule dates with ➕ Bulk add.</div>
     ${wsmAddHtml()}
     <div class="fd-filters"><input id="wsm-q" type="search" placeholder="Search a workshop" value="${escAttr(W.q)}" oninput="_wsm.q=this.value;clearTimeout(_wsm.t);_wsm.t=setTimeout(()=>{wsmDraw();const i=document.getElementById('wsm-q');if(i){i.focus();i.setSelectionRange(i.value.length,i.value.length)}},250)">
       <select onchange="_wsm.kind=this.value;wsmDraw()"><option value="">Workshops and Mini Makes</option><option value="workshop"${W.kind === 'workshop' ? ' selected' : ''}>Workshops</option><option value="mini_make"${W.kind === 'mini_make' ? ' selected' : ''}>Mini Makes</option></select>
@@ -3882,7 +4018,7 @@ function wsmDraw() {
       <label class="fd-sm"><input type="checkbox" ${W.all ? 'checked' : ''} onchange="_wsm.all=this.checked;wsmLoad()"> Show finished retired ones</label></div>
     ${W.err ? `<p class="fd-msg">${esc(W.err)}</p>` : ''}${W.msg ? `<p class="fd-ok">${esc(W.msg)}</p>` : ''}
     ${W.rows === null ? '<p class="fd-sm">Loading…</p>' : `<p class="fd-sm">${rows.length} workshop${rows.length === 1 ? '' : 's'}</p>
-    <div class="fd-tbl-wrap wsm-wrap"><table class="fd-tbl wsm-tbl"><thead><tr>${th('title', 'Workshop')}${th('next', 'Next date')}${th('last', 'Last date')}${th('times', 'Times left', 'num')}${th('studios', 'Studios', 'num')}${th('booked', 'Booked', 'num')}${th('tier', 'Price tier')}${th('interest', 'Interest')}${th('live', 'Live')}${th('retired', 'Retire')}${th('order', `On page <span class="fd-sm">⭐ ${R.filter(r => r.wall_sort < 0).length}/5 ⬇ ${R.filter(r => r.wall_sort > 0).length}/5</span>`)}</tr></thead><tbody>` +
+    <div class="fd-tbl-wrap wsm-wrap"><table class="fd-tbl wsm-tbl"><thead><tr>${th('title', 'Workshop')}${th('next', 'Next date')}${th('last', 'Last date')}${th('times', 'Times left', 'num')}${th('studios', 'Studios', 'num')}${th('booked', 'Booked', 'num')}${th('tier', 'Price tier')}${th('interest', 'Interest')}${th('live', 'Live')}${th('retired', 'Retire')}${th('order', `On page <span class="fd-sm">⭐ ${R.filter(r => r.wall_sort < 0).length}/10 ⬇ ${R.filter(r => r.wall_sort > 0).length}/5</span>`)}</tr></thead><tbody>` +
     rows.map(r => { const pct = r.spots ? Math.round(100 * (+r.booked || 0) / r.spots) : null, done = r.retired_at && (!r.last_date || r.last_date < today);
       return `<tr class="${r.retired_at ? 'wsm-ret' : ''}${!r.live ? ' wsm-off' : ''}"><td class="wsm-name">${r.image ? `<img src="${escAttr(r.image)}" alt="">` : '<span class="wsm-noimg"></span>'}<span><button class="wsm-link" onclick="wsmDetail('${r.id}')" title="See every time it’s offered"><b>${esc(r.title)}</b></button><br><span class="fd-sm">${r.kind === 'mini_make' ? 'Mini Make' : 'Workshop'}${r.min_age != null ? ' · ' + r.min_age + (r.max_age && r.max_age < 99 ? '–' + r.max_age : '+') : ''}${r.minutes ? ' · ' + r.minutes + ' min' : ''}${r.retired_at ? ' · <b class="wsm-rt">' + (done ? 'retired' : 'retiring') + '</b>' : ''}</span></span></td>
         <td>${wsmDay(r.next_date)}</td><td>${wsmDay(r.last_date)}</td><td class="num"><button class="wsm-link num" onclick="wsmDetail('${r.id}')" title="See every time it’s offered">${r.times_left || 0}</button></td>
@@ -3909,7 +4045,7 @@ function wsmTier(id, sel) {
   if (!confirm(`Change “${r ? r.title : 'this workshop'}” to ${name}?\n\nNew bookings on World use it straight away, and it becomes the project’s default price tier in the Projects library.`)) { sel.value = (r && r.price_tier) || ''; return; }
   wsmSet(id, { price_tier: sel.value });
 }
-// ⭐ Featured / ⬇ Bottom: tap to set, tap again to take it off (up to 5 each)
+// ⭐ Featured (up to 10) / ⬇ Bottom (up to 5): tap to set, tap again to take it off
 function wsmPlace(id, place) {
   const r = (_wsm.rows || []).find(x => x.id === id); if (!r) return;
   const on = place === 'featured' ? r.wall_sort < 0 : r.wall_sort > 0;
