@@ -190,6 +190,7 @@ button.pill { cursor: pointer; }
 .base-row input { width: 100%; }
 .base-row .used { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .sheet-src { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.more-row { margin-bottom: 6px; flex-wrap: wrap; } .more-row .more-label { width: 150px; flex: none; } .more-row input[type=url] { flex: 1; min-width: 200px; }
 .sheet-src input { flex: 1; min-width: 0; }
 .file-chip { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; padding: 6px 10px; border-radius: 8px; background: #f3f2ec; }
 .sheet-source-choice { display: flex; gap: 14px; }
@@ -462,6 +463,8 @@ input.bad-amount { border-color: #c0392b; background: #fdf0ee; }
       <div><label class="field-label" for="ed-base">Base printout (shared) <a href="#" class="small" onclick="openSheets('base');return false">manage</a></label><select id="ed-base" style="width:100%"></select></div>
       <div class="full"><label class="field-label">Steps printout (this project only)</label><div id="ed-steps-src"></div></div>
       <input type="file" id="ed-steps-file" accept=".pdf,application/pdf,image/png,image/jpeg,image/webp" style="display:none" onchange="stepsFileChosen(this)">
+      <div class="full"><label class="field-label">More printouts <span class="muted">(optional: page 2, a glaze guide, a colouring sheet…)</span></label><div id="ed-more-src"></div></div>
+      <input type="file" id="ed-more-file" accept=".pdf,application/pdf,image/png,image/jpeg,image/webp" style="display:none" onchange="moreFileChosen(this)">
       <div><label class="field-label">Templates <a href="#" class="small" onclick="openSheets('template');return false">manage</a></label><div id="ed-templates" class="tpl-list"></div><a href="#" class="small" onclick="addTemplateRow();return false">+ Add another template</a></div>
       <div><label class="field-label" for="ed-marketing">Marketing photos link</label><input type="url" id="ed-marketing"></div>
       <div><label class="field-label" for="ed-metafield">Shopify project metafield</label><input type="text" id="ed-metafield"></div>
@@ -1416,6 +1419,8 @@ function openProjectEditor(id, presetName, onSaved) {
   document.getElementById('ed-steps').value = p.step_by_step_url || ''
   edSteps = { mode: p.printout_path ? 'file' : (p.printout_url ? 'link' : 'file'), url: p.printout_url || '', path: p.printout_path || null, file: null }
   renderStepsField()
+  edMore = (Array.isArray(p.extra_printouts) ? p.extra_printouts : []).map(x => ({ label: x.label || '', mode: x.path ? 'file' : (x.url ? 'link' : 'file'), url: x.url || '', path: x.path || null, file: null }))
+  renderMoreField()
   document.getElementById('ed-base').innerHTML = sheetOptionsHtml('base', p.base_printout_id || '')
   document.getElementById('ed-metafield').value = p.shopify_metafield || ''
   renderTemplateRows(templateIdsOf(p))
@@ -1563,7 +1568,7 @@ async function fillTierSelect(cur) {
   sel.innerHTML = PRICE_TIERS.map(t => `<option value="${String(t.key).replace(/"/g, '&quot;')}"${t.key === pick ? ' selected' : ''}>${String(t.name).replace(/[<&]/g, c => c === '<' ? '&lt;' : '&amp;')}</option>`).join('')
 }
 async function saveProject() {
-  if (edSteps.busy) { toast('Still shrinking the steps printout. Save again in a moment.', true); return }
+  if (edSteps.busy || edMore.some(x => x.busy)) { toast('Still shrinking a printout. Save again in a moment.', true); return }
   const pending = document.getElementById('ed-tag-entry').value
   if (pending.trim()) { addEditTag(pending); document.getElementById('ed-tag-entry').value = '' }
   const name = document.getElementById('ed-name').value.trim()
@@ -1619,6 +1624,7 @@ async function saveProject() {
   let { data, error } = await q.select().single()
   if (error) { btn.disabled = false; toast(friendlyError(error), true); return }
   data = await finishStepsPrintout(data)
+  data = await finishMorePrintouts(data)
   btn.disabled = false
   upsertLocal(data)
   closeModal('editor-modal')
@@ -2427,6 +2433,70 @@ async function finishStepsPrintout(row) {
   return row
 }
 
+/* ---------- more printouts (page 2, a glaze guide…): each a file or a link, with a label ----------
+   Saved in project_library.extra_printouts as [{ label, path } or { label, url }] (projects_more_printouts.sql). Files upload
+   when the project is saved, into the same private bucket as the steps sheet (steps/<project id>/more-…). The Hub shows each
+   one after the steps printout. */
+let edMore = []
+function renderMoreField() {
+  const box = document.getElementById('ed-more-src')
+  if (!box) return
+  box.innerHTML = edMore.map((x, i) => {
+    let body
+    if (x.busy) body = '<span class="file-chip">⏳ ' + esc(x.status || 'Working…') + '</span>'
+    else if (x.mode === 'link') body = '<input type="url" placeholder="https://drive.google.com/…" value="' + esc(x.url) + '" oninput="edMore[' + i + '].url = this.value">' +
+      '<button class="btn" onclick="edMore[' + i + '].mode=\'file\';renderMoreField()">Upload a file instead</button>'
+    else if (x.file) body = '<span class="file-chip">📎 ' + esc(x.file.name) + ' <span class="muted">— uploads when you save</span></span><button class="btn" onclick="pickMoreFile(' + i + ')">Choose a different file</button>' +
+      '<button class="btn" onclick="edMore[' + i + '].mode=\'link\';renderMoreField()">Use a link instead</button>'
+    else if (x.path) body = '<span class="file-chip">📎 ' + esc(sheetFileLabel(x.path)) + '</span><button class="btn" onclick="openSheetFile(\'' + esc(x.path) + '\')">Open</button>' +
+      '<button class="btn" onclick="pickMoreFile(' + i + ')">Replace file</button><button class="btn" onclick="edMore[' + i + '].mode=\'link\';renderMoreField()">Use a link instead</button>'
+    else body = '<span class="file-chip"><span class="muted">No file yet</span></span><button class="btn" onclick="pickMoreFile(' + i + ')">Choose file</button>' +
+      '<button class="btn" onclick="edMore[' + i + '].mode=\'link\';renderMoreField()">Use a link instead</button>'
+    return '<div class="sheet-src more-row"><input type="text" class="more-label" placeholder="Label, e.g. Page 2" maxlength="40" value="' + esc(x.label) + '" oninput="edMore[' + i + '].label = this.value">' + body +
+      '<button class="btn" title="Remove this printout" onclick="if(confirm(\'Remove this printout from the project?\')){edMore.splice(' + i + ',1);renderMoreField()}">✕</button></div>'
+  }).join('') + '<button class="btn" onclick="edMore.push({ label: \'\', mode: \'file\', url: \'\', path: null, file: null });renderMoreField()">+ Add another printout</button>'
+}
+let moreFor = null
+function pickMoreFile(i) { moreFor = edMore[i]; const input = document.getElementById('ed-more-file'); input.value = ''; input.click() }
+async function moreFileChosen(input) {
+  const file = input.files[0], mine = moreFor, list = edMore
+  if (!file || !mine) return
+  mine.busy = true; mine.status = ''; renderMoreField()
+  const ready = await prepareSheetFile(file, m => { mine.status = m; if (edMore === list) renderMoreField() })
+  mine.busy = false; mine.status = ''
+  if (edMore !== list) return
+  if (ready) { mine.file = ready; mine.mode = 'file'; if (!mine.label) mine.label = file.name.replace(/\.[a-z0-9]+$/i, '').slice(0, 40) }
+  renderMoreField()
+}
+// After the project row is saved: upload new files, save the list, and remove files that were replaced or taken off
+async function finishMorePrintouts(row) {
+  const before = ((editing && editing.extra_printouts) || []).map(x => x && x.path).filter(Boolean)
+  const out = []
+  for (const x of edMore) {
+    const label = String(x.label || '').trim().slice(0, 40)
+    if (x.mode === 'link') { const u = String(x.url || '').trim(); if (/^https?:\/\//i.test(u)) out.push({ label, url: u }); continue }
+    if (x.file) {
+      const safeName = x.file.name.toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-+|-+$/g, '') || 'printout.pdf'
+      const path = 'steps/' + row.id + '/more-' + Date.now() + '-' + safeName
+      toast('Uploading ' + x.file.name + '…')
+      const { error } = await sb.storage.from(SHEETS_BUCKET).upload(path, x.file, { contentType: x.file.type, upsert: false })
+      if (error) { toast('Project saved, but ' + x.file.name + ' didn\'t upload: ' + friendlyError(error), true); if (x.path) out.push({ label, path: x.path }); continue }
+      out.push({ label, path }); continue
+    }
+    if (x.path) out.push({ label, path: x.path })
+  }
+  const same = JSON.stringify(out) === JSON.stringify(row.extra_printouts || [])
+  let saved = row
+  if (!same) {
+    const { data, error } = await sb.from('project_library').update({ extra_printouts: out }).eq('id', row.id).select().single()
+    if (error) { toast('Project saved, but its other printouts didn\'t: ' + (/extra_printouts/.test(error.message || '') ? 'run projects_more_printouts.sql first.' : friendlyError(error)), true); return row }
+    saved = data
+  }
+  const keep = new Set(out.map(x => x.path).filter(Boolean)), gone = before.filter(p => !keep.has(p))
+  if (gone.length) await sb.storage.from(SHEETS_BUCKET).remove(gone)
+  return saved
+}
+
 function upsertLocal(p) {
   const i = library.findIndex(x => x.id === p.id)
   if (i >= 0) library[i] = p; else library.push(p)
@@ -2451,6 +2521,8 @@ async function deleteProject() {
   const { error } = await sb.from('project_library').delete().eq('id', editing.id)
   if (error) { toast(friendlyError(error), true); return }
   if (editing.printout_path) await sb.storage.from(SHEETS_BUCKET).remove([editing.printout_path]) // its uploaded steps sheet
+  const morePaths = (editing.extra_printouts || []).map(x => x && x.path).filter(Boolean)
+  if (morePaths.length) await sb.storage.from(SHEETS_BUCKET).remove(morePaths)          // and its other printouts
   library = library.filter(p => p.id !== editing.id); delete libById[editing.id]
   closeModal('editor-modal'); toast('Project deleted')
   afterLibraryChange()
