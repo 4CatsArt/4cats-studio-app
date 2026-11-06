@@ -1563,6 +1563,7 @@ async function fillTierSelect(cur) {
   sel.innerHTML = PRICE_TIERS.map(t => `<option value="${String(t.key).replace(/"/g, '&quot;')}"${t.key === pick ? ' selected' : ''}>${String(t.name).replace(/[<&]/g, c => c === '<' ? '&lt;' : '&amp;')}</option>`).join('')
 }
 async function saveProject() {
+  if (edSteps.busy) { toast('Still shrinking the steps printout. Save again in a moment.', true); return }
   const pending = document.getElementById('ed-tag-entry').value
   if (pending.trim()) { addEditTag(pending); document.getElementById('ed-tag-entry').value = '' }
   const name = document.getElementById('ed-name').value.trim()
@@ -2179,9 +2180,9 @@ async function addSheet() {
   const name = nameEl.value.trim()
   if (!name) { toast('Give the ' + cfg.one + ' a name first.', true); nameEl.focus(); return }
   if (sheetData[kind].rows.some(r => r.name.toLowerCase() === name.toLowerCase())) { toast('There is already a ' + cfg.one + ' called ' + name + '.', true); return }
-  const file = source === 'upload' ? fileEl.files[0] : null
-  if (source === 'upload' && file && !sheetFileOk(file)) return
+  let file = source === 'upload' ? fileEl.files[0] : null
   const btn = document.getElementById('sh-add'); btn.disabled = true
+  if (file) { file = await prepareSheetFile(file, m => toast(m)); if (!file) { btn.disabled = false; return } }
   const { data: row, error } = await sb.from(cfg.table).insert({ name, url: source === 'link' ? nz(urlEl.value) : null }).select().single()
   if (error) { btn.disabled = false; toast(friendlyError(error), true); return }
   if (file) await uploadSheetFile(kind, row.id, file, null)
@@ -2200,10 +2201,80 @@ const SHEETS_BUCKET = 'project-sheets'
 const SHEET_MAX_BYTES = 20 * 1024 * 1024
 const SHEET_TYPES = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp']
 
-function sheetFileOk(file) {
-  if (!SHEET_TYPES.includes(file.type)) { toast('Upload a PDF, or a PNG / JPG / WebP image.', true); return false }
-  if (file.size > SHEET_MAX_BYTES) { toast('That file is over 20 MB.', true); return false }
-  return true
+/* ---------- big files: shrink to fit before uploading ----------
+   Files over 20 MB are shrunk in the browser. Pictures use shrinkImage.
+   PDFs: each page is redrawn as a JPEG and put into a new PDF (pdf.js reads
+   it, pdf-lib builds the new one), trying lower quality until it fits.
+   Text in a shrunk PDF can't be selected anymore. Small files are untouched. */
+const SHEET_TARGET_BYTES = 19 * 1024 * 1024   // a little under the limit
+const PDF_PASSES = [{ dpi: 150, q: 0.75 }, { dpi: 120, q: 0.65 }, { dpi: 96, q: 0.55 }, { dpi: 72, q: 0.45 }]
+const PDFJS_BASE = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/'
+let pdfLibsReady = null
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script')
+    s.src = src; s.onload = resolve; s.onerror = () => reject(new Error('could not load the PDF tools'))
+    document.head.appendChild(s)
+  })
+}
+function loadPdfLibs() {   // only loaded the first time a big PDF is picked
+  if (!pdfLibsReady) {
+    pdfLibsReady = Promise.all([
+      loadScript(PDFJS_BASE + 'pdf.min.js'),
+      loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js')
+    ]).then(() => { pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_BASE + 'pdf.worker.min.js' })
+      .catch(e => { pdfLibsReady = null; throw e })
+  }
+  return pdfLibsReady
+}
+function fmtMB(n) { return (n / 1048576).toFixed(1) + ' MB' }
+async function shrinkPdf(file, progress) {
+  progress('Getting ready to shrink ' + file.name + '…')
+  await loadPdfLibs()
+  const doc = await pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise
+  try {
+    for (const pass of PDF_PASSES) {
+      const out = await PDFLib.PDFDocument.create()
+      for (let i = 1; i <= doc.numPages; i++) {
+        progress('Shrinking ' + file.name + '… page ' + i + ' of ' + doc.numPages)
+        const page = await doc.getPage(i)
+        const base = page.getViewport({ scale: 1 })   // page size in points (72 per inch)
+        const vp = page.getViewport({ scale: Math.min(pass.dpi / 72, 4000 / Math.max(base.width, base.height)) })
+        const c = document.createElement('canvas')
+        c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height)
+        const ctx = c.getContext('2d')
+        ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, c.width, c.height)
+        await page.render({ canvasContext: ctx, viewport: vp }).promise
+        const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', pass.q))
+        c.width = 0; c.height = 0; page.cleanup()
+        if (!blob) throw new Error('could not redraw page ' + i)
+        const img = await out.embedJpg(await blob.arrayBuffer())
+        out.addPage([base.width, base.height]).drawImage(img, { x: 0, y: 0, width: base.width, height: base.height })
+      }
+      const bytes = await out.save()
+      if (bytes.length <= SHEET_TARGET_BYTES) return new File([bytes], file.name.replace(/\.pdf$/i, '') + '.pdf', { type: 'application/pdf' })
+    }
+  } finally { doc.destroy() }
+  throw new Error('it is still over 20 MB even at the lowest quality')
+}
+// Checks the type, shrinks if over 20 MB. Returns the file to upload, or null.
+async function prepareSheetFile(file, progress) {
+  if (!SHEET_TYPES.includes(file.type)) { toast('Upload a PDF, or a PNG / JPG / WebP image.', true); return null }
+  if (file.size <= SHEET_MAX_BYTES) return file
+  try {
+    let small
+    if (file.type === 'application/pdf') small = await shrinkPdf(file, progress)
+    else {
+      progress('Shrinking ' + file.name + '…')
+      small = new File([await shrinkImage(file, 2400)], file.name.replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' })
+    }
+    if (small.size > SHEET_MAX_BYTES) throw new Error('it is still over 20 MB')
+    toast('Shrunk ' + file.name + ' from ' + fmtMB(file.size) + ' to ' + fmtMB(small.size))
+    return small
+  } catch (e) {
+    toast('Could not shrink ' + file.name + ': ' + e.message, true)
+    return null
+  }
 }
 function sheetFileLabel(path) {
   return String(path || '').split('/').pop().replace(/^\d+-/, '')
@@ -2234,9 +2305,12 @@ function pickReplaceFile(id) {
 async function sheetReplaceChosen(input) {
   const file = input.files[0], id = _replaceSheetId
   _replaceSheetId = null
-  if (!file || !id || !sheetFileOk(file)) return
-  const r = sheetData[sheetsKind].byId[id]
-  if (await uploadSheetFile(sheetsKind, id, file, r && r.file_path)) await reloadSheets(sheetsKind)
+  if (!file || !id) return
+  const kind = sheetsKind
+  const ready = await prepareSheetFile(file, m => toast(m))
+  if (!ready) return
+  const r = sheetData[kind].byId[id]
+  if (await uploadSheetFile(kind, id, ready, r && r.file_path)) await reloadSheets(kind)
 }
 async function switchSheetToLink(id) {
   const kind = sheetsKind, cfg = SHEET_LIBS[kind], r = sheetData[kind].byId[id]
@@ -2287,6 +2361,7 @@ let edSteps = { mode: 'file', url: '', path: null, file: null }
 function renderStepsField() {
   const box = document.getElementById('ed-steps-src')
   if (!box) return
+  if (edSteps.busy) { box.innerHTML = '<div class="sheet-src"><span class="file-chip">⏳ ' + esc(edSteps.status || 'Working…') + '</span></div>'; return }
   if (edSteps.mode === 'link') {
     box.innerHTML = '<div class="sheet-src">' +
       '<input type="url" id="ed-printout" placeholder="https://drive.google.com/…" value="' + esc(edSteps.url) + '" oninput="edSteps.url = this.value">' +
@@ -2314,11 +2389,16 @@ function pickStepsFile() {
   input.value = ''
   input.click()
 }
-function stepsFileChosen(input) {
+async function stepsFileChosen(input) {
   const file = input.files[0]
-  if (!file || !sheetFileOk(file)) return
-  edSteps.file = file
-  edSteps.mode = 'file'
+  if (!file) return
+  const mine = edSteps   // if the editor is closed or another project opened meanwhile, don't touch it
+  mine.busy = true; mine.status = ''
+  renderStepsField()
+  const ready = await prepareSheetFile(file, m => { mine.status = m; if (edSteps === mine) renderStepsField() })
+  mine.busy = false; mine.status = ''
+  if (edSteps !== mine) return
+  if (ready) { mine.file = ready; mine.mode = 'file' }
   renderStepsField()
 }
 
