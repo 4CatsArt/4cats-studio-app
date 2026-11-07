@@ -440,7 +440,11 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .as-pad { display: grid; gap: 3px; font-size: 12px; background: #eef7ff; border: 1px solid #cfe3f7; border-radius: 8px; padding: 5px 6px; } .as-pad.ask { background: #fff4d6; border-color: #e8cf8a; }
 .as-pad select { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 6px; width: 100%; min-width: 0; box-sizing: border-box; } .as-pad { min-width: 0; overflow-wrap: anywhere; } .as-padn { color: #8a5a00; background: #fff4d6; border-radius: 999px; padding: 2px 10px; font: inherit; border: 0; cursor: pointer; } .as-padn:hover { filter: brightness(.96); }
 .as-skipped { color: #6b6b63; }
-.as-ov { margin-top: 10px; } .as-ovf { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; } .as-ovf button { font: inherit; font-size: 13px; border: 1px solid var(--border); background: #fff; border-radius: 999px; padding: 4px 12px; cursor: pointer; } .as-ovf button.on { background: #1f2a24; color: #fff; border-color: #1f2a24; }
+.as-wact { font: inherit; font-size: 11.5px; font-weight: 700; border: 1px solid currentColor; border-radius: 999px; padding: 1px 6px; background: #fff; color: inherit; max-width: 100%; margin-top: 2px; }
+.as-noted { font-size: 11px; font-weight: 700; color: #14532d; white-space: nowrap; }
+.as-disb { font: inherit; font-size: 11px; font-weight: 700; border: 1px solid currentColor; background: #fff; border-radius: 999px; padding: 0 8px; margin-left: 4px; cursor: pointer; }
+.as-dn.as-dis { color: #6b6b63; font-size: 12px; } .as-ovt tr.as-ov-x td { color: #6b6b63; }
+.as-ov { margin-top: 10px; } .as-ovh { display: flex; gap: 10px; align-items: center; width: 100%; text-align: left; font: inherit; background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 10px 14px; margin-bottom: 8px; cursor: pointer; } .as-ovh span { color: #6b6b63; font-size: 13px; } .as-ovh .spacer { flex: 1; } .as-ovf { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; } .as-ovf button { font: inherit; font-size: 13px; border: 1px solid var(--border); background: #fff; border-radius: 999px; padding: 4px 12px; cursor: pointer; } .as-ovf button.on { background: #1f2a24; color: #fff; border-color: #1f2a24; }
 .as-ovw { overflow-x: auto; background: #fff; border: 1px solid var(--border); border-radius: 14px; } .as-ovt { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .as-ovt th, .as-ovt td { text-align: left; vertical-align: top; padding: 7px 8px; border-bottom: 1px solid var(--border); } .as-ovt td.nw { white-space: nowrap; } .as-ovt th { font-size: 12px; color: #6b6b63; }
 .as-ovt tr.as-ov-w td:nth-child(4) { color: #a3191c; } .as-ovt tr.ask td:nth-child(3) { font-weight: 800; } .as-ovt tr.done td { opacity: .55; } .as-ovt select { max-width: 260px; font: inherit; font-size: 13px; }
@@ -4681,6 +4685,13 @@ function asBuild(W, onlyId) {
     }
   }
   out.items = items; out.pool = pool; out.glazingItem = glazingItem;
+  // disregarded warnings (autosched_disregard.sql): out of the day's warnings, kept with their note
+  out.studios.forEach(S => S.days.forEach(D => {
+    D.disregarded = [];
+    D.notes = D.notes.filter(n => { if (!n.startsWith('⚠')) return true;
+      const x = (_as.disr || []).find(r => r.studio_id === S.id && r.day === D.date && r.warning === n);
+      if (x) { D.disregarded.push({ text: n, note: x.note || '', by: x.created_by || '' }); return false; } return true; });
+  }));
   // 🚫 "Don't make any changes" for a studio this week: every suggestion off (nothing new, nothing taken off)
   out.studios.forEach(S => { if (_as.skip && _as.skip[W.from + '|' + S.id]) { S.skipped = true; S.days.forEach(D => D.entries.forEach(e => { if (e.t === 'new') e.on = false; if (e.t === 'old') { e.keep = true; if (e.closeP) e.close = false; } })); } });
   return out;
@@ -4692,6 +4703,7 @@ async function asMake() {
   if (error) { _as.err = /hub_autosched_week/.test(error.message) ? 'Run auto_schedule.sql in Supabase first.' : error.message; asDraw(); return; }
   _as.data = data;
   try { await asNotesLoad(true); } catch (e) {}   // (the notes first: 👤 + Staff days are planned with their extra person)
+  try { await asDisrLoad(); } catch (e) {}          // (and the disregarded warnings)
   _as.plan = asBuild(data);
   _as.plan.studios.forEach(S => {   // nothing to change: start folded (open it any time)
     const n = S.days.reduce((t, D) => t + D.entries.filter(e => (e.t === 'new' && e.on) || (e.t === 'old' && e.s.remove && !e.keep)).length, 0);
@@ -4710,18 +4722,22 @@ function asDraw() {
       <input type="date" value="${escAttr(_as.week)}" onchange="if(this.value){_as.week=asMonday(this.value);_as.plan=null;_as.done=null;asDraw()}">
       <select onchange="_as.prov=this.value;_as.plan=null;asDraw()"><option value="">All studios</option>${[['BC', 'BC'], ['AB', 'Alberta'], ['ON', 'Ontario']].map(p => `<option value="${p[0]}"${_as.prov === p[0] ? ' selected' : ''}>${p[1]}</option>`).join('')}</select>
       <button class="fd-pay" ${_as.busy ? 'disabled' : ''} onclick="asMake()">${_as.busy ? 'Working…' : P ? '↻ Make it again' : 'Make the workshop schedule'}</button>
-      <button class="ho-btn" onclick="asTodo()">📋 To-do${_as.openNotes && _as.openNotes.length ? ` <span class="as-todo-n">${_as.openNotes.length}</span>` : ''}</button>
-      ${P ? `<button class="ho-btn${_as.ov ? ' on' : ''}" onclick="_as.ov=!_as.ov;asPeopleLoad();asDraw()" title="Every warning, PA/PD and field trip question and note this week, in one table">📊 ${_as.ov ? 'Back to the studios' : 'Overview'}</button>` : ''}</div>
+      <button class="ho-btn" onclick="asTodo()">📋 To-do${_as.openNotes && _as.openNotes.length ? ` <span class="as-todo-n">${_as.openNotes.length}</span>` : ''}</button></div>
     ${_as.notesErr ? `<p class="fd-sm">${esc(_as.notesErr)}</p>` : ''}
     ${_as.err ? `<p class="fd-msg">${esc(_as.err)}</p>` : ''}${_as.done ? `<div class="as-done">✅ Published: <b>${_as.done.added}</b> new time${_as.done.added === 1 ? '' : 's'}, <b>${_as.done.removed}</b> empty time${_as.done.removed === 1 ? '' : 's'} removed${_as.done.kept ? `, ${_as.done.kept} kept because someone booked meanwhile` : ''}. <button class="ho-btn" onclick="_as.week=asAddDays(_as.week,7);_as.plan=null;_as.done=null;asDraw()">Next week →</button></div>` : ''}`;
-  if (!P) { el.innerHTML = h; return; }
+  if (!P) {
+    // the week is made as soon as it's shown (making only plans, nothing changes until Publish), so the Overview is always there
+    if (!_as.busy && !_as.err && _as.autoWeek !== _as.week + '|' + _as.prov) { _as.autoWeek = _as.week + '|' + _as.prov; setTimeout(asMake, 0); h += '<p class="ho-intro">Making the week…</p>'; }
+    el.innerHTML = h; return;
+  }
   const sum = asCount();
   const padAsk = P.studios.filter(S => !S.published).reduce((t, S) => t + S.days.filter(D => D.pad && D.pad.ans === undefined).length, 0);
   const padLow = P.studios.filter(S => !S.published).reduce((t, S) => t + S.days.filter(D => D.pad && D.pad.low).length, 0);
   h += `<div class="as-sum"><span><b>${sum.add}</b> new times</span><span><b>${sum.rem}</b> empty times coming off</span>${sum.close ? `<span><b>${sum.close}</b> party time${sum.close === 1 ? '' : 's'} closing or going to one</span>` : ''}<span><b>${P.studios.length}</b> studios</span>${padAsk ? `<button class="as-padn" onclick="asPadList()">🎒🚌 <b>${padAsk}</b> PA/PD or field trip day${padAsk === 1 ? '' : 's'} need${padAsk === 1 ? 's' : ''} an answer</button>` : ''}${padLow ? `<button class="as-padn low" onclick="asPadList()">⚠ <b>${padLow}</b> PA/PD day${padLow === 1 ? '' : 's'} with few kids</button>` : ''}
     <span class="as-view" role="group" aria-label="Show"><button class="${_as.view !== 'after' ? 'on' : ''}" onclick="_as.view='changes';_as.sview={};asDraw()">Changes</button><button class="${_as.view === 'after' ? 'on' : ''}" onclick="_as.view='after';_as.sview={};asDraw()">After publishing</button></span>
     <span class="as-key">${_as.view === 'after' ? '<i class="k-old"></i>on the schedule <i class="k-new"></i>new' : '<i class="k-old"></i>stays <i class="k-rem"></i>comes off <i class="k-new"></i>new'}</span></div>
-    ${_as.ov ? asOverviewHtml() : `<div class="as-studios">${P.studios.map((S, si) => asStudioHtml(S, si)).join('')}</div>`}
+    ${asOverviewHtml()}
+    <div class="as-studios">${P.studios.map((S, si) => asStudioHtml(S, si)).join('')}</div>
     <div class="as-foot"><span>${sum.add} new · ${sum.rem} off${P.studios.some(S => S.published) ? ` <span class="fd-sm">(${P.studios.filter(S => S.published).length} studio${P.studios.filter(S => S.published).length === 1 ? '' : 's'} already published)</span>` : ''}</span><button class="fd-pay" ${_as.busy || (!sum.add && !sum.rem) ? 'disabled' : ''} onclick="asPublish()">${P.studios.some(S => S.published) ? 'Approve and publish the rest' : 'Approve and publish'}</button></div>`;
   el.innerHTML = h;
 }
@@ -4750,7 +4766,8 @@ function asStudioHtml(S, si) {
   h += '<div class="as-week">' + S.days.map((D, di) => `<div class="as-day${D.staff === 0 ? ' closed' : ''}"><div class="as-dh">${new Date(D.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', day: 'numeric' })}<span>${asDayStaff(D)}</span></div>` +
     asNotesHtml(S.id, D.date) +
     (D.pad && !S.published ? asPadHtml(S, D) : '') +
-    D.notes.filter(x => !(D.pad && (x.startsWith('🎒') || x.startsWith('🚌')))).map(x => `<div class="as-dn${x.startsWith('⚠') ? ' warn' : ''}">${esc(x)}</div>`).join('') +
+    D.notes.filter(x => !(D.pad && (x.startsWith('🎒') || x.startsWith('🚌')))).map(x => `<div class="as-dn${x.startsWith('⚠') ? ' warn' : ''}">${esc(x)}${x.startsWith('⚠') && !S.published ? ' ' + asWarnActHtml(S.id, D.date, x) : ''}</div>`).join('') +
+    (D.disregarded || []).map(x => `<div class="as-dn as-dis" title="${escAttr(x.text)}">✓ Disregarded${x.note ? ': ' + esc(x.note) : ''} <button class="as-disb" onclick="asDisregard('${S.id}','${D.date}',${escAttr(JSON.stringify(x.text))},true)">Undo</button></div>`).join('') +
     D.entries.map((e, ei) => {
       if (e.t === 'old') {
         const s = e.s, rem = s.remove && !e.keep;
@@ -4886,14 +4903,15 @@ function asNotesHtml(sid, d) {
   return (_as.notes || []).filter(n => n.studio_id === sid && n.day === d).map(n => `<div class="as-note2${n.done ? ' done' : ''}"><div><b>${esc((AS_NOTE_KINDS.find(k => k[0] === n.kind) || [, '📝'])[1])}</b></div><div>${esc(n.body)}</div>
     <div class="as-note2b"><span>${esc(String(n.created_by || '').split('@')[0])}${n.done ? ' · done' : ''}</span><button onclick="asNoteDone('${n.id}',${!n.done})">${n.done ? 'Undo' : '✓ Done'}</button><button onclick="asNoteDel('${n.id}')" title="Delete">✕</button></div></div>`).join('');
 }
-function asNoteNew(sid, d) {
-  if (!_as.people) { asPeopleLoad().then(() => asNoteNew(sid, d)); return; }
-  openDutySheet(`<h3>📝 Note for ${esc(STUDIO_NAMES[sid] || sid)}</h3><p class="ho-intro">${esc(new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' }))}</p>
-    <div class="ba-form"><label class="f">What kind<select id="asn-kind">${AS_NOTE_KINDS.map(k => `<option value="${k[0]}">${esc(k[1])}</option>`).join('')}</select></label>
-    <label class="f">Note<textarea id="asn-body" rows="3" maxlength="1000" placeholder="e.g. Ask Sarah to come in 5–8 for the evening"></textarea></label>
+function asNoteNew(sid, d, pre) {
+  if (!_as.people) { asPeopleLoad().then(() => asNoteNew(sid, d, pre)); return; }
+  pre = pre || {};
+  openDutySheet(`<h3>${esc(pre.title || '📝 Note')} · ${esc(STUDIO_NAMES[sid] || sid)}</h3><p class="ho-intro">${esc(new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' }))}</p>
+    <div class="ba-form"><label class="f">What kind<select id="asn-kind">${AS_NOTE_KINDS.map(k => `<option value="${k[0]}"${pre.kind === k[0] ? ' selected' : ''}>${esc(k[1])}</option>`).join('')}</select></label>
+    <label class="f">Note<textarea id="asn-body" rows="${pre.body ? 5 : 3}" maxlength="1000" placeholder="e.g. Ask Sarah to come in 5–8 for the evening">${esc(pre.body || '')}</textarea></label>
     <label class="f">For <span class="fd-sm">(optional: they see it on their Today screen)</span>${asAssignSelect({ studio_id: sid }, 'asn-for', '')}</label><p class="fd-msg" id="asn-msg"></p></div>
     <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="asNoteSave('${sid}','${d}')">Save note</button></div>`);
-  setTimeout(() => { const t = document.getElementById('asn-body'); if (t) t.focus(); }, 50);
+  setTimeout(() => { const t = document.getElementById('asn-body'); if (t) { t.focus(); t.selectionStart = t.selectionEnd = t.value.length; } }, 50);
 }
 async function asNoteSave(sid, d) {
   const body = (document.getElementById('asn-body') || {}).value || '', kind = (document.getElementById('asn-kind') || {}).value || 'other';
@@ -4931,6 +4949,35 @@ async function asTodo(showDone) {
         <button class="as-x" onclick="asNoteDel('${n.id}')" title="Delete">✕</button></div>`).join('') + '</div>').join('') : '<p class="ho-intro">Nothing to do. 🎉</p>'}
     <div class="sheet-actions"><button class="primary" onclick="closeDutySheet()">Close</button></div>`);
 }
+// ---------- Disregarded warnings (autosched_disregard.sql) ----------
+async function asDisrLoad() {
+  const r = await sb.rpc('hub_autosched_disregarded', { p_from: _as.week, p_to: asAddDays(_as.week, 6) });
+  _as.disr = r.error ? [] : (r.data || []); _as.disrErr = r.error && /hub_autosched_disregard/.test(r.error.message) ? 'Run autosched_disregard.sql to disregard warnings.' : '';
+}
+// ⚠ a warning: what to do about it (another staff, move a class, flag with a note, or disregard: it's OK)
+function asWarnActHtml(st, d, text) {
+  const clean = String(text).replace(/^⚠\s*/, ''), key = clean.slice(0, 60);
+  const noted = (_as.notes || []).some(n => n.studio_id === st && n.day === d && String(n.body || '').includes(key));
+  return `${noted ? '<span class="as-noted">📋 note added</span> ' : ''}<select class="as-wact" onchange="asWarnAct('${st}','${d}',${escAttr(JSON.stringify(text))},this.value);this.value=''" title="What to do about it">
+    <option value="">What to do?</option><option value="staff">👤 Request another staff</option><option value="move">🔁 Move a class</option><option value="flag">🚩 Flag with a note</option><option value="ok">✓ Disregard (it’s OK)</option></select>`;
+}
+function asWarnAct(st, d, text, v) {
+  const clean = String(text).replace(/^⚠\s*/, '');
+  if (v === 'staff') asExtra(st, d, 1);
+  else if (v === 'move') asNoteNew(st, d, { kind: 'other', body: `🔁 Move a class: ${clean}\n\nMove: `, title: '🔁 Move a class' });
+  else if (v === 'flag') asNoteNew(st, d, { kind: 'other', body: `🚩 ${clean}\n\n`, title: '🚩 Flag with a note' });
+  else if (v === 'ok') asDisregard(st, d, text);
+}
+async function asDisregard(st, d, text, undo) {
+  let note = null;
+  if (!undo) { note = prompt('Disregard this warning? Add a short note (why it’s OK):\n\n' + text.replace(/^⚠\s*/, ''), ''); if (note === null) return; }
+  const { error } = await sb.rpc('hub_autosched_disregard', { p_studio: st, p_day: d, p_warning: text, p_note: note, p_undo: !!undo });
+  if (error) { alert(/hub_autosched_disregard/.test(error.message) ? 'Run autosched_disregard.sql first.' : error.message); return; }
+  await asDisrLoad();
+  const P = _as.plan, i = P ? P.studios.findIndex(x => x.id === st) : -1;
+  if (i >= 0 && _as.data) { const one = asBuild(_as.data, st).studios[0]; if (one) P.studios[i] = one; }
+  asDraw();
+}
 // ---------- Assigning notes (autosched_assign.sql): admins and coordinators ----------
 async function asPeopleLoad() {
   if (_as.people) return _as.people;
@@ -4962,23 +5009,28 @@ function asOverviewHtml() {
   const fmt = d => new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
   P.studios.forEach((S, si) => S.days.forEach((D, di) => {
     if (D.pad && !S.published) rows.push({ d: D.date, st: S.id, type: 'q', D, S });
-    D.notes.filter(x => x.startsWith('⚠')).forEach(x => rows.push({ d: D.date, st: S.id, type: 'w', text: x.replace(/^⚠\s*/, '') }));
+    D.notes.filter(x => x.startsWith('⚠')).forEach(x => rows.push({ d: D.date, st: S.id, type: 'w', text: x.replace(/^⚠\s*/, ''), raw: x }));
+    (D.disregarded || []).forEach(x => rows.push({ d: D.date, st: S.id, type: 'x', text: x.text.replace(/^⚠\s*/, ''), raw: x.text, note: x.note, by: x.by }));
   }));
   const inPlan = new Set(P.studios.map(S => S.id));
   (_as.notes || []).filter(n => inPlan.has(n.studio_id)).forEach(n => rows.push({ d: n.day, st: n.studio_id, type: 'n', n }));
   const count = t => rows.filter(r => r.type === t).length, mineN = rows.filter(r => r.type === 'n' && !r.n.done && String(r.n.assigned_email || '').toLowerCase() === me).length;
-  const shown = rows.filter(r => f === 'all' || r.type === f || (f === 'mine' && r.type === 'n' && String(r.n.assigned_email || '').toLowerCase() === me))
+  const shown = rows.filter(r => (f === 'all' && r.type !== 'x') || r.type === f || (f === 'mine' && r.type === 'n' && String(r.n.assigned_email || '').toLowerCase() === me))
     .sort((a, b) => a.d.localeCompare(b.d) || (STUDIO_NAMES[a.st] || a.st).localeCompare(STUDIO_NAMES[b.st] || b.st) || 'qwn'.indexOf(a.type) - 'qwn'.indexOf(b.type));
+  const chipAll = rows.filter(r => r.type !== 'x').length;
   const chip = (k, lbl, n) => `<button class="${f === k ? 'on' : ''}" onclick="_as.ovf='${k}';asDraw()">${lbl} <b>${n}</b></button>`;
   const row = r => {
-    const go = `<button class="ho-btn" onclick="_as.ov=false;asGoStudio('${r.st}')">Go to</button>`;
+    const go = `<button class="ho-btn" onclick="asGoStudio('${r.st}')">Go to</button>`;
     let what = '', detail = '', act = '';
     if (r.type === 'q') {
       const Pd = r.D.pad;
       what = Pd.kind === 'field' ? '🚌 Field trip' : '🎒 PA/PD day';
       detail = `${Pd.kind === 'field' && Pd.time ? esc(Pd.time) + ' · ' : ''}${esc(asPadWho(Pd))} · usually <b>${Pd.usual || 0} staff</b>${Pd.low ? ` · <b class="as-padlow">⚠ under ${Pd.min}</b>` : ''}`;
       act = `<select onchange="asPadSet('${r.S.id}','${r.D.date}',this.value)">${asPadOpts(Pd).map(o => `<option value="${o[0]}"${String(Pd.ans ?? '') === o[0] ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select>`;
-    } else if (r.type === 'w') { what = '⚠ Warning'; detail = esc(r.text); }
+    } else if (r.type === 'w') { what = '⚠ Warning'; detail = esc(r.text);
+      act = asWarnActHtml(r.st, r.d, r.raw); }
+    else if (r.type === 'x') { what = '✓ Disregarded'; detail = `<s>${esc(r.text)}</s><div><b>${esc(r.note || 'No note')}</b> <span class="fd-sm">· ${esc(String(r.by || '').split('@')[0])}</span></div>`;
+      act = `<button class="ho-btn" onclick="asDisregard('${r.st}','${r.d}',${escAttr(JSON.stringify(r.raw))},true)">Undo</button>`; }
     else {
       const n = r.n; what = (AS_NOTE_KINDS.find(k => k[0] === n.kind) || [, '📝 Note'])[1];
       detail = `${esc(n.body)}<span class="fd-sm"> · ${esc(String(n.created_by || '').split('@')[0])}${n.done ? ' · ✓ done' : ''}</span>`;
@@ -4986,7 +5038,11 @@ function asOverviewHtml() {
     }
     return `<tr class="as-ov-${r.type}${r.type === 'n' && r.n.done ? ' done' : ''}${r.type === 'q' && r.D.pad.ans === undefined ? ' ask' : ''}"><td class="nw">${esc(fmt(r.d))}</td><td class="nw"><b>${esc(STUDIO_NAMES[r.st] || r.st)}</b></td><td class="nw">${what}</td><td>${detail}</td><td>${act}</td><td>${go}</td></tr>`;
   };
-  return `<div class="as-ov"><div class="as-ovf">${chip('all', 'All', rows.length)}${chip('w', '⚠ Warnings', count('w'))}${chip('q', '🎒🚌 PA/PD and field trips', count('q'))}${chip('n', '📋 Notes', count('n'))}${chip('mine', '👤 For me', mineN)}</div>
+  if (!_as.people && !_as.peopleBusy) { _as.peopleBusy = true; asPeopleLoad().then(() => { _as.peopleBusy = false; asDraw(); }); }
+  const head = `<button class="as-ovh" onclick="_as.ovHide=!_as.ovHide;asDraw()" aria-expanded="${!_as.ovHide}"><b>📊 Overview</b> <span>${count('w')} warning${count('w') === 1 ? '' : 's'} · ${count('q')} PA/PD and field trip day${count('q') === 1 ? '' : 's'} · ${count('n')} note${count('n') === 1 ? '' : 's'}${mineN ? ` · <b>${mineN} for you</b>` : ''}</span><span class="spacer"></span>${_as.ovHide ? '▸ Show' : '▾ Hide'}</button>`;
+  if (_as.ovHide) return `<div class="as-ov">${head}</div>`;
+  return `<div class="as-ov">${head}<div class="as-ovf">${chip('all', 'All', chipAll)}${chip('w', '⚠ Warnings', count('w'))}${chip('q', '🎒🚌 PA/PD and field trips', count('q'))}${chip('n', '📋 Notes', count('n'))}${chip('mine', '👤 For me', mineN)}${count('x') ? chip('x', '✓ Disregarded', count('x')) : ''}</div>
+    ${_as.disrErr ? `<p class="fd-sm">${esc(_as.disrErr)}</p>` : ''}
     ${_as.peopleErr ? `<p class="fd-sm">${esc(_as.peopleErr)}</p>` : ''}
     ${shown.length ? `<div class="as-ovw"><table class="as-ovt"><thead><tr><th>Day</th><th>Studio</th><th>What</th><th>Details</th><th></th><th></th></tr></thead><tbody>${shown.map(row).join('')}</tbody></table></div>` : '<p class="ho-intro">Nothing here this week. 🎉</p>'}
     <p class="fd-sm">Notes for a day are added on the studio's day (📝 Note). Anyone a note is for sees it on their Today screen and can tick it done there.</p></div>`;
