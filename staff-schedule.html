@@ -1333,9 +1333,14 @@ function bdApplyDayPlan(ctx, date, slots, ss) {
   const plan = (ctx.dayPlan || {})[date]
   if (!plan || !slots.length) return
   const first = Math.min(...ss.map(r => toMin(r.start_time))), last = Math.max(...ss.map(r => toMin(r.end_time)))
-  const EVE = 17 * 60, ev = plan.evening
+  // (Nov 7 2026) a field trip or PA/PD day (an evening answer): the daytime is staffed by what it needs (the trip or camp
+  // teacher), and the plan's people apply from the evening's first session (3pm or later; else 5pm)
+  const ev = plan.evening
+  const lateStarts = ss.map(r => toMin(r.start_time)).filter(m => m >= 15 * 60)
+  const EVE = ev != null && ev !== '' ? (lateStarts.length ? Math.min(...lateStarts) : 17 * 60) : 17 * 60
   const floorAt = t => {
     if (t < first || t >= last) return 0
+    if (ev != null && ev !== '' && t < EVE) return 0
     if (t >= EVE && ev === 'close') return 0
     if (t >= EVE && /^\d+$/.test(ev || '')) return +ev
     if (t >= EVE && ev === 'more') return (plan.staff || 0) + 1
@@ -1729,7 +1734,14 @@ function bdSnapToStandard(ctx, blocks) {
       }
       return false
     }
-    const fit = fits.find(t => t.end - t.start !== 360 || clearBreak(t)) || fits[0]
+    // a 6-hour shift without a clear break: a shorter standard shift that covers nearly all of it (within 30 minutes at
+    // either end, e.g. 4–9 or 4:30–9:30) beats jumping to a longer one
+    let fit = fits.find(t => t.end - t.start !== 360 || clearBreak(t)) || fits[0]
+    if (fits.some(t => t.end - t.start === 360 && !clearBreak(t)) && fit && fit.end - fit.start > 360) {
+      const near = STANDARD_SHIFTS.filter(t => t.end - t.start < 360 && t.start <= b.start + 30 && t.end >= b.end - 30 && t.start >= w.open && t.end <= w.close)
+        .sort((x, y) => ((Math.min(y.end, b.end) - Math.max(y.start, b.start)) - (Math.min(x.end, b.end) - Math.max(x.start, b.start))) || ((x.end - x.start) - (y.end - y.start)))[0]
+      if (near) fit = near
+    }
     if (!fit || (fit.start === b.start && fit.end === b.end)) return
     if (b.staffId) {
       const p = ctx.pool.find(x => x.id === b.staffId)
