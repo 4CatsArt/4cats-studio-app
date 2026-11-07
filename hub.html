@@ -440,6 +440,9 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .as-pad { display: grid; gap: 3px; font-size: 12px; background: #eef7ff; border: 1px solid #cfe3f7; border-radius: 8px; padding: 5px 6px; } .as-pad.ask { background: #fff4d6; border-color: #e8cf8a; }
 .as-pad select { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 6px; width: 100%; min-width: 0; box-sizing: border-box; } .as-pad { min-width: 0; overflow-wrap: anywhere; } .as-padn { color: #8a5a00; background: #fff4d6; border-radius: 999px; padding: 2px 10px; font: inherit; border: 0; cursor: pointer; } .as-padn:hover { filter: brightness(.96); }
 .as-skipped { color: #6b6b63; }
+.as-e.as-open { background: transparent; border: 1px dashed var(--border); color: #6b6b63; font-size: 12.5px; padding: 4px 8px; }
+.as-e.as-pclose { font-size: 12.5px; padding: 4px 8px; cursor: pointer; } .as-e.as-pclose span { display: block; font-size: 11.5px; }
+.as-e.as-open b { color: #3d4540; } .as-e.as-open span { display: block; font-size: 11.5px; }
 /* the PA/PD days and field trips list: a wider window; the answer box shrinks so "Go to" always fits */
 .duty-sheet.as-padsheet { max-width: 860px; }
 .as-padr > div:first-child { flex: 1 1 240px; min-width: 0; }
@@ -4233,6 +4236,10 @@ function rpEditPanelsHtml() {
 //   a new time that matches an existing empty one (same workshop, same time) keeps the existing one instead
 //   a PA/PD day: asks first — close the evening, or open with how many staff (until answered, nothing is proposed that day)
 //   a weekday with a booked field trip: the same question (close the evening, or open with how many staff)
+//   party times' open spots come down as they get near (Publish lowers their spots left; reopen any time from the Schedule):
+//     a week or less away, any open party spot closes (Kids, Splatter, Adult Get-Together); two weeks or less away, a double or
+//     triple party time with 2+ rooms open goes down to one (the Kids Party one stays); booked parties stay; never a field trip
+//   weekend mornings (9:00 workshop, 9:15 glazing, 9:30 Mini Make): Vancouver Main Street only (Nov 7 2026)
 //   kids-only times: only workshops ticked 🧒 Good for kids (Workshops manager)
 //   Featured workshops first, then the most popular; never the same project twice in a day; only workshops in their "Offered" dates;
 //     never retired ones (not-live ones are fine), never wheel, never the Hanukkah workshops
@@ -4245,7 +4252,9 @@ const AS_WEEKEND_LATE = [['16:00', 'workshop'], ['16:15', 'glazing'], ['16:30', 
 // start times: workshops and Mini Makes on the half hour; glazing on :15; glazing per day (weekday 1, weekend day 2)
 const AS_ON_GRID = (k, start) => k === 'glazing' ? start % 60 === 15 : (k === 'workshop' || k === 'mini') ? start % 30 === 0 : true;
 const AS_GLAZE_MAX = weekend => weekend ? 2 : 1;
-const AS_CLASS_BUFFER = 15;   // the class teacher's 15 minutes after a kids class
+const AS_CLASS_BUFFER = 15;
+const AS_PARTY_CLOSE_DAYS = 7, AS_PARTY_ONE_DAYS = 14;   // open party spots close a week out; double/triple times go down to one two weeks out
+const AS_MORNING_STUDIOS = ['BC-YVR-MS'];   // weekend morning workshops (when no kids class at 9am): these studios only   // the class teacher's 15 minutes after a kids class
 const AS_DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 const AS_CLASS_LEN = s => Math.max(+s.len || 0, 90);   // kids classes: 90 minutes (or longer, if the class is set longer)
 const AS_KIND_LABEL = { workshop: 'Workshop', glazing: 'Glazing', mini: 'Mini Make', kidsws: 'Kids workshop' };
@@ -4326,6 +4335,29 @@ function asBuild(W, onlyId) {
       // the empty times come off (unless unticked)
       ss.forEach(s => { s.remove = asRemovable(s, s.k, today, nowMin); if (s.remove) out.removeCount++;
         D.entries.push({ t: 'old', s, keep: !s.remove }); });
+      // party times coming near: open spots close a week out; a double/triple time with 2+ rooms open goes down to one two weeks out
+      if (d >= today) {
+        const daysOut = Math.round((Date.parse(d + 'T12:00:00') - Date.parse(today + 'T12:00:00')) / 86400000);
+        const isGt = x => x.party === 'get_together' || /get.?together/i.test(x.title || '');
+        const isRoom = x => !isGt(x) && (x.party === 'kids' || x.party === 'splatter' || /kids? party|splatter|birthday|party time slot/i.test(x.title || ''));
+        const groups = {};
+        D.entries.forEach(e => { if (e.t !== 'old' || !['party', 'group'].includes(e.s.k) || !((+e.s.left || 0) > 0)) return;
+          const g = isGt(e.s) ? 'gt' : isRoom(e.s) ? 'room' : null; if (!g) return; (groups[g + '|' + e.s.start] = groups[g + '|' + e.s.start] || []).push(e); });
+        Object.values(groups).forEach(list => {
+          const open = list.reduce((t, e) => t + (+e.s.left || 0), 0);
+          let to = null, why = '';
+          if (daysOut <= AS_PARTY_CLOSE_DAYS) { to = list.map(() => 0); why = 'a week or less away'; }
+          else if (daysOut <= AS_PARTY_ONE_DAYS && open >= 2) {
+            const keep = Math.max(0, list.findIndex(e => e.s.party !== 'splatter' && !/splatter/i.test(e.s.title || '')));
+            to = list.map((e, i) => i === keep ? 1 : 0); why = 'two weeks or less away';
+          }
+          if (!to) return;
+          list.forEach((e, i) => { if ((+e.s.left || 0) > to[i]) { e.closeP = true; e.close = true; e.closeTo = to[i]; } });
+          const lead = list.find(e => e.closeP); if (!lead) return;
+          lead.closeLead = true; lead.closeWhy = why; lead.closeOpen = open;
+          lead.closeAfter = list.reduce((t, e) => t + (e.closeP ? e.closeTo : (+e.s.left || 0)), 0);
+        });
+      }
       if (!row || !row.auto) continue;
       const prov = st.slice(0, 2), hol = (W.holidays || []).find(h => h.day === d && (h.province === 'ALL' || h.province === prov));
       const clo = (W.closures || []).find(c => c.studio_id === st && c.date === d);
@@ -4422,8 +4454,8 @@ function asBuild(W, onlyId) {
         // one teacher takes the class, another runs the morning
         const classesAt9 = kept.filter(s => s.k === 'class' && s.start <= 9 * 60 && s.start + AS_CLASS_LEN(s) > 9 * 60).length;
         const morningOk = classesAt9 === 0 || (staff >= 2 && classesAt9 === 1);
-        const morning = morningOk ? AS_WEEKEND_MORNING : [];
-        if (!morningOk) D.notes.push(classesAt9 > 1 ? 'Two kids classes at 9am: no morning workshops' : 'Kids class at 9am (1 staff): no morning workshops');
+        const morning = morningOk && AS_MORNING_STUDIOS.includes(st) ? AS_WEEKEND_MORNING : [];
+        if (!morningOk && AS_MORNING_STUDIOS.includes(st)) D.notes.push(classesAt9 > 1 ? 'Two kids classes at 9am: no morning workshops' : 'Kids class at 9am (1 staff): no morning workshops');
         const tpl = morning.concat(staff >= 3 ? AS_WEEKEND_BIG.concat(AS_WEEKEND) : AS_WEEKEND).concat(late).slice().sort((a, b) => asMin(a[0]) - asMin(b[0]));
         tpl.forEach(([t, k]) => add(asMin(t), k, 'weekend'));
       } else {
@@ -4550,7 +4582,7 @@ function asBuild(W, onlyId) {
   }
   out.items = items; out.pool = pool; out.glazingItem = glazingItem;
   // 🚫 "Don't make any changes" for a studio this week: every suggestion off (nothing new, nothing taken off)
-  out.studios.forEach(S => { if (_as.skip && _as.skip[W.from + '|' + S.id]) { S.skipped = true; S.days.forEach(D => D.entries.forEach(e => { if (e.t === 'new') e.on = false; if (e.t === 'old') e.keep = true; })); } });
+  out.studios.forEach(S => { if (_as.skip && _as.skip[W.from + '|' + S.id]) { S.skipped = true; S.days.forEach(D => D.entries.forEach(e => { if (e.t === 'new') e.on = false; if (e.t === 'old') { e.keep = true; if (e.closeP) e.close = false; } })); } });
   return out;
 }
 async function asMake() {
@@ -4584,23 +4616,24 @@ function asDraw() {
   const sum = asCount();
   const padAsk = P.studios.filter(S => !S.published).reduce((t, S) => t + S.days.filter(D => D.pad && D.pad.ans === undefined).length, 0);
   const padLow = P.studios.filter(S => !S.published).reduce((t, S) => t + S.days.filter(D => D.pad && D.pad.low).length, 0);
-  h += `<div class="as-sum"><span><b>${sum.add}</b> new times</span><span><b>${sum.rem}</b> empty times coming off</span><span><b>${P.studios.length}</b> studios</span>${padAsk ? `<button class="as-padn" onclick="asPadList()">🎒🚌 <b>${padAsk}</b> PA/PD or field trip day${padAsk === 1 ? '' : 's'} need${padAsk === 1 ? 's' : ''} an answer</button>` : ''}${padLow ? `<button class="as-padn low" onclick="asPadList()">⚠ <b>${padLow}</b> PA/PD day${padLow === 1 ? '' : 's'} with few kids</button>` : ''}
+  h += `<div class="as-sum"><span><b>${sum.add}</b> new times</span><span><b>${sum.rem}</b> empty times coming off</span>${sum.close ? `<span><b>${sum.close}</b> party time${sum.close === 1 ? '' : 's'} closing or going to one</span>` : ''}<span><b>${P.studios.length}</b> studios</span>${padAsk ? `<button class="as-padn" onclick="asPadList()">🎒🚌 <b>${padAsk}</b> PA/PD or field trip day${padAsk === 1 ? '' : 's'} need${padAsk === 1 ? 's' : ''} an answer</button>` : ''}${padLow ? `<button class="as-padn low" onclick="asPadList()">⚠ <b>${padLow}</b> PA/PD day${padLow === 1 ? '' : 's'} with few kids</button>` : ''}
     <span class="as-view" role="group" aria-label="Show"><button class="${_as.view !== 'after' ? 'on' : ''}" onclick="_as.view='changes';_as.sview={};asDraw()">Changes</button><button class="${_as.view === 'after' ? 'on' : ''}" onclick="_as.view='after';_as.sview={};asDraw()">After publishing</button></span>
     <span class="as-key">${_as.view === 'after' ? '<i class="k-old"></i>on the schedule <i class="k-new"></i>new' : '<i class="k-old"></i>stays <i class="k-rem"></i>comes off <i class="k-new"></i>new'}</span></div>
     <div class="as-studios">${P.studios.map((S, si) => asStudioHtml(S, si)).join('')}</div>
     <div class="as-foot"><span>${sum.add} new · ${sum.rem} off${P.studios.some(S => S.published) ? ` <span class="fd-sm">(${P.studios.filter(S => S.published).length} studio${P.studios.filter(S => S.published).length === 1 ? '' : 's'} already published)</span>` : ''}</span><button class="fd-pay" ${_as.busy || (!sum.add && !sum.rem) ? 'disabled' : ''} onclick="asPublish()">${P.studios.some(S => S.published) ? 'Approve and publish the rest' : 'Approve and publish'}</button></div>`;
   el.innerHTML = h;
 }
-function asCount() { let add = 0, rem = 0; (_as.plan ? _as.plan.studios : []).filter(S => !S.published).forEach(S => S.days.forEach(D => D.entries.forEach(e => { if (e.t === 'new' && e.on) add++; if (e.t === 'old' && e.s.remove && !e.keep) rem++; }))); return { add, rem }; }
+function asCount() { let add = 0, rem = 0, close = 0; (_as.plan ? _as.plan.studios : []).filter(S => !S.published).forEach(S => S.days.forEach(D => D.entries.forEach(e => { if (e.t === 'new' && e.on) add++; if (e.t === 'old' && e.s.remove && !e.keep) rem++; if (e.closeLead && e.close) close++; }))); return { add, rem, close }; }
 function asStudioHtml(S, si) {
   const P = _as.plan, items = P.items, open = _as.open[S.id] !== false;
   const n = S.days.reduce((t, D) => t + D.entries.filter(e => e.t === 'new' && e.on).length, 0), r = S.days.reduce((t, D) => t + D.entries.filter(e => e.t === 'old' && e.s.remove && !e.keep).length, 0);
+  const c = S.days.reduce((t, D) => t + D.entries.filter(e => e.closeLead && e.close).length, 0);
   const warn = S.days.some(D => D.notes.some(x => x.startsWith('⚠')));
   const sv = _as.sview[S.id] || _as.view;
-  let h = `<div class="as-studio" id="as-st-${S.id}"><div class="as-shw"><button class="as-sh" onclick="_as.open['${S.id}']=${open ? 'false' : 'true'};asDraw()"><b>${esc(STUDIO_NAMES[S.id] || S.id)}</b><span>${n} new · ${r} off${warn ? ' · ⚠ check' : ''}</span><span class="spacer"></span>${open ? '▾' : '▸'}</button>
-    ${S.published ? `<span class="as-pub">✓ Published: ${+S.published.added || 0} new, ${+S.published.removed || 0} off${S.published.kept ? `, ${S.published.kept} kept (booked meanwhile)` : ''}</span>`
+  let h = `<div class="as-studio" id="as-st-${S.id}"><div class="as-shw"><button class="as-sh" onclick="_as.open['${S.id}']=${open ? 'false' : 'true'};asDraw()"><b>${esc(STUDIO_NAMES[S.id] || S.id)}</b><span>${n} new · ${r} off${c ? ` · ${c} party time${c === 1 ? '' : 's'} closing` : ''}${warn ? ' · ⚠ check' : ''}</span><span class="spacer"></span>${open ? '▾' : '▸'}</button>
+    ${S.published ? `<span class="as-pub">✓ Published: ${+S.published.added || 0} new, ${+S.published.removed || 0} off${S.published.kept ? `, ${S.published.kept} kept (booked meanwhile)` : ''}${S.published.closed ? `, ${S.published.closed} party spot${S.published.closed === 1 ? '' : 's'} closed` : ''}</span>`
       : S.skipped ? `<span class="as-pub as-skipped">🚫 No changes this week</span><button class="ho-btn as-pubone" onclick="asSkip('${S.id}')">↺ Use the suggestions</button>`
-      : (n || r) ? `<button class="ho-btn as-pubone" onclick="asSkip('${S.id}')" title="Leave this studio's week as it is: nothing new, nothing taken off">🚫 Don’t make any changes</button>` +  `<button class="ho-btn as-pubone" ${_as.busy ? 'disabled' : ''} onclick="asPublish('${S.id}')">Publish this studio</button>`
+      : (n || r || c) ? `<button class="ho-btn as-pubone" onclick="asSkip('${S.id}')" title="Leave this studio's week as it is: nothing new, nothing taken off">🚫 Don’t make any changes</button>` +  `<button class="ho-btn as-pubone" ${_as.busy ? 'disabled' : ''} onclick="asPublish('${S.id}')">Publish this studio</button>`
       : `<span class="as-pub">✓ Up to date</span><button class="ho-btn as-pubone" onclick="_as.open['${S.id}']=${open ? 'false' : 'true'};asDraw()">${open ? 'Collapse' : 'Expand'}</button>`}
     ${open && !S.published ? `<span class="as-view as-view-sm" role="group" aria-label="Show for ${escAttr(STUDIO_NAMES[S.id] || S.id)}"><button class="${sv !== 'after' ? 'on' : ''}" onclick="_as.sview['${S.id}']='changes';asDraw()">Changes</button><button class="${sv === 'after' ? 'on' : ''}" onclick="_as.sview['${S.id}']='after';asDraw()">After publishing</button></span>` : ''}</div>`;
   if (S.notes.length) h += `<p class="as-note">${S.notes.map(esc).join(' ')}</p>`;
@@ -4614,8 +4647,19 @@ function asStudioHtml(S, si) {
       if (e.t === 'old') {
         const s = e.s, rem = s.remove && !e.keep;
         if (!['workshop', 'glazing', 'mini', 'wheel', 'kidsws', 'class', 'party', 'field', 'group', 'camp', 'paday'].includes(s.k)) return '';
-        if (['party', 'group', 'field'].includes(s.k) && !s.booked) return '';
-        return `<div class="as-e ${rem ? 'rem' : 'old'}${s.k === 'class' && !s.booked ? ' cls0' : ''}"${s.remove ? ` onclick="asToggleRem(${si},${di},${ei})" title="${rem ? 'Comes off (0 bookings). Tap to keep it.' : 'Kept. Tap to take it off.'}"` : ''}><b>${asT(s.start)}</b> ${esc(fdClean(s.title))}<span>${asCounts(s, rem, e.same)}</span></div>`;
+        // an open party, get-together or field trip time nobody has booked: a light row (Auto-schedule never changes these),
+        // one per time and kind (Kids and Splatter products at the same time show once)
+        if (['party', 'group', 'field'].includes(s.k) && !s.booked) {
+          const lbl = s.k === 'party' ? (/splatter/i.test(s.title || '') ? 'Splatter Party' : 'Kids Party') : fdClean(s.title);
+          const dup = D.entries.slice(0, ei).some(o => o.t === 'old' && o.s && ['party', 'group', 'field'].includes(o.s.k) && !o.s.booked && o.s.start === s.start
+            && (o.s.k === 'party' ? (/splatter/i.test(o.s.title || '') ? 'Splatter Party' : 'Kids Party') : fdClean(o.s.title)) === lbl);
+          if (e.closeLead) return asPartyCloseHtml(s, e, si, di, ei, lbl);
+          if (e.closeP || dup) return '';
+          return `<div class="as-e as-open" title="Open for booking. Auto-schedule doesn’t change party, get-together or field trip times."><b>${asT(s.start)}</b> ${esc(lbl)} <span>open, not booked</span></div>`;
+        }
+        if (e.closeLead) return asOldRow() + asPartyCloseHtml(s, e, si, di, ei, s.k === 'party' ? (/splatter/i.test(s.title || '') ? 'Splatter Party' : 'Kids Party') : fdClean(s.title));
+        return asOldRow();
+        function asOldRow() { return `<div class="as-e ${rem ? 'rem' : 'old'}${s.k === 'class' && !s.booked ? ' cls0' : ''}"${s.remove ? ` onclick="asToggleRem(${si},${di},${ei})" title="${rem ? 'Comes off (0 bookings). Tap to keep it.' : 'Kept. Tap to take it off.'}"` : ''}><b>${asT(s.start)}</b> ${esc(fdClean(s.title))}<span>${asCounts(s, rem, e.same)}</span></div>`; }
       }
       if (!e.on) return `<div class="as-e drop" onclick="asNew(${si},${di},${ei},'on',true)" title="Tap to add it back"><b>${asT(e.start)}</b> ${esc(AS_KIND_LABEL[e.k])} <span>left out</span></div>`;
       const it = items[e.item] || {}, opts = e.k === 'glazing' ? [] : P.pool.filter(i => (e.k === 'mini' ? i._mini : !i._mini && i.kind !== 'glazing') && (e.k !== 'kidsws' || i.kids_ok || i.id === e.item));
@@ -4782,23 +4826,36 @@ function asSkip(st) {
   const one = asBuild(_as.data, st).studios[0]; if (one) P.studios[i] = one;   // just this studio's week again
   asDraw();
 }
+// a party time whose open spots come down: "2 open → 1" or "closes" (tap to keep it open, tap again to close)
+function asPartyCloseHtml(s, e, si, di, ei, lbl) {
+  const what = e.closeAfter === 0 ? `${e.closeOpen > 1 ? e.closeOpen + ' open: ' : ''}closes` : `${e.closeOpen} open → ${e.closeAfter}`;
+  return `<div class="as-e ${e.close ? 'rem as-pclose' : 'as-open'}" onclick="asToggleClose(${si},${di},${ei})" title="${e.close ? `${e.closeWhy}: ${e.closeAfter === 0 ? 'its open spots close' : 'down to one open'} when you publish (reopen any time from the Schedule). Tap to keep it as it is.` : 'Kept as it is. Tap to close.'}"><b>${asT(s.start)}</b> ${esc(lbl)}${s.booked ? ' (open rooms)' : ''} <span>${e.close ? esc(what) + ': ' + esc(e.closeWhy) : 'kept open (tap to close)'}</span></div>`;
+}
+// a party time that closes: keep it open instead (or close it again); every product at that time and kind goes together
+function asToggleClose(si, di, ei) {
+  const D = _as.plan.studios[si].days[di], e = D.entries[ei], to = !e.close;
+  D.entries.forEach(o => { if (o.closeP && o.s.start === e.s.start && o.s.k === e.s.k) o.close = to; });
+  asDraw();
+}
 function asToggleRem(si, di, ei) { const e = _as.plan.studios[si].days[di].entries[ei]; e.keep = !e.keep; asDraw(); }
 function asNew(si, di, ei, k, v) { const e = _as.plan.studios[si].days[di].entries[ei]; if (k === 'start') v = Math.round(v / 15) * 15; e[k] = v; asDraw(); }
 async function asPublish(onlyId) {
   const P = _as.plan;
   const list = P.studios.filter(S => !S.published && (!onlyId || S.id === onlyId));
   const work = list.map(S => {
-    const remove = [], add = [];
+    const remove = [], add = [], close = [];
     S.days.forEach(D => D.entries.forEach(e => {
+      if (e.closeP && e.close) close.push({ id: e.s.id, left: e.closeTo });
       if (e.t === 'old' && e.s.remove && !e.keep) remove.push(e.s.id);
       if (e.t === 'new' && e.on) add.push({ studio_id: S.id, date: D.date, time: asHM(e.start), item_id: e.item, spots: e.spots, minutes: e.len, kids_only: !!e.kids });
     }));
-    return { S, remove, add };
-  }).filter(w => w.remove.length || w.add.length);
+    return { S, remove, add, close };
+  }).filter(w => w.remove.length || w.add.length || w.close.length);
   const nAdd = work.reduce((t, w) => t + w.add.length, 0), nRem = work.reduce((t, w) => t + w.remove.length, 0);
+  const nClose = list.reduce((t, S) => t + S.days.reduce((u, D) => u + D.entries.filter(e => e.closeLead && e.close).length, 0), 0);
   const who = onlyId ? (STUDIO_NAMES[onlyId] || onlyId) : (list.length === P.studios.length ? 'every studio' : `the ${list.length} studios not published yet`);
   if (!work.length) { alert('Nothing to publish for ' + who + '.'); return; }
-  if (!confirm(`Publish the week of ${_as.week} for ${who}?\n\n${nAdd} new times go live on World, and ${nRem} empty times come off (anything booked in the meantime stays).`)) return;
+  if (!confirm(`Publish the week of ${_as.week} for ${who}?\n\n${nAdd} new times go live on World, and ${nRem} empty times come off (anything booked in the meantime stays).${nClose ? `\n\n${nClose} party time${nClose === 1 ? '' : 's'} close or go down to one open room (reopen any time from the Schedule).` : ''}`)) return;
   // one studio at a time (a whole week for every studio at once is too much for one request); the Workshops page refreshed once at the end
   const fails = [];
   for (let i = 0; i < work.length; i++) {
@@ -4806,7 +4863,14 @@ async function asPublish(onlyId) {
     _as.busy = true; _as.err = `Publishing ${i + 1} of ${work.length}: ${STUDIO_NAMES[w.S.id] || w.S.id}…`; asDraw();
     const { data, error } = await sb.rpc('hub_autosched_publish', { p: { week: _as.week, remove: w.remove, add: w.add, refresh: i === work.length - 1 } });
     if (error) { fails.push(`${STUDIO_NAMES[w.S.id] || w.S.id}: ${error.message}`); continue; }
-    w.S.published = data || {}; _as.open[w.S.id] = false;
+    // the unbooked party times coming near: closed (spots to 0)
+    let closed = 0;
+    if (w.close.length) {
+      const c = await sb.rpc('hub_autosched_close_parties', { p: w.close });
+      if (c.error) fails.push(`${STUDIO_NAMES[w.S.id] || w.S.id} (party times): ${/hub_autosched_close_parties/.test(c.error.message) ? 'run autosched_close_parties.sql first' : c.error.message}`);
+      else closed = +c.data || 0;
+    }
+    w.S.published = Object.assign({}, data || {}, { closed }); _as.open[w.S.id] = false;
   }
   _as.busy = false; _as.err = fails.length ? 'Not published (try these again): ' + fails.join(' · ') : '';
   if (fails.length && work.length > 1) { try { await sb.rpc('hub_autosched_publish', { p: { week: _as.week, remove: [], add: [], refresh: true } }); } catch (e) {} }
