@@ -4710,6 +4710,7 @@ async function asMake() {
     if (!n && !S.days.some(D => D.pad && D.pad.ans === undefined)) _as.open[S.id] = false; else if (_as.open[S.id] === false) delete _as.open[S.id];
   });
   asDraw();
+  asDayPlanSoon();   // the staff schedule follows this plan
 }
 // ---- The page ----
 function asDraw() {
@@ -4724,6 +4725,7 @@ function asDraw() {
       <button class="fd-pay" ${_as.busy ? 'disabled' : ''} onclick="asMake()">${_as.busy ? 'Working…' : P ? '↻ Make it again' : 'Make the workshop schedule'}</button>
       <button class="ho-btn" onclick="asTodo()">📋 To-do${_as.openNotes && _as.openNotes.length ? ` <span class="as-todo-n">${_as.openNotes.length}</span>` : ''}</button></div>
     ${_as.notesErr ? `<p class="fd-sm">${esc(_as.notesErr)}</p>` : ''}
+    ${_as.dpErr ? `<p class="fd-sm">${esc(_as.dpErr)}</p>` : ''}
     ${_as.err ? `<p class="fd-msg">${esc(_as.err)}</p>` : ''}${_as.done ? `<div class="as-done">✅ Published: <b>${_as.done.added}</b> new time${_as.done.added === 1 ? '' : 's'}, <b>${_as.done.removed}</b> empty time${_as.done.removed === 1 ? '' : 's'} removed${_as.done.kept ? `, ${_as.done.kept} kept because someone booked meanwhile` : ''}. <button class="ho-btn" onclick="_as.week=asAddDays(_as.week,7);_as.plan=null;_as.done=null;asDraw()">Next week →</button></div>` : ''}`;
   if (!P) {
     // the week is made as soon as it's shown (making only plans, nothing changes until Publish), so the Overview is always there
@@ -4847,7 +4849,7 @@ function asPadSet(st, d, v) {
   if (v === '') delete _as.pad[k]; else _as.pad[k] = v;
   const P = _as.plan, i = P.studios.findIndex(x => x.id === st); if (i < 0 || !_as.data) return;
   const one = asBuild(_as.data, st).studios[0]; if (one) P.studios[i] = one;   // just this studio's week again
-  asDraw();
+  asDraw(); asDayPlanSoon();
 }
 // + Workshop / + Kids / + Glazing: a one-off time added by hand (4pm to start; change the time and the workshop in the box)
 function asAddManual(si, di, k) {
@@ -4891,7 +4893,7 @@ async function asNotesLoad(quiet) {
       [...new Set(changed.map(k => k.split('|')[0]))].forEach(st => { const i = _as.plan.studios.findIndex(x => x.id === st); if (i >= 0 && !_as.plan.studios[i].published) { const one = asBuild(_as.data, st).studios[0]; if (one) _as.plan.studios[i] = one; } });
     }
   }
-  if (!quiet) asDraw();
+  if (!quiet) { asDraw(); asDayPlanSoon(); }
 }
 const AS_EXTRA_NOTE = /^Bring in another staff/i;
 function asExtraFromNotes() {
@@ -5052,20 +5054,62 @@ async function asExtra(st, d, delta) {
   const k = st + '|' + d, P = _as.plan, i = P.studios.findIndex(x => x.id === st); if (i < 0) return;
   const D = P.studios[i].days.find(x => x.date === d) || {};
   if (delta > 0) {
-    const when = new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
-    if (!confirm(`Bring in another staff at ${STUDIO_NAMES[st] || st} on ${when}?\n\nThe day is planned with ${(D.staff || 0) + 1} staff, and a to-do note is added to book them.`)) return;
+    // when they're needed: the busiest part of the day (the staff schedule picks), or hours you give (autosched_day_plan.sql)
+    const when = new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' });
+    const pick = await new Promise(res => {
+      openDutySheet(`<h3>👤 Bring in another staff</h3><p class="ho-intro">${esc(STUDIO_NAMES[st] || st)} · ${esc(when)}. The day is planned with ${(D.staff || 0) + 1} staff, a to-do note is added to book them, and the staff schedule adds their shift.</p>
+        <div class="ba-form"><label class="ba-check"><input type="radio" name="asx-when" value="busy" checked onchange="document.getElementById('asx-hrs').style.opacity=.5"> The busiest part of the day <span class="fd-sm">(the staff schedule picks, at least 3 hours)</span></label>
+        <label class="ba-check"><input type="radio" name="asx-when" value="hours" onchange="document.getElementById('asx-hrs').style.opacity=1"> These hours</label>
+        <div id="asx-hrs" style="opacity:.5;display:flex;gap:8px;align-items:center;margin-left:24px"><input type="time" id="asx-from" step="900" value="17:00" onfocus="document.querySelector('[name=asx-when][value=hours]').click()"> to <input type="time" id="asx-to" step="900" value="21:30" onfocus="document.querySelector('[name=asx-when][value=hours]').click()"></div>
+        <p class="fd-msg" id="asx-msg"></p></div>
+        <div class="sheet-actions"><button onclick="closeDutySheet();window._asxRes(null)">Cancel</button><button class="primary" onclick="window._asxOk()">Bring in another staff</button></div>`);
+      window._asxRes = res;
+      window._asxOk = () => {
+        const hrs = (document.querySelector('[name=asx-when]:checked') || {}).value === 'hours';
+        const f = (document.getElementById('asx-from') || {}).value, t = (document.getElementById('asx-to') || {}).value;
+        if (hrs && (!f || !t || t <= f)) { document.getElementById('asx-msg').textContent = 'Choose a start before the end.'; return; }
+        closeDutySheet(); res(hrs ? { from: f, to: t } : {});
+      };
+    });
+    if (!pick) return;
     _as.extra[k] = (+_as.extra[k] || 0) + 1;
-    try { await sb.rpc('hub_autosched_note_save', { p: { studio_id: st, day: d, kind: 'staff', body: `Bring in another staff (part-timer or home office): planned with ${(D.staff || 0) + 1} staff` } }); } catch (e) {}
-    asNotesLoad(true).then(() => asDraw());
+    const hrsTxt = pick.from ? ` (${shortTime(pick.from + ':00')}–${shortTime(pick.to + ':00')})` : ' (busiest part of the day)';
+    try { await sb.rpc('hub_autosched_note_save', { p: Object.assign({ studio_id: st, day: d, kind: 'staff', body: `Bring in another staff (part-timer or home office): planned with ${(D.staff || 0) + 1} staff${hrsTxt}` }, pick.from ? { extra_from: pick.from, extra_to: pick.to } : {}) }); } catch (e) {}
+    asNotesLoad(true).then(() => { asDraw(); asDayPlanSoon(); });
   } else {
     // undo: its note goes (the newest one for that day), so the next Make it again doesn't bring them back
     const n = (_as.notes || []).filter(x => x.studio_id === st && x.day === d && x.kind === 'staff' && AS_EXTRA_NOTE.test(String(x.body || ''))).sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))[0];
     if (n) { try { await sb.rpc('hub_autosched_note_delete', { p_id: n.id }); } catch (e) {} }
     _as.extra[k] = Math.max(0, (+_as.extra[k] || 0) - 1); if (!_as.extra[k]) delete _as.extra[k];
-    asNotesLoad(true).then(() => asDraw());
+    asNotesLoad(true).then(() => { asDraw(); asDayPlanSoon(); });
   }
   const one = asBuild(_as.data, st).studios[0]; if (one) P.studios[i] = one;   // just this studio's week again
   asDraw();
+}
+// ---------- The day plan for the staff schedule (autosched_day_plan.sql) ----------
+// What each studio-day was planned around: Studio staffing's people, 👤 + Staff extras (with their hours when given), the
+// PA/PD or field trip evening answer, closed days. The staff schedule builder schedules at least that many people.
+let _asDpTimer = null;
+function asDayPlanSoon() { clearTimeout(_asDpTimer); _asDpTimer = setTimeout(() => { asDayPlanSave().catch(() => {}); }, 1200); }
+async function asDayPlanSave() {
+  const P = _as.plan, W = _as.data; if (!P || !W) return;
+  const today = W.today || new Date().toISOString().slice(0, 10), rows = [];
+  const keys = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+  P.studios.forEach(S => {
+    const row = (W.staffing || []).find(x => x.studio_id === S.id) || {};
+    S.days.forEach(D => {
+      if (D.date < today) return;
+      const k = S.id + '|' + D.date;
+      const notes = (_as.notes || []).filter(n => n.studio_id === S.id && n.day === D.date && n.kind === 'staff' && AS_EXTRA_NOTE.test(String(n.body || '')));
+      const closed = (D.notes || []).some(x => /^(Closed|🎌)/.test(x));
+      rows.push({ studio_id: S.id, day: D.date, staff: closed ? 0 : (+row[keys[new Date(D.date + 'T12:00:00').getDay()]] || 0),
+        extra: +_as.extra[k] || 0, extra_hours: notes.filter(n => n.extra_from && n.extra_to).map(n => ({ from: String(n.extra_from).slice(0, 5), to: String(n.extra_to).slice(0, 5), note_id: n.id })),
+        extra_notes: notes.map(n => n.id), evening: D.pad && D.pad.ans !== undefined ? String(D.pad.ans) : null, closed });
+    });
+  });
+  if (!rows.length) return;
+  const r = await sb.rpc('hub_autosched_dayplan_save', { p: rows });
+  _as.dpErr = r.error ? (/hub_autosched_dayplan_save/.test(r.error.message) ? 'Run autosched_day_plan.sql so the staff schedule follows this plan.' : r.error.message) : '';
 }
 // 🚫 Don't make any changes at a studio this week (or ↺ use the suggestions again)
 function asSkip(st) {
