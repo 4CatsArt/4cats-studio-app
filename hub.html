@@ -547,12 +547,14 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .lab-pct.sm { font-size: 15px; }
 .lab-card { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 10px 12px; } .lab-card .lab-row { border: 0; padding: 0; background: none; }
 .lab-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin: 8px 0 4px; } .lab-line .lab-pair, .lab-line .lab-item { display: inline-flex; margin: 0; }
-.lab-item { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; align-items: center; } .lab-item .lab-hint { grid-column: 1 / -1; }
+.lab-item { display: grid; grid-template-columns: auto auto 1fr; gap: 2px 8px; align-items: center; } .lab-item .lab-hint { grid-column: 1 / -1; }
 .lab-item .lab-pct { justify-self: start; }
 .lab-k { font-weight: 800; font-size: 13px; color: #3d4540; } .lab-hint { display: block; color: #6b6b63; font-size: 12.5px; line-height: 1.35; }
 .lab-verdict { font-weight: 800; font-size: 14px; border-radius: 999px; padding: 2px 10px; } .lab-verdict.good { background: #e3f4e8; color: #14532d; } .lab-verdict.ok { background: #fff4d6; color: #8a5a00; } .lab-verdict.high { background: #fdeaea; color: #a3191c; }
 .lab-verdict-big { font-weight: 900; font-size: 18px; border-radius: 12px; padding: 8px 12px; margin: 4px 0; } .lab-verdict-big.good { background: #e3f4e8; color: #14532d; } .lab-verdict-big.ok { background: #fff4d6; color: #8a5a00; } .lab-verdict-big.high { background: #fdeaea; color: #a3191c; }
 .lab-pct.off { color: #4a4a44; background: #eeeeea; font-size: 16px; }
+.lab-money { font-weight: 800; } .lab-money.up { color: #14532d; } .lab-money.down { color: #a3191c; }
+.lab-break { margin-top: 6px; } .lab-break .tot td { font-weight: 800; border-top: 2px solid var(--border); }
 .lab-verdict.off, .lab-verdict-big.off { background: #eeeeea; color: #4a4a44; }
 .lab-verdict-big .lab-hint { font-weight: 500; margin-top: 2px; } .lab-result { margin-top: 6px; font-size: 15px; } .lab-result.up b { color: #14532d; } .lab-result.down b { color: #a3191c; }
 .lab-big { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; } .lab-big .lab-pct { font-size: 28px; }
@@ -3024,25 +3026,36 @@ async function labourGet(studio, date) {
   return _labour.busy[k];
 }
 const labourSrc = s => s === 'paid' ? 'hours worked' : s === 'mixed' ? 'worked + some planned' : 'planned';
-// Labour % only, against the goal (20%): green at or under the goal, amber a little over, red well over
+// Labour % only, against the goal (20%): green at or under the goal, amber a little over, red well over.
+// Everyone with access sees the labour % (and, later, coordinators); finance logins also see the day margin and Details.
 const LAB_GOAL = 20, LAB_WARN = 25;
 const labStaffCls = p => p == null ? '' : p <= LAB_GOAL ? 'good' : p <= LAB_WARN ? 'ok' : 'high';
+const labState = d => !d || d.err ? 'err' : d.pct != null ? 'ok' : d.state ? d.state : (Number(d.hours) || d.open ? 'no_bookings' : 'closed');
 function labourPctHtml(d) {
   if (!d || d.err) return `<span class="lab-pct">–</span>`;
-  const p = d.pct;
-  if (p == null) return `<span class="lab-pct off">${Number(d.hours) ? 'No bookings' : 'Closed'}</span>`;
-  return `<span class="lab-pct ${labStaffCls(p)}">${p}%</span>`;
+  const st = labState(d);
+  if (st !== 'ok') return `<span class="lab-pct off">${st === 'closed' ? 'Closed' : 'No bookings'}</span>`;
+  return `<span class="lab-pct ${labStaffCls(d.pct)}">${d.pct}%</span>`;
 }
-// the plain-language hint under it
 function labourHintHtml(d) {
-  if (!d || d.err) return '';
-  if (d.pct == null) return `<span class="lab-hint">${Number(d.hours) ? 'Staff are scheduled, but nothing is booked for this day.' : 'Nothing booked and nobody scheduled.'}</span>`;
+  if (!d || d.err) return `<span class="lab-hint">${esc((d && d.err) || '')}</span>`;
+  const st = labState(d);
+  if (st === 'closed') return '<span class="lab-hint">Closed: nothing booked and nobody scheduled.</span>';
+  if (st === 'no_bookings') return '<span class="lab-hint">Nothing is booked for this day yet.</span>';
   const c = Math.max(0, Math.round(d.pct));
-  return `<span class="lab-hint">Out of every $1 booked, ${c}¢ pays staff. The goal is ${LAB_GOAL}¢ (${LAB_GOAL}%) or less.</span>`;
+  return `<span class="lab-hint">Out of every $1 booked, ${c}¢ pays staff. The goal is ${LAB_GOAL}¢ (${LAB_GOAL}%) or less. This doesn’t include other costs like rent and utilities.</span>`;
+}
+// finance logins: the day margin (booked − staff − the day's rent, supplies, utilities and home office share)
+const labMarginCls = m => m == null ? '' : m >= 10 ? 'good' : m >= 0 ? 'ok' : 'high';
+function labourMarginHtml(d, withHint) {
+  if (!d || !d.money || d.err || d.margin == null || d.revenue == null) return '';
+  const m = d.margin, mp = d.margin_pct, money = n => '$' + Math.round(Math.abs(n)).toLocaleString('en-CA');
+  return `<span class="lab-item"><span class="lab-k">Day margin</span><span class="lab-pct ${labMarginCls(mp)}">${mp == null ? '–' : mp + '%'}</span>
+    <span class="lab-money ${m >= 0 ? 'up' : 'down'}">${m >= 0 ? '+' : '−'}${money(m)}</span>${withHint ? `<span class="lab-hint">Booked revenue less staff, and this day’s share of the month’s rent, art supplies, utilities and home office costs (split over the month’s open days).</span>` : ''}</span>`;
 }
 function labourSubHtml(d) {
-  if (!d || d.err) return esc((d && d.err) || '');
-  return `${labourSrc(d.source)} · ${Number(d.hours || 0)} h${d.revenue != null ? ` · $${Math.round(d.revenue)} booked` : ''}${d.money && d.labour != null ? ` · $${Math.round(d.labour)} staff` : ''}`;
+  if (!d || d.err || !d.money) return '';
+  return `${labourSrc(d.source)} · ${Number(d.hours || 0)} h · $${Math.round(d.revenue || 0)} booked · $${Math.round(d.labour || 0)} staff`;
 }
 async function labourCardLoad() {
   const el = document.getElementById('card-labour'); if (!el) return;
@@ -3050,8 +3063,8 @@ async function labourCardLoad() {
   const today = localDateStr(new Date()), d = await labourGet(_sessionStudioId, today);
   el.style.display = '';
   el.innerHTML = `<div class="lab-card"><div class="lab-row"><span class="lab-ttl">📊 Labour today</span>${labourPctHtml(d)}<span class="spacer"></span>
-      <button class="ho-btn" onclick="labourTable('${escAttr(_sessionStudioId)}','${today}')">Details</button><span class="lab-admin" title="Only home office sees this for now">admin</span></div>
-    ${labourHintHtml(d)}<div class="lab-sub">${labourSubHtml(d)}</div></div>`;
+      ${d && d.money ? `<button class="ho-btn" onclick="labourTable('${escAttr(_sessionStudioId)}','${today}')">Details</button>` : ''}<span class="lab-admin" title="Only home office sees this for now">admin</span></div>
+    ${labourHintHtml(d)}${d && d.money ? `<div class="lab-pair">${labourMarginHtml(d, true)}</div><div class="lab-sub">${labourSubHtml(d)}</div>` : ''}</div>`;
 }
 async function labourLineLoad(elId, date) {
   const el = document.getElementById(elId); if (!el) return;
@@ -3059,9 +3072,8 @@ async function labourLineLoad(elId, date) {
   el.innerHTML = '<div class="lab-line"><span class="lab-sub">📊 Labour…</span></div>';
   const d = await labourGet(_sessionStudioId, date);
   if (!document.getElementById(elId) || (_plan && _plan.date !== date && elId === 'plan-labour')) return;
-  el.innerHTML = `<div class="lab-line"><span class="lab-ttl">📊 Labour</span>${labourPctHtml(d)}<span class="lab-sub" title="Out of every $1 booked, how many cents pay staff">goal ${LAB_GOAL}%</span>
-    <span class="lab-sub">${labourSubHtml(d)}</span>
-    <button class="ho-btn" onclick="labourTable('${escAttr(_sessionStudioId)}','${date}')">Details</button><span class="lab-admin" title="Only home office sees this for now">admin</span></div>`;
+  el.innerHTML = `<div class="lab-line"><span class="lab-ttl">📊 Labour</span>${labourPctHtml(d)}<span class="lab-sub" title="Out of every $1 booked, how many cents pay staff. Doesn’t include rent, utilities or other costs.">goal ${LAB_GOAL}%</span>
+    ${d && d.money ? `${labourMarginHtml(d, false)}<span class="lab-sub">${labourSubHtml(d)}</span><button class="ho-btn" onclick="labourTable('${escAttr(_sessionStudioId)}','${date}')">Details</button>` : ''}<span class="lab-admin" title="Only home office sees this for now">admin</span></div>`;
 }
 async function labourTable(studio, date) {
   const d = await labourGet(studio, date); if (!d || d.err) { alert((d && d.err) || 'Not loaded.'); return; }
@@ -3072,7 +3084,13 @@ async function labourTable(studio, date) {
   const sess = (d.sessions || []).map(x => `<tr><td>${esc(fdTime ? fdTime(x.time + ':00') : x.time)}</td><td>${esc(String(x.title || '').split('|')[0].trim())}${x.estimate ? ' <span class="fd-sm" title="Old-style Drawing Class and Lawren Harris weeks: $18 for each child on that week’s class list">(estimate: $18 a child)</span>' : ''}</td>${d.revenue != null ? `<td class="num">${money(x.revenue)}</td>` : ''}</tr>`).join('');
   openDutySheet(`<h3>📊 Labour · ${esc(STUDIO_NAMES[studio] || studio)}</h3><p class="ho-intro">${esc(when)} · ${labourSrc(d.source)}</p>
     <div class="lab-big">${labourPctHtml(d)}${labourHintHtml(d)}</div>
-    ${d.revenue != null ? `<p class="fd-sm" style="margin:6px 0 0">Booked for this day: <b>${money(d.revenue)}</b>${d.money && d.labour != null ? ` · staff <b>${money(d.labour)}</b>` : ''}</p>` : ''}
+    ${d.margin != null ? `<div class="lab-pair" style="margin-top:8px">${labourMarginHtml(d, true)}</div>
+      <table class="lab-tbl lab-break"><tbody>
+        <tr><td>Booked for this day</td><td class="num">${money(d.revenue)}</td></tr>
+        <tr><td>Staff</td><td class="num">−${money(d.labour)}</td></tr>
+        <tr><td>This day’s share of rent, art supplies, utilities and home office${d.open === false ? ' (closed: none)' : ''}</td><td class="num">−${money(d.costs)}</td></tr>
+        <tr class="tot"><td>Day margin</td><td class="num">${d.margin >= 0 ? '' : '−'}${money(Math.abs(d.margin))}</td></tr></tbody></table>`
+      : `<p class="fd-sm">No rent, art supplies, utilities or home office costs on file for this month (finance), so there’s no day margin yet.</p>`}
     <h4 style="margin:12px 0 4px">Staff (${Number(d.hours || 0)} h)</h4>
     ${people ? `<table class="lab-tbl"><thead><tr><th>Who</th><th class="num">Paid time</th><th>From</th>${d.money ? '<th class="num">Cost</th>' : ''}</tr></thead><tbody>${people}</tbody></table>` : '<p class="fd-sm">No shifts or hours worked.</p>'}
     <h4 style="margin:12px 0 4px">Bookings this day</h4>
