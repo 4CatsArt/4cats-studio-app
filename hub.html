@@ -4439,7 +4439,12 @@ function asBuild(W, onlyId) {
         D.notes.push('Closed');
         // something booked on a normally-closed day (a field trip, a party…): someone has to be there
         const onClosed = ss.filter(x => x.booked > 0 && ['field', 'group', 'party', 'paday', 'camp', 'class'].includes(x.k));
-        if (onClosed.length) D.notes.push(`⚠ Usually closed, but booked: ${onClosed.map(x => `${asT(x.start)} ${fdClean(x.title)}`).join(', ')}. Schedule someone (👤 + Staff doesn’t apply on closed days).`);
+        // a camp or PA/PD day on a usually-closed day: one person 8:30–5, planned by itself (the staff schedule adds the shift)
+        const campOn = onClosed.filter(x => ['paday', 'camp'].includes(x.k)), others = onClosed.filter(x => !['paday', 'camp'].includes(x.k));
+        if (campOn.length) { D.autoCamp = { from: '08:30', to: '17:00' }; D.notes.push(`${campOn.some(x => x.k === 'paday') ? 'PA/PD day' : 'Camp'} (usually closed): planned with 1 staff, 8:30am–5pm`); }
+        // anything else booked: a warning, until someone's requested for the day (👤 Request another staff)
+        if (others.length && !campOn.length && !(+_as.extra[st + '|' + d] > 0))
+          D.notes.push(`⚠ Usually closed, but booked: ${others.map(x => `${asT(x.start)} ${fdClean(x.title)}`).join(', ')}. Request another staff for it (What to do?).`);
         continue;
       }
       if (hol) { D.notes.push('🎌 ' + hol.name); continue; }
@@ -5101,9 +5106,11 @@ async function asDayPlanSave() {
       if (D.date < today) return;
       const k = S.id + '|' + D.date;
       const notes = (_as.notes || []).filter(n => n.studio_id === S.id && n.day === D.date && n.kind === 'staff' && AS_EXTRA_NOTE.test(String(n.body || '')));
-      const closed = (D.notes || []).some(x => /^(Closed|🎌)/.test(x));
-      rows.push({ studio_id: S.id, day: D.date, staff: closed ? 0 : (+row[keys[new Date(D.date + 'T12:00:00').getDay()]] || 0),
-        extra: +_as.extra[k] || 0, extra_hours: notes.filter(n => n.extra_from && n.extra_to).map(n => ({ from: String(n.extra_from).slice(0, 5), to: String(n.extra_to).slice(0, 5), note_id: n.id })),
+      const closed = (D.notes || []).some(x => /^(Closed|🎌)/.test(x)) && !D.autoCamp;
+      const hrs = notes.filter(n => n.extra_from && n.extra_to).map(n => ({ from: String(n.extra_from).slice(0, 5), to: String(n.extra_to).slice(0, 5), note_id: n.id }));
+      const auto = D.autoCamp && !hrs.length ? [D.autoCamp] : [];   // (a camp / PA/PD day on a closed day: 8:30–5)
+      rows.push({ studio_id: S.id, day: D.date, staff: closed || D.autoCamp ? 0 : (+row[keys[new Date(D.date + 'T12:00:00').getDay()]] || 0),
+        extra: Math.max(+_as.extra[k] || 0, hrs.length + auto.length), extra_hours: hrs.concat(auto),
         extra_notes: notes.map(n => n.id), evening: D.pad && D.pad.ans !== undefined ? String(D.pad.ans) : null, closed });
     });
   });
