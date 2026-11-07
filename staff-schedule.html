@@ -1189,6 +1189,9 @@ async function bdLoad(studio) {
   const aim40 = new Set(aim.error ? [] : (aim.data || []).map(r => r.id))
   const ssr = await sb.from('studio_staffing').select('*').eq('studio_id', studio).maybeSingle()
   const staffing = ssr.error ? null : ssr.data
+  // Auto-schedule's plan for each day (autosched_day_plan.sql): a minimum number of people, + Staff extras, the PA/PD evening
+  const dpr = await sb.rpc('hub_autosched_dayplan_get', { p_studio_id: studio, p_from: from, p_to: to })
+  const dayPlan = {}; (dpr.error ? [] : (dpr.data || [])).forEach(d => { dayPlan[d.day] = d })
   const mins = await sb.from('studio_staffing_minimums').select('*').eq('studio_id', studio)
   const minimums = mins.error ? [] : (mins.data || [])
   const partyToClose = await bdPartySlotsDue(studio)
@@ -1229,7 +1232,7 @@ async function bdLoad(studio) {
     ;(st.data || []).forEach(r => { if (r.teacher && String(r.teacher).trim()) dayTeacher[r.session_id] = String(r.teacher).trim() })
   }
   return { studio, from, to, sessions: need.data || [], ruleBadge, badgeLabel, opening: opening.data, ot: ot.data, dayTeacher,
-           pool, everyone: people.data, badgesBy, notesBy, pastShifts, recentWeekends, classTeachers, coordinators, daySessions, dayScheduleError, minimums, partyToClose, wages, unav: unav.data, toff: toff.data, shifts: shifts.data, aim40, staffing }
+           pool, everyone: people.data, badgesBy, notesBy, pastShifts, recentWeekends, classTeachers, coordinators, daySessions, dayScheduleError, minimums, partyToClose, wages, unav: unav.data, toff: toff.data, shifts: shifts.data, aim40, staffing, dayPlan }
 }
 
 // Minimum people on for this studio at this weekday and time (studio_staffing_minimums), or 0
@@ -1267,6 +1270,7 @@ function bdDayNeed(ctx, date) {
   const bookedSs = ss.filter(r => (r.booked || 0) > 0 || (r.teachers || 0) > 0)
   // (Nov 7 2026) an open day with nothing booked 3 days before closes: no shifts (Auto-schedule's nightly run closes its times)
   if (!bookedSs.length && daysBetween(todayStr(), date) <= QUIET_CLOSE_DAYS) { (ctx.quietClosed = ctx.quietClosed || new Set()).add(date); return null }
+  if (!bookedSs.length && ((ctx.dayPlan || {})[date] || {}).closed) return null   // closed in Auto-schedule's plan
   if (bookedSs.length) {
     const realStart = r => { const m = (ctx.daySessions[date] || []).find(x => x.session_id === r.session_id); return m && m.session_time ? toMin(m.session_time) : toMin(r.start_time) }
     lo = Math.min(...bookedSs.map(r => Math.min(realStart(r) - 30, toMin(r.start_time))))
@@ -1316,7 +1320,48 @@ function bdDayNeed(ctx, date) {
                                        x.start_time && x.end_time && toMin(x.start_time) < t + 15 && toMin(x.end_time) > t).length
     slots.push({ t, need: Math.max(0, need - have), badges, on, rawNeed: need, have, floater })
   }
+  bdApplyDayPlan(ctx, date, slots, ss)
   return slots
+}
+
+// Auto-schedule's plan for the day is a minimum (Nov 7 2026): at least Studio staffing's people while sessions run; a
+// PA/PD or field trip evening as answered (closed: no minimum after 5pm; N staff; one more teacher); each 👤 + Staff extra
+// person on top, over the hours given, or the busiest 3 hours of the day when none were given.
+function bdApplyDayPlan(ctx, date, slots, ss) {
+  const plan = (ctx.dayPlan || {})[date]
+  if (!plan || !slots.length) return
+  const first = Math.min(...ss.map(r => toMin(r.start_time))), last = Math.max(...ss.map(r => toMin(r.end_time)))
+  const EVE = 17 * 60, ev = plan.evening
+  const floorAt = t => {
+    if (t < first || t >= last) return 0
+    if (t >= EVE && ev === 'close') return 0
+    if (t >= EVE && /^\d+$/.test(ev || '')) return +ev
+    if (t >= EVE && ev === 'more') return (plan.staff || 0) + 1
+    return plan.staff || 0
+  }
+  const extras = []   // [from, to] for each extra person
+  ;(plan.extra_hours || []).forEach(h => { if (h.from && h.to) extras.push([toMin(h.from), toMin(h.to)]) })
+  for (let i = extras.length; i < (plan.extra || 0); i++) {
+    // the busiest 3 hours of the day (by what's needed), for an extra with no hours given
+    let best = null, bestSum = -1
+    for (let a = 0; a < slots.length; a++) {
+      const win = slots.filter(x => x.t >= slots[a].t && x.t < slots[a].t + 180)
+      if (!win.length || slots[a].t + 180 > slots[slots.length - 1].t + 15) continue
+      // busiest = most people needed, then most people there (booked or expected) when that's a tie
+      const sum = win.reduce((t, x) => t + x.rawNeed * 1000 + (x.on || []).reduce((u, r) => u + Math.max(r.expected || 0, r.booked || 0), 0), 0)
+      if (sum > bestSum) { bestSum = sum; best = [slots[a].t, slots[a].t + 180] }
+    }
+    extras.push(best || [slots[0].t, Math.min(slots[0].t + 180, slots[slots.length - 1].t + 15)])
+  }
+  slots.forEach(x => {
+    const f = floorAt(x.t) + extras.filter(e => x.t >= e[0] && x.t < e[1]).length
+    if (f > x.rawNeed) { x.need = Math.max(0, x.need + (f - x.rawNeed)); x.rawNeed = f; x.planFloor = true }
+  })
+  ctx.planNotes = ctx.planNotes || {}
+  const fm = m => fromMin ? fmtTime(fromMin(m)) : m
+  ctx.planNotes[date] = 'Auto-schedule plan: at least ' + (plan.staff || 0) + ' staff while sessions run' +
+    (plan.extra ? ', + ' + plan.extra + ' extra (' + extras.map(e => fm(e[0]) + '–' + fm(e[1])).join(', ') + ')' : '') +
+    (ev === 'close' ? ', evening closed' : /^\d+$/.test(ev || '') ? ', evening ' + ev + ' staff' : ev === 'more' ? ', evening one more teacher' : '')
 }
 
 // A Clay Wheel class and a Wheel Workshop starting at the same time share one teacher: how many teachers that saves
@@ -1633,6 +1678,7 @@ async function bdBuildOne(studio) {
   // (Nov 7 2026) days with nothing booked 3 days before: closed, no shifts
   ;[...(ctx.quietClosed || [])].sort().forEach(date => best.r.teacherNotes.push(fmtDate(date) + ': nothing booked 3 days before, so the studio is closed (no shifts)'))
   await bdFloaterCheck(ctx, best.r)
+  Object.keys(ctx.planNotes || {}).sort().forEach(date => { if ((ctx.dayPlan[date] || {}).extra || /evening/.test(ctx.planNotes[date])) best.r.teacherNotes.push(fmtDate(date) + ': ' + ctx.planNotes[date]) })
   bdPlan = { blocks: best.r.blocks, teacherNotes: best.r.teacherNotes, dirty: true }
   bdPlans[studio] = { ctx, plan: bdPlan }
 }
@@ -3385,6 +3431,17 @@ async function approveDrafts() {
     if (up.error) { toast(up.error.message, true); return }
   }
   toast('Approved ' + total + ' shifts')
+  // Auto-schedule's 👤 + Staff to-do notes for these days: done now the shifts are approved ("4 staff on Sat, Nov 14")
+  try {
+    for (const st of bdStudios) {
+      const dp = await sb.rpc('hub_autosched_dayplan_get', { p_studio_id: st, p_from: bdWeek, p_to: to })
+      for (const d of (dp.error ? [] : (dp.data || [])).filter(x => (x.extra_notes || []).length)) {
+        const { data: on } = await sb.from('staff_shifts').select('staff_id').eq('studio_id', st).eq('shift_date', d.day).in('status', ['approved', 'posted'])
+        const n = new Set((on || []).map(x => x.staff_id)).size
+        for (const id of d.extra_notes) await sb.rpc('hub_autosched_extra_done', { p_note: id, p_who: 'staff schedule: ' + n + ' staff on ' + fmtDate(d.day) })
+      }
+    }
+  } catch (e) { console.warn('extra staff notes', e) }
   hubPushShifts()   // phone notifications for staff whose schedule changed (if switched on)
   bdOpenWeek()
 }
