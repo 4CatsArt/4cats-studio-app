@@ -877,6 +877,7 @@ const FLAG_TEXT = {
   headcount_unknown: 'Headcount missing, check party details',
   enrollment_not_linked: 'Enrollment not linked, teacher assumed',
   open_party_slot: 'Open slot, could still book',
+  open_party_planned: 'Open party time: planned as one party until it closes a week before',
   event_time_missing: 'Event has no start and end time yet, not counted',
   event_staff_missing: 'Staff needed not set, assumed 1',
   no_enrollment: 'Nobody enrolled, no teacher counted',
@@ -934,11 +935,14 @@ function dayCurve(date, minOne) {
   for (let t = lo; t < hi; t += 15) {
     const on = r => toMin(r.start_time) < t + 15 && toMin(r.end_time) > t
     let dedicated = 0, pooled = 0, anyOpen = false
+    // (same as the builder) shared times in 30-minute blocks; a kids class's teacher 15 minutes after it
+    const b0 = Math.floor(t / 30) * 30, inBlock = r => toMin(r.start_time) < b0 + 30 && toMin(r.end_time) > b0
+    const onC = r => toMin(r.start_time) < t + 15 && toMin(r.end_time) + (r.rule_kind === 'one_per_session' && (r.teachers || 0) > 0 ? CLASS_AFTER_MIN : 0) > t
     active.forEach(r => {
-      if (!on(r)) return
+      if (r.rule_kind === 'pooled') { if (inBlock(r)) { pooled += (r.expected || 0) / (r.ratio || 25); if (on(r)) anyOpen = true } return }
+      if (!onC(r)) return
       anyOpen = true
-      if (r.rule_kind === 'pooled') pooled += (r.expected || 0) / (r.ratio || 20)
-      else dedicated += r.teachers || 0
+      dedicated += r.teachers || 0
     })
     let need = dedicated + Math.ceil(pooled - 1e-9)
     if (minOne && anyOpen && need === 0) need = 1
@@ -1044,6 +1048,8 @@ const TRAINING_SHIFTS_NEEDED = 3
 // A class teacher also looks after the studio while the class runs, when the studio is quiet:
 // no party running and at most this many people booked into drop-in sessions at that time.
 const QUIET_BOOKED = 2
+// A kids class's teacher is tied up this long after it ends (tidying, handing kids back), so nothing else is planned on them
+const CLASS_AFTER_MIN = 15
 // Standard shift shapes (finance.html's Quick Shifts plus the 8:30–1 morning). Every shift the
 // generator makes is rounded out to the shortest of these that covers it.
 const STANDARD_SHIFTS = [
@@ -1252,14 +1258,23 @@ function bdDayNeed(ctx, date) {
   if (closes != null) hi = Math.min(hi, closes)   // staff leave at closing time, even if a seat hold runs later
   lo = Math.floor(lo / 15) * 15; hi = Math.ceil(hi / 15) * 15
   const slots = []
+  // (Nov 7 2026) a kids class's teacher is tied up 15 minutes after it; shared times (workshops, Mini Make, glazing) are
+  // counted in 30-minute blocks: everyone there at any point in the half hour, 1 person per 25 (the rule's ratio)
+  const endOf = r => toMin(r.end_time) + (r.rule_kind === 'one_per_session' && (r.teachers || 0) > 0 ? CLASS_AFTER_MIN : 0)
   for (let t = lo; t < hi; t += 15) {
     let dedicated = 0, pooled = 0, pooledBooked = 0, partyOn = false, classOn = false
     const badges = new Set(), on = []
+    const b0 = Math.floor(t / 30) * 30, b1 = b0 + 30
     ss.forEach(r => {
-      if (!(toMin(r.start_time) < t + 15 && toMin(r.end_time) > t)) return
+      if (r.rule_kind === 'pooled') {
+        if (!(toMin(r.start_time) < b1 && toMin(r.end_time) > b0)) return
+        if (toMin(r.start_time) < t + 15 && toMin(r.end_time) > t) on.push(r)
+        pooled += (r.expected || 0) / (r.ratio || 25); pooledBooked += r.booked || 0
+        return
+      }
+      if (!(toMin(r.start_time) < t + 15 && endOf(r) > t)) return
       on.push(r)
-      if (r.rule_kind === 'pooled') { pooled += (r.expected || 0) / (r.ratio || 20); pooledBooked += r.booked || 0 }
-      else dedicated += r.teachers || 0
+      dedicated += r.teachers || 0
       if (r.rule_kind === 'per_group' && (r.teachers || 0) > 0) partyOn = true
       if (r.rule_kind === 'one_per_session' && (r.teachers || 0) > 0) classOn = true
       const b = ctx.ruleBadge[r.rule_label]
