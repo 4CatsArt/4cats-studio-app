@@ -4653,7 +4653,8 @@ async function asMake() {
   const { data, error } = await sb.rpc('hub_autosched_week', { p_from: _as.week });
   _as.busy = false;
   if (error) { _as.err = /hub_autosched_week/.test(error.message) ? 'Run auto_schedule.sql in Supabase first.' : error.message; asDraw(); return; }
-  _as.data = data; asNotesLoad();
+  _as.data = data;
+  try { await asNotesLoad(true); } catch (e) {}   // (the notes first: 👤 + Staff days are planned with their extra person)
   _as.plan = asBuild(data);
   _as.plan.studios.forEach(S => {   // nothing to change: start folded (open it any time)
     const n = S.days.reduce((t, D) => t + D.entries.filter(e => (e.t === 'new' && e.on) || (e.t === 'old' && e.s.remove && !e.keep)).length, 0);
@@ -4815,11 +4816,26 @@ function asCounts(s, rem, same) {
 }
 // ---- 📝 Notes and to-dos (autosched_notes.sql): on a studio's day; saved for everyone; ✓ Done when handled ----
 const AS_NOTE_KINDS = [['staff', '👤 Need another staff'], ['cancel', '✕ Cancel a time'], ['paday', '🎒 PA/PD day'], ['other', '📝 Other']];
-async function asNotesLoad() {
+async function asNotesLoad(quiet) {
   const [w, o] = await Promise.all([sb.rpc('hub_autosched_notes', { p_from: _as.week, p_to: asAddDays(_as.week, 6), p_open: false }), sb.rpc('hub_autosched_notes', { p_from: null, p_to: null, p_open: true })]);
   _as.notes = w.error ? [] : (w.data || []); _as.openNotes = o.error ? null : (o.data || []);
   _as.notesErr = w.error && /hub_autosched_notes/.test(w.error.message) ? 'Run autosched_notes.sql to use notes.' : '';
-  asDraw();
+  // 👤 + Staff is remembered by its note ("Bring in another staff…", to-do or done): the week is planned with them every time
+  if (!w.error) {
+    const was = _as.extra, now = asExtraFromNotes();
+    const changed = [...new Set(Object.keys(was).concat(Object.keys(now)))].filter(k => (+was[k] || 0) !== (+now[k] || 0));
+    _as.extra = now;
+    if (!quiet && changed.length && _as.plan && _as.data) {
+      [...new Set(changed.map(k => k.split('|')[0]))].forEach(st => { const i = _as.plan.studios.findIndex(x => x.id === st); if (i >= 0 && !_as.plan.studios[i].published) { const one = asBuild(_as.data, st).studios[0]; if (one) _as.plan.studios[i] = one; } });
+    }
+  }
+  if (!quiet) asDraw();
+}
+const AS_EXTRA_NOTE = /^Bring in another staff/i;
+function asExtraFromNotes() {
+  const out = {};
+  (_as.notes || []).forEach(n => { if (n.kind === 'staff' && AS_EXTRA_NOTE.test(String(n.body || ''))) { const k = n.studio_id + '|' + n.day; out[k] = (out[k] || 0) + 1; } });
+  return out;
 }
 function asNotesHtml(sid, d) {
   return (_as.notes || []).filter(n => n.studio_id === sid && n.day === d).map(n => `<div class="as-note2${n.done ? ' done' : ''}"><div><b>${esc((AS_NOTE_KINDS.find(k => k[0] === n.kind) || [, '📝'])[1])}</b></div><div>${esc(n.body)}</div>
@@ -4874,9 +4890,13 @@ async function asExtra(st, d, delta) {
     if (!confirm(`Bring in another staff at ${STUDIO_NAMES[st] || st} on ${when}?\n\nThe day is planned with ${(D.staff || 0) + 1} staff, and a to-do note is added to book them.`)) return;
     _as.extra[k] = (+_as.extra[k] || 0) + 1;
     try { await sb.rpc('hub_autosched_note_save', { p: { studio_id: st, day: d, kind: 'staff', body: `Bring in another staff (part-timer or home office): planned with ${(D.staff || 0) + 1} staff` } }); } catch (e) {}
-    asNotesLoad();
+    asNotesLoad(true).then(() => asDraw());
   } else {
+    // undo: its note goes (the newest one for that day), so the next Make it again doesn't bring them back
+    const n = (_as.notes || []).filter(x => x.studio_id === st && x.day === d && x.kind === 'staff' && AS_EXTRA_NOTE.test(String(x.body || ''))).sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))[0];
+    if (n) { try { await sb.rpc('hub_autosched_note_delete', { p_id: n.id }); } catch (e) {} }
     _as.extra[k] = Math.max(0, (+_as.extra[k] || 0) - 1); if (!_as.extra[k]) delete _as.extra[k];
+    asNotesLoad(true).then(() => asDraw());
   }
   const one = asBuild(_as.data, st).studios[0]; if (one) P.studios[i] = one;   // just this studio's week again
   asDraw();
