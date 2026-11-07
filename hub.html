@@ -540,6 +540,12 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .fd-x { border: 0; background: none; font-size: 22px; line-height: 1; cursor: pointer; color: #6b6b63; }
 .fd-giftl { display: grid; gap: 4px; }
 .fd-sub { display: grid; border-top: 1px solid var(--border); padding-top: 6px; } .fd-sub .fd-pl { padding: 4px 0; }
+.labour-card { margin: 10px 0; } .lab-row, .lab-line { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 8px 12px; }
+.lab-line { margin: 4px 0 10px; } .lab-ttl { font-weight: 800; } .lab-sub { color: #6b6b63; font-size: 13px; } .lab-row .spacer { flex: 1; }
+.lab-pct { font-weight: 900; font-size: 20px; padding: 0 8px; border-radius: 10px; } .lab-pct.good { color: #14532d; background: #e3f4e8; } .lab-pct.ok { color: #8a5a00; background: #fff4d6; } .lab-pct.high { color: #a3191c; background: #fdeaea; }
+.lab-admin { font-size: 10px; font-weight: 800; text-transform: uppercase; color: #6b6b63; border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; }
+.lab-big { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; } .lab-big .lab-pct { font-size: 28px; }
+.lab-tbl { width: 100%; border-collapse: collapse; font-size: 14px; } .lab-tbl th, .lab-tbl td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--border); } .lab-tbl .num { text-align: right; }
 .fd-invrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; } .fd-invrow input { font: inherit; font-size: 13px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 8px; }
 .fd-paybtns { display: grid; gap: 6px; }
 .fd-pay { font: inherit; font-size: 17px; font-weight: 800; color: #fff; background: #c8232c; border: 0; border-radius: 12px; padding: 12px 16px; cursor: pointer; }
@@ -2397,6 +2403,8 @@ tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decorati
     <div id="hub-announcements"></div>
 
     <div class="card hero-card" id="card-daily-hero"></div>
+    <!-- 📊 Labour today (hub_day_labour.sql): labour ÷ the revenue of today's bookings. Admin only while it's being built. -->
+    <div id="card-labour" class="labour-card" style="display:none"></div>
 
     <!-- Week info bar — theme name, Friday event, next week preview.
          Informational only for now, no real links (per explicit request). -->
@@ -2647,6 +2655,7 @@ tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decorati
       <button class="ho-btn" onclick="goToDashboard()" title="Back to the Today screen">← Today screen</button>
     </div>
     <p class="ho-intro" id="plan-intro"></p>
+    <div id="plan-labour"></div>
     <div id="plan-idea-pin"></div>
     <div class="plan-days" id="plan-days"></div>
     <!-- Floor plan for the day (Day view's own code). Outside plan-body so redraws don't wipe it. -->
@@ -2985,8 +2994,69 @@ function heroGreetingHtml(name) {
   return `${esc(text)}, ${esc(name)}!${emoji ? ' ' + esc(emoji) : ''}`;
 }
 
+// ---------- 📊 Labour % by day (hub_day_labour.sql) ----------
+// Labour ÷ the revenue of that day's bookings (sessions happening that day, whenever they were paid for).
+// Past days: hours worked (punches; a shift with no punches counts as planned). Today and on: planned shifts.
+// Admin only while it's being built; $ amounts only for finance logins (the database decides).
+const _labour = { cache: {}, busy: {} };
+function labourCan() { return !!(_studioData && _studioData.isAdmin); }
+async function labourGet(studio, date) {
+  const k = studio + '|' + date;
+  if (_labour.cache[k] && Date.now() - _labour.cache[k].at < 60 * 1000) return _labour.cache[k].d;
+  if (_labour.busy[k]) return _labour.busy[k];
+  _labour.busy[k] = sb.rpc('hub_day_labour', { p_studio_id: studio, p_from: date, p_to: date }).then(r => {
+    delete _labour.busy[k];
+    if (r.error) return { err: /hub_day_labour/.test(r.error.message) ? 'Run hub_day_labour.sql first.' : r.error.message };
+    const d = Object.assign({ money: r.data.money, today: r.data.today }, (r.data.days || [])[0] || {});
+    _labour.cache[k] = { at: Date.now(), d }; return d;
+  });
+  return _labour.busy[k];
+}
+const labourSrc = s => s === 'paid' ? 'hours worked' : s === 'mixed' ? 'worked + some planned' : 'planned';
+function labourPctHtml(d) {
+  if (!d || d.err) return `<span class="lab-pct">–</span>`;
+  const p = d.pct, cls = p == null ? '' : p <= 25 ? 'good' : p <= 35 ? 'ok' : 'high';
+  return `<span class="lab-pct ${cls}">${p == null ? (Number(d.hours) ? 'no bookings' : '–') : p + '%'}</span>`;
+}
+async function labourCardLoad() {
+  const el = document.getElementById('card-labour'); if (!el) return;
+  if (!labourCan() || !_sessionStudioId) { el.style.display = 'none'; return; }
+  const today = localDateStr(new Date()), d = await labourGet(_sessionStudioId, today);
+  el.style.display = '';
+  el.innerHTML = `<div class="lab-row"><span class="lab-ttl">📊 Labour today</span>${labourPctHtml(d)}
+    <span class="lab-sub">${d && !d.err ? `${labourSrc(d.source)} · ${Number(d.hours || 0)} h${d.money && d.revenue != null ? ` · $${Math.round(d.labour)} of $${Math.round(d.revenue)} booked` : ''}` : esc((d && d.err) || '')}</span>
+    <span class="spacer"></span><button class="ho-btn" onclick="labourTable('${escAttr(_sessionStudioId)}','${today}')">Details</button>
+    <span class="lab-admin" title="Only home office sees this for now">admin</span></div>`;
+}
+async function labourLineLoad(elId, date) {
+  const el = document.getElementById(elId); if (!el) return;
+  if (!labourCan() || !_sessionStudioId || !date) { el.innerHTML = ''; return; }
+  el.innerHTML = '<div class="lab-line"><span class="lab-sub">📊 Labour…</span></div>';
+  const d = await labourGet(_sessionStudioId, date);
+  if (!document.getElementById(elId) || (_plan && _plan.date !== date && elId === 'plan-labour')) return;
+  el.innerHTML = `<div class="lab-line"><span class="lab-ttl">📊 Labour</span>${labourPctHtml(d)}
+    <span class="lab-sub">${d && !d.err ? `${labourSrc(d.source)} · ${Number(d.hours || 0)} h${d.money && d.revenue != null ? ` · $${Math.round(d.labour)} of $${Math.round(d.revenue)} booked` : ''}` : esc((d && d.err) || '')}</span>
+    <button class="ho-btn" onclick="labourTable('${escAttr(_sessionStudioId)}','${date}')">Details</button><span class="lab-admin" title="Only home office sees this for now">admin</span></div>`;
+}
+async function labourTable(studio, date) {
+  const d = await labourGet(studio, date); if (!d || d.err) { alert((d && d.err) || 'Not loaded.'); return; }
+  const when = new Date(date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' });
+  const hm = m => { m = Math.round(Number(m) || 0); return Math.floor(m / 60) + 'h' + (m % 60 ? ' ' + (m % 60) + 'm' : ''); };
+  const money = n => n == null ? '' : '$' + Number(n).toFixed(2);
+  const people = (d.people || []).map(p => `<tr><td>${esc(p.name)}</td><td class="num">${hm(p.mins)}</td><td>${p.source === 'paid' ? 'worked' : 'planned'}</td>${d.money ? `<td class="num">${money(p.cost)}</td>` : ''}</tr>`).join('');
+  const sess = (d.sessions || []).map(x => `<tr><td>${esc(fdTime ? fdTime(x.time + ':00') : x.time)}</td><td>${esc(String(x.title || '').split('|')[0].trim())}</td>${d.money ? `<td class="num">${money(x.revenue)}</td>` : ''}</tr>`).join('');
+  openDutySheet(`<h3>📊 Labour · ${esc(STUDIO_NAMES[studio] || studio)}</h3><p class="ho-intro">${esc(when)} · ${labourSrc(d.source)}</p>
+    <div class="lab-big">${labourPctHtml(d)}<span class="lab-sub">labour ÷ the revenue of this day’s bookings${d.money && d.revenue != null ? `: <b>${money(d.labour)}</b> ÷ <b>${money(d.revenue)}</b>` : ''}</span></div>
+    <h4 style="margin:12px 0 4px">Staff (${Number(d.hours || 0)} h)</h4>
+    ${people ? `<table class="lab-tbl"><thead><tr><th>Who</th><th class="num">Paid time</th><th>From</th>${d.money ? '<th class="num">Cost</th>' : ''}</tr></thead><tbody>${people}</tbody></table>` : '<p class="fd-sm">No shifts or hours worked.</p>'}
+    <h4 style="margin:12px 0 4px">Bookings this day</h4>
+    ${sess ? `<table class="lab-tbl"><thead><tr><th>Time</th><th>What</th>${d.money ? '<th class="num">Booked</th>' : ''}</tr></thead><tbody>${sess}</tbody></table>` : '<p class="fd-sm">No booked revenue this day.</p>'}
+    <p class="fd-sm">Past days: hours worked from punches (anyone without punches counts by their shift, marked “planned”). Today and on: planned shifts. Booked revenue is before tax, gift card redemptions included; camps and multi-week classes are spread over their days. Memberships and retail aren’t tied to a day, so they’re not included.</p>
+    <div class="sheet-actions"><button class="primary" onclick="closeDutySheet()">Close</button></div>`);
+}
 function renderDailyHero(data) {
   _lastHeroData = data;
+  try { labourCardLoad(); } catch (e) {}
   const container = document.getElementById('card-daily-hero');
   if (!container) return;
 
@@ -8137,6 +8207,7 @@ function planParticipants() {
 function renderPlanDay() {
   const body = document.getElementById('plan-body');
   const P = _plan;
+  try { labourLineLoad('plan-labour', P.date); } catch (e) {}
   const edit = planCanEdit();
   document.getElementById('plan-intro').innerHTML = edit
     ? 'Who’s doing what each day. Change roles, wheel and party teachers, and add break times. Roles start from the staff schedule; anything you set here wins.'
