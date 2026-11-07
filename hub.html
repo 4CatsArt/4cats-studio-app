@@ -4217,6 +4217,7 @@ function rpEditPanelsHtml() {
 //     weekday and two on a weekend day (glazing already on that day counts); a kids class teacher is tied up 15 minutes
 //     after the class (a second teacher can start something right away)
 //   a kids class (90 minutes), kids-only workshop, wheel, booked party (its real length), booked field trip or group event takes a teacher fully;
+//     wheel times starting together (a Clay Wheel class and a Wheel Workshop) share one teacher;
 //     1-staff studios get 45 minutes after a booked party for lunch
 //   never on stat holidays or studio closures; small studios (1–2 staff) get no weekday workshops during camps (not PA/PD days)
 //   1 staff on a weekday: everything done within 5 hours of their break, which ends 15 minutes before the first class / kids workshop;
@@ -4224,6 +4225,7 @@ function rpEditPanelsHtml() {
 //     and the whole shift (from 15 minutes before the first thing on the day) is at most 8½ hours
 //   a new time that matches an existing empty one (same workshop, same time) keeps the existing one instead
 //   a PA/PD day: asks first — close the evening, or open with how many staff (until answered, nothing is proposed that day)
+//   a weekday with a booked field trip: the same question (close the evening, or open with how many staff)
 //   kids-only times: only workshops ticked 🧒 Good for kids (Workshops manager)
 //   Featured workshops first, then the most popular; never the same project twice in a day; only workshops in their "Offered" dates;
 //     never retired ones (not-live ones are fine), never wheel, never the Hanukkah workshops
@@ -4330,10 +4332,16 @@ function asBuild(W, onlyId) {
       kept.forEach(s => {
         const lb = `${asT(s.start)} ${fdClean(s.title)}`;
         if (s.k === 'class') ded.push([s.start, s.start + AS_CLASS_LEN(s) + AS_CLASS_BUFFER, lb + ' (class, and 15 minutes after)']);
-        else if (s.k === 'wheel' && s._series) ded.push([s.start, s.start + (+s.len || 90), lb + ' (wheel class)']);   // wheel classes: 90 minutes unless set
-        else if (s.k === 'kidsws' || s.k === 'wheel') ded.push([s.start, s.start + (s.len || 120), lb]);
+        else if (s.k === 'wheel') {
+          // wheel classes: 90 minutes unless set; wheel times starting together (a Clay Wheel class and a Wheel Workshop) share one teacher
+          const end = s.start + (s._series ? (+s.len || 90) : (s.len || 120)), lab = lb + (s._series ? ' (wheel class)' : '');
+          const same = ded.find(x => x.wheel && x[0] === s.start);
+          if (same) { same[1] = Math.max(same[1], end); same[2] += ', ' + lab; }
+          else { const e = [s.start, end, lab]; e.wheel = true; ded.push(e); }
+        }
+        else if (s.k === 'kidsws') ded.push([s.start, s.start + (s.len || 120), lb]);
         else if (s.k === 'party' && s.booked > 0) { const len = s.party_minutes || 105; ded.push([s.start, s.start + len, lb + ' (party)']); if (staff === 1) ded.push([s.start + len, s.start + len + 45, 'lunch after the party']); }
-        else if ((s.k === 'field' || s.k === 'group') && s.booked > 0) ded.push([s.start, s.start + (s.len || 120), lb]);
+        else if ((s.k === 'field' || s.k === 'group') && s.booked > 0) ded.push([s.start, s.start + (s.len || 120), lb + (s.k === 'field' ? ' (field trip)' : '')]);
         else if (s.k === 'camp' || s.k === 'paday') ded.push([s.start, s.start + (s.len || 360), lb + ' (PA/PD day or camp)']);
       });
       const maxDed = (a, b) => { let m = 0; for (let t = a; t < b; t += 15) { const n = ded.filter(x => x[0] <= t && x[1] > t).length; if (n > m) m = n; } return m; };
@@ -4394,14 +4402,18 @@ function asBuild(W, onlyId) {
         tpl.forEach(([t, k]) => add(asMin(t), k, 'weekend'));
       } else {
         // a PA/PD day: ask about the evening (close it, or open with how many staff) before proposing anything
-        if (kept.some(s => s.k === 'paday')) {
-          const ans = _as.pad[st + '|' + d], kids = kept.filter(s => s.k === 'paday').reduce((t, s) => t + (+s.booked || 0), 0), min = +(set.pa_min ?? 8);
-          D.pad = { usual: staff, ans, kids, low: min > 0 && kids < min, min };
-          if (ans === undefined) { D.notes.push('🎒 PA/PD day: choose what happens to the evening'); continue; }
-          if (ans === 'close') { D.notes.push('🎒 PA/PD day: evening closed'); continue; }
-          if (ans === 'watch') { D.notes.push('🎒 PA/PD day: both kept open · watching its bookings (notes on 📋 To-do)'); }
+        // (a weekday with a booked field trip: the same question, close the evening or open with how many staff)
+        const isPa = kept.some(s => s.k === 'paday'), isFt = !isPa && kept.some(s => s.k === 'field' && s.booked > 0);
+        if (isPa || isFt) {
+          const ans = _as.pad[st + '|' + d], min = +(set.pa_min ?? 8);
+          const kids = kept.filter(s => s.k === (isPa ? 'paday' : 'field')).reduce((t, s) => t + (+s.booked || 0), 0);
+          const lbl = isPa ? '🎒 PA/PD day' : '🚌 Field trip';
+          D.pad = { kind: isPa ? 'paday' : 'field', usual: staff, ans, kids, low: isPa && min > 0 && kids < min, min };
+          if (ans === undefined) { D.notes.push(lbl + ': choose what happens to the evening'); continue; }
+          if (ans === 'close') { D.notes.push(lbl + ': evening closed'); continue; }
+          if (ans === 'watch') { D.notes.push(lbl + ': both kept open · watching its bookings (notes on 📋 To-do)'); }
           else {
-          staff = Math.max(1, +ans || 1) + extra; D.staff = staff; D.notes.push(`🎒 PA/PD day: evening with ${staff} staff`);
+          staff = Math.max(1, +ans || 1) + extra; D.staff = staff; D.notes.push(`${lbl}: evening with ${staff} staff`);
           }
         }
         const classes = kept.filter(s => s.k === 'class').sort((a, b) => a.start - b.start);
@@ -4434,7 +4446,9 @@ function asBuild(W, onlyId) {
           // the whole shift: at most 8½ hours (8 working + the break), from 15 minutes before the first thing on the day
           // (a field trip, party, class, booked time or the kids workshop)
           // (a PA/PD day or camp is its own daytime shift: the evening person's shift starts from the evening's first thing)
-          const firstAll = Math.min(...[kidsT].concat(ded.filter(x => !/staff break|lunch|PA\/PD day or camp/.test(x[2] || '')).map(x => x[0]), pub.map(x => x[0])).filter(x => x != null));
+          // (a field trip day whose evening staff was chosen: the evening is its own shift, like a PA/PD day)
+          const ftOwn = D.pad && D.pad.kind === 'field';
+          const firstAll = Math.min(...[kidsT].concat(ded.filter(x => !/staff break|lunch|PA\/PD day or camp/.test(x[2] || '') && !(ftOwn && /\(field trip\)/.test(x[2] || ''))).map(x => x[0]), pub.map(x => x[0])).filter(x => x != null));
           if (isFinite(firstAll)) {
             const shiftEnd = firstAll - 15 + 510;
             if (!D.workEnd || shiftEnd < D.workEnd) {
@@ -4535,7 +4549,7 @@ function asDraw() {
   const sum = asCount();
   const padAsk = P.studios.filter(S => !S.published).reduce((t, S) => t + S.days.filter(D => D.pad && D.pad.ans === undefined).length, 0);
   const padLow = P.studios.filter(S => !S.published).reduce((t, S) => t + S.days.filter(D => D.pad && D.pad.low).length, 0);
-  h += `<div class="as-sum"><span><b>${sum.add}</b> new times</span><span><b>${sum.rem}</b> empty times coming off</span><span><b>${P.studios.length}</b> studios</span>${padAsk ? `<button class="as-padn" onclick="asPadList()">🎒 <b>${padAsk}</b> PA/PD day${padAsk === 1 ? '' : 's'} need${padAsk === 1 ? 's' : ''} an answer</button>` : ''}${padLow ? `<button class="as-padn low" onclick="asPadList()">⚠ <b>${padLow}</b> PA/PD day${padLow === 1 ? '' : 's'} with few kids</button>` : ''}
+  h += `<div class="as-sum"><span><b>${sum.add}</b> new times</span><span><b>${sum.rem}</b> empty times coming off</span><span><b>${P.studios.length}</b> studios</span>${padAsk ? `<button class="as-padn" onclick="asPadList()">🎒🚌 <b>${padAsk}</b> PA/PD or field trip day${padAsk === 1 ? '' : 's'} need${padAsk === 1 ? 's' : ''} an answer</button>` : ''}${padLow ? `<button class="as-padn low" onclick="asPadList()">⚠ <b>${padLow}</b> PA/PD day${padLow === 1 ? '' : 's'} with few kids</button>` : ''}
     <span class="as-view" role="group" aria-label="Show"><button class="${_as.view !== 'after' ? 'on' : ''}" onclick="_as.view='changes';_as.sview={};asDraw()">Changes</button><button class="${_as.view === 'after' ? 'on' : ''}" onclick="_as.view='after';_as.sview={};asDraw()">After publishing</button></span>
     <span class="as-key">${_as.view === 'after' ? '<i class="k-old"></i>on the schedule <i class="k-new"></i>new' : '<i class="k-old"></i>stays <i class="k-rem"></i>comes off <i class="k-new"></i>new'}</span></div>
     <div class="as-studios">${P.studios.map((S, si) => asStudioHtml(S, si)).join('')}</div>
@@ -4559,7 +4573,7 @@ function asStudioHtml(S, si) {
   h += '<div class="as-week">' + S.days.map((D, di) => `<div class="as-day${D.staff === 0 ? ' closed' : ''}"><div class="as-dh">${new Date(D.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', day: 'numeric' })}<span>${D.staff ? D.staff + (D.staff >= 4 ? '+' : '') + ' staff' : ''}</span></div>` +
     asNotesHtml(S.id, D.date) +
     (D.pad && !S.published ? asPadHtml(S, D) : '') +
-    D.notes.filter(x => !(D.pad && x.startsWith('🎒'))).map(x => `<div class="as-dn${x.startsWith('⚠') ? ' warn' : ''}">${esc(x)}</div>`).join('') +
+    D.notes.filter(x => !(D.pad && (x.startsWith('🎒') || x.startsWith('🚌')))).map(x => `<div class="as-dn${x.startsWith('⚠') ? ' warn' : ''}">${esc(x)}</div>`).join('') +
     D.entries.map((e, ei) => {
       if (e.t === 'old') {
         const s = e.s, rem = s.remove && !e.keep;
@@ -4593,9 +4607,15 @@ function asAfterHtml(S) {
   }).join('') + '</div>';
 }
 // 🎒 A PA/PD day's evening: close it, or open with how many staff (up to the usual); then that studio's week is made again
+function asPadOpts(P) {
+  const n = Math.max(1, P.usual || 1);
+  return [['', 'Choose…']].concat(P.kind === 'field' ? [] : [['watch', 'Keep both open, tell us if it books']]).concat([['close', 'Close the evening']])
+    .concat(Array.from({ length: n }, (_, i) => [String(i + 1), `Open with ${i + 1} staff${i + 1 === n ? ' (normal)' : ''}`]));
+}
+const asPadName = P => P.kind === 'field' ? '🚌 <b>Field trip</b>' : '🎒 <b>PA/PD day</b>';
 function asPadHtml(S, D) {
-  const P = D.pad, n = Math.max(1, P.usual || 1), opts = [['', 'Choose…'], ['watch', 'Keep both open, tell us if it books'], ['close', 'Close the evening']].concat(Array.from({ length: n }, (_, i) => [String(i + 1), `Open with ${i + 1} staff${i + 1 === n ? ' (normal)' : ''}`]));
-  return `<label class="as-pad${P.ans === undefined ? ' ask' : ''}${P.low ? ' low' : ''}">🎒 <b>PA/PD day</b> · ${P.kids} kid${P.kids === 1 ? '' : 's'} booked${P.low ? `<span class="as-padlow">⚠ Under ${P.min}: cancel it, or run more in the evening?</span>` : ''}<span>The evening?</span><select onchange="asPadSet('${S.id}','${D.date}',this.value)">${opts.map(o => `<option value="${o[0]}"${String(P.ans ?? '') === o[0] ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select></label>`;
+  const P = D.pad, opts = asPadOpts(P);
+  return `<label class="as-pad${P.ans === undefined ? ' ask' : ''}${P.low ? ' low' : ''}">${asPadName(P)} · ${P.kids} ${P.kind === 'field' ? (P.kids === 1 ? 'person' : 'people') : (P.kids === 1 ? 'kid' : 'kids')} booked${P.low ? `<span class="as-padlow">⚠ Under ${P.min}: cancel it, or run more in the evening?</span>` : ''}<span>The evening?</span><select onchange="asPadSet('${S.id}','${D.date}',this.value)">${opts.map(o => `<option value="${o[0]}"${String(P.ans ?? '') === o[0] ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select></label>`;
 }
 function asPadSet(st, d, v) {
   const k = st + '|' + d, was = _as.pad[k];
@@ -4746,16 +4766,16 @@ function asPadList() {
   const rows = [];
   P.studios.forEach((S, si) => S.days.forEach(D => { if (D.pad) rows.push({ S, si, D }); }));
   const fmt = d => new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
-  openDutySheet(`<h3>🎒 PA/PD days this week</h3>
-    <p class="ho-intro">${rows.length} PA/PD day${rows.length === 1 ? '' : 's'}. Answer the evening question here, or Go to the studio.</p>
+  openDutySheet(`<h3>🎒 PA/PD days and 🚌 field trips this week</h3>
+    <p class="ho-intro">${rows.length} day${rows.length === 1 ? '' : 's'} with a PA/PD day or a booked field trip. Answer the evening question here, or Go to the studio.</p>
     <div class="as-padl">${rows.length ? rows.sort((a, b) => a.D.date.localeCompare(b.D.date) || (STUDIO_NAMES[a.S.id] || '').localeCompare(STUDIO_NAMES[b.S.id] || '')).map(r => {
       const P2 = r.D.pad, n = Math.max(1, P2.usual || 1);
-      const opts = [['', 'Choose…'], ['watch', 'Keep both open, tell us if it books'], ['close', 'Close the evening']].concat(Array.from({ length: n }, (_, i) => [String(i + 1), `Open with ${i + 1} staff${i + 1 === n ? ' (normal)' : ''}`]));
-      return `<div class="as-padr${P2.low ? ' low' : ''}${P2.ans === undefined ? ' ask' : ''}"><div><b>${esc(STUDIO_NAMES[r.S.id] || r.S.id)}</b> · ${esc(fmt(r.D.date))}
-        <div class="fd-sm">${P2.kids} kid${P2.kids === 1 ? '' : 's'} booked${P2.low ? ` · <b class="as-padlow">⚠ under ${P2.min}</b>` : ''}</div></div>
+      const opts = asPadOpts(P2);
+      return `<div class="as-padr${P2.low ? ' low' : ''}${P2.ans === undefined ? ' ask' : ''}"><div>${P2.kind === 'field' ? '🚌 ' : '🎒 '}<b>${esc(STUDIO_NAMES[r.S.id] || r.S.id)}</b> · ${esc(fmt(r.D.date))}
+        <div class="fd-sm">${P2.kind === 'field' ? 'Field trip · ' + P2.kids + (P2.kids === 1 ? ' person' : ' people') : P2.kids + (P2.kids === 1 ? ' kid' : ' kids')} booked${P2.low ? ` · <b class="as-padlow">⚠ under ${P2.min}</b>` : ''}</div></div>
         <select ${r.S.published ? 'disabled' : ''} onchange="asPadSet('${r.S.id}','${r.D.date}',this.value);asPadList()">${opts.map(o => `<option value="${o[0]}"${String(P2.ans ?? '') === o[0] ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select>
         <button class="ho-btn" onclick="closeDutySheet();asGoStudio('${r.S.id}')">Go to</button></div>`;
-    }).join('') : '<p class="ho-intro">No PA/PD days this week.</p>'}</div>
+    }).join('') : '<p class="ho-intro">No PA/PD days or field trips this week.</p>'}</div>
     <div class="sheet-actions"><button class="primary" onclick="closeDutySheet()">Done</button></div>`);
 }
 function asGoStudio(id) {
