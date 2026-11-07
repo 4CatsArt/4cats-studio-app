@@ -1326,6 +1326,19 @@ function bdDayNeed(ctx, date) {
   return slots
 }
 
+// A field trip or PA/PD day (an evening answer in Auto-schedule's plan): its daytime teacher is one of the day's staff,
+// from 30 minutes before the trip / camp to about 7.5 hours later (10:30 → 6; a camp at least until 5pm). null otherwise.
+const DAY_TEACHER_SPAN = 450
+function bdDayTeacher(ctx, date, ss) {
+  const plan = (ctx.dayPlan || {})[date]
+  if (!plan || plan.evening == null || plan.evening === '') return null
+  const day = (ss || []).filter(r => (r.booked || 0) > 0 && (/field trip/i.test(r.title || '') || /camp|pa\/pd/i.test(r.rule_label || '')))
+  if (!day.length) return null
+  const first = Math.min(...day.map(r => toMin(r.start_time)))
+  if (first >= 15 * 60) return null
+  const start = Math.floor((first - 30) / 15) * 15
+  return { start, end: Math.max(17 * 60, start + DAY_TEACHER_SPAN) }
+}
 // Auto-schedule's plan for the day is a minimum (Nov 7 2026): at least Studio staffing's people while sessions run; a
 // PA/PD or field trip evening as answered (closed: no minimum after 5pm; N staff; one more teacher); each 👤 + Staff extra
 // person on top, over the hours given, or the busiest 3 hours of the day when none were given.
@@ -1338,9 +1351,14 @@ function bdApplyDayPlan(ctx, date, slots, ss) {
   const ev = plan.evening
   const lateStarts = ss.map(r => toMin(r.start_time)).filter(m => m >= 15 * 60)
   const EVE = ev != null && ev !== '' ? (lateStarts.length ? Math.min(...lateStarts) : 17 * 60) : 17 * 60
+  const dt = bdDayTeacher(ctx, date, ss), gone = t => dt && t >= dt.end ? 1 : 0   // (the daytime teacher has gone home)
   const floorAt = t => {
     if (t < first || t >= last) return 0
     if (ev != null && ev !== '' && t < EVE) return 0
+    if (ev === 'close' && t >= EVE) return 0
+    if (/^\d+$/.test(ev || '') && t >= EVE) return Math.max(1, +ev - gone(t))
+    if (ev === 'more' && t >= EVE) return Math.max(1, (plan.staff || 0) + 1 - gone(t))
+    if (ev === 'watch' && t >= EVE) return Math.max(1, (plan.staff || 0) - gone(t))
     if (t >= EVE && ev === 'close') return 0
     if (t >= EVE && /^\d+$/.test(ev || '')) return +ev
     if (t >= EVE && ev === 'more') return (plan.staff || 0) + 1
@@ -1742,7 +1760,7 @@ function bdSnapToStandard(ctx, blocks) {
         .sort((x, y) => ((Math.min(y.end, b.end) - Math.max(y.start, b.start)) - (Math.min(x.end, b.end) - Math.max(x.start, b.start))) || ((x.end - x.start) - (y.end - y.start)))[0]
       if (near) fit = near
     }
-    if (!fit || (fit.start === b.start && fit.end === b.end)) return
+    if (b.keepShape || !fit || (fit.start === b.start && fit.end === b.end)) return
     if (b.staffId) {
       const p = ctx.pool.find(x => x.id === b.staffId)
       const extra = paidMins(ctx.studio, fit.start, fit.end) - paidMins(ctx.studio, b.start, b.end)
@@ -1773,7 +1791,13 @@ function bdGenerate(ctx, pairPref) {
     // closing shift instead, below, so the day's main shift stays whole.)
     ctx.daySlots = ctx.daySlots || {}
     ctx.daySlots[date] = slots
-    blocks = blocks.concat(bdBlocks(ctx, date, slots, 0))
+    // a field trip / PA/PD day: the daytime teacher's shift (e.g. 10:30–6) first; everything else is planned around them
+    const dt = bdDayTeacher(ctx, date, ctx.sessions.filter(r => r.session_date === date && r.start_time && r.end_time))
+    if (dt) {
+      slots.forEach(x => { if (x.t >= dt.start && x.t < dt.end) x.need = Math.max(0, x.need - 1) })
+      blocks.push({ date, start: Math.max(dt.start, ctx.dayWindow[date].open), end: Math.min(dt.end, ctx.dayWindow[date].close), layer: 1, badges: [], staffId: null, keepShape: true, dayTeacher: true })
+    }
+    if (slots.some(x => x.need > 0)) blocks = blocks.concat(bdBlocks(ctx, date, slots, 0))
   }
   // scarce first: badge blocks, then longest
   // Assigned class teachers first, on the shift covering their class; then managers' 5 full days
