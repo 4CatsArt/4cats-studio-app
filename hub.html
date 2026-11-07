@@ -440,6 +440,9 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .as-pad { display: grid; gap: 3px; font-size: 12px; background: #eef7ff; border: 1px solid #cfe3f7; border-radius: 8px; padding: 5px 6px; } .as-pad.ask { background: #fff4d6; border-color: #e8cf8a; }
 .as-pad select { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 6px; width: 100%; min-width: 0; box-sizing: border-box; } .as-pad { min-width: 0; overflow-wrap: anywhere; } .as-padn { color: #8a5a00; background: #fff4d6; border-radius: 999px; padding: 2px 10px; font: inherit; border: 0; cursor: pointer; } .as-padn:hover { filter: brightness(.96); }
 .as-skipped { color: #6b6b63; }
+/* glazing stands out (no colour of its own): heavier text and a dark outline */
+.as-e.as-glz { font-weight: 800; box-shadow: inset 0 0 0 2px currentColor; text-transform: none; } .as-e.as-glz b { font-weight: 900; }
+.as-e.as-glz > span { font-weight: 600; } .as-e.as-glz select { font-weight: 800; }
 .as-e.as-open { background: transparent; border: 1px dashed var(--border); color: #6b6b63; font-size: 12.5px; padding: 4px 8px; }
 .as-e.as-pclose { font-size: 12.5px; padding: 4px 8px; cursor: pointer; } .as-e.as-pclose span { display: block; font-size: 11.5px; }
 .as-e.as-open b { color: #3d4540; } .as-e.as-open span { display: block; font-size: 11.5px; }
@@ -4569,6 +4572,34 @@ function asBuild(W, onlyId) {
       // ran out of different projects for the day (never the same project twice)
       Object.keys(D.short || {}).forEach(k => D.notes.push(k === 'kidsws' ? 'Kids workshop left empty: no 🧒 Good for kids workshop in its dates (tick some in Workshops)'
         : `${D.short[k]} ${AS_KIND_LABEL[k].toLowerCase()} time${D.short[k] === 1 ? '' : 's'} left empty: no other ${k === 'glazing' ? 'glazing item' : AS_KIND_LABEL[k].toLowerCase() + ' in its dates'} to offer`));
+      // ⚠ 1 staff on a weekend: a day over 5 hours needs a 30-minute gap with nothing running, starting within the first
+      // 5 hours (from 15 minutes before the first thing). Everything on the day counts: classes, workshops and glazing staying or new,
+      // booked parties, field trips and group times. (A break already planned for a weekday counts as that gap.)
+      if (weekend && staff === 1) {   // (weekdays plan their own break around the kids class, above)
+        const lenOf = x => x.k === 'class' ? AS_CLASS_LEN(x) : x.k === 'party' ? (x.party_minutes || 105) : x.k === 'mini' ? (x.len || 90) : (x.len || 120);
+        // what's running, each with when it frees the teacher (a class: 15 minutes after it ends)
+        const runs = kept.filter(x => ['workshop', 'glazing', 'mini', 'kidsws', 'class', 'wheel'].includes(x.k) || (['party', 'field', 'group'].includes(x.k) && x.booked > 0))
+          .map(x => [x.start, x.start + lenOf(x) + (x.k === 'class' ? AS_CLASS_BUFFER : 0)])
+          .concat(D.entries.filter(e => e.t === 'new' && e.on).map(e => [e.start, e.start + e.len]))
+          .sort((p1, p2) => p1[0] - p2[0]);
+        if (runs.length) {
+          // the shift: from 15 minutes before the first thing, to the weekend's end (5pm, or the studio's own) or later if something runs later
+          const dayStart = runs[0][0] - 15, dayEnd = Math.max(...runs.map(x => x[1]), row.weekend_end ? asMin(row.weekend_end) : 17 * 60);
+          if (dayEnd - dayStart > 300) {
+            // a 30-minute break in a gap with nothing running, with at most 5 hours worked before it AND after it
+            const lo = dayEnd - 330, hi = dayStart + 300;   // the break has to start between these
+            const gaps = []; let end = runs[0][1];
+            for (let i = 1; i < runs.length; i++) { if (runs[i][0] > end) gaps.push([end, runs[i][0]]); end = Math.max(end, runs[i][1]); }
+            if (dayEnd > end) gaps.push([end, dayEnd]);   // (after the last thing, before the shift ends)
+            const fits = gaps.some(([g0, g1]) => Math.max(g0, lo) + 30 <= g1 && Math.max(g0, lo) <= hi);
+            if (!fits) {
+              const near = gaps.filter(([g0, g1]) => g1 - g0 >= 30).map(([g0, g1]) => `${asT(g0)}–${asT(g1)}`);
+              D.notes.push(`⚠ 1 staff: nowhere for a 30-minute break that keeps both halves of the ${asT(dayStart)}–${asT(dayEnd)} shift under 5 hours`
+                + (near.length ? ` (the only gap${near.length === 1 ? '' : 's'}: ${near.join(', ')})` : ' (something is running all day)') + '. Leave a gap around midday, take a time off, or bring in another staff (👤 + Staff).');
+            }
+          }
+        }
+      }
       // flag: kept times with no teacher free
       kept.filter(s => ['workshop', 'glazing', 'mini'].includes(s.k)).forEach(s => {
         const end = s.start + (s.len || (s.k === 'mini' ? 90 : 120));
@@ -4659,11 +4690,11 @@ function asStudioHtml(S, si) {
         }
         if (e.closeLead) return asOldRow() + asPartyCloseHtml(s, e, si, di, ei, s.k === 'party' ? (/splatter/i.test(s.title || '') ? 'Splatter Party' : 'Kids Party') : fdClean(s.title));
         return asOldRow();
-        function asOldRow() { return `<div class="as-e ${rem ? 'rem' : 'old'}${s.k === 'class' && !s.booked ? ' cls0' : ''}"${s.remove ? ` onclick="asToggleRem(${si},${di},${ei})" title="${rem ? 'Comes off (0 bookings). Tap to keep it.' : 'Kept. Tap to take it off.'}"` : ''}><b>${asT(s.start)}</b> ${esc(fdClean(s.title))}<span>${asCounts(s, rem, e.same)}</span></div>`; }
+        function asOldRow() { return `<div class="as-e ${rem ? 'rem' : 'old'}${s.k === 'class' && !s.booked ? ' cls0' : ''}${s.k === 'glazing' ? ' as-glz' : ''}"${s.remove ? ` onclick="asToggleRem(${si},${di},${ei})" title="${rem ? 'Comes off (0 bookings). Tap to keep it.' : 'Kept. Tap to take it off.'}"` : ''}><b>${asT(s.start)}</b> ${esc(fdClean(s.title))}<span>${asCounts(s, rem, e.same)}</span></div>`; }
       }
       if (!e.on) return `<div class="as-e drop" onclick="asNew(${si},${di},${ei},'on',true)" title="Tap to add it back"><b>${asT(e.start)}</b> ${esc(AS_KIND_LABEL[e.k])} <span>left out</span></div>`;
       const it = items[e.item] || {}, opts = e.k === 'glazing' ? [] : P.pool.filter(i => (e.k === 'mini' ? i._mini : !i._mini && i.kind !== 'glazing') && (e.k !== 'kidsws' || i.kids_ok || i.id === e.item));
-      return `<div class="as-e new"><div class="as-er"><input type="time" step="900" value="${asHM(e.start)}" onchange="asNew(${si},${di},${ei},'start',asMin(this.value))"><button class="as-x" onclick="asNew(${si},${di},${ei},'on',false)" title="Leave this one out">✕</button></div>` +
+      return `<div class="as-e new${e.k === 'glazing' ? ' as-glz' : ''}"><div class="as-er"><input type="time" step="900" value="${asHM(e.start)}" onchange="asNew(${si},${di},${ei},'start',asMin(this.value))"><button class="as-x" onclick="asNew(${si},${di},${ei},'on',false)" title="Leave this one out">✕</button></div>` +
         (opts.length ? `<select title="${escAttr(it.title || '')}" onchange="asNew(${si},${di},${ei},'item',this.value)">${opts.map(i => `<option value="${escAttr(i.id)}"${i.id === e.item ? ' selected' : ''}>${esc(i.title)}${i.featured ? ' ⭐' : ''}</option>`).join('')}</select>` : `<b>${esc(it.title || 'Glazing')}</b>`) +
         `<span>${esc(AS_KIND_LABEL[e.k])} · ${e.spots} spots${e.manual ? ' · added by you' : ''}</span></div>`;
     }).join('') + `<div class="as-addb"><button class="as-noteb" onclick="asNoteNew('${S.id}','${D.date}')">📝 Note</button>${D.staff ? `<button class="as-staffb" onclick="asExtra('${S.id}','${D.date}',1)" title="Bring in a part-timer or home office: plan this day with one more staff">👤 + Staff</button>` : ''}${D.extra ? `<button onclick="asExtra('${S.id}','${D.date}',-1)" title="Plan without the extra person again">undo +staff</button>` : ''}</div>` + (D.staff && !D.notes.some(x => /^(Closed|🎌|Past)/.test(x)) ? `<div class="as-addb"><button onclick="asAddManual(${si},${di},'workshop')" title="Add a workshop time">+ Workshop</button><button onclick="asAddManual(${si},${di},'kidsws')" title="Add a kids-only workshop time">+ Kids</button><button onclick="asAddManual(${si},${di},'glazing')" title="Add a glazing time">+ Glazing</button></div>` : '') + '</div>').join('') + '</div></div>';
