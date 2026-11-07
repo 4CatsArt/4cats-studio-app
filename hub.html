@@ -557,6 +557,9 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .lab-line { margin: 4px 0 10px; } .lab-ttl { font-weight: 800; } .lab-sub { color: #6b6b63; font-size: 13px; } .lab-row .spacer { flex: 1; }
 .lab-pct { font-weight: 900; font-size: 20px; padding: 0 8px; border-radius: 10px; } .lab-pct.good { color: #14532d; background: #e3f4e8; } .lab-pct.ok { color: #8a5a00; background: #fff4d6; } .lab-pct.high { color: #a3191c; background: #fdeaea; }
 .lab-admin { font-size: 10px; font-weight: 800; text-transform: uppercase; color: #6b6b63; border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; }
+.plan-timeoff { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; } .plan-timeoff:empty { display: none; }
+.pto-h { font-size: 12.5px; font-weight: 700; color: #6b6b63; } .pto { display: inline-flex; align-items: center; gap: 6px; border: 1px dashed var(--border); border-radius: 999px; padding: 2px 10px 2px 3px; font-size: 13px; }
+.pto small { color: #6b6b63; } .pto b { font-size: 11px; } .pto.ok b { color: #14532d; } .pto.wait b { color: #8a5a00; }
 .lab-pct.sm { font-size: 15px; }
 .lab-card { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 10px 12px; } .lab-card .lab-row { border: 0; padding: 0; background: none; }
 .lab-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin: 8px 0 4px; } .lab-line .lab-pair, .lab-line .lab-item { display: inline-flex; margin: 0; }
@@ -3127,6 +3130,34 @@ async function labourTable(studio, date) {
     <p class="fd-sm">Past days: hours worked from punches (anyone without punches counts by their shift, marked “planned”). Today and on: planned shifts. Booked revenue is before tax, gift card redemptions included; camps and multi-week classes are spread over their days. Memberships and retail aren’t tied to a day, so they’re not included. Older Drawing Class and Lawren Harris weeks are estimated at $18 for each child on that week’s class list.</p>
     <div class="sheet-actions"><button class="primary" onclick="closeDutySheet()">Close</button></div>`);
 }
+// ---------- Schedule: time off asked for this day (admin view only) ----------
+// Approved and waiting requests from people at this studio (their studios or home studio), under the day's shifts
+async function planTimeOffLoad(date) {
+  const el = document.getElementById('plan-timeoff'); if (!el || !(_studioData && _studioData.isAdmin) || !_sessionStudioId) { if (el) el.innerHTML = ''; return; }
+  try {
+    const { data: rows, error } = await sb.from('staff_time_off').select('*').lte('start_date', date).gte('end_date', date);
+    if (error) throw error;
+    const live = (rows || []).filter(r => !/^(denied|declined|rejected|cancel)/i.test(String(r.status || '')));
+    if (!live.length) { el.innerHTML = ''; return; }
+    const ids = [...new Set(live.map(r => r.staff_id).filter(Boolean))];
+    const { data: ppl } = await sb.from('staff_profiles').select('id, display_name, preferred_name, studio_ids, home_studio_id, avatar_key').in('id', ids);
+    const here = {}; (ppl || []).forEach(p => { if ((p.studio_ids || []).includes(_sessionStudioId) || p.home_studio_id === _sessionStudioId) here[p.id] = p; });
+    const mine = live.filter(r => here[r.staff_id]);
+    if (!document.getElementById('plan-timeoff') || (_plan && _plan.date !== date)) return;
+    if (!mine.length) { el.innerHTML = ''; return; }
+    const nm = p => String(p.preferred_name || '').trim() || p.display_name || 'Someone';
+    const tm = t => t ? shortTime(String(t).slice(0, 5) + ':00') : '';
+    const fmt = d => new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' });
+    el.innerHTML = `<span class="pto-h">🌴 Time off asked for:</span>` + mine.map(r => {
+      const p = here[r.staff_id], ok = /approved/i.test(String(r.status || '')), part = r.start_time || r.end_time;
+      const span = r.start_date !== r.end_date ? ` (${fmt(r.start_date)}–${fmt(r.end_date)})` : '';
+      const kind = r.kind || r.type || r.reason_type || '';
+      return `<span class="pto ${ok ? 'ok' : 'wait'}" title="${escAttr([kind, r.reason || r.note || ''].filter(Boolean).join(' · '))}">${hubAvatarHtml({ name: nm(p), avatar_key: p.avatar_key, staff_id: p.id }, 20)}${esc(nm(p))}
+        <small>${part ? esc(`${tm(r.start_time) || 'start'}–${tm(r.end_time) || 'end'}`) : 'all day'}${esc(span)}${kind && !/time.?off/i.test(kind) ? ' · ' + esc(String(kind).replace(/_/g, ' ')) : ''}</small>
+        <b>${ok ? '✓ approved' : '⏳ waiting'}</b></span>`;
+    }).join('');
+  } catch (e) { el.innerHTML = `<span class="pto-h">🌴 Time off couldn’t load: ${esc(e.message || e)}</span>`; }
+}
 function renderDailyHero(data) {
   _lastHeroData = data;
   try { labourCardLoad(); } catch (e) {}
@@ -4333,7 +4364,8 @@ function asBuild(W, onlyId) {
       S.days.push(D);
       // only what's really running at this studio: a time that's hidden, or has 0 spots and nobody booked, isn't running (the
       // "phantom" times a Shopify product holds at every studio, as World's schedule treats them): not counted, not shown, not touched
-      const running = s => s.show !== false && (s.booked > 0 || (+s.capacity > 0 && !(s.left != null && +s.left <= 0 && +s.capacity === 0)) || (s.capacity == null && s.left != null && +s.left > 0));
+      // (a time with nobody booked and 0 spots left was closed, e.g. a party time closed while planning staff: not running, whatever its capacity)
+      const running = s => s.show !== false && (s.booked > 0 || (+s.capacity > 0 && !(s.left != null && +s.left <= 0)) || (s.capacity == null && s.left != null && +s.left > 0));
       const ss = all.filter(s => s.date === d && running(s)).map(s => Object.assign({}, s, { k: asKind(s, items), start: asMin(s.time), len: +s.minutes || 0 }));
       // the empty times come off (unless unticked)
       ss.forEach(s => { s.remove = asRemovable(s, s.k, today, nowMin); if (s.remove) out.removeCount++;
@@ -8451,6 +8483,7 @@ function planParticipants() {
 function renderPlanDay() {
   const body = document.getElementById('plan-body');
   const P = _plan;
+  setTimeout(() => { try { planTimeOffLoad(P.date); } catch (e) {} }, 0);
   try { labourLineLoad('plan-labour', P.date); } catch (e) {}
   const edit = planCanEdit();
   document.getElementById('plan-intro').innerHTML = edit
@@ -8536,6 +8569,7 @@ function renderPlanDay() {
     <div class="ho-card">
       <div class="ho-title" style="font-size:18px;margin-bottom:8px">${esc(when)}</div>
       <div class="plan-shifts">${shifts}</div>
+      ${_studioData && _studioData.isAdmin ? '<div id="plan-timeoff" class="plan-timeoff"></div>' : ''}
       ${(() => {
         const pp = planParticipants();
         const chips = Object.keys(pp.groups).sort((a, b) => pp.groups[b] - pp.groups[a])
