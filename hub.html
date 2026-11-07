@@ -4256,7 +4256,10 @@ function asBuild(W, onlyId) {
           D.pad = { usual: staff, ans, kids, low: min > 0 && kids < min, min };
           if (ans === undefined) { D.notes.push('🎒 PA/PD day: choose what happens to the evening'); continue; }
           if (ans === 'close') { D.notes.push('🎒 PA/PD day: evening closed'); continue; }
+          if (ans === 'watch') { D.notes.push('🎒 PA/PD day: both kept open · watching its bookings (notes on 📋 To-do)'); }
+          else {
           staff = Math.max(1, +ans || 1) + extra; D.staff = staff; D.notes.push(`🎒 PA/PD day: evening with ${staff} staff`);
+          }
         }
         const classes = kept.filter(s => s.k === 'class').sort((a, b) => a.start - b.start);
         const kidsT = classes.length ? classes[0].start : (row.kids_time ? asMin(row.kids_time) : null);
@@ -4448,11 +4451,18 @@ function asAfterHtml(S) {
 }
 // 🎒 A PA/PD day's evening: close it, or open with how many staff (up to the usual); then that studio's week is made again
 function asPadHtml(S, D) {
-  const P = D.pad, n = Math.max(1, P.usual || 1), opts = [['', 'Choose…'], ['close', 'Close the evening']].concat(Array.from({ length: n }, (_, i) => [String(i + 1), `Open with ${i + 1} staff${i + 1 === n ? ' (normal)' : ''}`]));
+  const P = D.pad, n = Math.max(1, P.usual || 1), opts = [['', 'Choose…'], ['watch', 'Keep both open, tell us if it books'], ['close', 'Close the evening']].concat(Array.from({ length: n }, (_, i) => [String(i + 1), `Open with ${i + 1} staff${i + 1 === n ? ' (normal)' : ''}`]));
   return `<label class="as-pad${P.ans === undefined ? ' ask' : ''}${P.low ? ' low' : ''}">🎒 <b>PA/PD day</b> · ${P.kids} kid${P.kids === 1 ? '' : 's'} booked${P.low ? `<span class="as-padlow">⚠ Under ${P.min}: cancel it, or run more in the evening?</span>` : ''}<span>The evening?</span><select onchange="asPadSet('${S.id}','${D.date}',this.value)">${opts.map(o => `<option value="${o[0]}"${String(P.ans ?? '') === o[0] ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select></label>`;
 }
 function asPadSet(st, d, v) {
-  const k = st + '|' + d;
+  const k = st + '|' + d, was = _as.pad[k];
+  if (v === 'watch' || was === 'watch') {
+    const ids = ((_as.data && _as.data.sessions) || []).filter(x => x.studio_id === st && x.date === d && /\bp[ad] day|pa\/pd|no[\s-]school/i.test(x.title || '')).map(x => x.id);
+    const min = +(((_as.data || {}).settings || {}).pa_min ?? 8);
+    if (ids.length) sb.rpc('hub_autosched_watch', { p_session_ids: ids, p_min: min, p_on: v === 'watch' }).then(r => {
+      if (r.error) alert('The watch list isn’t set up: ' + (/hub_autosched_watch/.test(r.error.message) ? 'run autosched_watch.sql first.' : r.error.message));
+    });
+  }
   if (v === '') delete _as.pad[k]; else _as.pad[k] = v;
   const P = _as.plan, i = P.studios.findIndex(x => x.id === st); if (i < 0 || !_as.data) return;
   const one = asBuild(_as.data, st).studios[0]; if (one) P.studios[i] = one;   // just this studio's week again
@@ -4597,7 +4607,7 @@ function asPadList() {
     <p class="ho-intro">${rows.length} PA/PD day${rows.length === 1 ? '' : 's'}. Answer the evening question here, or Go to the studio.</p>
     <div class="as-padl">${rows.length ? rows.sort((a, b) => a.D.date.localeCompare(b.D.date) || (STUDIO_NAMES[a.S.id] || '').localeCompare(STUDIO_NAMES[b.S.id] || '')).map(r => {
       const P2 = r.D.pad, n = Math.max(1, P2.usual || 1);
-      const opts = [['', 'Choose…'], ['close', 'Close the evening']].concat(Array.from({ length: n }, (_, i) => [String(i + 1), `Open with ${i + 1} staff${i + 1 === n ? ' (normal)' : ''}`]));
+      const opts = [['', 'Choose…'], ['watch', 'Keep both open, tell us if it books'], ['close', 'Close the evening']].concat(Array.from({ length: n }, (_, i) => [String(i + 1), `Open with ${i + 1} staff${i + 1 === n ? ' (normal)' : ''}`]));
       return `<div class="as-padr${P2.low ? ' low' : ''}${P2.ans === undefined ? ' ask' : ''}"><div><b>${esc(STUDIO_NAMES[r.S.id] || r.S.id)}</b> · ${esc(fmt(r.D.date))}
         <div class="fd-sm">${P2.kids} kid${P2.kids === 1 ? '' : 's'} booked${P2.low ? ` · <b class="as-padlow">⚠ under ${P2.min}</b>` : ''}</div></div>
         <select ${r.S.published ? 'disabled' : ''} onchange="asPadSet('${r.S.id}','${r.D.date}',this.value);asPadList()">${opts.map(o => `<option value="${o[0]}"${String(P2.ans ?? '') === o[0] ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select>
@@ -7766,6 +7776,27 @@ async function wsAdd() {
   if (error) { m.textContent = error.message; alert('Not added: ' + error.message); console.error('hub_ws_add', error); return; }   // (a pop-up too, so it can't be missed)
   wsReload('Added ✓ It’s on World now.');
 }
+// 🔁 Change workshop (home office only): a booked time keeps its date, time, spots and bookings; only the workshop changes
+function wsChangeBooked(id) {
+  const W = _plan.ws || {}, t = (W.times || []).find(z => String(z.session_id) === String(id)); if (!t) return;
+  const cur = (W.items || []).find(i => i.id === t.item_id) || {};
+  const opts = (W.items || []).filter(i => i.kind !== 'glazing' && i.id !== t.item_id).sort((a, b) => String(a.title).localeCompare(String(b.title)))
+    .map(i => `<option value="${escAttr(i.id)}">${esc(i.title)}${i.kind === 'mini_make' ? ' (Mini Make)' : ''}</option>`).join('');
+  openDutySheet(`<h3>🔁 Change the workshop</h3>
+    <p class="ho-intro">${esc(STUDIO_NAMES[_sessionStudioId] || '')} · ${esc(new Date(t.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))}${t.time ? ' · ' + esc(shortTime(t.time)) : ''}</p>
+    <p><b>${esc(cur.title || 'This workshop')}</b> has <b>${t.booked}</b> booked. The time, spots and every booking stay as they are; only the workshop changes. Prices aren't touched.</p>
+    <div class="ba-form"><label class="f">Change it to<select id="wscb-item"><option value="">Choose a workshop…</option>${opts}</select></label>
+    <p class="goal-note">⚠ The families aren’t emailed automatically. A note is added to Auto-schedule’s 📋 To-do to let them know.</p><p class="fd-msg" id="wscb-msg"></p></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="wsChangeBookedGo('${escAttr(id)}')">Change it</button></div>`);
+}
+async function wsChangeBookedGo(id) {
+  const item = (document.getElementById('wscb-item') || {}).value, m = document.getElementById('wscb-msg');
+  if (!item) { m.textContent = 'Choose the workshop to change it to.'; return; }
+  const { data, error } = await sb.rpc('hub_ws_change_booked', { p_session: id, p_item: item });
+  if (error) { m.textContent = 'Not changed: ' + (/hub_ws_change_booked/.test(error.message) ? 'run ws_change_booked.sql first.' : error.message); return; }
+  closeDutySheet();
+  wsReload(data && data.to ? `Changed to ${data.to} ✓ (let the ${data.families} famil${data.families === 1 ? 'y' : 'ies'} know)` : 'Saved ✓');
+}
 async function wsUpdate(id, change) {
   const { error } = await sb.rpc('hub_ws_update', Object.assign({ p_session: id }, change));
   if (error) { alert(error.message); }
@@ -7932,6 +7963,7 @@ function wsRowTools(x) {
   return `<span class="ws-inline"><span class="ws-tag world">World</span>${t.kids_only ? '<span class="ws-tag kids">Kids only</span>' : ''}${quiet ? '<span class="ws-tag">Quiet</span>' : ''}
     ${t.booked ? '' : `<button class="ho-btn" onclick="wsKids('${escAttr(t.session_id)}', ${!t.kids_only})" title="${t.kids_only ? 'Open it to families' : 'Make it kids only (drop-off)'}">${t.kids_only ? 'Make family' : 'Make kids only'}</button>`}
     ${t.booked ? '' : `<select class="ws-swap" onchange="wsUpdate('${escAttr(t.session_id)}', { p_item: this.value })" title="Swap the workshop (nobody's booked yet)" aria-label="Swap the workshop">${itemOpts}</select>`}
+    ${t.booked && typeof _hoCan !== 'undefined' && _hoCan.edit ? `<button class="ho-btn" onclick="wsChangeBooked('${escAttr(t.session_id)}')" title="Home office: change the workshop even though people are booked">🔁 Change workshop</button>` : ''}
     <span class="ws-count">Spots <input type="number" min="${Math.max(1, t.booked)}" max="200" value="${t.spots}" onchange="wsUpdate('${escAttr(t.session_id)}', { p_spots: +this.value })" aria-label="Spots"></span>
     <button class="ho-btn" onclick="wsUpdate('${escAttr(t.session_id)}', { p_show: ${!t.show} })">${t.show ? 'Hide' : 'Show'}</button>${t.show ? '' : '<span class="ws-tag off">Hidden</span>'}
     ${t.booked ? '' : `<button class="ho-btn" onclick="wsRemove('${escAttr(t.session_id)}')">Remove</button>`}</span>`;
