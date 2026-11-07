@@ -5354,6 +5354,19 @@ function fdNew() {
     today: null, ws: null, wsF: { type: '', from: '', to: '', days: {}, part: '', q: '', sort: 'date', desc: false },
     cls: null, clsF: { name: '', days: {}, from: '', age: '', sort: 'start', desc: false }, camps: null, campPick: {} };
 }
+// From the Schedule's open party slot: the Front desk's Parties, straight to that day and time
+function planBookParty(date, time) {
+  openFrontDesk();
+  _fd.tab = 'parties'; _fd.ptyDate = date; _fd.ptyMonth = date.slice(0, 7); _fd.ptyWant = { date, time }; _fd.add = null;
+  fdRender(); fdLoadTab();
+  if (_fd.ptys && !_fd.ptys.err) fdPtyGoWant();
+}
+function fdPtyGoWant() {
+  const W = _fd.ptyWant; if (!W || !Array.isArray(_fd.ptys)) return; _fd.ptyWant = null;
+  const at = _fd.ptys.filter(x => x.session_date === W.date && String(x.session_time).slice(0, 5) === W.time && (x.spaces_left_cache ?? 0) > 0);
+  const pick = at.find(x => fdPtyKind(x) === 'kids') || at[0];
+  if (pick) { _fd.ptyKind = fdPtyKind(pick); fdPtyOpen(pick.id); } else fdRender();
+}
 function openFrontDesk() {
   showOnlyPane('fd-pane'); setActiveNav('nav-fd');
   if (!_fd || _fd.studio !== _sessionStudioId) _fd = fdNew();   // (another studio: a fresh cart)
@@ -5395,11 +5408,15 @@ async function fdLoadTab() {
     fdRender(); await fdLoadClasses();
   } else if (F.tab === 'parties' && !F.ptys) {
     fdRender();
-    const { data, error } = await sb.from('sessions').select('id, title, session_date, session_time, spaces_left_cache, world_party, show')
+    const { data, error } = await sb.from('sessions').select('id, title, session_date, session_time, spaces_left_cache, capacity, world_party, show')
       .eq('studio_id', st).gte('session_date', fdToday()).lte('session_date', fdAddDays(fdToday(), 400)).order('session_date').order('session_time').limit(4000);
     if (error) { F.ptys = { err: error.message }; fdRender(); return; }
-    F.ptys = (data || []).filter(x => x.show !== false && fdPtyKind(x));
+    // (a party kind at 0 spots is a leftover, e.g. Splatter where the studio doesn't offer it: not shown)
+    F.ptys = (data || []).filter(x => x.show !== false && fdPtyKind(x) && (x.capacity == null || Number(x.capacity) > 0));
+    if (F.ptyWant) setTimeout(fdPtyGoWant, 0);
     if (!F.ptyP) { try { const r = await sb.from('world_site_settings').select('value').eq('key', 'party_pricing').maybeSingle(); F.ptyP = r.data && r.data.value ? JSON.parse(r.data.value) : {}; } catch (e) { F.ptyP = {}; } }
+    // World settings → Parties: which studios offer splatter, and each one's maximum (the same list World's Parties page uses)
+    if (!F.ptyPage) { try { const r = await sb.from('world_site_settings').select('value').eq('key', 'parties').maybeSingle(); F.ptyPage = r.data && r.data.value ? JSON.parse(r.data.value) : {}; } catch (e) { F.ptyPage = {}; } }
   } else if (F.tab === 'camps' && !F.camps) {
     fdRender();
     const { data, error } = await sb.from('sessions').select('id, title, session_date, session_time, capacity, spaces_left_cache, show')
@@ -5597,12 +5614,18 @@ const FD_PTY = [['kids', '🎨 Kids Party'], ['splatter', '💦 Splatter Party']
 const FD_PTY_PROJECTS = [['oven-bake', 'Oven-Bake Clay'], ['clay', 'Clay'], ['painting', 'Painting'], ['besties', 'Besties'], ['undecided', 'Undecided']];
 const FD_PTY_AFTER = [['no - just we will leave after the art portion', 'No – just leave after the art portion'], ['yes - add 30 minutes (enough time for cake only)', 'Yes – add 30 minutes (cake only)'], ['yes - add 45 minutes (enough time for lunch/snacks and cake)', 'Yes – add 45 minutes (lunch/snacks and cake)']];
 const FD_GT_AFTER = [['No', 'No party time after'], ['Yes – add 30 minutes', 'Add 30 minutes'], ['Yes – add 60 minutes', 'Add 60 minutes']];
+// Splatter: this studio's entry on World settings → Parties (splatter studios), if that list is set up
+function fdSplatterStudio() { const L = ((_fd.ptyPage || {}).splatter || {}).studios || []; return L.find(x => x && x.studio_id === _sessionStudioId) || null; }
+function fdSplatterOk() { const L = ((_fd.ptyPage || {}).splatter || {}).studios || []; return !L.length || !!fdSplatterStudio(); }
 function fdPtyKind(x) { return x.world_party || (/splatter/i.test(x.title || '') ? 'splatter' : /get.?together/i.test(x.title || '') ? 'get_together' : /\bparty\b/i.test(x.title || '') && !/glaz|workshop/i.test(x.title || '') ? 'kids' : null); }
 function fdPtyHtml() {
   const F = _fd, R = F.ptys;
   if (!R) return fdLoading; if (R.err) return '<p class="fd-msg">' + esc(R.err) + '</p>';
+  const offered = FD_PTY.filter(k => R.some(x => fdPtyKind(x) === k[0]) && (k[0] !== 'splatter' || fdSplatterOk()));   // (only the kinds this studio offers)
+  if (!offered.length) return '<p class="fd-sm">No party times at this studio yet.</p>';
+  if (!offered.some(k => k[0] === (F.ptyKind || 'kids'))) F.ptyKind = offered[0][0];
   const kind = F.ptyKind || 'kids', list = R.filter(x => fdPtyKind(x) === kind);
-  let h = '<div class="fd-progs">' + FD_PTY.map(k => `<button class="fd-prog${kind === k[0] ? ' on' : ''}" onclick="_fd.ptyKind='${k[0]}';_fd.ptyDate=null;_fd.ptyMonth=null;fdRender()"><b>${k[1]}</b><span>${R.filter(x => fdPtyKind(x) === k[0] && (x.spaces_left_cache ?? 0) > 0).length} open times</span></button>`).join('') + '</div>';
+  let h = '<div class="fd-progs">' + offered.map(k => `<button class="fd-prog${kind === k[0] ? ' on' : ''}" onclick="_fd.ptyKind='${k[0]}';_fd.ptyDate=null;_fd.ptyMonth=null;fdRender()"><b>${k[1]}</b><span>${R.filter(x => fdPtyKind(x) === k[0] && (x.spaces_left_cache ?? 0) > 0).length} open times</span></button>`).join('') + '</div>';
   if (!list.length) return h + '<p class="fd-sm">No times for this kind of party at this studio yet.</p>';
   const months = [...new Set(list.map(x => x.session_date.slice(0, 7)))].sort();
   if (!F.ptyMonth || !months.includes(F.ptyMonth)) { const open = list.find(x => (x.spaces_left_cache ?? 0) > 0); F.ptyMonth = open ? open.session_date.slice(0, 7) : months[0]; }
@@ -5637,7 +5660,7 @@ function fdPtyOpen(id) {
 }
 function fdPtyAddHtml() {
   const A = _fd.add, x = A.x, k = A.pk, P = _fd.ptyP || {}, kids = k === 'kids', gt = k === 'get_together';
-  const min = gt ? (+((P.get_together || {}).min) || 10) : (+((P[k] || {}).included) || 8), max = gt ? (+((P.get_together || {}).max) || 30) : 40;
+  const min = gt ? (+((P.get_together || {}).min) || 10) : (+((P[k] || {}).included) || 8), max = gt ? (+((P.get_together || {}).max) || 30) : k === 'splatter' ? ((fdSplatterStudio() || {}).max || 40) : 40;   // (splatter: the studio's own maximum, World settings → Parties)
   const is11 = String(x.session_time || '').slice(0, 5) === '11:00', set = (f, v) => `_fd.add.${f}=${v};fdRender()`;
   let h = `<h3>${esc((FD_PTY.find(p => p[0] === k) || [, 'Party'])[1])}</h3><p class="fd-sm">${fdDay(x.session_date)}, ${fdTime(x.session_time)}</p>
     <div class="fd-field"><b>What are they celebrating?</b><input value="${esc(A.reason)}" maxlength="100" placeholder="e.g. Maya’s 8th birthday" oninput="_fd.add.reason=this.value"></div>
@@ -7580,16 +7603,21 @@ async function loadPlanDay(date) {
         const isRoomParty = x => x.session_type === 'party' && /^(kids party|splatter party|party time slot|splatter party time slot)$/i.test(String(x.title || '').trim());
         const party = sessions.filter(isRoomParty);
         const bookedAt = {};
-        party.filter(x => booked[x.id] > 0).forEach(x => { const t = String(x.session_time).slice(0, 5); bookedAt[t] = (bookedAt[t] || 0) + 1; });
+        party.filter(x => booked[x.id] > 0).forEach(x => { const t = String(x.session_time).slice(0, 5); bookedAt[t] = (bookedAt[t] || 0) + (Number(booked[x.id]) || 1); });
         const openRows = [];
-        [...new Set(party.filter(x => !(booked[x.id] > 0)).map(x => String(x.session_time).slice(0, 5)))].forEach(t => {
+        // every party time in the slot schedule (or with a party product): rooms there minus parties booked there.
+        // (A Kids Party with 2 spots and 1 booked still has a room open, even with no unbooked product left at that time.)
+        [...new Set(Object.keys(slotsAt).filter(t => party.some(x => String(x.session_time).slice(0, 5) === t)))].forEach(t => {
           const open = (slotsAt[t] || 0) - (bookedAt[t] || 0);
           // the party products customers can book at this time (old leftovers with no Shopify product, like "Party Time Slot", don't count)
-          const products = party.filter(x => !(booked[x.id] > 0) && String(x.session_time).slice(0, 5) === t && buildShopifyTitle(x.session_date, x.session_time || '00:00:00', x.title));
-          // closed from the Schedule (every party product here set to 0 spots on Shopify)
+          const products = party.filter(x => String(x.session_time).slice(0, 5) === t && buildShopifyTitle(x.session_date, x.session_time || '00:00:00', x.title) && (x.capacity == null || Number(x.capacity) > 0));   // (not 0-spot leftovers)
+          if (!products.length) return;   // (only 0-spot leftovers here: no party offered at this time)
+          // closed from the Schedule (every party product here set to 0 spots left)
           const closed = products.length > 0 && products.every(x => x.spaces_left_cache !== null && x.spaces_left_cache !== undefined && Number(x.spaces_left_cache) <= 0);
           if (open > 0) openRows.push({ id: 'slot-' + t, title: closed ? 'Party slot (closed)' : 'Open party slot', session_date: date, session_time: t + ':00', session_type: 'party',
-            capacity: closed ? 0 : open, spaces_left_cache: closed ? 0 : open, show: true, partySlot: true, slotClosed: closed, slotProducts: products });
+            capacity: closed ? 0 : open, spaces_left_cache: closed ? 0 : open, show: true, partySlot: true, slotClosed: closed, slotProducts: products,
+            slotRooms: slotsAt[t] || 0, slotBooked: bookedAt[t] || 0,
+            slotKinds: [...new Set(products.filter(x => (Number(x.spaces_left_cache) || 0) > 0).map(x => /splatter/i.test(x.title) ? 'Splatter' : 'Kids'))] });
         });
         sessions = sessions.filter(x => !isRoomParty(x) || booked[x.id] > 0).concat(openRows)
           .sort((a, b) => String(a.session_time).localeCompare(String(b.session_time)));
@@ -8125,13 +8153,14 @@ function renderPlanDay() {
     ...kids.map(x => [hmM(x.session_time), `<div class="plan-sess tap" data-open-cl="${escAttr(x.id)}" tabindex="0"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">Kids class teacher${!P.kidsTeacher[x.id] && demoPlan[x.id] && demoPlan[x.id].auto ? ` · none set, so <b>${esc(nameOf(demoPlan[x.id].teachers[0]))}</b> (the day’s demoer)` : ''}${edit ? ' · changes here are for this day only (the term teacher is set in the staff schedule)' : ''}</div></span>
         ${planRowExtras(x)}${planCount(x)}${pick(P.kidsTeacher[x.id], `planKids('${escAttr(x.id)}', this.value)`)}${planRowTools(x)}</div>${planNoteHtml(x)}<div class="pf-wrap" data-cl="${escAttr(x.id)}"></div>`]),
     ...others.map(x => [hmM(x.session_time), `<div class="plan-sess${x.session_type === 'party' ? '' : ' tap'}"${x.session_type === 'party' ? '' : ` data-open-cl="${escAttr(x.id)}" tabindex="0"`}><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">${
-          x.partySlot ? (x.slotClosed ? 'Closed online: customers can’t book this time' : `${x.spaces_left_cache} party slot${x.spaces_left_cache === 1 ? '' : 's'} open, not booked yet`)
+          x.partySlot ? (x.slotClosed ? 'Closed online: customers can’t book this time'
+            : `${(x.slotKinds || []).length ? x.slotKinds.join(' or ') + ' party · ' : ''}${x.slotBooked ? `${x.slotBooked} of ${x.slotRooms} booked · ` : ''}${x.spaces_left_cache} open`)
           : x.session_type === 'party' ? 'Not booked yet'
           : !(P.booked[x.id] > 0) ? 'No one booked yet'
           : planIsCamp(x) ? planCampLine(x)
           : (demoers.length || P.roles.director) && demoPlan[x.id] ? `<span class="floor-staff" style="margin-top:4px">${hubDemoChips(demoPlan[x.id])}</span>` : esc(dayCover)}</div></span>
         ${planRowExtras(x)}${planCount(x)}<span class="kind-chip kind-${sessionKind(x.title)[1]}">${esc(sessionKind(x.title)[0])}</span>${x.session_type === 'party' ? (planCanAdjust() ? (x.partySlot
-          ? `<button class="ho-btn spots-btn" onclick="planSlotOpenClose('${escAttr(x.id)}', ${x.slotClosed ? 'true' : 'false'})">${x.slotClosed ? 'Reopen' : 'Close slot'}</button>`
+          ? `${x.slotClosed ? '' : `<button class="ho-btn spots-btn" onclick="planBookParty('${escAttr(x.session_date)}', '${escAttr(String(x.session_time).slice(0, 5))}')" title="Book a party at this time (Front desk)">Book</button>`}<button class="ho-btn spots-btn" onclick="planSlotOpenClose('${escAttr(x.id)}', ${x.slotClosed ? 'true' : 'false'})">${x.slotClosed ? 'Reopen' : 'Close slot'}</button>`
           : `<button class="ho-btn spots-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Spots</button>`) : '') : planRowTools(x)}</div>${planNoteHtml(x)}<div class="pf-wrap" data-cl="${escAttr(x.id)}"></div>`]),
     ...(P.early || []).map(e => { const m = hmM(e.session.session_time) - 15, t = String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
       return [m, `<div class="plan-sess cu15"><span class="t">${esc(shortTime(t))}</span><span class="nm">15-min catch-up · ${esc(e.session.title)}<div class="sub">Coming 15 minutes early to catch up on a missed class: <b>${esc(e.kids.join(' · '))}</b>. They stay for the ${esc(shortTime(e.session.session_time))} class.</div></span><span class="kind-chip">15 min</span></div>`]; }),
