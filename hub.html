@@ -4292,7 +4292,7 @@ const AS_MORNING_STUDIOS = ['BC-YVR-MS'];   // weekend morning workshops (when n
 const AS_DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 const AS_CLASS_LEN = s => Math.max(+s.len || 0, 90);   // kids classes: 90 minutes (or longer, if the class is set longer)
 const AS_KIND_LABEL = { workshop: 'Workshop', glazing: 'Glazing', mini: 'Mini Make', kidsws: 'Kids workshop' };
-let _as = { skip: {}, week: null, prov: '', data: null, plan: null, busy: false, msg: '', err: '', done: null, open: {}, view: 'changes', sview: {}, pad: {}, notes: [], openNotes: null, extra: {} };   // extra: 'studio|date' → staff brought in   // pad: 'studio|date' → 'close' or staff for a PA/PD day's evening
+let _as = { mclose: {}, skip: {}, week: null, prov: '', data: null, plan: null, busy: false, msg: '', err: '', done: null, open: {}, view: 'changes', sview: {}, pad: {}, notes: [], openNotes: null, extra: {} };   // extra: 'studio|date' → staff brought in   // pad: 'studio|date' → 'close' or staff for a PA/PD day's evening
 const asMin = t => { const [h, m] = String(t || '0:0').split(':').map(Number); return h * 60 + (m || 0); };
 const asHM = m => String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
 const asT = m => { const h = Math.floor(m / 60), mm = m % 60; return (h % 12 || 12) + (mm ? ':' + String(mm).padStart(2, '0') : '') + (h >= 12 ? 'pm' : 'am'); };
@@ -4391,6 +4391,13 @@ function asBuild(W, onlyId) {
           const lead = list.find(e => e.closeP); if (!lead) return;
           lead.closeLead = true; lead.closeWhy = why; lead.closeOpen = open;
           lead.closeAfter = list.reduce((t, e) => t + (e.closeP ? e.closeTo : (+e.s.left || 0)), 0);
+        });
+        // closed by hand in Auto-schedule (tap an open party time): all its open spots, every product at that time
+        Object.values(groups).forEach(list => {
+          if (!list.some(e => _as.mclose[e.s.id])) return;
+          const open = list.reduce((t, e) => t + (+e.s.left || 0), 0);
+          list.forEach(e => { e.closeP = true; e.close = true; e.closeTo = 0; e.closeLead = false; e.manual = true; });
+          const lead = list[0]; lead.closeLead = true; lead.closeWhy = 'closed by you'; lead.closeOpen = open; lead.closeAfter = 0;
         });
       }
       if (!row || !row.auto) continue;
@@ -4719,7 +4726,8 @@ function asStudioHtml(S, si) {
             && (o.s.k === 'party' ? (/splatter/i.test(o.s.title || '') ? 'Splatter Party' : 'Kids Party') : fdClean(o.s.title)) === lbl);
           if (e.closeLead) return asPartyCloseHtml(s, e, si, di, ei, lbl);
           if (e.closeP || dup) return '';
-          return `<div class="as-e as-open" title="Open for booking. Auto-schedule doesn’t change party, get-together or field trip times."><b>${asT(s.start)}</b> ${esc(lbl)} <span>open, not booked</span></div>`;
+          if (s.k === 'field') return `<div class="as-e as-open" title="Open for booking. Auto-schedule doesn’t change field trip times."><b>${asT(s.start)}</b> ${esc(lbl)} <span>open, not booked</span></div>`;
+          return `<div class="as-e as-open" style="cursor:pointer" onclick="asCloseManual('${escAttr(S.id)}', '${escAttr(D.date)}', ${s.start}, '${s.k}')" title="Open for booking. Tap to close it (its open spots go to 0 when you publish)."><b>${asT(s.start)}</b> ${esc(lbl)} <span>open, not booked · tap to close</span></div>`;
         }
         if (e.closeLead) return asOldRow() + asPartyCloseHtml(s, e, si, di, ei, s.k === 'party' ? (/splatter/i.test(s.title || '') ? 'Splatter Party' : 'Kids Party') : fdClean(s.title));
         return asOldRow();
@@ -4912,10 +4920,24 @@ function asSkip(st) {
 // a party time whose open spots come down: "2 open → 1" or "closes" (tap to keep it open, tap again to close)
 function asPartyCloseHtml(s, e, si, di, ei, lbl) {
   const what = e.closeAfter === 0 ? `${e.closeOpen > 1 ? e.closeOpen + ' open: ' : ''}closes` : `${e.closeOpen} open → ${e.closeAfter}`;
+  if (e.manual) return `<div class="as-e rem as-pclose" onclick="asToggleClose(${si},${di},${ei})" title="You closed it: its open spots go to 0 when you publish. Tap to keep it open."><b>${asT(s.start)}</b> ${esc(lbl)} <span>${esc(what)}: closed by you (tap to undo)</span></div>`;
   return `<div class="as-e ${e.close ? 'rem as-pclose' : 'as-open'}" onclick="asToggleClose(${si},${di},${ei})" title="${e.close ? `${e.closeWhy}: ${e.closeAfter === 0 ? 'its open spots close' : 'down to one open'} when you publish (reopen any time from the Schedule). Tap to keep it as it is.` : 'Kept as it is. Tap to close.'}"><b>${asT(s.start)}</b> ${esc(lbl)}${s.booked ? ' (open rooms)' : ''} <span>${e.close ? esc(what) + ': ' + esc(e.closeWhy) : 'kept open (tap to close)'}</span></div>`;
 }
 // a party time that closes: keep it open instead (or close it again); every product at that time and kind goes together
+function asCloseManual(st, d, start, k) {
+  const P = _as.plan, i = P.studios.findIndex(x => x.id === st); if (i < 0 || !_as.data) return;
+  const D = P.studios[i].days.find(x => x.date === d); if (!D) return;
+  D.entries.forEach(e => { if (e.t === 'old' && e.s.start === start && e.s.k === k && (+e.s.left || 0) > 0) _as.mclose[e.s.id] = true; });
+  const one = asBuild(_as.data, st).studios[0]; if (one) P.studios[i] = one;
+  asDraw();
+}
 function asToggleClose(si, di, ei) {
+  const D0 = _as.plan.studios[si].days[di], e0 = D0.entries[ei];
+  if (e0.manual) {   // closed by hand: tapping again reopens it (forgotten, so Make it again won't close it)
+    D0.entries.forEach(o => { if (o.t === 'old' && o.s.start === e0.s.start && o.s.k === e0.s.k) delete _as.mclose[o.s.id]; });
+    const S = _as.plan.studios[si], one = asBuild(_as.data, S.id).studios[0]; if (one) _as.plan.studios[si] = one;
+    asDraw(); return;
+  }
   const D = _as.plan.studios[si].days[di], e = D.entries[ei], to = !e.close;
   D.entries.forEach(o => { if (o.closeP && o.s.start === e.s.start && o.s.k === e.s.k) o.close = to; });
   asDraw();
