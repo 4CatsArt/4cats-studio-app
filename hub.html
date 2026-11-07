@@ -4408,10 +4408,17 @@ function asBuild(W, onlyId) {
           const ans = _as.pad[st + '|' + d], min = +(set.pa_min ?? 8);
           const kids = kept.filter(s => s.k === (isPa ? 'paday' : 'field')).reduce((t, s) => t + (+s.booked || 0), 0);
           const lbl = isPa ? '🎒 PA/PD day' : '🚌 Field trip';
-          D.pad = { kind: isPa ? 'paday' : 'field', usual: staff, ans, kids, low: isPa && min > 0 && kids < min, min };
+          // (a field trip: its booked time, e.g. 10am–12pm)
+          const ft = isFt ? kept.filter(s => s.k === 'field' && s.booked > 0).sort((a, b) => a.start - b.start) : [];
+          const ftTime = ft.length ? ft.map(s => `${asT(s.start)}–${asT(s.start + (s.len || 120))}`).join(', ') : null;
+          // (a field trip: how many are expected, since usually only a deposit is booked; null when nobody has set it)
+          const ftExp = isFt ? ft.reduce((t, s) => s.expected != null && +s.expected > 0 ? (t || 0) + +s.expected : t, null) : null;
+          D.pad = { kind: isPa ? 'paday' : 'field', usual: staff, ans, kids, low: isPa && min > 0 && kids < min, min, time: ftTime, expected: ftExp };
           if (ans === undefined) { D.notes.push(lbl + ': choose what happens to the evening'); continue; }
           if (ans === 'close') { D.notes.push(lbl + ': evening closed'); continue; }
           if (ans === 'watch') { D.notes.push(lbl + ': both kept open · watching its bookings (notes on 📋 To-do)'); }
+          else if (ans === 'more') { staff = staff + 1; D.staff = staff; D.notes.push(`${lbl}: evening with ${staff} staff (one more brought in · on 📋 To-do)`); }
+          else if (ans === 'cancel_pa') { D.notes.push(`${lbl}: to be cancelled (on 📋 To-do) · evening as usual`); }
           else {
           staff = Math.max(1, +ans || 1) + extra; D.staff = staff; D.notes.push(`${lbl}: evening with ${staff} staff`);
           }
@@ -4610,15 +4617,27 @@ function asAfterHtml(S) {
 function asPadOpts(P) {
   const n = Math.max(1, P.usual || 1);
   return [['', 'Choose…']].concat(P.kind === 'field' ? [] : [['watch', 'Keep both open, tell us if it books']]).concat([['close', 'Close the evening']])
-    .concat(Array.from({ length: n }, (_, i) => [String(i + 1), `Open with ${i + 1} staff${i + 1 === n ? ' (normal)' : ''}`]));
+    .concat(Array.from({ length: n }, (_, i) => [String(i + 1), `Open with ${i + 1} staff${i + 1 === n ? ' (normal)' : ''}`]))
+    .concat([['more', 'Keep the evening open, bring in one more teacher']])
+    .concat(P.kind === 'field' ? [] : [['cancel_pa', 'Close the PA/PD day']]);
 }
-const asPadName = P => P.kind === 'field' ? '🚌 <b>Field trip</b>' : '🎒 <b>PA/PD day</b>';
+// who's coming: PA/PD days by kids booked; field trips by the expected number (usually only a deposit is booked)
+const asPadWho = P => P.kind === 'field' ? (P.expected != null ? `about ${P.expected} expected` : 'expected number not set yet (deposit paid)') : `${P.kids} kid${P.kids === 1 ? '' : 's'} booked`;
+const asPadName = P => P.kind === 'field' ? `🚌 <b>Field trip${P.time ? ' ' + esc(P.time) : ''}</b>` : '🎒 <b>PA/PD day</b>';
 function asPadHtml(S, D) {
   const P = D.pad, opts = asPadOpts(P);
-  return `<label class="as-pad${P.ans === undefined ? ' ask' : ''}${P.low ? ' low' : ''}">${asPadName(P)} · ${P.kids} ${P.kind === 'field' ? (P.kids === 1 ? 'person' : 'people') : (P.kids === 1 ? 'kid' : 'kids')} booked${P.low ? `<span class="as-padlow">⚠ Under ${P.min}: cancel it, or run more in the evening?</span>` : ''}<span>The evening?</span><select onchange="asPadSet('${S.id}','${D.date}',this.value)">${opts.map(o => `<option value="${o[0]}"${String(P.ans ?? '') === o[0] ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select></label>`;
+  return `<label class="as-pad${P.ans === undefined ? ' ask' : ''}${P.low ? ' low' : ''}">${asPadName(P)} · ${asPadWho(P)}${P.low ? `<span class="as-padlow">⚠ Under ${P.min}: cancel it, or run more in the evening?</span>` : ''}<span>The evening?</span><select onchange="asPadSet('${S.id}','${D.date}',this.value)">${opts.map(o => `<option value="${o[0]}"${String(P.ans ?? '') === o[0] ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select></label>`;
 }
 function asPadSet(st, d, v) {
   const k = st + '|' + d, was = _as.pad[k];
+  // one more teacher, or closing the PA/PD day: a note on 📋 To-do (only when newly chosen)
+  if ((v === 'more' || v === 'cancel_pa') && was !== v && typeof sb !== 'undefined') {
+    const Dx = ((((_as.plan || {}).studios || []).find(x => x.id === st) || {}).days || []).find(x => x.date === d) || {};
+    const usual = (Dx.pad && Dx.pad.usual) || Dx.staff || 1;
+    const body = v === 'more' ? `Bring in one more teacher for the evening (planned with ${usual + 1} staff)${Dx.pad && Dx.pad.kind === 'field' ? ' · field trip day' : ' · PA/PD day'}`
+      : `Close the PA/PD day: let the booked families know and credit them (${(Dx.pad && Dx.pad.kids) || 0} booked)`;
+    sb.rpc('hub_autosched_note_save', { p: { studio_id: st, day: d, kind: v === 'more' ? 'staff' : 'paday', body } }).then(() => { try { asNotesLoad(); } catch (e) {} }, () => {});
+  }
   if (v === 'watch' || was === 'watch') {
     const ids = ((_as.data && _as.data.sessions) || []).filter(x => x.studio_id === st && x.date === d && /\bp[ad] day|pa\/pd|no[\s-]school/i.test(x.title || '')).map(x => x.id);
     const min = +(((_as.data || {}).settings || {}).pa_min ?? 8);
@@ -4772,7 +4791,7 @@ function asPadList() {
       const P2 = r.D.pad, n = Math.max(1, P2.usual || 1);
       const opts = asPadOpts(P2);
       return `<div class="as-padr${P2.low ? ' low' : ''}${P2.ans === undefined ? ' ask' : ''}"><div>${P2.kind === 'field' ? '🚌 ' : '🎒 '}<b>${esc(STUDIO_NAMES[r.S.id] || r.S.id)}</b> · ${esc(fmt(r.D.date))}
-        <div class="fd-sm">${P2.kind === 'field' ? 'Field trip · ' + P2.kids + (P2.kids === 1 ? ' person' : ' people') : P2.kids + (P2.kids === 1 ? ' kid' : ' kids')} booked${P2.low ? ` · <b class="as-padlow">⚠ under ${P2.min}</b>` : ''}</div></div>
+        <div class="fd-sm">${P2.kind === 'field' ? 'Field trip' + (P2.time ? ' ' + esc(P2.time) : '') + ' · ' + esc(asPadWho(P2)) : esc(asPadWho(P2))}${P2.low ? ` · <b class="as-padlow">⚠ under ${P2.min}</b>` : ''}</div></div>
         <select ${r.S.published ? 'disabled' : ''} onchange="asPadSet('${r.S.id}','${r.D.date}',this.value);asPadList()">${opts.map(o => `<option value="${o[0]}"${String(P2.ans ?? '') === o[0] ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select>
         <button class="ho-btn" onclick="closeDutySheet();asGoStudio('${r.S.id}')">Go to</button></div>`;
     }).join('') : '<p class="ho-intro">No PA/PD days or field trips this week.</p>'}</div>
