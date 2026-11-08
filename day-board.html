@@ -86,6 +86,7 @@ main { padding: 14px 20px 40px; }
 .shift.draft { background: repeating-linear-gradient(90deg, #f4f2ec 0 10px, #fbfaf6 10px 20px); border: 1px dashed #b9b2a2; }
 .sh-acts { float: right; } .sh-acts button { font: inherit; font-size: 11px; border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 0 5px; margin-left: 2px; cursor: pointer; color: var(--muted); }
 .sh-acts button:hover { color: var(--ink); border-color: #bbb; }
+.offline { background: #fbf5ea; border: 1px solid #ead2ad; border-radius: 10px; padding: 7px 12px; margin: 0 0 10px; font-size: 12.5px; color: #6b4b00; }
 .cok { background: var(--panel); border: 1px solid #c9daf3; border-radius: 12px; padding: 10px 14px; margin: 0 0 10px; font-size: 13px; }
 .cok h2 { font-size: 14px; margin: 0 0 4px; } .cok p { margin: 4px 0; }
 .cok-opts { display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0; } .cok-opts > div { flex: 1; min-width: 240px; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
@@ -300,11 +301,13 @@ async function load() {
           const d = (pd.data || []).find(z => z.booking_id === b.id) || {};
           // an Adult Get-Together or team building: only the intro (the first 15 minutes), then it runs like a workshop
           const intro = /get.?together|team\s*building/i.test(title);
-          const len = intro ? LEN.intro : /90/.test(String(d.actual_art_time || '')) ? 90 : 60;
+          // (Nov 8 2026) the staffing rules: a field trip is 1 teacher per 30 children, for its whole time (2 hours unless set)
+          const field = /field\s*trip/i.test(title);
+          const len = intro ? LEN.intro : field ? Math.max(60, +x.duration_minutes || 120) : /90/.test(String(d.actual_art_time || '')) ? 90 : 60;
           const t1 = findPerson(d.party_teacher1), t2 = findPerson(d.party_teacher2);
           const guests = d.expected_guests || b.qty || '';
-          blocks.push({ id: 'p1-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 1, title, sub: `${guests ? guests + ' guests · ' : ''}${len} min ${intro ? 'intro' : 'art time'}`, start: t0, end: t0 + len, person: t1 ? t1.id : null });
-          if (t2 || (!intro && +guests > 15) || (intro && +guests > 20)) blocks.push({ id: 'p2-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 2, title, sub: `second teacher · ${len} min`, start: t0, end: t0 + len, person: t2 ? t2.id : null });
+          blocks.push({ id: 'p1-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 1, title, sub: `${guests ? guests + (field ? ' children · ' : ' guests · ') : ''}${len} min ${intro ? 'intro' : field ? 'field trip' : 'art time'}`, start: t0, end: t0 + len, person: t1 ? t1.id : null });
+          if (t2 || (field ? +guests > 30 : !intro && +guests > 15) || (intro && +guests > 20)) blocks.push({ id: 'p2-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 2, title, sub: `second teacher · ${len} min`, start: t0, end: t0 + len, person: t2 ? t2.id : null });
         });
       } else {
         if (!n) return;   // (nobody booked yet: nothing to demo)
@@ -320,9 +323,27 @@ async function load() {
     const partyGuests = {};
     partyBk.forEach(b => { const d = (pd.data || []).find(z => z.booking_id === b.id) || {};
       partyGuests[b.session_id] = (partyGuests[b.session_id] || 0) + (+d.expected_guests || +b.qty || 0); });
+    // time off and unavailability this day: the studio's team and anyone with a shift (staff_time_off, staff_unavailability)
+    const off = {}, offNames = {};
+    try {
+      const tr = await sb.rpc('hub_board_staff', { p_studio: st });
+      const team = (tr.data || []).filter(x => x.here); team.forEach(x => { offNames[x.id] = x.name; });
+      const ids = [...new Set(team.map(x => x.id).concat(people.map(p => p.id)))];
+      people.forEach(p => { offNames[p.id] = p.show; });
+      if (ids.length) {
+        const dow = new Date(date + 'T12:00:00').getDay();
+        const [tor, unr] = await Promise.all([
+          sb.from('staff_time_off').select('staff_id, start_time, end_time, status').in('staff_id', ids).in('status', ['approved', 'pending']).lte('start_date', date).gte('end_date', date),
+          sb.from('staff_unavailability').select('staff_id, day_of_week, start_time, end_time, effective_from, effective_to').in('staff_id', ids).eq('day_of_week', dow)]);
+        (tor.data || []).forEach(o => (off[o.staff_id] = off[o.staff_id] || []).push({ kind: 'toff', pending: o.status === 'pending',
+          from: o.start_time ? toMin(o.start_time) : null, to: o.end_time ? toMin(o.end_time) : null }));
+        (unr.data || []).filter(u => (!u.effective_from || u.effective_from <= date) && (!u.effective_to || u.effective_to >= date))
+          .forEach(u => (off[u.staff_id] = off[u.staff_id] || []).push({ kind: 'unav', from: u.start_time ? toMin(u.start_time) : null, to: u.end_time ? toMin(u.end_time) : null }));
+      }
+    } catch (e) {}
     let inbox = [];
     try { const ib = await sb.rpc('hub_inbox_mine'); inbox = (ib.data || []).filter(x => x.studio_id === st && String(x.day || '').slice(0, 10) === date); } catch (e) {}
-    D = { st, date, people, blocks, lo, hi, sessions, booked, rolesFromPlan, startRoles: people.map(p => [p.id, p.role]), inbox, partyGuests };
+    D = { st, date, people, blocks, lo, hi, sessions, booked, rolesFromPlan, startRoles: people.map(p => [p.id, p.role]), inbox, partyGuests, off, offNames };
     START = JSON.parse(JSON.stringify(blocks));
     // breaks suggested straight away for anyone on a long shift without one (saved with Save the day)
     const br = suggestBreaks();
@@ -366,6 +387,7 @@ function problems() {
     });
   });
   D.blocks.filter(b => !b.person).forEach(b => { bad[b.id] = 1; list.push(`${b.title} at ${fmt(b.start)} has nobody`); });
+  D.people.forEach(p => { const c = offClashDay(p.id, p.start, p.end); if (c.length) list.push(`${p.show} has a shift but is ${c.map(offText).join(' and ')}: change or remove the shift`); });
   D.people.filter(p => p.gone).forEach(p => list.push(`${p.show} is ${p.gone} but has a shift this day: remove it (✕) or give their work to someone else`));
   // breaks never at the same time: someone is always on
   const brks = D.blocks.filter(b => b.kind === 'brk' && b.person);
@@ -431,7 +453,7 @@ function draw() {
   })();
   const nobody = D.blocks.filter(b => !b.person);
   const rows = (nobody.length ? `<div class="row needs" data-person=""><div class="who"><b>Needs someone</b><small>${nobody.length} with nobody: drag onto a person</small></div><div class="lane" style="width:${W}px">${hourLines}${laneOut(nobody)}</div></div>` : '')
-    + D.people.map(p => `<div class="row" data-person="${esc(p.id)}"><div class="who"><b>${esc(p.show)}${p.draft ? ' <span class="draft-tag">draft</span>' : ''}${p.gone ? ` <span class="gone-tag">${esc(p.gone)}</span>` : ''}${p.shiftId ? `
+    + D.people.map(p => `<div class="row" data-person="${esc(p.id)}"><div class="who"><b>${esc(p.show)}${p.draft ? ' <span class="draft-tag">draft</span>' : ''}${p.gone ? ` <span class="gone-tag">${esc(p.gone)}</span>` : ''}${offClashDay(p.id, p.start, p.end).map(o => ` <span class="gone-tag">${esc(offText(o))}</span>`).join('')}${p.shiftId ? `
         <span class="sh-acts"><button title="Change ${esc(p.show)}'s shift times" onclick="dayShiftEdit('${esc(p.id)}')">✎</button><button title="Remove ${esc(p.show)}'s shift" onclick="dayShiftRemove('${esc(p.id)}')">✕</button></span>` : ''}</b><small>${fmt(p.start)}–${fmt(p.end)}
         <select class="role" aria-label="${esc(p.show)}'s role today" onchange="setRole('${esc(p.id)}', this.value)">${['Director', 'Demoer', 'Circler'].map(r => `<option${r === p.role ? ' selected' : ''}>${r}</option>`).join('')}</select></small>
         <small>${Math.round(mins(p.id) / 6) / 10}h teaching or demoing${D.blocks.some(b => b.person === p.id && b.kind === 'brk') ? '' : (p.end - p.start > 300 ? ' · <b style="color:#9a3412;display:inline">no break set</b>' : '')}</small></div>
@@ -470,6 +492,8 @@ function draw() {
     <div class="decide"${decide ? '' : ' style="padding:6px 14px"'}><h2 style="display:flex;align-items:center;gap:10px${decide ? '' : ';margin:0'}">${decide ? `To decide for this day (${(D.inbox || []).length})` : '<span class="muted" style="font-weight:500">Nothing to decide for this day</span>'}
       <span style="flex:1"></span><button onclick="dayTodo()" style="font-weight:500">+ Add a to-do</button></h2>${decide}</div>
     ${cokHtml()}
+    ${(() => { const ids = Object.keys(D.off || {}); if (!ids.length) return '';
+      return `<div class="offline"><b>Off this day:</b> ${ids.map(id => `${esc((D.offNames || {})[id] || 'Someone')} <span class="muted">(${D.off[id].map(offText).map(esc).join(', ')})</span>`).join(' · ')}</div>`; })()}
     <div class="key"><span><i style="background:var(--kids);border-color:var(--kids-b)"></i>Kids class (${LEN.kids} min)</span><span><i style="background:var(--wheel);border-color:var(--wheel-b)"></i>Wheel</span>
       <span><i style="background:var(--party);border-color:var(--party-b)"></i>Party (its art time)</span><span><i style="background:var(--demo);border-color:var(--demo-b)"></i>Demo (${LEN.demo} min)</span>
       <span><i style="background:repeating-linear-gradient(135deg,#ececec 0 4px,#f7f7f7 4px 8px);border-color:#9a9a9a"></i>Break</span>
@@ -576,6 +600,14 @@ function dayLabourCheck() {
     if (error || !data || !D || D.st !== st || D.date !== date) return;   // (not a home office login, not set up yet, or moved on)
     D.labour = (data.days || [])[0] || null; draw();
   }, 600);
+}
+// ---- time off and unavailability on the day ----
+const offText = o => (o.kind === 'toff' ? 'time off' : 'unavailable') + (o.from != null && o.to != null ? ' ' + fmt(o.from) + '–' + fmt(o.to) : '') + (o.pending ? ' · pending' : '');
+function offFor(pid) { return (D.off || {})[pid] || []; }
+function offClashDay(pid, a, z) { return offFor(pid).filter(o => o.from == null || o.to == null || (a < o.to && z > o.from)); }
+function offAskDay(pid, a, z, name) {
+  const c = offClashDay(pid, a, z); if (!c.length) return true;
+  return confirm(`${name || 'They'}: ${c.map(offText).join(' and ')} that day. Add the shift anyway?`);
 }
 // ---- a to-do for this day: shows in To decide (and 📋 For you) until ticked off ----
 async function dayTodo() {
@@ -786,6 +818,7 @@ async function dayShiftEdit(pid) {
   const p = D.people.find(z => z.id === pid); if (!p) return;
   const v = prompt(`${p.show}'s shift: new times (e.g. 8:30a-5p, at least 3 hours)`, fmt(p.start) + '-' + fmt(p.end)); if (v === null) return;
   const r = parseRange(v); if (!r) { alert('Use a time like 8:30a-5p, with a or p on both times.'); return; }
+  if (!offAskDay(p.id, r.start, r.end, p.show)) return;
   const { error } = await sb.rpc('hub_board_shift_set', { p_id: p.shiftId, p_start: hhmm(r.start), p_end: hhmm(r.end), p_remove: false });
   if (error) { alert(/hub_board_shift_set/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
   const was = `${fmt(p.start)}–${fmt(p.end)}`;
@@ -810,7 +843,7 @@ async function dayShiftAdd() {
   const pop = document.createElement('div'); pop.className = 'pop'; pop.id = 'pop';
   const here = _staffList.list.filter(x => x.here && !D.people.some(p => p.id === x.id)), others = _staffList.list.filter(x => !x.here && !D.people.some(p => p.id === x.id));
   pop.innerHTML = `<label>Add a shift on ${esc(new Date(D.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' }))}</label>
-    <select id="add-who"><option value="">Who?</option><optgroup label="${esc(STUDIO_NAMES[D.st] || D.st)}">${here.map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</optgroup>
+    <select id="add-who"><option value="">Who?</option><optgroup label="${esc(STUDIO_NAMES[D.st] || D.st)}">${here.map(x => `<option value="${esc(x.id)}">${esc(x.name)}${offFor(x.id).length ? ' · ' + esc(offFor(x.id).map(offText).join(', ')) : ''}</option>`).join('')}</optgroup>
       <optgroup label="Other studios">${others.map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</optgroup></select>
     <label style="margin-top:8px">Times (at least 3 hours)</label><input id="add-time" value="9a-5p" style="width:100%;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px">
     <div class="row2"><button id="pop-ok">Add (as a draft)</button><button id="pop-x">Cancel</button></div>`;
@@ -820,6 +853,7 @@ async function dayShiftAdd() {
   $('pop-ok').onclick = async () => {
     const who = $('add-who').value, r = parseRange($('add-time').value);
     if (!who) { alert('Choose who.'); return; } if (!r) { alert('Use a time like 9a-5p, with a or p on both times.'); return; }
+    if (!offAskDay(who, r.start, r.end, (_staffList.list.find(x => x.id === who) || {}).name)) return;
     const { data, error } = await sb.rpc('hub_board_shift_add', { p_staff: who, p_studio: D.st, p_date: D.date, p_start: hhmm(r.start), p_end: hhmm(r.end) });
     if (error) { alert(/hub_board_shift_add/.test(error.message) ? 'Run week_board.sql in Supabase first.' : niceErr(error.message)); return; }
     const inf = _staffList.list.find(x => x.id === who) || {};
