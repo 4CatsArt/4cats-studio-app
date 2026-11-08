@@ -454,7 +454,7 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .as-ovt tr.as-ov-w td:nth-child(4) { color: #a3191c; } .as-ovt tr.ask td:nth-child(3) { font-weight: 800; } .as-ovt tr.done td { opacity: .55; } .as-ovt select { max-width: 260px; font: inherit; font-size: 13px; }
 .as-ovt .ho-btn { white-space: nowrap; }
 .as-ovn { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; } .as-ovdone { display: inline-flex; gap: 4px; align-items: center; } .as-for { margin-top: 4px; font-size: 12.5px; } .as-forsel { font: inherit; font-size: 13px; max-width: 220px; }
-.mn-row { border-top: 1px solid var(--border); padding: 6px 0; font-size: 14px; } .inbox-row .inbox-btns { margin-top: 5px; display: flex; gap: 6px; flex-wrap: wrap; } .mn-row label { display: inline-flex; gap: 6px; align-items: center; }
+.mn-row { border-top: 1px solid var(--border); padding: 6px 0; font-size: 14px; } .inbox-row .inbox-btns { margin-top: 5px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; } .inbox-sel { font: inherit; font-size: 13px; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border); max-width: 100%; } .mn-row label { display: inline-flex; gap: 6px; align-items: center; }
 /* glazing stands out (no colour of its own): heavier text and a dark outline */
 .as-e.as-glz { font-weight: 800; box-shadow: inset 0 0 0 2px currentColor; text-transform: none; } .as-e.as-glz b { font-weight: 900; }
 .as-e.as-glz > span { font-weight: 600; } .as-e.as-glz select { font-weight: 800; }
@@ -3062,7 +3062,14 @@ function heroGreetingHtml(name) {
 // The inbox (hub_inbox.sql): things to decide for the responsibilities this person holds (e.g. Staff schedule approvals)
 let _inbox = [];
 const asFmt12 = v => { const [h, m] = String(v || '').split(':').map(Number); return (h % 12 || 12) + (m ? ':' + String(m).padStart(2, '0') : '') + (h >= 12 ? 'p' : 'a'); };
-const INBOX_KIND = { cut_shift: '✂️', short_day: '👤', class_problem: '📚' };
+const INBOX_KIND = { cut_shift: '✂️', short_day: '👤', class_problem: '📚', evening_question: '🌆', as_note: '📝' };
+// the evening question's choices: the same as Auto-schedule's (asPadOpts)
+function inboxEveningOpts(P) {
+  const n = Math.max(1, +P.usual || 1), pa = P.pad !== 'field';
+  return (pa ? [['watch', 'Keep both open, tell us if it books']] : []).concat([['close', 'Close the evening']])
+    .concat(Array.from({ length: n }, (_, i) => [String(i + 1), `Open with ${i + 1} staff${i + 1 === n ? ' (normal)' : ''}`]))
+    .concat([['more', 'Keep it open, bring in one more teacher']]).concat(pa ? [['cancel_pa', 'Close the PA/PD day']] : []);
+}
 function inboxItemHtml(x) {
   const fmt = d => d ? new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }) : '';
   const t = v => v ? asFmt12(v) : '';
@@ -3071,12 +3078,15 @@ function inboxItemHtml(x) {
     ? `<button class="ho-btn" onclick="inboxDecide('${x.id}','approve')">✓ Approve</button> <button class="ho-btn" onclick="inboxChange('${x.id}')">Change…</button> <button class="ho-btn" onclick="inboxDecide('${x.id}','keep')">Keep</button>`
     : x.kind === 'short_day'
     ? `<button class="ho-btn" onclick="window.open('staff-schedule.html','_blank')">Open staff schedule</button> <button class="ho-btn" onclick="inboxDecide('${x.id}','done')">✓ Done</button>`
+    : x.kind === 'evening_question'
+    ? `<select id="ev-${x.id}" class="inbox-sel"><option value="">Choose…</option>${inboxEveningOpts(x.payload || {}).map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join('')}</select>
+       <button class="ho-btn" onclick="const v=document.getElementById('ev-${x.id}').value; if (!v) { alert('Choose what happens to the evening.'); return; } inboxDecide('${x.id}','evening',null,null,v)">Save</button>`
     : `<button class="ho-btn" onclick="inboxDecide('${x.id}','done')">✓ Done</button>`;
   return `<div class="mn-row inbox-row"><div><b>${INBOX_KIND[x.kind] || '•'} ${esc(fmt(x.day))}</b> · ${esc(STUDIO_NAMES[x.studio_id] || x.studio_id || '')} · <b>${esc(x.title)}</b> ${now}</div>
     <div class="lab-sub">${esc(x.detail || '')}</div><div class="inbox-btns">${btns}</div></div>`;
 }
-async function inboxDecide(id, action, start, end) {
-  const { data, error } = await sb.rpc('hub_inbox_decide', { p_id: id, p_action: action, p_start: start || null, p_end: end || null });
+async function inboxDecide(id, action, start, end, value) {
+  const { data, error } = await sb.rpc('hub_inbox_decide', { p_id: id, p_action: action, p_start: start || null, p_end: end || null, p_value: value || null });
   if (error) { alert(error.message); myNotesLoad(); return; }
   // a shift was changed or removed: the staff member gets their notification, the same way as any approved shift change in the Hub
   if (data && data.applied) fnHeaders().then(h => fetch(`${SUPABASE_URL}/functions/v1/hub-push`, { method: 'POST', headers: h, body: JSON.stringify({ action: 'shifts' }) })).catch(() => {});
@@ -4926,7 +4936,7 @@ function asRulesHtml() {
       <ul><li>nobody booked: it closes (spots to 0);</li><li>1 or 2 booked: it stays open, and a note asks whether to close it and move them;</li><li>not enough history to tell: it stays open.</li></ul></li>
     <li><b>A day with nothing booked at all</b> ${n(S.low_close_days)} days out: its workshop times close.</li>
     <li><b>The class booking check:</b> every family should be on every week of the kids class they bought. Anyone missing a week, a week on a different day from week 1, or a paid class order with no booking is flagged in the morning.</li>
-    <li><b>📋 For you:</b> every shift that could be cut, every short day and every class booking problem goes to whoever holds that job (👤 Who gets these, in the nightly run card). <b>Approve</b> changes the shift and the staff member gets their usual shift-change notification in the 4Cats Team app; <b>Keep</b> leaves it and it isn't suggested again. Nothing changes without someone approving it.</li>
+    <li><b>📋 For you:</b> every shift that could be cut, every short day, every PA/PD day or field trip whose evening hasn't been decided (next 3 weeks), every open Auto-schedule note (low times with 1–2 booked, a watched day that booked, + Staff) and every class booking problem goes to whoever holds that job (👤 Who gets these, in the nightly run card). <b>Approve</b> changes the shift and the staff member gets their usual shift-change notification in the 4Cats Team app; <b>Keep</b> leaves it and it isn't suggested again. Nothing changes without someone approving it.</li>
     <li><b>Then the staffing check</b> (the next 2 weeks): each studio's shifts against what's needed after those changes. It flags days that are <b>short</b> and shifts (or ends of shifts) that <b>could be cut</b>; it never changes a shift.</li>
     <li><b>Never:</b> deletes anything; changes anything with a booking; touches classes, camps, PA/PD days, wheel, field trips, booked parties, hidden times, or studios with Auto-schedule off. Every change can be undone.</li>
   </ul>
