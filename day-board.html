@@ -451,7 +451,8 @@ function draw() {
   const nDrafts = D.people.filter(p => p.draft).length, pb = $('pub');
   if (pb) { pb.style.display = nDrafts ? '' : 'none'; pb.textContent = `Publish ${nDrafts} draft${nDrafts === 1 ? '' : 's'}`; }
   $('main').innerHTML = `${D.flash ? `<div class="flash">${esc(D.flash)}</div>` : ''}
-    ${decide ? `<div class="decide"><h2>To decide for this day (${(D.inbox || []).length})</h2>${decide}</div>` : ''}
+    <div class="decide"${decide ? '' : ' style="padding:6px 14px"'}><h2 style="display:flex;align-items:center;gap:10px${decide ? '' : ';margin:0'}">${decide ? `To decide for this day (${(D.inbox || []).length})` : '<span class="muted" style="font-weight:500">Nothing to decide for this day</span>'}
+      <span style="flex:1"></span><button onclick="dayTodo()" style="font-weight:500">+ Add a to-do</button></h2>${decide}</div>
     ${cokHtml()}
     <div class="key"><span><i style="background:var(--kids);border-color:var(--kids-b)"></i>Kids class (${LEN.kids} min)</span><span><i style="background:var(--wheel);border-color:var(--wheel-b)"></i>Wheel</span>
       <span><i style="background:var(--party);border-color:var(--party-b)"></i>Party (its art time)</span><span><i style="background:var(--demo);border-color:var(--demo-b)"></i>Demo (${LEN.demo} min)</span>
@@ -560,6 +561,14 @@ function dayLabourCheck() {
     D.labour = (data.days || [])[0] || null; draw();
   }, 600);
 }
+// ---- a to-do for this day: shows in To decide (and 📋 For you) until ticked off ----
+async function dayTodo() {
+  const v = prompt('A to-do for this day (it shows here and in 📋 For you until it\u2019s ticked off):', ''); if (!v || !v.trim()) return;
+  const { data, error } = await sb.rpc('hub_board_todo', { p_studio: D.st, p_day: D.date, p_text: v.trim() });
+  if (error) { alert(/hub_board_todo/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
+  D.inbox = (D.inbox || []).concat([{ id: data.id, kind: 'as_note', studio_id: D.st, day: D.date, title: 'To-do', detail: v.trim() }]);
+  D.flash = 'To-do added.'; draw();
+}
 // ---- 🌆 Close or keep? (close_or_keep.sql): empty times past the end of the shifts ----
 let _cokT = null;
 function cokCheck() {
@@ -640,8 +649,11 @@ function dayTimeMenu(id, el) {
     ${kids ? '<div class="muted" style="font-size:12.5px;margin:4px 0 8px">A kids class week: a class keeps its time every week, so it\u2019s moved as a whole class (home office).</div>'
       : `<div style="display:flex;gap:6px;align-items:center;margin:6px 0"><input id="tm-new" placeholder="New time, e.g. 3p" style="flex:1;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px"><button id="tm-move">🕐 Change time</button></div>
          <div class="muted" style="font-size:12px;margin-bottom:8px">${n ? 'Everyone booked moves with it: contact them first.' : 'Same day, another time.'}</div>`}
-    <div class="row2">${!kids ? `<button id="tm-close" title="${n ? 'Stops new bookings; the families booked keep their spot' : 'Closes it (Undo in the nightly log)'}">${n ? 'Close to new bookings' : 'Close it'}</button>` : ''}<button id="pop-x">Cancel</button></div>
-    ${n ? `<div class="muted" style="font-size:12px;margin-top:8px;line-height:1.45">To <b>cancel it</b>, first move or refund the families: Hub → Schedule → this time → <b>Move</b> or <b>Change / Cancel</b> for each one. Then close it here.</div>` : ''}`;
+    <div class="row2">${!kids ? `<button id="tm-close" title="${n ? 'Stops new bookings; the families booked keep their spot' : 'Closes it (Undo in the nightly log)'}">${n ? 'Close to new bookings' : 'Close it'}</button>` : ''}<button id="pop-x">Not now</button></div>
+    ${n ? `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--line)"><label style="font-size:12.5px">Cancel it: Registrations moves or refunds the ${n} booked</label>
+        <input id="tm-cnote" placeholder="Note for them (optional), e.g. no wheel teacher" style="width:100%;box-sizing:border-box;font:inherit;font-size:12.5px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;margin:4px 0 6px">
+        <button id="tm-cancel">Cancel it: send to Registrations</button>
+        <div class="muted" style="font-size:11.5px;margin-top:6px;line-height:1.45">Closes it to new bookings now. Registrations gets the families (name, email, phone, order) to move or refund.</div></div>` : ''}`;
   document.body.appendChild(pop);
   const r0 = el.getBoundingClientRect(); pop.style.left = Math.min(window.innerWidth - 340, r0.left) + 'px'; pop.style.top = Math.min(window.innerHeight - 220, r0.bottom + 6) + 'px';
   $('pop-x').onclick = closePop;
@@ -654,6 +666,13 @@ function dayTimeMenu(id, el) {
     D.blocks.forEach(b => { if (b.session === id) { b.start += delta; b.end += delta; } });   // (its class, party or demo moves with it)
     D.lo = Math.min(D.lo, Math.floor(r.start / 60) * 60);
     closePop(); D.flash = `Moved ${title} from ${data.from} to ${data.to}${data.bookings ? ` (${data.bookings} booking${data.bookings === 1 ? '' : 's'} moved with it)` : ''}. Check who's demoing it.`; draw();
+  };
+  if ($('tm-cancel')) $('tm-cancel').onclick = async () => {
+    if (!confirm(`Cancel ${title} at ${fmt(t0)}? It closes to new bookings now, and Registrations is asked to move or refund the ${n} booked.`)) return;
+    const { data, error } = await sb.rpc('hub_board_cancel_request', { p_session: id, p_note: $('tm-cnote').value || null });
+    if (error) { alert(/hub_board_cancel_request/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
+    x.spaces_left_cache = 0;
+    closePop(); D.flash = `${title} at ${fmt(t0)}: sent to Registrations to move or refund ${data.families} famil${data.families === 1 ? 'y' : 'ies'}; closed to new bookings.`; draw();
   };
   if ($('tm-close')) $('tm-close').onclick = async () => {
     if (!confirm(n ? `Close ${title} at ${fmt(t0)} to new bookings? The ${n} booked keep their spot.` : `Close ${title} at ${fmt(t0)}?`)) return;
