@@ -851,6 +851,8 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .me-day { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 18px; font-weight: 600; color: var(--ink); }
 .me-time { font-size: 15px; font-weight: 700; color: var(--accent-deep); }
 .me-studio { font-size: 13px; color: var(--ink-soft); margin-top: 2px; }
+.me-note { font-size: 13px; margin-top: 6px; padding: 6px 10px; border-radius: 10px; background: #eef3fb; color: #24467a; }
+.me-note.day { background: #fbf5ea; color: #6b4b00; }
 .me-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .me-chip { font-size: 12.5px; background: var(--accent-soft); color: var(--accent-deep); border-radius: 999px; padding: 4px 10px; font-weight: 600; }
 .me-chip.teach { background: #e0f2fe; color: #0369a1; }
@@ -1380,6 +1382,8 @@ button.role-chip.shift-edit:hover { border-color: var(--accent); }
 .team-shift { font-size: 13px; color: var(--ink-soft); }
 .team-tags { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .team-tag { font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-deep); white-space: nowrap; }
+.team-tag.note { background: #eef3fb; color: #24467a; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team-daynote { font-size: 13px; font-weight: 600; color: #24467a; background: #eef3fb; border: 1px solid #c9daf3; border-radius: 10px; padding: 7px 12px; margin: 6px 0 8px; }
 .team-tag.open  { background: #fff4dd; color: #8a4b00; }
 .team-tag.close { background: #e0e7ff; color: #3730a3; }
 .team-empty { font-size: 14px; color: var(--ink-soft); line-height: 1.45; }
@@ -3088,7 +3092,7 @@ function inboxItemHtml(x) {
   const btns = x.kind === 'cut_shift'
     ? `<button class="ho-btn" onclick="inboxDecide('${x.id}','approve')">✓ Approve</button> <button class="ho-btn" onclick="inboxChange('${x.id}')">Change…</button> <button class="ho-btn" onclick="inboxDecide('${x.id}','keep')">Keep</button>`
     : x.kind === 'short_day'
-    ? `<button class="ho-btn" onclick="window.open('staff-schedule.html','_blank')">Open staff schedule</button> <button class="ho-btn" onclick="inboxDecide('${x.id}','done')">✓ Done</button>`
+    ? `<button class="ho-btn" onclick="window.open('staff-schedule.html','_blank')">Open staff schedule</button> <button class="ho-btn" onclick="inboxDecide('${x.id}','done')" title="I've added someone">✓ Done</button> <button class="ho-btn" onclick="inboxDecide('${x.id}','keep')" title="It's quiet: the staff we have is enough (this day isn't flagged again)">Disregard</button>`
     : x.kind === 'evening_question'
     ? `<select id="ev-${x.id}" class="inbox-sel"><option value="">Choose…</option>${inboxEveningOpts(x.payload || {}).map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join('')}</select>
        <button class="ho-btn" onclick="const v=document.getElementById('ev-${x.id}').value; if (!v) { alert('Choose what happens to the evening.'); return; } inboxDecide('${x.id}','evening',null,null,v)">Save</button>`
@@ -13424,6 +13428,9 @@ async function meLoadShifts() {
   body.innerHTML = '<div class="ho-intro">Loading your shifts…</div>';
   const today = localDateStr(new Date());
   const to = new Date(); to.setDate(to.getDate() + _meWeeks * 7);
+  let myNotes = [];
+  try { const mn = await sb.rpc('hub_my_notes', { p_from: today, p_to: localDateStr(to) }); myNotes = (!mn.error && mn.data) || []; } catch (e) {}
+  const noteOf = sh => myNotes.find(n => n.shift_date === sh.shift_date && n.studio_id === sh.studio_id) || null;
   const [sched, req, cov] = await Promise.all([
     sb.rpc('hub_my_schedule', { p_from: today, p_to: localDateStr(to) }),
     sb.rpc('hub_my_requests_v5').then(r => r.error && /hub_my_requests_v5/i.test(r.error.message) ? sb.rpc('hub_my_requests') : r),
@@ -13456,6 +13463,7 @@ async function meLoadShifts() {
     html += `<div class="me-shift${sh.shift_date === d.today ? ' today' : ''}${sh.sick ? ' sick' : ''}">
       <div class="me-row"><span class="me-day">${esc(meDateLabel(sh.shift_date, d.today))}</span><span class="me-time">${esc(shortTime(sh.start_time))} – ${esc(shortTime(sh.end_time))}</span></div>
       <div class="me-studio">📍 ${esc(studio)}</div>
+      ${(() => { const n = noteOf(sh); return n ? (n.note ? `<div class="me-note">📝 <b>Note:</b> ${esc(n.note)}</div>` : '') + (n.day_note ? `<div class="me-note day">📌 <b>At the studio:</b> ${esc(n.day_note)}</div>` : '') : ''; })()}
       ${roles || teach || sh.sick ? `<div class="me-chips">${sh.sick ? '<span class="me-chip sick">🤒 You called in sick</span>' : ''}${roles}${teach}</div>` : ''}
       ${team ? `<div class="me-team">Working with ${team}</div>` : '<div class="me-team">No one else is on yet.</div>'}
       ${meOfferLine(sh) || (canSick ? `<div class="me-actions"><button class="ho-btn" onclick="meSick(${i})">🤒 Call in sick</button>${meCanGive(sh) ? `<button class="ho-btn" onclick="meGiveAway(${i})">🔁 Give away</button>` : ''}</div>`
@@ -15267,6 +15275,7 @@ const AVATAR_TINTS = ['#ece7ff', '#dbeafe', '#e3f9ec', '#fce7f3', '#fef3d6', '#e
 const AVATAR_INKS  = ['#5636c9', '#1d4ed8', '#15803d', '#be185d', '#b45309', '#0369a1', '#b91c1c', '#6d28d9'];
 let _teamCount = 0;
 let _teamPeople = [];
+let _teamNotes = { day: '', by: {} };
 let _teamTimer = null;
 function avatarTintIndex(seed) {
   let h = 0; const t = String(seed || '');
@@ -15291,10 +15300,14 @@ function hmToMin(t) { const [h, m] = String(t || '0:0').split(':').map(Number); 
 async function loadTeamToday(studioId) {
   const el = document.getElementById('card-team-today');
   if (!el) return;
-  const [{ data, error }, sick] = await Promise.all([
+  const [{ data, error }, sick, notes] = await Promise.all([
     sb.rpc('hub_today_team', { p_studio_id: studioId || null }),
-    loadSickCalls(studioId, 0)
+    loadSickCalls(studioId, 0),
+    sb.rpc('hub_studio_notes', { p_studio: studioId || _sessionStudioId, p_date: localDateStr(new Date()) }).then(r => r, () => ({ data: null }))
   ]);
+  // today's day note and shift notes (shift_day_notes.sql; none until it's run)
+  _teamNotes = { day: (notes && notes.data && notes.data.day_note) || '', by: {} };
+  ((notes && notes.data && notes.data.shifts) || []).forEach(x => { _teamNotes.by[x.staff_id] = x.note; });
   _sickToday = {}; sick.forEach(c => { _sickToday[c.staff_id] = c; });
   await loadBreakWarnings();
   if (error) {
@@ -15333,6 +15346,7 @@ function renderTeamToday(rows) {
   const lastEnd = Math.max(...people.map(p => Math.max(...p.shifts.map(s => hmToMin(s.end)))));
   const sickNow = people.filter(p => _sickToday[p.staff_id]);
   el.innerHTML = `<div class="team-title">Who's working</div>
+    ${_teamNotes.day ? `<div class="team-daynote">📝 ${esc(_teamNotes.day)}</div>` : ''}
     ${sickNow.map(p => sickAlertHtml(_sickToday[p.staff_id], p)).join('')}
     ${people.filter(p => _breakWarn[p.staff_id]).map(p => `<div class="sick-alert wait">⏰ <b>${esc(p.name)}</b>${_breakWarn[p.staff_id].startsWith('’') ? '' : ' '}${esc(_breakWarn[p.staff_id])}.</div>`).join('')}
     <div class="team-list">${people.map(p => {
@@ -15342,6 +15356,7 @@ function renderTeamToday(rows) {
       const closes = p.shifts.some(s => hmToMin(s.end) === lastEnd);
       const tags = [
         _sickToday[p.staff_id] ? '<span class="team-tag sick">🤒 Called in sick</span>' : '',
+        _teamNotes.by[p.staff_id] ? `<span class="team-tag note" title="${escAttr(_teamNotes.by[p.staff_id])}">📝 ${esc(_teamNotes.by[p.staff_id])}</span>` : '',
         p.role_tag ? `<span class="team-tag">${esc(p.role_tag)}</span>` : '',
         opens ? '<span class="team-tag open">Opening</span>' : '',
         closes ? '<span class="team-tag close">Closing</span>' : '',
