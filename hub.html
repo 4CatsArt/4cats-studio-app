@@ -497,7 +497,8 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .asn-pill { font-size: 12px; font-weight: 700; padding: 1px 9px; border-radius: 999px; background: #eee; color: #666; } .asn-pill.on { background: #e2f1e8; color: #1d5640; }
 .asn-body { padding: 0 14px 12px; } .asn-body h4 { margin: 12px 0 6px; font-size: 13.5px; }
 .asn-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; } .asn-sw { display: flex; gap: 6px; align-items: center; font-weight: 600; }
-.asn-tbl td { font-size: 13px; vertical-align: top; } .asn-body h4 .ho-btn { margin-left: 8px; font-weight: 400; } .asn-resp { display: flex; gap: 14px; flex-wrap: wrap; } .asn-resp label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 600; } .asn-resp select { font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--border); min-width: 220px; } .asn-undone td { opacity: .5; text-decoration: line-through; } .asn-undone td:last-child { text-decoration: none; }
+.asn-tbl td { font-size: 13px; vertical-align: top; } .asn-body h4 .ho-btn { margin-left: 8px; font-weight: 400; } .asn-wait { background: #fff7e0; border: 1px solid #f0d89a; border-radius: 10px; padding: 8px 12px; font-size: 13px; margin: 8px 0; }
+.asn-resp { display: flex; gap: 14px; flex-wrap: wrap; } .asn-resp label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 600; } .asn-resp select { font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--border); min-width: 220px; } .asn-undone td { opacity: .5; text-decoration: line-through; } .asn-undone td:last-child { text-decoration: none; }
 .stf-rb { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; margin: 16px 0; max-width: 980px; }
 .stf-rb h3 { margin: 0 0 4px; font-size: 17px; } .stf-rb h4 { margin: 14px 0 6px; font-size: 13.5px; color: var(--ink-soft); }
 .stf-rtbl input, .stf-si input { width: 72px; font: inherit; padding: 4px 6px; border: 1px solid var(--border); border-radius: 8px; text-align: right; }
@@ -5022,11 +5023,10 @@ async function asNightlyLoad() {
 }
 // 👥 the staffing check: shifts against what's needed (flags only; you decide, the staff schedule makes the change)
 async function asStaffCheckNow() {
-  _asn.busy = 'staff'; asDraw();
-  const { data, error } = await sb.rpc('hub_autosched_staffing', { p_fresh: true });
-  _asn.busy = '';
-  if (error) { alert(error.message); asDraw(); return; }
-  _asn.staff = data || []; _asn.staffAt = new Date().toISOString(); asDraw();
+  _asn.busy = 'staff'; _asn.wait = 'Queued: starts within a minute…'; asDraw();
+  try { const data = await asQueued('staffing'); _asn.staff = data || []; _asn.staffAt = new Date().toISOString(); try { myNotesLoad(); } catch (e) {} }
+  catch (e) { alert(e.message); }
+  _asn.busy = ''; _asn.wait = ''; asDraw();
 }
 async function asStaffExtra(st, d) {   // 👤 request another staff on that day (the + Staff flow: hours, To-do note, the staff schedule places them)
   if (!_as.plan || d < _as.week || d > asAddDays(_as.week, 6)) { _as.week = asMonday(d); _as.plan = null; await asMake(); }
@@ -5100,6 +5100,7 @@ function asNightlyHtml() {
       <button class="ho-btn" ${N.busy ? 'disabled' : ''} onclick="asNightlyPreview()">${N.busy === 'preview' ? 'Looking…' : '👁 Preview tonight’s run'}</button>
       ${_hoCan.edit ? `<button class="ho-btn" ${N.busy ? 'disabled' : ''} onclick="asNightlyNow()">${N.busy === 'run' ? 'Running…' : '▶ Run it now'}</button>` : ''}
       <span class="fd-sm">Settings (how low, how many days out): 👥 Studio staffing → 📏 Staffing rules.</span></div>
+    ${N.wait ? `<p class="asn-wait">⏳ ${esc(N.wait)} <span class="fd-sm">(the whole network takes a minute or two; you can leave this open)</span></p>` : ''}
     ${asRespHtml()}
     ${asClassHtml()}
     ${asStaffHtml()}
@@ -5115,21 +5116,37 @@ async function asNightlyToggle(on) {
   if (error) { alert('Not saved: ' + error.message); asNightlyLoad(); return; }
   _asn.set = data; _asn.on = !!data.nightly_on; asDraw();
 }
+// The whole network takes longer than the app's 8-second limit, so these are queued: the database runs them within a minute
+// (no limit, as you) and the card fills in by itself (autosched_nightly.sql: autosched_nightly_requests)
+async function asQueued(kind) {
+  const r = await sb.rpc('hub_autosched_nightly_request', { p_kind: kind });
+  if (r.error) throw new Error(/hub_autosched_nightly_request/.test(r.error.message) ? 'Run autosched_nightly.sql in Supabase first (the buttons are queued now).' : r.error.message);
+  const id = r.data, t0 = Date.now();
+  while (Date.now() - t0 < 6 * 60 * 1000) {
+    await new Promise(ok => setTimeout(ok, 4000));
+    const g = await sb.rpc('hub_autosched_nightly_request_get', { p_id: id });
+    if (g.error) throw new Error(g.error.message);
+    const x = g.data || {};
+    if (x.status === 'done') return x.result;
+    if (x.status === 'failed') throw new Error(x.error || 'It didn\u2019t finish');
+    _asn.wait = x.status === 'working' ? 'Working on it…' : 'Queued: starts within a minute…'; asDraw();
+  }
+  throw new Error('Still working on it. Look again in a few minutes (Last 7 days shows what it did).');
+}
 async function asNightlyPreview() {
-  _asn.busy = 'preview'; asDraw();
-  const { data, error } = await sb.rpc('autosched_nightly_run', { p_dry: true });
-  _asn.busy = '';
-  if (error) { alert(error.message); asDraw(); return; }
-  _asn.preview = data.actions || []; asDraw();
+  _asn.busy = 'preview'; _asn.wait = 'Queued: starts within a minute…'; asDraw();
+  try { const data = await asQueued('preview'); _asn.preview = (data && data.actions) || []; }
+  catch (e) { alert(e.message); }
+  _asn.busy = ''; _asn.wait = ''; asDraw();
 }
 async function asNightlyNow() {
   const n = (_asn.preview || []).filter(a => !['keep_no_history'].includes(a.action)).length;
   if (!confirm(`Run tonight's changes now${_asn.preview ? ` (${n} change${n === 1 ? '' : 's'}, as in the preview)` : ''}? Each one can be undone.`)) return;
-  _asn.busy = 'run'; asDraw();
-  const { data, error } = await sb.rpc('autosched_nightly_run', { p_dry: false });
-  _asn.busy = '';
-  if (error) { alert(error.message); asDraw(); return; }
+  _asn.busy = 'run'; _asn.wait = 'Queued: starts within a minute…'; asDraw();
+  try { await asQueued('run'); } catch (e) { alert(e.message); _asn.busy = ''; _asn.wait = ''; asDraw(); return; }
+  _asn.busy = ''; _asn.wait = '';
   _asn.preview = null; await asNightlyLoad();
+  try { myNotesLoad(); } catch (e) {}
   if (_as.plan) asMake();   // (the week's plan, with the new state)
 }
 async function asNightlyUndo(id) {
