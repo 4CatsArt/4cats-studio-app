@@ -2377,6 +2377,7 @@ tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decorati
       <button class="nav-item" id="nav-announce" onclick="openAnnouncePane()"><span class="ic">📢</span> Announcements</button>
       <button class="nav-item" id="nav-bulk" onclick="openBulkPane()"><span class="ic">➕</span> Bulk add</button>
       <button class="nav-item" id="nav-ct" onclick="openCtPane()"><span class="ic">📚</span> Class times</button>
+      <button class="nav-item" id="nav-sessions-table" onclick="window.open('sessions.html', '_blank')" title="Every class time in a table: sort, filter, delete several at once (opens in a new tab)"><span class="ic">🗂️</span> Class times table</button>
       <button class="nav-item" id="nav-don" onclick="openDonPane()"><span class="ic">🎁</span> Donations & giveaways</button>
       <button class="nav-item" id="nav-ft" onclick="openFtPane()"><span class="ic">🏫</span> Field trips <span class="nav-badge" id="ft-badge" style="display:none"></span></button>
       <button class="nav-item" id="nav-act" onclick="openActPane()"><span class="ic">🕘</span> Activity log</button>
@@ -4323,6 +4324,8 @@ const AS_WEEKEND_LATE = [['16:00', 'workshop'], ['16:15', 'glazing'], ['16:30', 
 const AS_ON_GRID = (k, start) => k === 'glazing' ? start % 60 === 15 : (k === 'workshop' || k === 'mini') ? start % 30 === 0 : true;
 const AS_GLAZE_MAX = weekend => weekend ? 2 : 1;
 const AS_CLASS_BUFFER = 15;
+// A 6pm Friday Kids Party runs like a workshop (Nov 7 2026): no teacher of its own, so Friday evening workshops go ahead
+function asFriSixParty(s, d) { return s.k === 'party' && s.start === 18 * 60 && new Date(d + 'T12:00:00').getDay() === 5 && !/splatter/i.test(s.title || ''); }
 // a field trip or PA/PD day's daytime teacher works this long (7.5 h, e.g. 10:30–6), a camp's at least until 5pm
 const AS_DAY_SPAN = 450;
 const AS_PARTY_CLOSE_DAYS = 7, AS_PARTY_ONE_DAYS = 14;   // open party spots close a week out; double/triple times go down to one two weeks out
@@ -4471,7 +4474,7 @@ function asBuild(W, onlyId) {
           else { const e = [s.start, end, lab]; e.wheel = true; ded.push(e); }
         }
         else if (s.k === 'kidsws') ded.push([s.start, s.start + (s.len || 120), lb]);
-        else if (s.k === 'party' && s.booked > 0) { const len = s.party_minutes || 105; ded.push([s.start, s.start + len, lb + ' (party)']); if (staff === 1) ded.push([s.start + len, s.start + len + 45, 'lunch after the party']); }
+        else if (s.k === 'party' && s.booked > 0 && !asFriSixParty(s, d)) { const len = s.party_minutes || 105; ded.push([s.start, s.start + len, lb + ' (party)']); if (staff === 1) ded.push([s.start + len, s.start + len + 45, 'lunch after the party']); }
         // a booked Adult Get-Together runs like a workshop: its teacher only for the first 15 minutes (the intro)
         else if (s.k === 'group' && s.booked > 0 && (s.party === 'get_together' || /get.?together/i.test(s.title || ''))) ded.push([s.start, s.start + 15, lb + ' (get-together intro)']);
         else if ((s.k === 'field' || s.k === 'group') && s.booked > 0) ded.push([s.start, s.start + (s.len || 120), lb + (s.k === 'field' ? ' (field trip)' : '')]);
@@ -20482,14 +20485,28 @@ function renderMsgAttachments(attachments) {
 
 // ── MAGICAL MOMENTS (studio view) ────────────────────────────
 
+// The people a moment can be about: this studio's active staff (the same list the shift planner uses); home office: everyone
+var studioStaffList = []
+async function loadMomentStaff() {
+  try {
+    var r = await sb.from('staff_profiles').select('id, display_name, preferred_name, nickname, studio_ids, is_active, termination_date').eq('is_active', true).order('display_name')
+    var today = new Date().toLocaleDateString('en-CA')
+    var all = (r.data || []).filter(function (p) { return !p.termination_date || p.termination_date >= today })
+    var mine = _sessionStudioId ? all.filter(function (p) { return !p.studio_ids || !p.studio_ids.length || p.studio_ids.indexOf(_sessionStudioId) !== -1 }) : all
+    studioStaffList = mine.length ? mine : all
+  } catch (e) { studioStaffList = [] }
+}
 function loadMomentsView() {
   var el = document.getElementById('moments-view-content')
   el.innerHTML = renderMomentsSubmitUI()
+  _mmSelectedStaff = null
   // init staff search after render
   var input = document.getElementById('mm-staff-search')
   if (input) {
     input.addEventListener('input', function() { searchStaffForMoment(this.value) })
+    input.addEventListener('focus', function() { searchStaffForMoment(this.value, true) })
   }
+  loadMomentStaff().then(function () { if (input && document.activeElement === input) searchStaffForMoment(input.value, true) })
 }
 
 function renderMomentsSubmitUI() {
@@ -20505,7 +20522,7 @@ function renderMomentsSubmitUI() {
     + '<div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Who is this about?</div>'
     + '<input id="mm-staff-search" type="text" placeholder="Start typing a name..." autocomplete="off" style="width:100%;padding:10px 12px;border:0.5px solid #d0d0c8;border-radius:8px;font-size:14px;outline:none">'
     + '<div id="mm-staff-results" style="margin-top:4px"></div>'
-    + '<div id="mm-selected-staff" style="display:none;margin-top:6px;padding:9px 13px;background:#f5f0ff;border:0.5px solid #ce93d8;border-radius:8px;font-size:13px;display:flex;align-items:center;justify-content:space-between"></div>'
+    + '<div id="mm-selected-staff" style="margin-top:6px;padding:9px 13px;background:#f5f0ff;border:0.5px solid #ce93d8;border-radius:8px;font-size:13px;align-items:center;justify-content:space-between;display:none"></div>'
     + '</div>'
     // Your name
     + '<div>'
@@ -20536,21 +20553,28 @@ function renderMomentsSubmitUI() {
 
 var _mmSelectedStaff = null
 
-function searchStaffForMoment(val) {
+var _mmMatches = []
+function searchStaffForMoment(val, onFocus) {
   var q = (val || '').trim().toLowerCase()
   var res = document.getElementById('mm-staff-results')
-  if (!q || q.length < 1) { res.innerHTML = ''; return }
-  var matches = studioStaffList.filter(function(s) {
-    var name = (s.display_name || '') + ' ' + (s.nickname || '')
-    return name.toLowerCase().indexOf(q) !== -1
-  }).slice(0, 6)
-  if (!matches.length) { res.innerHTML = '<div style="font-size:12px;color:#aaa;padding:4px 0">No staff found</div>'; return }
-  res.innerHTML = '<div style="border:0.5px solid #e0e0d8;border-radius:8px;overflow:hidden;margin-top:2px">'
-    + matches.map(function(s) {
-      var name = s.display_name || s.nickname || 'Unknown'
-      return '<div onclick="selectMomentStaff(\'' + s.id + '\',\'' + escHtml(name) + '\')" style="padding:9px 13px;font-size:13px;cursor:pointer;background:white;border-bottom:0.5px solid #f0f0e8" onmouseover="this.style.background=\'#f5f5f0\'" onmouseout="this.style.background=\'white\'">' + escHtml(name) + '</div>'
+  if (!res) return
+  if (!q && !onFocus) { res.innerHTML = ''; return }
+  var nm = function (s) { return (s.preferred_name || '').trim() || s.display_name || s.nickname || 'Unknown' }
+  if (!studioStaffList.length) { res.innerHTML = '<div style="font-size:12px;color:#aaa;padding:4px 0">Loading names\u2026</div>'; return }
+  _mmMatches = studioStaffList.filter(function(s) {
+    var name = (s.display_name || '') + ' ' + (s.nickname || '') + ' ' + (s.preferred_name || '')
+    return !q || name.toLowerCase().indexOf(q) !== -1
+  }).slice(0, q ? 8 : 30)
+  if (!_mmMatches.length) { res.innerHTML = '<div style="font-size:12px;color:#aaa;padding:4px 0">No one by that name at this studio</div>'; return }
+  res.innerHTML = '<div style="border:0.5px solid #e0e0d8;border-radius:8px;overflow:auto;max-height:260px;margin-top:2px">'
+    + _mmMatches.map(function(s, i) {
+      return '<div onmousedown="event.preventDefault()" onclick="selectMomentStaffAt(' + i + ')" style="padding:9px 13px;font-size:13px;cursor:pointer;background:white;border-bottom:0.5px solid #f0f0e8" onmouseover="this.style.background=\'#f5f5f0\'" onmouseout="this.style.background=\'white\'">' + escHtml(nm(s)) + '</div>'
     }).join('')
     + '</div>'
+}
+function selectMomentStaffAt(i) {
+  var s = _mmMatches[i]; if (!s) return
+  selectMomentStaff(s.id, (s.preferred_name || '').trim() || s.display_name || s.nickname || 'Unknown')
 }
 
 function selectMomentStaff(id, name) {
