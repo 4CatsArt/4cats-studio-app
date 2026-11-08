@@ -4456,7 +4456,7 @@ function asBuild(W, onlyId) {
           const open = list.reduce((t, e) => t + (+e.s.left || 0), 0);
           let to = null, why = '';
           if (daysOut <= AS_PARTY_CLOSE_DAYS) { to = list.map(() => 0); why = 'a week or less away'; }
-          else if (daysOut <= AS_PARTY_ONE_DAYS && open >= 2) {
+          else if (daysOut <= AS_PARTY_ONE_DAYS && open >= 2 && !isGt(list[0].s)) {   // (Kids / Splatter rooms only: an Adult Get-Together slot is one time of its own)
             const keep = Math.max(0, list.findIndex(e => e.s.party !== 'splatter' && !/splatter/i.test(e.s.title || '')));
             to = list.map((e, i) => i === keep ? 1 : 0); why = 'two weeks or less away';
           }
@@ -4864,6 +4864,7 @@ function asRulesHtml() {
     <li>An open party time counts as "could still book" until it closes.</li>
     <li><b>Unbooked party times close ${n(S.open_party_close_days)} days before.</b></li>
     <li><b>Double or triple party times</b> with 2 or more rooms still open go down to <b>one room ${n(S.party_one_room_days)} days before</b> (Splatter closes before Kids).</li>
+    <li><b>Adult Get-Together slots</b> are one time each, at every studio: they're never part of the "down to one room" rule, and only close when unbooked ${n(S.open_party_close_days)} days before.</li>
     <li>Field trips are never closed by these rules.</li>
   </ul>
 
@@ -15230,7 +15231,7 @@ async function loadClassStaff(studioId) {
     const kidsWeeks = (sess || []).filter(x => /\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(x.title || ''));
     const rosters = await Promise.all(kidsWeeks.map(x => sb.rpc('get_class_week_bookings', { p_session_id: x.id })));
     const kidsRows = kidsWeeks.map((x, i) => ({ time: x.session_time, title: x.title,
-      bookingCount: rosters[i].error ? 0 : (rosters[i].data || []).reduce((n, b) => n + (b.qty || 0), 0) }));
+      bookingCount: rosters[i].error ? 0 : (rosters[i].data || []).reduce((n, b) => n + (b.qty || 0), 0), ok: !rosters[i].error }));
     let campTeam = {};
     const campIds = (sess || []).filter(x => /camp|pa day|pd day|pa\/pd|no school/i.test(x.title || '')).map(x => x.id);
     if (campIds.length) { try { const ct = await sb.rpc('hub_camp_team', { p_session_ids: campIds }); if (!ct.error) campTeam = ct.data || {}; } catch (e) {} }
@@ -15396,9 +15397,18 @@ function renderFloorToday(data) {
   });
   const allSessions = merged.filter(s => !evTitles.has(String(s.title || '').trim().toLowerCase()))
     .sort((a, b) => String(a.time).localeCompare(String(b.time)));
-  // 0 booked and 0 spots open = not running today (kids classes always show).
+  // 0 booked and 0 spots open = not running today. A kids class with nobody enrolled isn't running either (rules doc 1:
+  // nobody enrolled = no class, no teacher), once the class counts have loaded.
+  const isKidsClass = s => { const info = _classInfo && _classInfo.byKey[String(s.time || '').slice(0, 8) + '|' + s.title];
+    return !!(info && (info.type === 'class' || info.type === 'series')) || /class \d+ of \d+|week session/i.test(s.title || '') || s.title === 'Catch Up Class'; };
   const notRunning = s => {
     if (!_classInfo || Number(s.bookingCount || 0) > 0) return false;
+    if (isKidsClass(s)) {
+      if (!_classInfo.kidsRows || s.title === 'Catch Up Class') return false;
+      // weeks 2+: only when that week's class list really loaded (a failed load must never hide a class)
+      const wk = _classInfo.kidsRows.find(k => String(k.time || '').slice(0, 8) + '|' + k.title === String(s.time || '').slice(0, 8) + '|' + s.title);
+      return wk ? wk.ok === true : true;
+    }
     const info = _classInfo.byKey[String(s.time || '').slice(0, 8) + '|' + s.title];
     if (!info || info.spaces === null || info.spaces === undefined || Number(info.spaces) > 0) return false;
     return !(info.type === 'class' || info.type === 'series' || /class \d+ of \d+|week session/i.test(s.title || '') || s.title === 'Catch Up Class');
@@ -15447,7 +15457,7 @@ function renderFloorToday(data) {
     ${rolesStripHtml()}
     ${_todayEvents.length ? `<div class="ev-list">${_todayEvents.map(eventBlockHtml).join('')}</div>` : ''}
     <div class="floor-list">${rows || `<div class="floor-empty">${_todayEvents.length ? 'No classes booked today.' : 'Nothing booked today.'}</div>`}</div>
-    ${offToday.length ? `<details class="plan-closed"><summary>Not running today (${offToday.length}) · 0 booked and no spots open</summary>
+    ${offToday.length ? `<details class="plan-closed"><summary>Not running today (${offToday.length}) · nobody booked or enrolled</summary>
       ${offToday.map(s => `<div class="plan-sess off"><span class="t">${esc(shortTime(s.time))}</span><span class="nm">${esc(s.title)}</span></div>`).join('')}
       <div class="goal-note" style="margin:6px 2px">A coordinator can open spots from the Schedule.</div></details>` : ''}`;
   el.style.display = '';
