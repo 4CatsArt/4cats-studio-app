@@ -478,6 +478,13 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .as-x:hover { color: #9b1b22; } .as-dn { overflow-wrap: anywhere; } .as-dh { min-width: 0; }
 .as-foot { position: sticky; bottom: 0; display: flex; gap: 12px; align-items: center; justify-content: flex-end; background: rgba(255,255,255,.96); border-top: 1px solid var(--border); padding: 10px 14px; margin: 0 -4px; }
 /* 👥 Studio staffing */
+.asn { background: #fff; border: 1px solid var(--border); border-radius: 12px; margin: 8px 0; }
+.asn-head { display: flex; gap: 10px; align-items: center; width: 100%; background: none; border: 0; font: inherit; padding: 10px 14px; cursor: pointer; text-align: left; color: var(--ink); }
+.asn-head .fd-sm { flex: 1; } .asn-car { color: var(--ink-soft); }
+.asn-pill { font-size: 12px; font-weight: 700; padding: 1px 9px; border-radius: 999px; background: #eee; color: #666; } .asn-pill.on { background: #e2f1e8; color: #1d5640; }
+.asn-body { padding: 0 14px 12px; } .asn-body h4 { margin: 12px 0 6px; font-size: 13.5px; }
+.asn-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; } .asn-sw { display: flex; gap: 6px; align-items: center; font-weight: 600; }
+.asn-tbl td { font-size: 13px; vertical-align: top; } .asn-undone td { opacity: .5; text-decoration: line-through; } .asn-undone td:last-child { text-decoration: none; }
 .stf-rb { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; margin: 16px 0; max-width: 980px; }
 .stf-rb h3 { margin: 0 0 4px; font-size: 17px; } .stf-rb h4 { margin: 14px 0 6px; font-size: 13.5px; color: var(--ink-soft); }
 .stf-rtbl input, .stf-si input { width: 72px; font: inherit; padding: 4px 6px; border: 1px solid var(--border); border-radius: 8px; text-align: right; }
@@ -4777,6 +4784,7 @@ function asDraw() {
       <select onchange="_as.prov=this.value;_as.plan=null;asDraw()"><option value="">All studios</option>${[['BC', 'BC'], ['AB', 'Alberta'], ['ON', 'Ontario']].map(p => `<option value="${p[0]}"${_as.prov === p[0] ? ' selected' : ''}>${p[1]}</option>`).join('')}</select>
       <button class="fd-pay" ${_as.busy ? 'disabled' : ''} onclick="asMake()">${_as.busy ? 'Working…' : P ? '↻ Make it again' : 'Make the workshop schedule'}</button>
       <button class="ho-btn" onclick="asTodo()">📋 To-do${_as.openNotes && _as.openNotes.length ? ` <span class="as-todo-n">${_as.openNotes.length}</span>` : ''}</button></div>
+    ${asNightlyHtml()}
     ${_as.notesErr ? `<p class="fd-sm">${esc(_as.notesErr)}</p>` : ''}
     ${_as.dpErr ? `<p class="fd-sm">${esc(_as.dpErr)}</p>` : ''}
     ${_as.err ? `<p class="fd-msg">${esc(_as.err)}</p>` : ''}${_as.done ? `<div class="as-done">✅ Published: <b>${_as.done.added}</b> new time${_as.done.added === 1 ? '' : 's'}, <b>${_as.done.removed}</b> empty time${_as.done.removed === 1 ? '' : 's'} removed${_as.done.kept ? `, ${_as.done.kept} kept because someone booked meanwhile` : ''}. <button class="ho-btn" onclick="_as.week=asAddDays(_as.week,7);_as.plan=null;_as.done=null;asDraw()">Next week →</button></div>` : ''}`;
@@ -4795,6 +4803,71 @@ function asDraw() {
     <div class="as-studios">${P.studios.map((S, si) => asStudioHtml(S, si)).join('')}</div>
     <div class="as-foot"><span>${sum.add} new · ${sum.rem} off${P.studios.some(S => S.published) ? ` <span class="fd-sm">(${P.studios.filter(S => S.published).length} studio${P.studios.filter(S => S.published).length === 1 ? '' : 's'} already published)</span>` : ''}</span><button class="fd-pay" ${_as.busy || (!sum.add && !sum.rem) ? 'disabled' : ''} onclick="asPublish()">${P.studios.some(S => S.published) ? 'Approve and publish the rest' : 'Approve and publish'}</button></div>`;
   el.innerHTML = h;
+}
+// ---- 🌙 The nightly run (autosched_nightly.sql): closes and swaps by itself every night once switched on (rules doc 13, 30–33) ----
+let _asn = { loaded: false, open: false, on: false, set: null, log: [], preview: null, busy: '', err: '' };
+const ASN_ACT = { close_party: '🎉 Party closed', one_room: '🎉 Down to one room', swap: '🔁 Swapped', close_low: '✕ Closed (low)', close_quiet_day: '✕ Closed (quiet day)', note_low: '📋 Note: low, with bookings', keep_no_history: '• Kept (no history)' };
+async function asNightlyLoad() {
+  _asn.loaded = true;
+  const [st, lg] = await Promise.all([sb.rpc('get_staffing_settings'), sb.rpc('hub_autosched_nightly_log', { p_days: 7 })]);
+  if (lg.error) { _asn.err = /hub_autosched_nightly_log/.test(lg.error.message) ? 'Run autosched_nightly.sql in Supabase first.' : lg.error.message; asDraw(); return; }
+  _asn.set = st.data || {}; _asn.on = !!_asn.set.nightly_on; _asn.log = lg.data || []; _asn.err = ''; asDraw();
+}
+function asNightlyList(list, withUndo) {
+  if (!list.length) return '<p class="fd-sm">Nothing.</p>';
+  const fmt = d => new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
+  return `<table class="fd-tbl asn-tbl"><thead><tr><th>Day</th><th>Studio</th><th>What</th><th></th>${withUndo ? '<th></th>' : ''}</tr></thead><tbody>${list.map(a => `<tr${a.undone_at ? ' class="asn-undone"' : ''}>
+    <td>${esc(fmt(a.day))}</td><td>${esc(STUDIO_NAMES[a.studio_id] || a.studio_id)}</td><td><b>${esc(ASN_ACT[a.action] || a.action)}</b></td><td>${esc(a.detail || '')}</td>
+    ${withUndo ? `<td>${a.undone_at ? `<span class="fd-sm">undone${a.undone_by ? ' by ' + esc(String(a.undone_by).split('@')[0]) : ''}</span>` : a.can_undo && _hoCan.edit ? `<button class="ho-btn" onclick="asNightlyUndo(${+a.id})">Undo</button>` : ''}</td>` : ''}</tr>`).join('')}</tbody></table>`;
+}
+function asNightlyHtml() {
+  if (!_asn.loaded) { setTimeout(asNightlyLoad, 0); }
+  const N = _asn, real = (N.log || []).filter(a => a.action !== 'keep_no_history');
+  const last = N.log && N.log.length ? new Date(N.log[0].run_at) : null;
+  const head = `<button class="asn-head" onclick="_asn.open=!_asn.open;asDraw()" aria-expanded="${N.open}">🌙 <b>Nightly run</b>
+    <span class="asn-pill ${N.on ? 'on' : ''}">${N.on ? 'On' : 'Off'}</span>
+    <span class="fd-sm">${N.err ? esc(N.err) : last ? `last change ${esc(last.toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))} · ${real.length} change${real.length === 1 ? '' : 's'} this week` : N.on ? 'nothing changed yet' : 'switched off: nothing changes by itself'}</span>
+    <span class="asn-car">${N.open ? '▾' : '▸'}</span></button>`;
+  if (!N.open || N.err) return `<div class="asn">${head}</div>`;
+  return `<div class="asn">${head}<div class="asn-body">
+    <p class="fd-sm">Every night at about 2am, by itself: unbooked party times close a week out (double times go down to one room two weeks out); workshop times nobody has booked a week out swap to the studio’s most-booked project; times expected to finish under ${esc(N.set.low_people ?? 3)} close ${esc(N.set.low_close_days ?? 3)} days out if nobody’s booked (with bookings: a note here instead, nobody is moved); a day with nothing booked closes its workshop times. Never classes, camps, wheel, booked parties, or studios with Auto-schedule off. Every change can be undone.</p>
+    <div class="asn-bar">${_hoCan.edit ? `<label class="asn-sw"><input type="checkbox" class="fd-tick" ${N.on ? 'checked' : ''} ${N.busy ? 'disabled' : ''} onchange="asNightlyToggle(this.checked)"> Run every night</label>` : ''}
+      <button class="ho-btn" ${N.busy ? 'disabled' : ''} onclick="asNightlyPreview()">${N.busy === 'preview' ? 'Looking…' : '👁 Preview tonight’s run'}</button>
+      ${_hoCan.edit ? `<button class="ho-btn" ${N.busy ? 'disabled' : ''} onclick="asNightlyNow()">${N.busy === 'run' ? 'Running…' : '▶ Run it now'}</button>` : ''}
+      <span class="fd-sm">Settings (how low, how many days out): 👥 Studio staffing → 📏 Staffing rules.</span></div>
+    ${N.preview ? `<h4>Tonight’s run would do this <span class="fd-sm">(nothing has changed)</span></h4>${asNightlyList(N.preview, false)}` : ''}
+    <h4>The last 7 days</h4>${asNightlyList(N.log || [], true)}
+  </div></div>`;
+}
+async function asNightlyToggle(on) {
+  _asn.busy = 'save'; asDraw();
+  const next = Object.assign({}, _asn.set || {}, { nightly_on: !!on });
+  const { data, error } = await sb.rpc('save_staffing_settings', { p: next });
+  _asn.busy = '';
+  if (error) { alert('Not saved: ' + error.message); asNightlyLoad(); return; }
+  _asn.set = data; _asn.on = !!data.nightly_on; asDraw();
+}
+async function asNightlyPreview() {
+  _asn.busy = 'preview'; asDraw();
+  const { data, error } = await sb.rpc('autosched_nightly_run', { p_dry: true });
+  _asn.busy = '';
+  if (error) { alert(error.message); asDraw(); return; }
+  _asn.preview = data.actions || []; asDraw();
+}
+async function asNightlyNow() {
+  const n = (_asn.preview || []).filter(a => !['keep_no_history'].includes(a.action)).length;
+  if (!confirm(`Run tonight's changes now${_asn.preview ? ` (${n} change${n === 1 ? '' : 's'}, as in the preview)` : ''}? Each one can be undone.`)) return;
+  _asn.busy = 'run'; asDraw();
+  const { data, error } = await sb.rpc('autosched_nightly_run', { p_dry: false });
+  _asn.busy = '';
+  if (error) { alert(error.message); asDraw(); return; }
+  _asn.preview = null; await asNightlyLoad();
+  if (_as.plan) asMake();   // (the week's plan, with the new state)
+}
+async function asNightlyUndo(id) {
+  const { error } = await sb.rpc('hub_autosched_nightly_undo', { p_id: id });
+  if (error) { alert(error.message); return; }
+  await asNightlyLoad(); if (_as.plan) asMake();
 }
 // the day's staff in its header: on a PA/PD or field trip day whose evening was set, the usual and the evening's ("2 staff · evening 1")
 function asDayStaff(D) {
@@ -5305,6 +5378,8 @@ const STF_SETTINGS = [
   ['Parties', [['open_party_close_days', 'An unbooked party time closes (days before)'], ['party_one_room_days', 'Double / triple party times go down to one room (days before)'],
     ['fri6_party_shared', 'The 6pm Friday Kids Party runs like a workshop (no teacher of its own)', 'bool']]],
   ['Workshops (Auto-schedule)', [['glazing_max_weekday', 'Glazing times on a weekday'], ['glazing_max_weekend', 'Glazing times on a weekend day']]],
+  ['Nightly run (Auto-schedule → 🌙 Nightly run)', [['low_people', '"Low": expected to finish with fewer people than'], ['low_close_days', 'Low times with nobody booked close (days before)'],
+    ['swap_days', 'Times nobody booked swap to the most-booked project (days before)'], ['history_weeks', 'Weeks of history for expected late bookings']]],
   ['Staff schedule builder', [['quiet_close_days', 'Nothing booked this many days before: no shifts that day'], ['quiet_booked', 'A class teacher also covers the floor with up to this many drop-ins'],
     ['floater_max_pct', 'Weekend floater only while labour stays under (%)'], ['manager_min_hours', 'Managers: at least (hours a week)'], ['manager_max_hours', 'Managers: at most (hours a week)'],
     ['max_paid_min', 'Longest shift (paid minutes)'], ['max_days', 'Most days a week']]]
