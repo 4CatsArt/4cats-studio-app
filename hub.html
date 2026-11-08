@@ -478,6 +478,10 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .as-x:hover { color: #9b1b22; } .as-dn { overflow-wrap: anywhere; } .as-dh { min-width: 0; }
 .as-foot { position: sticky; bottom: 0; display: flex; gap: 12px; align-items: center; justify-content: flex-end; background: rgba(255,255,255,.96); border-top: 1px solid var(--border); padding: 10px 14px; margin: 0 -4px; }
 /* 👥 Studio staffing */
+.as-tabs { display: flex; gap: 6px; margin: 4px 0 10px; } .as-tabs button { font: inherit; font-weight: 600; border: 1px solid var(--border); background: #fff; border-radius: 999px; padding: 6px 14px; cursor: pointer; color: var(--ink); }
+.as-tabs button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+.as-rules { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 6px 20px 16px; max-width: 860px; line-height: 1.55; }
+.as-rules h3 { font-size: 16px; margin: 18px 0 6px; display: flex; gap: 8px; align-items: center; } .as-rules ul { margin: 0; padding-left: 20px; } .as-rules li { margin: 0 0 5px; font-size: 14px; }
 .asn { background: #fff; border: 1px solid var(--border); border-radius: 12px; margin: 8px 0; }
 .asn-head { display: flex; gap: 10px; align-items: center; width: 100%; background: none; border: 0; font: inherit; padding: 10px 14px; cursor: pointer; text-align: left; color: var(--ink); }
 .asn-head .fd-sm { flex: 1; } .asn-car { color: var(--ink-soft); }
@@ -4777,6 +4781,9 @@ function asDraw() {
   const el = document.getElementById('as-pane'); if (!el) return;
   const P = _as.plan, wkEnd = asAddDays(_as.week, 6), fmt = d => new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' });
   let h = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🗓️ Auto-schedule</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+    <div class="as-tabs" role="tablist"><button role="tab" aria-selected="${_as.tab !== 'rules'}" class="${_as.tab !== 'rules' ? 'on' : ''}" onclick="_as.tab='plan';asDraw()">🗓️ Plan the week</button><button role="tab" aria-selected="${_as.tab === 'rules'}" class="${_as.tab === 'rules' ? 'on' : ''}" onclick="_as.tab='rules';asDraw()">📖 The rules</button></div>`;
+  if (_as.tab === 'rules') { el.innerHTML = h + asRulesHtml(); return; }
+  h += `
     <div class="ho-intro">Pick a week and press <b>Make the workshop schedule</b>: the empty times (0 bookings) are marked to come off and new times are proposed for every studio from our rules. Look it over, then <b>Approve and publish</b>. Nothing changes until you publish.</div>
     <div class="as-bar"><button class="ho-btn" onclick="_as.week=asAddDays(_as.week,-7);_as.plan=null;_as.done=null;asDraw()" aria-label="Previous week">‹</button>
       <b>Week of ${fmt(_as.week)} – ${fmt(wkEnd)}</b><button class="ho-btn" onclick="_as.week=asAddDays(_as.week,7);_as.plan=null;_as.done=null;asDraw()" aria-label="Next week">›</button>
@@ -4803,6 +4810,86 @@ function asDraw() {
     <div class="as-studios">${P.studios.map((S, si) => asStudioHtml(S, si)).join('')}</div>
     <div class="as-foot"><span>${sum.add} new · ${sum.rem} off${P.studios.some(S => S.published) ? ` <span class="fd-sm">(${P.studios.filter(S => S.published).length} studio${P.studios.filter(S => S.published).length === 1 ? '' : 's'} already published)</span>` : ''}</span><button class="fd-pay" ${_as.busy || (!sum.add && !sum.rem) ? 'disabled' : ''} onclick="asPublish()">${P.studios.some(S => S.published) ? 'Approve and publish the rest' : 'Approve and publish'}</button></div>`;
   el.innerHTML = h;
+}
+// ---- 📖 The rules, in plain English: written from the live settings (📏 Staffing rules), so they never go out of date ----
+let _asRules = null;
+async function asRulesLoad() {
+  _asRules = { loading: true };
+  await asSettingsLoad();
+  const [rr, st] = await Promise.all([sb.rpc('hub_staffing_rules_list'), sb.rpc('hub_staffing_list')]);
+  _asRules = { list: rr.error ? [] : (rr.data || []), spots: (st.data && st.data.settings) || {}, err: rr.error ? rr.error.message : '' };
+  if (_as.tab === 'rules') asDraw();
+}
+function asRulesHtml() {
+  if (!_asRules) { setTimeout(asRulesLoad, 0); return '<p class="ho-intro">Loading the rules…</p>'; }
+  if (_asRules.loading) return '<p class="ho-intro">Loading the rules…</p>';
+  const S = AS_SET, sp = _asRules.spots || {}, n = v => esc(String(v)), hrs = m => { const h = +m / 60; return (h % 1 ? h.toFixed(1) : h) + (h === 1 ? ' hour' : ' hours') };
+  const per = k => (_asRules.list || []).find(r => k.test((r.pattern || '') + ' ' + (r.label || '')));
+  const ratio = (k, d) => { const r = per(k); return r && +r.ratio > 0 ? +r.ratio : d };
+  const shared = ratio(/workshop|glaz|shared/i, 25), party = ratio(/kids.*party|splatter/i, 15), trip = ratio(/field/i, 30), camp = ratio(/camp|pa.?day/i, 15);
+  const on = !!(_asn && _asn.on);
+  return `<div class="as-rules">
+  <p class="ho-intro">How Auto-schedule and the staff schedule decide things, in plain words. The numbers come from <b>👥 Studio staffing → 📏 Staffing rules</b>: change one there and it changes here, and in both schedulers.</p>
+
+  <h3>1. Planning the workshop week</h3>
+  <ul>
+    <li>Press <b>Make the workshop schedule</b>: times nobody has booked are marked to come off, and new times are proposed for every studio. <b>Nothing changes until you press Approve and publish.</b></li>
+    <li>How much a studio runs depends on its <b>staff that day</b> (👥 Studio staffing). Studios with Auto-schedule switched off there are left alone.</li>
+    <li>Workshops and Mini Makes start on the hour or half hour; glazing starts at a quarter past. At most <b>${n(S.glazing_max_weekday)}</b> glazing time on a weekday and <b>${n(S.glazing_max_weekend)}</b> on a weekend day.</li>
+    <li>Weekends follow a set pattern of afternoon times; studios with 3 or more staff also get midday times. Main Street also gets 9am times when there's no 9am kids class. Later times only go where they can finish by the studio's weekend closing (5pm unless set).</li>
+    <li>On a weekday with no kids class, a studio can get a kids workshop at its set time (👥 Studio staffing).</li>
+    <li>New times get <b>${n(sp.spots_small ?? 12)}</b> spots with 1–2 staff, <b>${n(sp.spots_big ?? 18)}</b> with 3 or more, and <b>${n(sp.spots_kids ?? 15)}</b> for kids-only times.</li>
+    <li>A new time is only added when <b>at least one person is free</b> for it, after the people tied up with teaching (next section).</li>
+    <li>A camp day at a small studio (2 staff or fewer, on a weekday): no workshops that day.</li>
+    <li>A camp or PA/PD day on a day the studio is usually closed: planned with 1 person, 8:30am–5pm, without asking.</li>
+    <li>A PA/PD day or field trip asks how the evening should run (as usual, 1 staff, one more teacher, or close), and that answer is kept for the staff schedule.</li>
+  </ul>
+
+  <h3>2. Who is tied up teaching (and for how long)</h3>
+  <ul>
+    <li><b>Kids class:</b> 1 teacher for ${hrs(S.class_min)} (or longer, if the class is set longer), plus <b>${n(S.class_after_min)} minutes after</b> for tidying and handing kids back.</li>
+    <li><b>Clay Wheel class:</b> 1 teacher (wheel badge) for ${hrs(S.wheel_class_min)}. <b>Wheel Workshop:</b> ${hrs(S.wheel_workshop_min)}. A wheel class and a Wheel Workshop starting together share one teacher.</li>
+    <li><b>Kids-only workshop:</b> 1 teacher for ${hrs(S.kids_workshop_min)}.</li>
+    <li><b>Kids or Splatter party (booked):</b> 1 teacher per <b>${n(party)}</b> kids for the art time (${n(S.party_min)} minutes unless the party says otherwise), not the party time after. With only 1 staff, a ${n(S.lunch_after_party_min)}-minute break follows.</li>
+    <li><b>Adult Get-Together or team building:</b> teachers for the <b>first ${n(S.get_together_intro_min)} minutes only</b> (the intro), 1 per <b>${n(AS_GT_PER)}</b> guests; after that it runs like a workshop.</li>
+    <li><b>Field trip:</b> 1 teacher per <b>${n(trip)}</b>, going by the <b>expected</b> number (most only pay a deposit), for ${hrs(S.field_trip_min)} unless set. The daytime teacher works about ${hrs(S.day_teacher_span_min)}, starting 30 minutes before.</li>
+    <li><b>Camp or PA/PD day:</b> 1 teacher per <b>${n(camp)}</b> campers, one of them the lead.</li>
+    <li><b>Workshops, glazing, Mini Make:</b> shared by everyone in the studio at the time, <b>1 person per ${n(shared)}</b>, counted in 30-minute blocks, using the people expected (booked plus usual walk-ins).</li>
+    <li><b>6pm Friday Kids Party:</b> ${S.fri6_party_shared !== false ? 'runs like a workshop: no teacher of its own, so Friday evening workshops go ahead around it.' : 'has its own teacher, like any party.'}</li>
+    <li>A warning shows when more teacher-only times overlap than there are staff (for example two kids classes with 1 staff).</li>
+  </ul>
+
+  <h3>3. Party times</h3>
+  <ul>
+    <li>An open party time counts as "could still book" until it closes.</li>
+    <li><b>Unbooked party times close ${n(S.open_party_close_days)} days before.</b></li>
+    <li><b>Double or triple party times</b> with 2 or more rooms still open go down to <b>one room ${n(S.party_one_room_days)} days before</b> (Splatter closes before Kids).</li>
+    <li>Field trips are never closed by these rules.</li>
+  </ul>
+
+  <h3>4. The staff schedule</h3>
+  <ul>
+    <li>The staff schedule plans at least as many people as Auto-schedule planned for each day, while anything is on. A <b>+ Staff</b> request adds one more person, over the hours given (or the busiest stretch).</li>
+    <li>At least 1 person whenever anything is on. The day starts 30 minutes before the first booking.</li>
+    <li><b>Shifts:</b> standard shapes; at least 3 hours; at most <b>${hrs(S.max_paid_min)}</b> paid (with the unpaid break by province); no 6-hour shifts like 3:30–9:30 unless the break is clear. Weekend days end at 5pm; weekday shifts flex with bookings.</li>
+    <li><b>People:</b> never on unavailability or approved time off; one shift a day; at most <b>${n(S.max_days)}</b> days a week (2 days off, together if possible). Managers <b>${n(S.manager_min_hours)}–${n(S.manager_max_hours)}</b> hours a week (some marked to aim for ${n(S.manager_max_hours)}). New staff get 3 training shifts first. On-call staff only as a last resort.</li>
+    <li><b>Weekends</b> follow 👥 Studio staffing's numbers. A <b>weekend floater</b> is only added if the day's labour stays under <b>${n(S.floater_max_pct)}%</b>, counting expected walk-ins.</li>
+    <li>A class teacher also covers the studio during class when it's quiet: no party on, and at most <b>${n(S.quiet_booked)}</b> people at drop-in times.</li>
+    <li>A day with nothing booked <b>${n(S.quiet_close_days)}</b> days before: nobody is scheduled.</li>
+  </ul>
+
+  <h3>5. The nightly run <span class="asn-pill ${on ? 'on' : ''}">${on ? 'On' : 'Off'}</span></h3>
+  <ul>
+    <li>${on ? 'Every night at about 2am, by itself:' : 'When switched on (🌙 Nightly run, on the Plan the week tab), every night at about 2am, by itself:'}</li>
+    <li><b>Unbooked party times</b> close ${n(S.open_party_close_days)} days out; double or triple times go down to one room ${n(S.party_one_room_days)} days out.</li>
+    <li><b>Workshop times nobody has booked ${n(S.swap_days)} days out</b> change to a more popular project at that studio (a different one for each time, never one already on that day, never wheel). Same time, same spots.</li>
+    <li><b>Times expected to finish with fewer than ${n(S.low_people)} people</b>, ${n(S.low_close_days)} days out ("expected" = booked now plus the late bookings and walk-ins that time usually gets, from the last ${n(S.history_weeks)} weeks):
+      <ul><li>nobody booked: it closes (spots to 0);</li><li>1 or 2 booked: it stays open, and a note asks whether to close it and move them;</li><li>not enough history to tell: it stays open.</li></ul></li>
+    <li><b>A day with nothing booked at all</b> ${n(S.low_close_days)} days out: its workshop times close.</li>
+    <li><b>Never:</b> deletes anything; changes anything with a booking; touches classes, camps, PA/PD days, wheel, field trips, booked parties, hidden times, or studios with Auto-schedule off. Every change can be undone.</li>
+  </ul>
+  ${_asRules.err ? `<p class="fd-sm">(Some numbers are the defaults: ${esc(_asRules.err)})</p>` : ''}
+  </div>`;
 }
 // ---- 🌙 The nightly run (autosched_nightly.sql): closes and swaps by itself every night once switched on (rules doc 13, 30–33) ----
 let _asn = { loaded: false, open: false, on: false, set: null, log: [], preview: null, busy: '', err: '' };
