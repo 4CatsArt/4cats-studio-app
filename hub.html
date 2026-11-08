@@ -478,6 +478,11 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .as-x:hover { color: #9b1b22; } .as-dn { overflow-wrap: anywhere; } .as-dh { min-width: 0; }
 .as-foot { position: sticky; bottom: 0; display: flex; gap: 12px; align-items: center; justify-content: flex-end; background: rgba(255,255,255,.96); border-top: 1px solid var(--border); padding: 10px 14px; margin: 0 -4px; }
 /* 👥 Studio staffing */
+.stf-rb { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; margin: 16px 0; max-width: 980px; }
+.stf-rb h3 { margin: 0 0 4px; font-size: 17px; } .stf-rb h4 { margin: 14px 0 6px; font-size: 13.5px; color: var(--ink-soft); }
+.stf-rtbl input, .stf-si input { width: 72px; font: inherit; padding: 4px 6px; border: 1px solid var(--border); border-radius: 8px; text-align: right; }
+.stf-sg { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 6px 18px; }
+.stf-si { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 13.5px; } .stf-sb { font-size: 13.5px; display: flex; gap: 8px; align-items: center; grid-column: 1 / -1; }
 .stf-rules { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px; margin: 8px 0; max-width: 980px; }
 .stf-rules label { display: inline-flex; gap: 6px; align-items: center; font-size: 14px; } .stf-rules input { width: 64px; font: inherit; padding: 5px 7px; border: 1px solid var(--border); border-radius: 8px; }
 .stf-tbl th.c, .stf-tbl td.c { text-align: center; } .stf-tbl td { padding: 6px 8px; } .stf-wrap { max-height: calc(100vh - 290px); }
@@ -4322,16 +4327,33 @@ const AS_WEEKEND_MORNING = [['09:00', 'workshop'], ['09:15', 'glazing'], ['09:30
 const AS_WEEKEND_LATE = [['16:00', 'workshop'], ['16:15', 'glazing'], ['16:30', 'mini'], ['17:00', 'workshop']];
 // start times: workshops and Mini Makes on the half hour; glazing on :15; glazing per day (weekday 1, weekend day 2)
 const AS_ON_GRID = (k, start) => k === 'glazing' ? start % 60 === 15 : (k === 'workshop' || k === 'mini') ? start % 30 === 0 : true;
-const AS_GLAZE_MAX = weekend => weekend ? 2 : 1;
-const AS_CLASS_BUFFER = 15;
+// The shared staffing settings (staffing_settings.sql; 👥 Studio staffing → 📏 Staffing rules): the same numbers the staff
+// schedule builder and get_staffing_need use. These are the defaults; asMake() loads the saved ones.
+const AS_SET_DEFAULTS = { class_min: 90, class_after_min: 15, wheel_class_min: 90, wheel_workshop_min: 120, kids_workshop_min: 120, party_min: 105,
+  lunch_after_party_min: 45, get_together_intro_min: 15, field_trip_min: 120, camp_min: 360, day_teacher_span_min: 450, open_party_close_days: 7,
+  party_one_room_days: 14, fri6_party_shared: true, glazing_max_weekday: 1, glazing_max_weekend: 2 };
+let AS_SET = Object.assign({}, AS_SET_DEFAULTS);
+let AS_GT_PER = 20;   // Adult Get-Together / team building intro: 1 teacher per this many guests (its rule in staffing_rules)
+async function asSettingsLoad() {
+  try { const r = await sb.rpc('get_staffing_settings'); if (!r.error && r.data) AS_SET = Object.assign({}, AS_SET_DEFAULTS, r.data); } catch (e) { /* the defaults */ }
+  try {
+    const rr = await sb.rpc('hub_staffing_rules_list');
+    const gt = (rr.error ? [] : (rr.data || [])).find(x => x.kind === 'per_group' && /get.?together|team.?building/i.test((x.pattern || '') + ' ' + (x.label || '')));
+    if (gt && +gt.ratio > 0) AS_GT_PER = +gt.ratio;
+  } catch (e) { /* 1 per 20 */ }
+  AS_CLASS_BUFFER = +AS_SET.class_after_min; AS_DAY_SPAN = +AS_SET.day_teacher_span_min;
+  AS_PARTY_CLOSE_DAYS = +AS_SET.open_party_close_days; AS_PARTY_ONE_DAYS = +AS_SET.party_one_room_days;
+}
+const AS_GLAZE_MAX = weekend => weekend ? +AS_SET.glazing_max_weekend : +AS_SET.glazing_max_weekday;
+let AS_CLASS_BUFFER = 15;
 // A 6pm Friday Kids Party runs like a workshop (Nov 7 2026): no teacher of its own, so Friday evening workshops go ahead
-function asFriSixParty(s, d) { return s.k === 'party' && s.start === 18 * 60 && new Date(d + 'T12:00:00').getDay() === 5 && !/splatter/i.test(s.title || ''); }
+function asFriSixParty(s, d) { return AS_SET.fri6_party_shared !== false && s.k === 'party' && s.start === 18 * 60 && new Date(d + 'T12:00:00').getDay() === 5 && !/splatter/i.test(s.title || ''); }
 // a field trip or PA/PD day's daytime teacher works this long (7.5 h, e.g. 10:30–6), a camp's at least until 5pm
-const AS_DAY_SPAN = 450;
-const AS_PARTY_CLOSE_DAYS = 7, AS_PARTY_ONE_DAYS = 14;   // open party spots close a week out; double/triple times go down to one two weeks out
+let AS_DAY_SPAN = 450;
+let AS_PARTY_CLOSE_DAYS = 7, AS_PARTY_ONE_DAYS = 14;   // open party spots close a week out; double/triple times go down to one two weeks out
 const AS_MORNING_STUDIOS = ['BC-YVR-MS'];   // weekend morning workshops (when no kids class at 9am): these studios only   // the class teacher's 15 minutes after a kids class
 const AS_DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
-const AS_CLASS_LEN = s => Math.max(+s.len || 0, 90);   // kids classes: 90 minutes (or longer, if the class is set longer)
+const AS_CLASS_LEN = s => Math.max(+s.len || 0, +AS_SET.class_min || 90);   // kids classes: 90 minutes (or longer, if the class is set longer)
 const AS_KIND_LABEL = { workshop: 'Workshop', glazing: 'Glazing', mini: 'Mini Make', kidsws: 'Kids workshop' };
 let _as = { mclose: {}, skip: {}, week: null, prov: '', data: null, plan: null, busy: false, msg: '', err: '', done: null, open: {}, view: 'changes', sview: {}, pad: {}, notes: [], openNotes: null, extra: {} };   // extra: 'studio|date' → staff brought in   // pad: 'studio|date' → 'close' or staff for a PA/PD day's evening
 const asMin = t => { const [h, m] = String(t || '0:0').split(':').map(Number); return h * 60 + (m || 0); };
@@ -4468,17 +4490,18 @@ function asBuild(W, onlyId) {
         if (s.k === 'class') ded.push([s.start, s.start + AS_CLASS_LEN(s) + AS_CLASS_BUFFER, lb + ' (class, and 15 minutes after)']);
         else if (s.k === 'wheel') {
           // wheel classes: 90 minutes unless set; wheel times starting together (a Clay Wheel class and a Wheel Workshop) share one teacher
-          const end = s.start + (s._series ? (+s.len || 90) : (s.len || 120)), lab = lb + (s._series ? ' (wheel class)' : '');
+          const end = s.start + (s._series ? (+s.len || +AS_SET.wheel_class_min) : (s.len || +AS_SET.wheel_workshop_min)), lab = lb + (s._series ? ' (wheel class)' : '');
           const same = ded.find(x => x.wheel && x[0] === s.start);
           if (same) { same[1] = Math.max(same[1], end); same[2] += ', ' + lab; }
           else { const e = [s.start, end, lab]; e.wheel = true; ded.push(e); }
         }
-        else if (s.k === 'kidsws') ded.push([s.start, s.start + (s.len || 120), lb]);
-        else if (s.k === 'party' && s.booked > 0 && !asFriSixParty(s, d)) { const len = s.party_minutes || 105; ded.push([s.start, s.start + len, lb + ' (party)']); if (staff === 1) ded.push([s.start + len, s.start + len + 45, 'lunch after the party']); }
+        else if (s.k === 'kidsws') ded.push([s.start, s.start + (s.len || +AS_SET.kids_workshop_min), lb]);
+        else if (s.k === 'party' && s.booked > 0 && !asFriSixParty(s, d)) { const len = s.party_minutes || +AS_SET.party_min; ded.push([s.start, s.start + len, lb + ' (party)']); if (staff === 1) ded.push([s.start + len, s.start + len + +AS_SET.lunch_after_party_min, 'lunch after the party']); }
         // a booked Adult Get-Together runs like a workshop: its teacher only for the first 15 minutes (the intro)
-        else if (s.k === 'group' && s.booked > 0 && (s.party === 'get_together' || /get.?together/i.test(s.title || ''))) ded.push([s.start, s.start + 15, lb + ' (get-together intro)']);
-        else if ((s.k === 'field' || s.k === 'group') && s.booked > 0) ded.push([s.start, s.start + (s.len || 120), lb + (s.k === 'field' ? ' (field trip)' : '')]);
-        else if (s.k === 'camp' || s.k === 'paday') ded.push([s.start, s.start + (s.len || 360), lb + ' (PA/PD day or camp)']);
+        else if (s.k === 'group' && s.booked > 0 && (s.party === 'get_together' || /get.?together/i.test(s.title || ''))) { const ppl = +s.expected > 0 ? +s.expected : (+s.booked || 1), n = Math.max(1, Math.ceil(ppl / AS_GT_PER));   // (1 teacher per 20 guests for the intro)
+          for (let i = 0; i < n; i++) ded.push([s.start, s.start + +AS_SET.get_together_intro_min, lb + ' (get-together intro' + (n > 1 ? `, teacher ${i + 1} of ${n}` : '') + ')']); }
+        else if ((s.k === 'field' || s.k === 'group') && s.booked > 0) ded.push([s.start, s.start + (s.len || +AS_SET.field_trip_min), lb + (s.k === 'field' ? ' (field trip)' : '')]);
+        else if (s.k === 'camp' || s.k === 'paday') ded.push([s.start, s.start + (s.len || +AS_SET.camp_min), lb + ' (PA/PD day or camp)']);
       });
       const maxDed = (a, b) => { let m = 0; for (let t = a; t < b; t += 15) { const n = ded.filter(x => x[0] <= t && x[1] > t).length; if (n > m) m = n; } return m; };
       // ⚠ more classes, parties or other teacher-only times at once than there are staff (e.g. two kids classes with 1 staff):
@@ -4673,7 +4696,7 @@ function asBuild(W, onlyId) {
       // 5 hours (from 15 minutes before the first thing). Everything on the day counts: classes, workshops and glazing staying or new,
       // booked parties, field trips and group times. (A break already planned for a weekday counts as that gap.)
       if (weekend && staff === 1) {   // (weekdays plan their own break around the kids class, above)
-        const lenOf = x => x.k === 'class' ? AS_CLASS_LEN(x) : x.k === 'party' ? (x.party_minutes || 105) : x.k === 'mini' ? (x.len || 90) : (x.len || 120);
+        const lenOf = x => x.k === 'class' ? AS_CLASS_LEN(x) : x.k === 'party' ? (x.party_minutes || +AS_SET.party_min) : x.k === 'mini' ? (x.len || 90) : (x.len || 120);
         // what's running, each with when it frees the teacher (a class: 15 minutes after it ends)
         const runs = kept.filter(x => ['workshop', 'glazing', 'mini', 'kidsws', 'class', 'wheel'].includes(x.k) || (['party', 'field', 'group'].includes(x.k) && x.booked > 0))
           .map(x => [x.start, x.start + lenOf(x) + (x.k === 'class' ? AS_CLASS_BUFFER : 0)])
@@ -4726,6 +4749,7 @@ async function asMake() {
   _as.busy = false;
   if (error) { _as.err = /hub_autosched_week/.test(error.message) ? 'Run auto_schedule.sql in Supabase first.' : error.message; asDraw(); return; }
   _as.data = data;
+  await asSettingsLoad();   // (the shared staffing settings: the same numbers as the staff schedule builder)
   try { await asNotesLoad(true); } catch (e) {}   // (the notes first: 👤 + Staff days are planned with their extra person)
   try { await asDisrLoad(); } catch (e) {}          // (and the disregarded warnings)
   // (and the PA/PD and field trip evening answers saved before: autosched_day_plan.sql), unless answered again on this page
@@ -5260,7 +5284,7 @@ function asGoStudio(id) {
 // Staff on each day of the week, per studio: how much the workshop auto-scheduler can run there, the spots on each auto-made
 // time, and later the staff scheduling templates. Every change saves straight away.
 const STF_DAYS = [['mon', 'Mon'], ['tue', 'Tue'], ['wed', 'Wed'], ['thu', 'Thu'], ['fri', 'Fri'], ['sat', 'Sat'], ['sun', 'Sun']];
-let _stf = { rows: {}, set: null, err: '', loaded: false, q: '', saving: {} };
+let _stf = { rows: {}, set: null, err: '', loaded: false, q: '', saving: {}, rules: null, sset: null, rerr: '', rsave: '' };
 async function openStfPane() {
   if (!_hoCan.view) return;
   showOnlyPane('stf-pane'); setActiveNav('nav-stf'); stfDraw();
@@ -5268,6 +5292,58 @@ async function openStfPane() {
   _stf.err = error ? (/hub_staffing_list/.test(error.message) ? 'Run studio_staffing.sql in Supabase first.' : error.message) : '';
   _stf.rows = {}; ((data && data.rows) || []).forEach(r => { _stf.rows[r.studio_id] = r; });
   _stf.set = (data && data.settings) || { spots_small: 12, spots_kids: 15, spots_big: 18 }; _stf.loaded = true; stfDraw();
+  stfRulesLoad();
+}
+// ---- 📏 Staffing rules: the one rulebook Auto-schedule, the staff schedule builder and the Hub share (staffing_settings.sql) ----
+const STF_SETTINGS = [
+  ['How long a teacher is needed', [
+    ['class_min', 'Kids class (minutes, unless the class is set longer)'], ['class_after_min', 'Class teacher stays after (minutes)'],
+    ['wheel_class_min', 'Clay Wheel class (minutes)'], ['wheel_workshop_min', 'Wheel Workshop (minutes)'], ['kids_workshop_min', 'Kids-only workshop (minutes)'],
+    ['party_min', 'Kids / Splatter party (minutes, unless its art time says)'], ['lunch_after_party_min', 'Break after a party, with 1 staff (minutes)'],
+    ['get_together_intro_min', 'Adult Get-Together intro (minutes)'], ['field_trip_min', 'Field trip (minutes, unless set)'], ['camp_min', 'Camp or PA/PD day (minutes, unless set)'],
+    ['day_teacher_span_min', 'Field trip / PA/PD daytime teacher\u2019s shift (minutes)']]],
+  ['Parties', [['open_party_close_days', 'An unbooked party time closes (days before)'], ['party_one_room_days', 'Double / triple party times go down to one room (days before)'],
+    ['fri6_party_shared', 'The 6pm Friday Kids Party runs like a workshop (no teacher of its own)', 'bool']]],
+  ['Workshops (Auto-schedule)', [['glazing_max_weekday', 'Glazing times on a weekday'], ['glazing_max_weekend', 'Glazing times on a weekend day']]],
+  ['Staff schedule builder', [['quiet_close_days', 'Nothing booked this many days before: no shifts that day'], ['quiet_booked', 'A class teacher also covers the floor with up to this many drop-ins'],
+    ['floater_max_pct', 'Weekend floater only while labour stays under (%)'], ['manager_min_hours', 'Managers: at least (hours a week)'], ['manager_max_hours', 'Managers: at most (hours a week)'],
+    ['max_paid_min', 'Longest shift (paid minutes)'], ['max_days', 'Most days a week']]]
+];
+async function stfRulesLoad() {
+  const [r1, r2] = await Promise.all([sb.rpc('hub_staffing_rules_list'), sb.rpc('get_staffing_settings')]);
+  const e = r1.error || r2.error;
+  _stf.rerr = e ? (/hub_staffing_rules_list|get_staffing_settings/.test(e.message) ? 'Run staffing_settings.sql in Supabase first.' : e.message) : '';
+  _stf.rules = r1.data || []; _stf.sset = r2.data || {}; stfDraw();
+}
+function stfRulesHtml() {
+  const edit = !!_hoCan.edit, S = _stf;
+  if (S.rerr) return `<div class="stf-rb"><h3>📏 Staffing rules</h3><p class="fd-msg">${esc(S.rerr)}</p></div>`;
+  if (!S.rules || !S.sset) return `<div class="stf-rb"><h3>📏 Staffing rules</h3><p class="fd-sm">Loading…</p></div>`;
+  const dis = edit ? '' : 'disabled';
+  const kindTxt = k => k === 'pooled' ? 'shared by everyone at that time' : k === 'per_group' ? 'per booking (party, field trip)' : k === 'one_per_session' ? 'per class or camp' : k || '';
+  return `<div class="stf-rb"><h3>📏 Staffing rules</h3>
+    <p class="fd-sm">One rulebook for <b>Auto-schedule</b>, the <b>staff schedule builder</b> and the Hub: change a number here and all three follow next time they plan.${S.rsave ? ` <b>${esc(S.rsave)}</b>` : ''}</p>
+    <h4>Teachers per people</h4>
+    <table class="fd-tbl stf-rtbl"><thead><tr><th>Rule</th><th>Counts</th><th class="c">1 teacher per</th><th class="c">Minutes</th></tr></thead><tbody>
+    ${S.rules.map(r => `<tr><td>${esc(r.label)}</td><td class="fd-sm">${esc(kindTxt(r.kind))}</td>
+      <td class="c">${r.ratio == null && r.kind !== 'pooled' && r.kind !== 'per_group' ? '<span class="fd-sm">1 each</span>' : `<input type="number" min="1" max="200" value="${escAttr(r.ratio ?? '')}" ${dis} onchange="stfRuleSave('${escAttr(r.id)}','ratio',this.value)" aria-label="1 teacher per, ${escAttr(r.label)}">`}</td>
+      <td class="c"><input type="number" min="0" max="720" value="${escAttr(r.minutes ?? '')}" placeholder="—" ${dis} onchange="stfRuleSave('${escAttr(r.id)}','minutes',this.value)" aria-label="Minutes, ${escAttr(r.label)}"></td></tr>`).join('')}
+    </tbody></table>
+    ${STF_SETTINGS.map(([g, list]) => `<h4>${esc(g)}</h4><div class="stf-sg">${list.map(([k, lbl, t]) => t === 'bool'
+        ? `<label class="stf-sb"><input type="checkbox" class="fd-tick" ${S.sset[k] !== false ? 'checked' : ''} ${dis} onchange="stfSetSave('${k}', this.checked)"> ${esc(lbl)}</label>`
+        : `<label class="stf-si"><span>${esc(lbl)}</span><input type="number" min="0" max="1440" value="${escAttr(S.sset[k] ?? '')}" ${dis} onchange="stfSetSave('${k}', this.value)"></label>`).join('')}</div>`).join('')}
+  </div>`;
+}
+async function stfSetSave(k, v) {
+  const next = Object.assign({}, _stf.sset, { [k]: typeof v === 'boolean' ? v : (v === '' ? '' : +v) });
+  const { data, error } = await sb.rpc('save_staffing_settings', { p: next });
+  if (error) { alert('Not saved: ' + error.message); stfRulesLoad(); return; }
+  _stf.sset = data; _stf.rsave = 'Saved ✓'; stfDraw(); setTimeout(() => { _stf.rsave = ''; stfDraw(); }, 1500);
+}
+async function stfRuleSave(id, field, v) {
+  const { error } = await sb.rpc('hub_staffing_rule_save', { p_id: id, p: { [field]: v } });
+  if (error) { alert('Not saved: ' + error.message); stfRulesLoad(); return; }
+  _stf.rsave = 'Saved ✓'; await stfRulesLoad(); setTimeout(() => { _stf.rsave = ''; stfDraw(); }, 1500);
 }
 function stfRow(id) { return _stf.rows[id] || { studio_id: id, mon: 1, tue: 1, wed: 1, thu: 1, fri: 1, sat: 1, sun: 1, kids_time: null, auto: true, _new: true }; }
 function stfDraw() {
@@ -5301,7 +5377,11 @@ function stfDraw() {
     });
     h += '</tbody></table></div>';
   }
+  h += stfRulesHtml();
+  // (keep the focus on the number box being typed in)
+  const ae = document.activeElement, keep = ae && el.contains(ae) && ae.getAttribute('onchange');
   el.innerHTML = h;
+  if (keep) { const again = [...el.querySelectorAll('[onchange]')].find(x => x.getAttribute('onchange') === keep); if (again && again !== ae) again.focus(); }
 }
 async function stfSave(id, patch) {
   _stf.saving[id] = 1; stfDraw();
