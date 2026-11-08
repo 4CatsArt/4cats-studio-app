@@ -34,6 +34,7 @@ main { padding: 14px 20px 40px; }
 .who { width: 190px; flex: none; padding: 8px 12px; position: sticky; left: 0; background: var(--panel); z-index: 5; border-right: 1px solid var(--line); }
 .who b { display: block; font-size: 14px; } .who small { display: block; color: var(--muted); font-size: 11.5px; line-height: 1.4; }
 .row.needs .who b { color: var(--bad); }
+.who select.role { font: inherit; font-size: 11.5px; padding: 1px 4px; border: 1px solid var(--line); border-radius: 6px; margin-left: 4px; background: #fff; }
 .lane { position: relative; flex: none; }
 .shift { position: absolute; top: 6px; bottom: 6px; background: #f1efe8; border-radius: 6px; }
 .hour { position: absolute; top: 0; bottom: 0; border-left: 1px solid #f1ede3; }
@@ -94,7 +95,7 @@ const STUDIO_NAMES = {
   'ON-YYZ-LEA':'Toronto - Leaside','ON-YYZ-BEA':'Toronto - The Beaches','ON-WTR-WTR':'Waterloo - Uptown'
 };
 // How long each kind keeps someone busy (minutes). Kids class: the class length setting (90); a party: its booked art time.
-const LEN = { kids: 90, wheel: 90, demo: 15 };
+const LEN = { kids: 90, wheel: 90, demo: 15, intro: 15 };
 const ROLES = [['director', 'Director'], ['teacher', 'Demoer'], ['teacher2', 'Demoer'], ['circler', 'Circler'], ['circler2', 'Circler'], ['circler3', 'Circler']];
 const PX = 2;      // pixels per minute (15 minutes = 30px)
 const STEP = 15;
@@ -125,6 +126,7 @@ async function load() {
     if (team.error) throw team.error;
     if (sess.error) throw sess.error;
     if (set.data && +set.data.class_min) LEN.kids = +set.data.class_min;
+    if (set.data && +set.data.get_together_intro_min) LEN.intro = +set.data.get_together_intro_min;
     const sessions = (sess.data || []).filter(x => x.session_type !== 'festival');
     const ids = sessions.map(x => x.id);
     const [ss, bk] = await Promise.all([
@@ -144,16 +146,26 @@ async function load() {
 
     // the people on shift (one row each)
     const people = (team.data || []).map(p => ({ id: p.staff_id, name: p.nickname || p.full_name || p.name || 'Someone', show: p.name || p.nickname || 'Someone',
-      start: toMin(p.start_time), end: toMin(p.end_time), roles: [] }));
+      start: toMin(p.start_time), end: toMin(p.end_time), roles: [], job: '', hired: null, role: '' }));
+    // their job (manager / coordinator) and hire date (seniority), from their staff profile
+    if (people.length) {
+      const prof = await sb.from('staff_profiles').select('id, role, hire_date').in('id', people.map(p => p.id));
+      (prof.data || []).forEach(r => { const p = people.find(x => x.id === r.id); if (p) { p.job = String(r.role || ''); p.hired = r.hire_date || null; } });
+    }
     const findPerson = n => { const k = key(n); if (!k) return null;
       return people.find(p => key(p.name) === k || key(p.show) === k) || people.find(p => key(p.show).split(' ')[0] === k.split(' ')[0]) || null; };
-    ROLES.forEach(([f, label]) => { const p = findPerson(dayRow[f]); if (p) p.roles.push(label); });
+    ROLES.forEach(([f, label]) => { const p = findPerson(dayRow[f]); if (p && !p.role) p.role = label; });
+    const rolesFromPlan = people.some(p => p.role);
+    if (!rolesFromPlan) autoRoles(people);   // (nothing set in the Day plan: automatic)
+    else people.forEach(p => { if (!p.role) p.role = 'Circler'; });
 
     // the blocks
     const blocks = [];
-    const demoers = [dayRow.teacher, dayRow.teacher2].map(findPerson).filter(Boolean);
-    const director = findPerson(dayRow.director);
-    const busyAt = (pid, a, z) => blocks.some(b => b.person === pid && a < b.end && z > b.start);
+    const demoers = people.filter(p => p.role === 'Demoer');
+    const director = people.find(p => p.role === 'Director') || null;
+    // (busy, or not on shift for the whole of it)
+    const busyAt = (pid, a, z) => { const p = people.find(x => x.id === pid);
+      return !p || a < p.start || z > p.end || blocks.some(b => b.person === pid && a < b.end && z > b.start); };
     // breaks first (the Day plan's roles: "12:30-1:00"), so nobody is picked to demo or teach on their break
     ROLES.forEach(([f]) => {
       const p = findPerson(dayRow[f]); const m = String(dayRow['break_' + f] || '').match(/(\d{1,2}):(\d{2})\D+(\d{1,2}):(\d{2})/);
@@ -170,7 +182,7 @@ async function load() {
         const len = Math.max(LEN.kids, +x.duration_minutes || 0);
         let p = findPerson((staffBy[x.id] || {}).teacher), auto = false;
         if (!p) { p = demoers.find(d => !busyAt(d.id, t0, t0 + len)) || (director && !busyAt(director.id, t0, t0 + len) ? director : null); auto = !!p; }
-        blocks.push({ id: 'k-' + x.id, kind: 'kids', session: x.id, title: title.split('|')[0].trim(), sub: `${n} enrolled · ${len} min${auto ? ' · auto' : ''}`, start: t0, end: t0 + len, person: p ? p.id : null });
+        blocks.push({ id: 'k-' + x.id, kind: 'kids', session: x.id, title: title.split('|')[0].trim(), sub: `${n} enrolled · ${len} min${auto ? ' · auto' : ''}`, start: t0, end: t0 + len, person: p ? p.id : null, auto });
       } else if (/wheel/i.test(title)) {
         if (!n) return;
         const p = findPerson((staffBy[x.id] || {}).wheel_teacher);
@@ -178,11 +190,13 @@ async function load() {
       } else if (x.session_type === 'party') {
         partyBk.filter(b => b.session_id === x.id).forEach(b => {
           const d = (pd.data || []).find(z => z.booking_id === b.id) || {};
-          const len = /team\s*building/i.test(title) ? 15 : /90/.test(String(d.actual_art_time || '')) ? 90 : 60;
+          // an Adult Get-Together or team building: only the intro (the first 15 minutes), then it runs like a workshop
+          const intro = /get.?together|team\s*building/i.test(title);
+          const len = intro ? LEN.intro : /90/.test(String(d.actual_art_time || '')) ? 90 : 60;
           const t1 = findPerson(d.party_teacher1), t2 = findPerson(d.party_teacher2);
           const guests = d.expected_guests || b.qty || '';
-          blocks.push({ id: 'p1-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 1, title, sub: `${guests ? guests + ' guests · ' : ''}${len} min art time`, start: t0, end: t0 + len, person: t1 ? t1.id : null });
-          if (t2 || +guests > 15) blocks.push({ id: 'p2-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 2, title, sub: `second teacher · ${len} min`, start: t0, end: t0 + len, person: t2 ? t2.id : null });
+          blocks.push({ id: 'p1-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 1, title, sub: `${guests ? guests + ' guests · ' : ''}${len} min ${intro ? 'intro' : 'art time'}`, start: t0, end: t0 + len, person: t1 ? t1.id : null });
+          if (t2 || (!intro && +guests > 15) || (intro && +guests > 20)) blocks.push({ id: 'p2-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 2, title, sub: `second teacher · ${len} min`, start: t0, end: t0 + len, person: t2 ? t2.id : null });
         });
       } else {
         if (!n) return;   // (nobody booked yet: nothing to demo)
@@ -195,7 +209,7 @@ async function load() {
     });
     let lo = Math.min(8 * 60, ...people.map(p => p.start), ...blocks.map(b => b.start)), hi = Math.max(17 * 60, ...people.map(p => p.end), ...blocks.map(b => b.runEnd || b.end));
     lo = Math.floor(lo / 60) * 60; hi = Math.ceil(hi / 60) * 60;
-    D = { st, date, people, blocks, lo, hi, sessions, booked };
+    D = { st, date, people, blocks, lo, hi, sessions, booked, rolesFromPlan };
     START = JSON.parse(JSON.stringify(blocks));
     draw();
   } catch (e) {
@@ -203,7 +217,26 @@ async function load() {
   }
 }
 
-// ---- problems: two things at once, outside the shift, teaching during a break ----
+// Roles for the day: Director = the manager or coordinator on shift (the most senior if more than one); Demoer = of everyone
+// else, the least seniority (most recent hire date), all day; everyone else Circler, by seniority.
+function autoRoles(people) {
+  const senior = (a, b) => String(a.hired || '9999').localeCompare(String(b.hired || '9999'));   // (earliest hire first)
+  people.forEach(p => { p.role = ''; });
+  const leads = people.filter(p => /manager|coordinator|director/i.test(p.job)).sort(senior);
+  // (no manager or coordinator on shift: the most senior person directs)
+  const dir = leads[0] || (people.length > 1 ? people.slice().sort(senior)[0] : null); if (dir) dir.role = 'Director';
+  const rest = people.filter(p => p !== dir).sort(senior);
+  if (rest.length) rest[rest.length - 1].role = 'Demoer';   // (the least seniority)
+  rest.forEach(p => { if (!p.role) p.role = 'Circler'; });
+  if (!dir && people.length === 1) people[0].role = 'Demoer';
+}
+function setRole(pid, role) {
+  const p = D.people.find(x => x.id === pid); if (!p) return;
+  if (role === 'Director' || role === 'Demoer') D.people.forEach(x => { if (x !== p && x.role === role) x.role = 'Circler'; });   // (one each)
+  p.role = role; p.roleSet = true; draw();
+}
+
+// ---- problems: two things at once, outside the shift, teaching during a break, two breaks at once ----
 function problems() {
   const bad = {}, list = [];
   const per = {}; D.blocks.forEach(b => { if (b.person) (per[b.person] = per[b.person] || []).push(b); });
@@ -216,6 +249,11 @@ function problems() {
     });
   });
   D.blocks.filter(b => !b.person).forEach(b => { bad[b.id] = 1; list.push(`${b.title} at ${fmt(b.start)} has nobody`); });
+  // breaks never at the same time: someone is always on
+  const brks = D.blocks.filter(b => b.kind === 'brk' && b.person);
+  brks.forEach((b, i) => brks.slice(i + 1).forEach(c => { if (b.start < c.end && c.start < b.end) { bad[b.id] = bad[c.id] = 1;
+    const n = id => (D.people.find(p => p.id === id) || {}).show || 'Someone';
+    list.push(`${n(b.person)} and ${n(c.person)} are on break at the same time (${fmt(Math.max(b.start, c.start))}): someone always needs to be on`); } }));
   return { bad, list };
 }
 
@@ -240,7 +278,8 @@ function draw() {
   const mins = pid => D.blocks.filter(b => b.person === pid && b.kind !== 'brk').reduce((t, b) => t + (b.end - b.start), 0);
   const nobody = D.blocks.filter(b => !b.person);
   const rows = (nobody.length ? `<div class="row needs" data-person=""><div class="who"><b>Needs someone</b><small>${nobody.length} with nobody: drag onto a person</small></div><div class="lane" style="width:${W}px">${hourLines}${laneOut(nobody)}</div></div>` : '')
-    + D.people.map(p => `<div class="row" data-person="${esc(p.id)}"><div class="who"><b>${esc(p.show)}</b><small>${fmt(p.start)}–${fmt(p.end)}${p.roles.length ? ' · ' + esc([...new Set(p.roles)].join(', ')) : ''}</small>
+    + D.people.map(p => `<div class="row" data-person="${esc(p.id)}"><div class="who"><b>${esc(p.show)}</b><small>${fmt(p.start)}–${fmt(p.end)}
+        <select class="role" aria-label="${esc(p.show)}'s role today" onchange="setRole('${esc(p.id)}', this.value)">${['Director', 'Demoer', 'Circler'].map(r => `<option${r === p.role ? ' selected' : ''}>${r}</option>`).join('')}</select></small>
         <small>${Math.round(mins(p.id) / 6) / 10}h teaching or demoing${D.blocks.some(b => b.person === p.id && b.kind === 'brk') ? '' : (p.end - p.start > 300 ? ' · <b style="color:#9a3412;display:inline">no break set</b>' : '')}</small></div>
       <div class="lane" style="width:${W}px">${hourLines}<i class="shift" style="left:${x(p.start)}px;width:${(p.end - p.start) * PX}px"></i>${laneOut(D.blocks.filter(b => b.person === p.id))}</div></div>`).join('');
   // coverage: on shift, minus anyone teaching, demoing or on a break; red at 0 while something's running
@@ -258,6 +297,7 @@ function draw() {
     if (s.person !== b.person) return `${b.kind === 'brk' ? 'Break' : b.title} (${fmt(b.start)}): ${name(s.person)} → ${name(b.person)}`;
     if (s.start !== b.start) return `${name(b.person)}'s break: ${fmt(s.start)} → ${fmt(b.start)}`;
     return null; }).filter(Boolean)
+    .concat(D.people.filter(p => p.roleSet).map(p => `${p.show}: ${p.role} today`))
     .concat(D.blocks.filter(b => !START.some(s => s.id === b.id)).map(b => `New break for ${(D.people.find(p => p.id === b.person) || {}).show || 'someone'}: ${fmt(b.start)}–${fmt(b.end)}`));
   $('main').innerHTML = `${D.flash ? `<div class="flash">${esc(D.flash)}</div>` : ''}
     <div class="key"><span><i style="background:var(--kids);border-color:var(--kids-b)"></i>Kids class (${LEN.kids} min)</span><span><i style="background:var(--wheel);border-color:var(--wheel-b)"></i>Wheel</span>
@@ -299,6 +339,7 @@ function suggestBreaks() {
       let best = null;
       for (let t = Math.ceil(from / STEP) * STEP; t <= to; t += STEP) {
         if (busyFor(p.id, t, t + 30, D.blocks)) continue;
+        if (D.blocks.some(b => b.kind === 'brk' && b.person && b.person !== p.id && t < b.end && t + 30 > b.start)) continue;   // (never two breaks at once)
         const trial = D.blocks.concat([{ person: p.id, start: t, end: t + 30, kind: 'brk' }]);
         const score = [Math.min(minFree(t, t + 30, trial), 2), -Math.abs(t + 15 - mid)];
         if (!best || score[0] > best.score[0] || (score[0] === best.score[0] && score[1] > best.score[1])) best = { t, score };
@@ -315,7 +356,7 @@ function suggestBreaks() {
 function assignDemos() {
   let changed = 0, nobody = 0;
   const load = {}; D.blocks.filter(b => b.person && b.kind !== 'brk').forEach(b => { load[b.person] = (load[b.person] || 0) + (b.end - b.start); });
-  const todo = D.blocks.filter(b => !b.locked && (b.kind === 'demo' || (!b.person && (b.kind === 'kids' || b.kind === 'party')))).sort((a, b) => a.start - b.start);
+  const todo = D.blocks.filter(b => !b.locked && (b.kind === 'demo' || b.auto || (!b.person && (b.kind === 'kids' || b.kind === 'party')))).sort((a, b) => a.start - b.start);
   todo.forEach(b => { if (b.person) load[b.person] -= (b.end - b.start); b.person = null; });   // (start fresh for these)
   todo.forEach(b => {
     const cands = D.people.filter(p => p.start <= b.start && p.end >= b.end && !busyFor(p.id, b.start, b.end, D.blocks, b));
@@ -323,8 +364,9 @@ function assignDemos() {
     cands.forEach(p => {
       const trial = D.blocks.map(x => x === b ? Object.assign({}, b, { person: p.id }) : x);
       const keepsFloor = minFree(b.start, b.end, trial) >= 1 ? 1 : 0;
-      const demoer = p.roles.includes('Demoer') ? 1 : 0;
-      const score = [keepsFloor, demoer, -(load[p.id] || 0)];
+      const demoer = p.role === 'Demoer' ? 1 : 0;
+      // a demo: the day's Demoer whenever they're free; a class or party with nobody: anyone, keeping the floor covered
+      const score = b.kind === 'demo' ? [demoer, keepsFloor, p.role === 'Director' ? 0 : 1, -(load[p.id] || 0)] : [keepsFloor, demoer ? 0 : 1, -(load[p.id] || 0)];
       if (!best || better(score, best.score)) best = { p, score };
     });
     const was = (START.find(s => s.id === b.id) || {}).person || null;
@@ -338,6 +380,7 @@ function better(a, b) { for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) re
 function planDay(which) {
   if (!D) return;
   const parts = [];
+  if (which === 'all' && !D.rolesFromPlan && !D.people.some(p => p.roleSet)) { autoRoles(D.people); parts.push('roles set (Director, Demoer, Circlers)'); }
   if (which !== 'demo') { const r = suggestBreaks(); parts.push(r.added ? `${r.added} break${r.added === 1 ? '' : 's'} suggested` : 'No breaks needed (or already set)'); if (r.missed.length) parts.push(`no time found for a break for ${r.missed.join(', ')}`); }
   if (which !== 'brk') { const r = assignDemos(); parts.push(`${r.changed} demo${r.changed === 1 ? '' : 's'} or class${r.changed === 1 ? '' : 'es'} given out`); if (r.nobody) parts.push(`${r.nobody} still need someone (everyone's busy)`); }
   D.flash = parts.join(' · ') + '. Look it over: drag anything to change it.';
