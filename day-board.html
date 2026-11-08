@@ -44,6 +44,8 @@ body.week .day-only { display: none; } body:not(.week) .wk-only { display: none;
 .wk .sh .x { position: absolute; top: 3px; right: 4px; font: inherit; font-size: 10.5px; line-height: 1; padding: 2px 4px; border-radius: 4px; border: 0; background: rgba(255,255,255,.25); color: inherit; cursor: pointer; opacity: 0; }
 .wk .sh:hover .x, .wk .sh:focus-within .x { opacity: 1; } .wk .sh.draft .x { background: rgba(0,0,0,.06); }
 .wk tr.gone .sh { box-shadow: 0 0 0 2px var(--bad); } .gone-tag { display: inline-block; margin: 2px 0; font-size: 10.5px; font-weight: 700; color: #fff; background: var(--bad); border-radius: 999px; padding: 1px 7px; }
+.lab { display: inline-block; margin-top: 4px; font-size: 11.5px; font-weight: 700; border-radius: 999px; padding: 1px 8px; }
+.lab.ok { background: #e3f3e8; color: #1f6b3a; } .lab.mid { background: #fdf0d2; color: #8a5a00; } .lab.high { background: #fbe1e1; color: #a12a2a; }
 .wk td.drop.over { background: #eef7f0; outline: 2px dashed #2f7d4a; outline-offset: -3px; }
 .wk .add { font: inherit; font-size: 13px; color: var(--muted); border: 1px dashed transparent; background: none; border-radius: 6px; width: 100%; padding: 6px 0; cursor: pointer; opacity: .25; }
 .wk td:hover .add, .wk .add:focus-visible { opacity: 1; border-color: #cfc9bb; } .wk .add.wide { opacity: .6; font-size: 12px; }
@@ -123,6 +125,8 @@ main { padding: 14px 20px 40px; }
   <button id="prev" class="wk-only" aria-label="Week before">◀</button>
   <input id="date" type="date" aria-label="Day">
   <button id="next" class="wk-only" aria-label="Week after">▶</button>
+  <select id="wkstart" class="wk-only" title="Which day the week starts on (remembered on this computer)" onchange="setWeekStart(this.value === 'mon')">
+    <option value="mon">Mon–Sun</option><option value="sun">Sun–Sat</option></select>
   <button id="load">Show</button>
   <span class="spacer"></span>
   <button id="sendupd" style="display:none" title="Changed or published shifts: let the staff know now (their usual notification)">Send updates to staff</button>
@@ -419,6 +423,7 @@ function draw() {
     const btn = (a, l, v) => `<button onclick="dayDecide('${x.id}','${a}'${v ? `,'${v}'` : ''})">${l}</button>`;
     let acts = '';
     if (x.kind === 'cut_shift') acts = btn('approve', '✓ Approve') + btn('keep', 'Keep');
+    else if (x.kind === 'short_day') acts = btn('done', '✓ Done') + `<button onclick="dayDecide('${x.id}','keep')" title="It's quiet: the staff we have is enough (this day isn't flagged again)">Disregard</button>`;
     else if (x.kind === 'evening_question') { const P = x.payload || {}, n = Math.max(1, +P.usual || 1), pa = P.pad !== 'field';
       const opts = (pa ? [['watch', 'Tell us if it books']] : []).concat([['close', 'Close the evening']]).concat(Array.from({ length: n }, (_, i) => [String(i + 1), `Open with ${i + 1} staff`])).concat([['more', 'One more teacher']]).concat(pa ? [['cancel_pa', 'Close the PA/PD day']] : []);
       acts = `<select onchange="if(this.value) dayDecide('${x.id}','evening',this.value)"><option value="">Choose…</option>${opts.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join('')}</select>`; }
@@ -525,8 +530,30 @@ function planDay(which) {
 const PEND_KEY = 'dayboard_pending_updates';
 let _pending = []; try { _pending = JSON.parse(localStorage.getItem(PEND_KEY) || '[]') || []; } catch (e) { _pending = []; }
 function savePending() { try { localStorage.setItem(PEND_KEY, JSON.stringify(_pending)); } catch (e) {} notifyBar(); }
-function queueNotify(staffId, name, text) { _pending.push({ staffId: staffId || '?', name: name || 'Someone', text: text || 'shift changed', at: Date.now() }); savePending(); }
-function pendingPeople() { const by = {}; _pending.forEach(x => { (by[x.staffId] = by[x.staffId] || { name: x.name, items: [] }).items.push(x.text); }); return Object.values(by); }
+// One line per person per day: what it was before → what it is now (changed back = nothing to tell them)
+const normT = t => String(t || '').toLowerCase().replace(/:00/g, '').replace(/([ap])m/g, '$1').replace(/\s+/g, '');
+function queueNotify(staffId, name, text) {
+  const m = String(text || '').match(/^([^:]+?):\s*(.*)$/), day = m ? m[1] : null, what = m ? m[2] : String(text || '');
+  let orig, latest, ev;
+  let mm;
+  if ((mm = what.match(/^(.+?)\s*→\s*(.+)$/))) ev = { kind: 'change', from: mm[1].trim(), to: mm[2].trim() };
+  else if ((mm = what.match(/^shift removed\s*\((?:was\s*)?(.+)\)$/i))) ev = { kind: 'removed', from: mm[1].trim() };
+  else if ((mm = what.match(/^new shift\s*(.+)$/i))) ev = { kind: 'new', to: mm[1].trim() };
+  const ex = day && ev ? _pending.find(x => x.staffId === (staffId || '?') && x.day === day && x.ev) : null;
+  if (ex) {   // merge with what's already on the list for that day
+    if (ev.kind === 'change') ex.latest = ev.to;
+    else if (ev.kind === 'removed') ex.latest = null;
+    else if (ev.kind === 'new') ex.latest = ev.to;
+    if (ex.orig != null && ex.latest != null && normT(ex.orig) === normT(ex.latest)) _pending = _pending.filter(x => x !== ex);   // (back as it was)
+    else if (ex.orig == null && ex.latest == null) _pending = _pending.filter(x => x !== ex);   // (added, then removed)
+  } else if (day && ev) {
+    orig = ev.kind === 'new' ? null : ev.from; latest = ev.kind === 'removed' ? null : ev.to;
+    _pending.push({ staffId: staffId || '?', name: name || 'Someone', day, ev: true, orig, latest, at: Date.now() });
+  } else _pending.push({ staffId: staffId || '?', name: name || 'Someone', text: text || 'shift changed', at: Date.now() });   // (a move between days)
+  savePending();
+}
+const pendText = x => !x.ev ? x.text : x.orig == null ? `${x.day}: new shift ${x.latest}` : x.latest == null ? `${x.day}: shift removed (was ${x.orig})` : `${x.day}: ${x.orig} → ${x.latest}`;
+function pendingPeople() { const by = {}; _pending.forEach(x => { (by[x.staffId] = by[x.staffId] || { name: x.name, items: [] }).items.push(pendText(x)); }); return Object.values(by); }
 function notifyBar() {
   const b = $('sendupd'); if (!b) return;
   const n = pendingPeople().length;
@@ -561,6 +588,13 @@ function dayPersonGone(pid) {   // their shift is gone: off the board, and whate
   D.blocks.forEach(b => { if (b.person === pid) b.person = null; });
   D.people = D.people.filter(p => p.id !== pid);
 }
+// After a shift changes: no break needed at 5 hours or less (it's removed); a break now outside the shift moves inside it
+function dayFitBreak(p) {
+  const b = D.blocks.find(z => z.kind === 'brk' && z.person === p.id); if (!b) return '';
+  if (p.end - p.start <= 300) { D.blocks = D.blocks.filter(z => z !== b); return 'No break needed at 5 hours or less: removed.'; }
+  if (b.start < p.start || b.end > p.end) { const len = b.end - b.start; b.start = Math.max(p.start + 120, Math.min(b.start, p.end - len - 60)); b.end = b.start + len; return 'Their break moved inside the new shift.'; }
+  return '';
+}
 async function dayDecide(id, action, value) {
   const x = (D.inbox || []).find(i => i.id === id);
   const { data, error } = await sb.rpc('hub_inbox_decide', { p_id: id, p_action: action, p_start: null, p_end: null, p_value: value || null });
@@ -568,7 +602,8 @@ async function dayDecide(id, action, value) {
   D.inbox = D.inbox.filter(i => i.id !== id);
   if (x && x.kind === 'cut_shift' && action === 'approve') {
     const P = x.payload || {}, p = D.people.find(z => z.shiftId === String(P.shift_id));
-    if (p) { if (P.action === 'remove') dayPersonGone(p.id); else if (P.action === 'end' && P.new_end) p.end = toMin(P.new_end); else if (P.action === 'start' && P.new_start) p.start = toMin(P.new_start); }
+    if (p) { if (P.action === 'remove') dayPersonGone(p.id); else if (P.action === 'end' && P.new_end) p.end = toMin(P.new_end); else if (P.action === 'start' && P.new_start) p.start = toMin(P.new_start);
+      if (P.action !== 'remove') dayFitBreak(p); }
     if (p && p.status !== 'draft') queueNotify(p.id, p.show, `${new Date(D.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })}: ${data && data.applied || 'shift changed'}`);
   }
   D.flash = data && data.applied ? 'Done: ' + data.applied : 'Done.'; draw();
@@ -580,9 +615,11 @@ async function dayShiftEdit(pid) {
   const { error } = await sb.rpc('hub_board_shift_set', { p_id: p.shiftId, p_start: hhmm(r.start), p_end: hhmm(r.end), p_remove: false });
   if (error) { alert(/hub_board_shift_set/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
   const was = `${fmt(p.start)}–${fmt(p.end)}`;
-  p.start = r.start; p.end = r.end; if (!p.draft) queueNotify(p.id, p.show, `${new Date(D.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })}: ${was} → ${fmt(r.start)}–${fmt(r.end)}`);
+  p.start = r.start; p.end = r.end;
+  const brkGone = dayFitBreak(p);
+  if (!p.draft) queueNotify(p.id, p.show, `${new Date(D.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })}: ${was} → ${fmt(r.start)}–${fmt(r.end)}`);
   D.inbox = (D.inbox || []).filter(i => !(i.kind === 'cut_shift' && i.payload && i.payload.shift_id === p.shiftId));
-  D.flash = `${p.show}: ${fmt(r.start)}–${fmt(r.end)}${p.draft ? ' (draft)' : ''}.`; draw();
+  D.flash = `${p.show}: ${fmt(r.start)}–${fmt(r.end)}${p.draft ? ' (draft)' : ''}.${brkGone ? ' ' + brkGone : ''}`; draw();
 }
 async function dayShiftRemove(pid) {
   const p = D.people.find(z => z.id === pid); if (!p || !confirm(`Remove ${p.show}'s shift (${fmt(p.start)}–${fmt(p.end)})?`)) return;
@@ -708,7 +745,7 @@ function openPop(el) {
   pop.innerHTML = b.kind === 'brk'
     ? `<label>Break for ${esc((D.people.find(p => p.id === b.person) || {}).show || '')}: start time</label>
        <select id="pop-sel">${Array.from({ length: Math.floor((D.hi - D.lo) / STEP) }, (_, i) => D.lo + i * STEP).map(m => `<option value="${m}" ${m === b.start ? 'selected' : ''}>${fmt(m)}</option>`).join('')}</select>
-       <div class="row2"><button id="pop-ok">Move break</button><button id="pop-x">Cancel</button></div>`
+       <div class="row2"><button id="pop-ok">Move break</button><button id="pop-del">Remove break</button><button id="pop-x">Cancel</button></div>`
     : `<label>${esc(b.title)} · ${fmt(b.start)}–${fmt(b.end)}: who?</label>
        <select id="pop-sel"><option value="">Nobody</option>${D.people.map(p => `<option value="${esc(p.id)}" ${p.id === b.person ? 'selected' : ''}>${esc(p.show)}${off(p) ? ' (not on shift then)' : busy(p) ? ' (busy then)' : ''}</option>`).join('')}</select>
        <div class="row2"><button id="pop-ok">Give it to them</button><button id="pop-x">Cancel</button></div>`;
@@ -717,6 +754,7 @@ function openPop(el) {
   pop.style.left = Math.min(window.innerWidth - 280, r.left) + 'px'; pop.style.top = Math.min(window.innerHeight - 140, r.bottom + 6) + 'px';
   $('pop-sel').focus();
   $('pop-x').onclick = closePop;
+  if ($('pop-del')) $('pop-del').onclick = () => { D.blocks = D.blocks.filter(z => z !== b); closePop(); D.flash = 'Break removed (Save the day to keep it that way).'; draw(); };
   $('pop-ok').onclick = () => { const v = $('pop-sel').value;
     if (b.kind === 'brk') { const len = b.end - b.start; b.start = +v; b.end = b.start + len; } else b.person = v || null;
     b.locked = true;
@@ -731,7 +769,9 @@ document.addEventListener('pointerdown', e => { const p = $('pop'); if (p && !p.
 // 📋 For you for that studio and week (approve or keep a cut, answer an evening, tick a note), and every time (close or reopen,
 // including a PA/PD day). Changes here are real. A day's heading opens its day board.
 let MODE = 'day', W = null;
-const sundayOf = ds => { const d = new Date(ds + 'T12:00:00'); d.setDate(d.getDate() - d.getDay()); return localDate(d); };
+let WEEK_MON = (() => { try { return localStorage.getItem('dayboard_week_starts') !== 'sun'; } catch (e) { return true; } })();   // (Monday unless switched)
+const sundayOf = ds => { const d = new Date(ds + 'T12:00:00'); d.setDate(d.getDate() - (WEEK_MON ? (d.getDay() + 6) % 7 : d.getDay())); return localDate(d); };   // (the week's first day)
+function setWeekStart(mon) { WEEK_MON = mon; try { localStorage.setItem('dayboard_week_starts', mon ? 'mon' : 'sun'); } catch (e) {} loadWeek(); }
 const addDays = (ds, n) => { const d = new Date(ds + 'T12:00:00'); d.setDate(d.getDate() + n); return localDate(d); };
 const dayLabel = ds => new Date(ds + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
 const parseRange = v => { const m = String(v || '').replace(/\s+/g, '').match(/^(\d{1,2})(?::(\d{2}))?([ap])m?-(\d{1,2})(?::(\d{2}))?([ap])m?$/i);
@@ -802,7 +842,7 @@ function drawWeek() {
   const itemHtml = x => {
     const btn = (a, l, v) => `<button onclick="wkDecide('${x.id}','${a}'${v ? `,'${v}'` : ''})">${l}</button>`;
     if (x.kind === 'cut_shift') return `<div class="it cut">✂️ ${esc(x.title)}<div class="acts">${btn('approve', '✓ Approve')}${btn('keep', 'Keep')}</div></div>`;
-    if (x.kind === 'short_day') return `<div class="it short">👤 ${esc(x.title)}<div class="muted">${esc(x.detail || '')}</div><div class="acts"><button onclick="window.open('staff-schedule.html','_blank')">Staff schedule</button>${btn('done', '✓ Done')}</div></div>`;
+    if (x.kind === 'short_day') return `<div class="it short">👤 ${esc(x.title)}<div class="muted">${esc(x.detail || '')}</div><div class="acts"><button onclick="window.open('staff-schedule.html','_blank')">Staff schedule</button>${btn('done', '✓ Done')}<button onclick="wkDecide('${x.id}','keep')" title="It's quiet: the staff we have is enough (this day isn't flagged again)">Disregard</button></div></div>`;
     if (x.kind === 'evening_question') { const P = x.payload || {}, n = Math.max(1, +P.usual || 1), pa = P.pad !== 'field';
       const opts = (pa ? [['watch', 'Tell us if it books']] : []).concat([['close', 'Close the evening']]).concat(Array.from({ length: n }, (_, i) => [String(i + 1), `Open with ${i + 1} staff`])).concat([['more', 'One more teacher']]).concat(pa ? [['cancel_pa', 'Close the PA/PD day']] : []);
       return `<div class="it">🌆 ${esc(x.title)}<div class="muted">${esc(x.detail || '')}</div><select onchange="if(this.value) wkDecide('${x.id}','evening',this.value)"><option value="">Choose…</option>${opts.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join('')}</select></div>`; }
@@ -812,7 +852,7 @@ function drawWeek() {
     const todo = W.inbox.filter(x => String(x.day).slice(0, 10) === d).length;
     return `<th><button class="day" onclick="openDay('${d}')" title="Open this day's day board">${esc(dayLabel(d))}</button>
       <div class="cov" title="8am–10pm: red = short, amber = more than needed, green = right">${c.cls.map((k, i) => `<i class="${k}" title="${fmt(c.lo + i * 30)}"></i>`).join('')}</div>
-      <small>${n} time${n === 1 ? '' : 's'} booked · need ${c.needH}h, scheduled ${c.haveH}h${c.drafts ? ' (drafts)' : ''}${todo ? ` · <b style="color:var(--bad)">${todo} to decide</b>` : ''}</small></th>`; }).join('');
+      <small>${n} time${n === 1 ? '' : 's'} booked · need ${c.needH}h, scheduled ${c.haveH}h${c.drafts ? ' (drafts)' : ''}${todo ? ` · <b style="color:var(--bad)">${todo} to decide</b>` : ''}</small>${labCell(d)}</th>`; }).join('');
   const shiftRows = people.map(pid => `<tr${W.gone && W.gone[pid] ? ' class="gone"' : ''}><td class="lbl"><b>${esc(W.names[pid] || 'Someone')}</b>${W.gone && W.gone[pid] ? `<span class="gone-tag">${esc(W.gone[pid])}</span>` : ''}<small>${Math.round(W.shifts.filter(x => x.staff_id === pid).reduce((t, x) => t + (toMin(x.end_time) - toMin(x.start_time)), 0) / 6) / 10}h this week</small></td>${days.map(d => {
       const mine = W.shifts.filter(x => x.staff_id === pid && x.shift_date === d);
       return `<td class="drop" data-staff="${esc(pid)}" data-day="${d}">${mine.map(sh => `<div class="sh${sh.status === 'draft' ? ' draft' : ''}" draggable="true" data-shift="${esc(String(sh.id))}" role="button" tabindex="0"
@@ -833,7 +873,8 @@ function drawWeek() {
       <span><i style="background:#8cc79d;border-color:#8cc79d"></i>Right</span><span>Click a day to open its day board · click a shift to change its times · drag it to another day or person · ✕ removes it · + adds one</span>
       ${W.needErr ? `<span style="color:var(--bad)">Need not loaded: ${esc(W.needErr)}</span>` : ''}</div>
     <div class="wk"><table>
-      <thead><tr><th class="lbl">${esc(STUDIO_NAMES[W.st] || W.st)}<small>week of ${esc(dayLabel(W.from))}</small></th>${head}</tr></thead>
+      <thead><tr><th class="lbl">${esc(STUDIO_NAMES[W.st] || W.st)}<small>week of ${esc(dayLabel(W.from))}</small>${W.labour && W.labour.total != null
+        ? `<div class="lab ${labClass(W.labour.total)}" title="Estimated labour: staff cost (scheduled shifts, drafts included) ÷ the revenue of the week's bookings">Labour ≈ ${W.labour.total}% this week</div>` : ''}</th>${head}</tr></thead>
       <tbody>
         <tr><td class="lbl"><b>To decide</b><small>📋 For you, this studio</small></td>${days.map(d => `<td>${items(d, ['short_day', 'evening_question', 'as_note', 'class_problem']).map(itemHtml).join('') || '<span class="muted">—</span>'}</td>`).join('')}</tr>
         ${shiftRows || `<tr><td class="lbl"><b>Shifts</b></td><td colspan="7" class="muted">No shifts this week yet: build them in the staff schedule.</td></tr>`}
@@ -841,6 +882,28 @@ function drawWeek() {
       </tbody></table></div>`;
   W.flash = '';
   wkWireDrag();
+  // labour estimate: fetched again whenever the shifts change (moves, times, adds, removes, approved cuts)
+  const sig = JSON.stringify(W.shifts.map(x => [x.id, x.staff_id, x.shift_date, x.start_time, x.end_time]));
+  if (W._labSig !== sig) { W._labSig = sig; wkLabourSoon(); }
+}
+let _labT = null;
+function wkLabourSoon() {
+  clearTimeout(_labT);
+  _labT = setTimeout(async () => {
+    if (!W || W._labOff) return;
+    const st = W.st, from = W.from;
+    const { data, error } = await sb.rpc('hub_day_labour', { p_studio_id: st, p_from: W.from, p_to: W.to, p_drafts: true });
+    if (!W || W.st !== st || W.from !== from) return;   // (moved on to another week)
+    if (error) { W._labOff = true; return; }            // (not a home office login, or not set up yet: nothing shown)
+    const byDay = {}; (data.days || []).forEach(x => { byDay[x.date] = x; });
+    W.labour = { total: data.total_pct, byDay }; drawWeek();
+  }, 600);
+}
+const labClass = pct => pct == null ? '' : pct <= 30 ? 'ok' : pct <= 40 ? 'mid' : 'high';
+function labCell(d) {
+  const x = W.labour && W.labour.byDay[d]; if (!x) return '';
+  if (x.pct == null) return x.state === 'no_bookings' || (x.hours > 0) ? `<div class="lab high" title="Staff scheduled, but no bookings yet that day">Labour: no bookings yet</div>` : '';
+  return `<div class="lab ${labClass(x.pct)}" title="Estimated labour: staff cost (scheduled shifts, drafts included) ÷ the revenue of that day's bookings">Labour ≈ ${x.pct}%</div>`;
 }
 // ---- dragging a shift to another day / person (HTML drag and drop: a computer, where the week board is used) ----
 function wkWireDrag() {
@@ -976,6 +1039,7 @@ const show = () => (MODE === 'week' ? loadWeek : load)();
   $('prev').onclick = () => { $('date').value = addDays(sundayOf($('date').value), -7); loadWeek(); };
   $('next').onclick = () => { $('date').value = addDays(sundayOf($('date').value), 7); loadWeek(); };
   $('reset').onclick = () => { if (START) { D.blocks = JSON.parse(JSON.stringify(START)); D.people.forEach(p => { p.role = (D.startRoles.find(r => r[0] === p.id) || [])[1] || p.role; p.roleSet = false; }); draw(); } };
+  $('wkstart').value = WEEK_MON ? 'mon' : 'sun';
   $('save').onclick = saveDay; $('sendupd').onclick = sendUpdates; notifyBar(); $('addsh').onclick = () => D && dayShiftAdd(); $('pub').onclick = () => D && dayPublish();
   $('plan').onclick = () => planDay('all'); $('brk').onclick = () => planDay('brk'); $('demo').onclick = () => planDay('demo');
   const { data: { session } } = await sb.auth.getSession();
