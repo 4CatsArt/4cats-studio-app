@@ -49,6 +49,7 @@ body.week .day-only { display: none; } body:not(.week) .wk-only { display: none;
 .lab { display: inline-block; margin: 4px 4px 0 0; font-size: 11.5px; font-weight: 700; border-radius: 999px; padding: 1px 8px; }
 .lab.ok { background: #e3f3e8; color: #1f6b3a; } .lab.mid { background: #fdf0d2; color: #8a5a00; } .lab.high { background: #fbe1e1; color: #a12a2a; }
 .wk .sh.clash { box-shadow: 0 0 0 2px var(--bad); }
+.who-link { cursor: pointer; text-decoration: underline dotted #b9b2a2; text-underline-offset: 3px; } .who-link:hover { color: #2f7d4a; }
 .off { font-size: 11.5px; font-weight: 600; border-radius: 6px; padding: 3px 6px; margin-bottom: 4px; }
 .off.else { background: #e5eefb; color: #2b4f86; border: 1px solid #c9daf3; }
 .off.toff { background: #f6ead7; color: #7a5520; border: 1px solid #ead2ad; } .off.unav { background: #eeece6; color: #6b6b63; border: 1px solid #dedad0; }
@@ -304,9 +305,14 @@ async function load() {
           // (Nov 8 2026) the staffing rules: a field trip is 1 teacher per 30 children, for its whole time (2 hours unless set)
           const field = /field\s*trip/i.test(title);
           const len = intro ? LEN.intro : field ? Math.max(60, +x.duration_minutes || 120) : /90/.test(String(d.actual_art_time || '')) ? 90 : 60;
-          const t1 = findPerson(d.party_teacher1), t2 = findPerson(d.party_teacher2);
+          let t1 = findPerson(d.party_teacher1), t2 = findPerson(d.party_teacher2), auto1 = false;
+          // (Nov 8 2026) no teacher set: someone free for the whole party (the Demoer, then the Director, then anyone on shift), marked auto
+          if (!t1) {
+            const order = demoers.concat(director ? [director] : []).concat(people.filter(q => q.role !== 'Demoer' && q !== director));
+            t1 = order.find(q => !busyAt(q.id, t0, t0 + len)) || null; auto1 = !!t1;
+          }
           const guests = d.expected_guests || b.qty || '';
-          blocks.push({ id: 'p1-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 1, title, sub: `${guests ? guests + (field ? ' children · ' : ' guests · ') : ''}${len} min ${intro ? 'intro' : field ? 'field trip' : 'art time'}`, start: t0, end: t0 + len, person: t1 ? t1.id : null });
+          blocks.push({ id: 'p1-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 1, title, sub: `${guests ? guests + (field ? ' children · ' : ' guests · ') : ''}${len} min ${intro ? 'intro' : field ? 'field trip' : 'art time'}${auto1 ? ' · auto' : ''}`, start: t0, end: t0 + len, person: t1 ? t1.id : null });
           if (t2 || (field ? +guests > 30 : !intro && +guests > 15) || (intro && +guests > 20)) blocks.push({ id: 'p2-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 2, title, sub: `second teacher · ${len} min`, start: t0, end: t0 + len, person: t2 ? t2.id : null });
         });
       } else {
@@ -582,6 +588,15 @@ function planDay(which) {
   const parts = [];
   if (which === 'all' && !D.rolesFromPlan && !D.people.some(p => p.roleSet)) { autoRoles(D.people); parts.push('roles set (Director, Demoer, Circlers)'); }
   if (which !== 'demo') { const r = suggestBreaks(); parts.push(r.added ? `${r.added} break${r.added === 1 ? '' : 's'} suggested` : 'No breaks needed (or already set)'); if (r.missed.length) parts.push(`no time found for a break for ${r.missed.join(', ')}`); }
+  if (which !== 'brk') {
+    let given = 0;
+    D.blocks.filter(b => b.kind === 'party' && !b.person && !b.locked).sort((a, b) => a.start - b.start).forEach(b => {
+      const order = D.people.filter(p => p.role === 'Demoer').concat(D.people.filter(p => p.role === 'Director')).concat(D.people.filter(p => !['Demoer', 'Director'].includes(p.role)));
+      const p = order.find(q => b.start >= q.start && b.end <= q.end && !busyFor(q.id, b.start, b.end, D.blocks, b));
+      if (p) { b.person = p.id; given++; }
+    });
+    if (given) parts.push(`${given} part${given === 1 ? 'y' : 'ies'} given a teacher`);
+  }
   if (which !== 'brk') { const r = assignDemos(); parts.push(`${r.changed} demo${r.changed === 1 ? '' : 's'} or class${r.changed === 1 ? '' : 'es'} given out`); if (r.nobody) parts.push(`${r.nobody} still need someone (everyone's busy)`); }
   D.flash = parts.join(' · ') + '. Look it over: drag anything to change it.';
   draw(); D.flash = '';
@@ -694,7 +709,9 @@ function dayTimeMenu(id, el) {
   const title = String(x.title || '').split('|')[0].trim();
   const pop = document.createElement('div'); pop.className = 'pop'; pop.id = 'pop'; pop.style.width = '320px';
   pop.innerHTML = `<label>${esc(fmt(t0) + ' ' + title)} · ${n ? `${n} booked` : 'nobody booked'}</label>
-    ${kids ? '<div class="muted" style="font-size:12.5px;margin:4px 0 8px">A kids class week: a class keeps its time every week, so it\u2019s moved as a whole class (home office).</div>'
+    ${kids ? `<div class="muted" style="font-size:12.5px;margin:4px 0 8px">A kids class week: a class keeps its time every week, so it\u2019s moved as a whole class (home office).</div>
+        <button id="tm-cclose" title="Every upcoming week closes, and the class comes off World; the families enrolled keep their spots">Close the class to new registrations</button>
+        <div class="muted" style="font-size:11.5px;margin:4px 0 8px;line-height:1.45">All its weeks close and it comes off World, so you can call ${n ? 'the families' : 'anyone who asks'} about moving to another time. Undo in the nightly log reopens it.</div>`
       : `<div style="display:flex;gap:6px;align-items:center;margin:6px 0"><input id="tm-new" placeholder="New time, e.g. 3p" style="flex:1;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px"><button id="tm-move">🕐 Change time</button></div>
          <div class="muted" style="font-size:12px;margin-bottom:8px">${n ? 'Everyone booked moves with it: contact them first.' : 'Same day, another time.'}</div>`}
     <div class="row2">${!kids ? `<button id="tm-close" title="${n ? 'Stops new bookings; the families booked keep their spot' : 'Closes it (Undo in the nightly log)'}">${n ? 'Close to new bookings' : 'Close it'}</button>` : ''}<button id="pop-x">Not now</button></div>
@@ -714,6 +731,13 @@ function dayTimeMenu(id, el) {
     D.blocks.forEach(b => { if (b.session === id || (b.sessions || []).includes(id)) { b.start += delta; b.end += delta; } });   // (its class, party, demo or wheel block moves with it)
     D.lo = Math.min(D.lo, Math.floor(r.start / 60) * 60);
     closePop(); D.flash = `Moved ${title} from ${data.from} to ${data.to}${data.bookings ? ` (${data.bookings} booking${data.bookings === 1 ? '' : 's'} moved with it)` : ''}. Check who's demoing it.`; draw();
+  };
+  if ($('tm-cclose')) $('tm-cclose').onclick = async () => {
+    if (!confirm(`Close ${title} to new registrations? Every upcoming week closes and the class comes off World. ${n ? 'The ' + n + ' enrolled keep their spots.' : ''}`)) return;
+    const { data, error } = await sb.rpc('hub_board_class_close', { p_session: id });
+    if (error) { alert(/hub_board_class_close/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
+    x.spaces_left_cache = 0;
+    closePop(); D.flash = `${title}: closed to new registrations (${data.weeks} week${data.weeks === 1 ? '' : 's'}) and off World. Undo it in the Hub: 🌙 Nightly run → Last 7 days.`; draw();
   };
   if ($('tm-cancel')) $('tm-cancel').onclick = async () => {
     if (!confirm(`Cancel ${title} at ${fmt(t0)}? It closes to new bookings now, and Registrations is asked to move or refund the ${n} booked.`)) return;
@@ -1021,15 +1045,17 @@ async function loadWeek() {
     const elseR = staffIds.length ? await sb.from('staff_shifts').select('staff_id, studio_id, shift_date, start_time, end_time, status')
       .in('staff_id', staffIds).neq('studio_id', st).gte('shift_date', from).lte('shift_date', to).not('start_time', 'is', null) : { data: [] };
     const [toffR, unavR] = staffIds.length ? await Promise.all([
-      sb.from('staff_time_off').select('staff_id, start_date, end_date, start_time, end_time, status').in('staff_id', staffIds).in('status', ['approved', 'pending']).lte('start_date', to).gte('end_date', from),
+      sb.from('staff_time_off').select('id, staff_id, start_date, end_date, start_time, end_time, status, type, note').in('staff_id', staffIds).in('status', ['approved', 'pending']).lte('start_date', to).gte('end_date', from),
       sb.from('staff_unavailability').select('staff_id, day_of_week, start_time, end_time, effective_from, effective_to').in('staff_id', staffIds)
     ]) : [{ data: [] }, { data: [] }];
-    const prof = staffIds.length ? await sb.from('staff_profiles').select('id, display_name, preferred_name, is_active, termination_date').in('id', staffIds) : { data: [] };
+    let prof = staffIds.length ? await sb.from('staff_profiles').select('id, display_name, preferred_name, is_active, termination_date, role, hire_date, home_studio_id, min_weekly_hours, max_weekly_hours, max_studio_days_per_week, on_call, on_call_until, aim_40').in('id', staffIds) : { data: [] };
+    if (prof.error) prof = await sb.from('staff_profiles').select('id, display_name, preferred_name, is_active, termination_date').in('id', staffIds);   // (older columns only)
+    const profiles = {}; (prof.data || []).forEach(p => { profiles[p.id] = p; });
     const names = {}, gone = {}; (prof.data || []).forEach(p => { names[p.id] = (p.preferred_name || '').trim() || p.display_name || 'Someone';
       if (p.is_active === false) gone[p.id] = 'deactivated'; else if (p.termination_date && p.termination_date < to) gone[p.id] = 'last day ' + dayLabel(p.termination_date); });
     const days = Array.from({ length: 7 }, (_, i) => addDays(from, i));
     W = { st, from, to, days, sessions, booked, need: need.error ? [] : (need.data || []), needErr: need.error ? need.error.message : '',
-          shifts: shifts.data || [], names, gone, team, toff: toffR.data || [], unav: unavR.data || [], elsewhere: elseR.data || [], inbox: (inbox.data || []).filter(x => x.studio_id === st && x.day && String(x.day).slice(0, 10) >= from && String(x.day).slice(0, 10) <= to) };
+          shifts: shifts.data || [], names, gone, team, profiles, toff: toffR.data || [], unav: unavR.data || [], elsewhere: elseR.data || [], inbox: (inbox.data || []).filter(x => x.studio_id === st && x.day && String(x.day).slice(0, 10) >= from && String(x.day).slice(0, 10) <= to) };
     drawWeek();
   } catch (e) { $('main').innerHTML = `<div class="msg"><b>Couldn't load that week.</b><br>${esc(e.message || e)}</div>`; }
 }
@@ -1071,7 +1097,7 @@ function drawWeek() {
     return `<th><button class="day" onclick="openDay('${d}')" title="Open this day's day board">${esc(dayLabel(d))}</button>
       <div class="cov" title="8am–10pm: red = short, amber = more than needed, green = right">${c.cls.map((k, i) => `<i class="${k}" title="${fmt(c.lo + i * 30)}"></i>`).join('')}</div>
       <small>${n} time${n === 1 ? '' : 's'} booked · need ${c.needH}h, scheduled ${c.haveH}h${c.drafts ? ' (drafts)' : ''}${todo ? ` · <b style="color:var(--bad)">${todo} to decide</b>` : ''}</small>${labCell(d)}</th>`; }).join('');
-  const shiftRows = people.map(pid => `<tr${W.gone && W.gone[pid] ? ' class="gone"' : ''}><td class="lbl"><b>${esc(W.names[pid] || 'Someone')}</b>${W.gone && W.gone[pid] ? `<span class="gone-tag">${esc(W.gone[pid])}</span>` : ''}<small>${Math.round(W.shifts.filter(x => x.staff_id === pid).reduce((t, x) => t + (toMin(x.end_time) - toMin(x.start_time)), 0) / 6) / 10}h this week</small></td>${days.map(d => {
+  const shiftRows = people.map(pid => `<tr${W.gone && W.gone[pid] ? ' class="gone"' : ''}><td class="lbl"><b class="who-link" role="button" tabindex="0" onclick="wkPerson('${esc(pid)}', this)" title="Hours promised, home studio and more">${esc(W.names[pid] || 'Someone')}</b>${W.gone && W.gone[pid] ? `<span class="gone-tag">${esc(W.gone[pid])}</span>` : ''}<small>${Math.round(W.shifts.filter(x => x.staff_id === pid).reduce((t, x) => t + (toMin(x.end_time) - toMin(x.start_time)), 0) / 6) / 10}h this week</small></td>${days.map(d => {
       const mine = W.shifts.filter(x => x.staff_id === pid && x.shift_date === d);
       const away = (W.elsewhere || []).filter(x => x.staff_id === pid && x.shift_date === d);
       return `<td class="drop" data-staff="${esc(pid)}" data-day="${d}">${offChips(pid, d)}${away.map(x => `<div class="off else" title="A shift at another studio that day (one shift a day)">@ ${esc(STUDIO_NAMES[x.studio_id] || x.studio_id)} ${fmt(toMin(x.start_time))}–${fmt(toMin(x.end_time))}${x.status === 'draft' ? ' · draft' : ''}</div>`).join('')}${mine.map(sh => `<div class="sh${sh.status === 'draft' ? ' draft' : ''}${offClash(pid, d, sh) ? ' clash' : ''}" draggable="true" data-shift="${esc(String(sh.id))}" role="button" tabindex="0"
@@ -1135,7 +1161,7 @@ const niceErr = m => String(m || '').replace(/\b[A-Z]{2}-[A-Z]{2,4}-[A-Z]{2,4}\b
 // ---- time off and unavailability (staff_time_off, staff_unavailability) ----
 function offOn(pid, d) {
   const out = [];
-  (W.toff || []).filter(o => o.staff_id === pid && o.start_date <= d && o.end_date >= d).forEach(o => out.push({ kind: 'toff', pending: o.status === 'pending',
+  (W.toff || []).filter(o => o.staff_id === pid && o.start_date <= d && o.end_date >= d).forEach(o => out.push({ kind: 'toff', id: o.id, pending: o.status === 'pending',
     times: o.start_time && o.end_time ? `${fmt(toMin(o.start_time))}–${fmt(toMin(o.end_time))}` : '' }));
   const dow = new Date(d + 'T12:00:00').getDay();
   (W.unav || []).filter(u => u.staff_id === pid && u.day_of_week === dow && (!u.effective_from || u.effective_from <= d) && (!u.effective_to || u.effective_to >= d))
@@ -1144,13 +1170,79 @@ function offOn(pid, d) {
 }
 function offChips(pid, d) {
   return offOn(pid, d).map(o => o.kind === 'toff'
-    ? `<div class="off toff" title="Time off${o.pending ? ' (not approved yet)' : ''}">Time off${o.times ? ' ' + o.times : ''}${o.pending ? ' · pending' : ''}</div>`
+    ? `<div class="off toff" role="button" tabindex="0" style="cursor:pointer" onclick="wkTimeOff('${o.id}', this)" title="Time off${o.pending ? ' (not approved yet)' : ''}: click to approve, change or cancel">Time off${o.times ? ' ' + o.times : ''}${o.pending ? ' · pending' : ''}</div>`
     : `<div class="off unav" title="Their regular unavailability">Unavailable${o.times ? ' ' + o.times : ''}</div>`).join('');
 }
 // a shift that overlaps their time off or unavailability (all day, or the hours given)
 function offClash(pid, d, sh) {
   const a = toMin(sh.start_time), z = toMin(sh.end_time);
   return offOn(pid, d).some(o => { if (!o.times) return true; const [x, y] = o.times.split('–').map(t => parseRange(t + '-' + t) ? parseRange(t + '-' + t).start : null); return x != null && y != null ? a < y && z > x : true; });
+}
+// ---- a person's card: hours promised (their profile), home studio, hire date, this week's hours ----
+function wkPerson(pid, el) {
+  const p = (W.profiles || {})[pid] || {}; closePop();
+  const paid = sh => { const m = toMin(sh.end_time) - toMin(sh.start_time); return m > 300 ? m - 30 : m; };
+  const here = W.shifts.filter(x => x.staff_id === pid), away = (W.elsewhere || []).filter(x => x.staff_id === pid);
+  const mins = here.concat(away).reduce((t, x) => t + paid(x), 0), days = new Set(here.concat(away).map(x => x.shift_date)).size;
+  const h = m => Math.round(m / 6) / 10;
+  const L = [];
+  const min = p.min_weekly_hours, max = p.max_weekly_hours;
+  L.push(`<b>Hours promised:</b> ${min != null ? 'at least ' + min : 'no minimum'}, ${max != null ? 'at most ' + max : 'no maximum'}${p.aim_40 ? ' · <b>aims for 40</b> (less a stat or time off)' : ''}`);
+  const status = min != null && mins / 60 < min ? `<b style="color:var(--bad)">${h(min * 60 - mins)} h under their minimum</b>` : max != null && mins / 60 > max ? `<b style="color:var(--bad)">${h(mins - max * 60)} h over their maximum</b>` : '';
+  L.push(`<b>This week:</b> ${h(mins)} h paid on ${days} day${days === 1 ? '' : 's'}${away.length ? ' (all studios)' : ''}${status ? ' · ' + status : ''}`);
+  if (p.max_studio_days_per_week != null) L.push(`<b>In-studio days:</b> at most ${p.max_studio_days_per_week} a week`);
+  if (p.role) L.push(`<b>Role:</b> ${esc(p.role)}`);
+  L.push(`<b>Home studio:</b> ${esc(p.home_studio_id ? (STUDIO_NAMES[p.home_studio_id] || p.home_studio_id) : 'not set')}`);
+  if (p.hire_date) { const mo = Math.max(0, Math.round((Date.now() - new Date(p.hire_date + 'T12:00:00')) / 2.63e9));
+    L.push(`<b>Hired:</b> ${esc(dayLabel(p.hire_date))} (${mo < 12 ? mo + ' month' + (mo === 1 ? '' : 's') : Math.floor(mo / 12) + ' yr' + (mo % 12 ? ' ' + (mo % 12) + ' mo' : '')})`); }
+  if (p.termination_date) L.push(`<b>Last day:</b> ${esc(dayLabel(p.termination_date))}`);
+  if (p.on_call) L.push(`<b>On call</b>${p.on_call_until ? ' until ' + esc(dayLabel(p.on_call_until)) : ''}: only when nobody else can cover`);
+  const pop = document.createElement('div'); pop.className = 'pop'; pop.id = 'pop'; pop.style.width = '330px';
+  pop.innerHTML = `<label style="font-size:14px">${esc(W.names[pid] || 'Someone')}</label><div style="font-size:12.5px;line-height:1.6;margin:4px 0 8px">${L.join('<br>')}</div>
+    <div class="row2"><button id="pop-x">Close</button></div>`;
+  document.body.appendChild(pop);
+  const r0 = el.getBoundingClientRect(); pop.style.left = Math.min(window.innerWidth - 350, r0.right + 8) + 'px'; pop.style.top = Math.min(window.innerHeight - 260, r0.top) + 'px';
+  $('pop-x').onclick = closePop;
+}
+// ---- a time off: approve or deny (pending), change its days or hours, or cancel it (staff_time_off) ----
+function wkTimeOff(id, el) {
+  const o = (W.toff || []).find(x => String(x.id) === String(id)); if (!o) return;
+  closePop();
+  const nm = W.names[o.staff_id] || 'Someone', hm = t => t ? String(t).slice(0, 5) : '';
+  const pop = document.createElement('div'); pop.className = 'pop'; pop.id = 'pop'; pop.style.width = '330px';
+  pop.innerHTML = `<label>${esc(nm)}: time off${o.status === 'pending' ? ' <b style="color:#8a5a00">(pending)</b>' : ''}${o.type ? ' · ' + esc(o.type) : ''}</label>
+    ${o.note ? `<div class="muted" style="font-size:12px;margin:2px 0 6px">“${esc(o.note)}”</div>` : ''}
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:6px 0">
+      <label style="font-size:11.5px">First day<input type="date" id="tf-a" value="${o.start_date}" style="width:100%;font:inherit;font-size:12.5px"></label>
+      <label style="font-size:11.5px">Last day<input type="date" id="tf-z" value="${o.end_date}" style="width:100%;font:inherit;font-size:12.5px"></label>
+      <label style="font-size:11.5px">From (part day)<input type="time" id="tf-f" value="${hm(o.start_time)}" style="width:100%;font:inherit;font-size:12.5px"></label>
+      <label style="font-size:11.5px">Until<input type="time" id="tf-u" value="${hm(o.end_time)}" style="width:100%;font:inherit;font-size:12.5px"></label>
+    </div>
+    <div class="row2" style="flex-wrap:wrap">${o.status === 'pending' ? '<button id="tf-ok" style="background:#2f7d4a;color:#fff;border-color:#2f7d4a">Approve</button><button id="tf-no">Deny</button>' : ''}
+      <button id="tf-save">Save changes</button>${o.status === 'approved' ? '<button id="tf-cancel">Cancel it</button>' : ''}<button id="pop-x">Not now</button></div>`;
+  document.body.appendChild(pop);
+  const r0 = el.getBoundingClientRect(); pop.style.left = Math.min(window.innerWidth - 350, r0.left) + 'px'; pop.style.top = Math.min(window.innerHeight - 260, r0.bottom + 6) + 'px';
+  $('pop-x').onclick = closePop;
+  const save = async (patch, msg) => {
+    patch.updated_at = new Date().toISOString(); patch.reviewed_at = new Date().toISOString();
+    try { const { data: { user } } = await sb.auth.getUser(); if (user) patch.reviewed_by = user.id; } catch (e) {}
+    const { error } = await sb.from('staff_time_off').update(patch).eq('id', o.id);
+    if (error) { alert(error.message); return; }
+    Object.assign(o, patch);
+    if (patch.status === 'denied' || patch.status === 'cancelled') W.toff = W.toff.filter(x => x !== o);
+    closePop(); W.flash = `${nm}: ${msg}.`; drawWeek();
+  };
+  const dates = () => {
+    const a = $('tf-a').value, z = $('tf-z').value || a, f = $('tf-f').value, u = $('tf-u').value;
+    if (!a) { alert('Choose the first day.'); return null; } if (z < a) { alert('The last day is before the first day.'); return null; }
+    if (!!f !== !!u) { alert('Enter both times for part of a day, or neither.'); return null; }
+    if (f && a !== z) { alert('Part-day time off can only cover one day.'); return null; } if (f && u <= f) { alert('The end time must be after the start.'); return null; }
+    return { start_date: a, end_date: z, start_time: f || null, end_time: u || null };
+  };
+  if ($('tf-ok')) $('tf-ok').onclick = () => { const d = dates(); if (d) save(Object.assign(d, { status: 'approved' }), 'time off approved'); };
+  if ($('tf-no')) $('tf-no').onclick = () => { if (confirm(`Deny ${nm}'s time off?`)) save({ status: 'denied' }, 'time off denied'); };
+  $('tf-save').onclick = () => { const d = dates(); if (d) save(d, 'time off changed'); };
+  if ($('tf-cancel')) $('tf-cancel').onclick = () => { if (confirm(`Cancel ${nm}'s time off (${o.start_date === o.end_date ? dayLabel(o.start_date) : dayLabel(o.start_date) + ' to ' + dayLabel(o.end_date)})?`)) save({ status: 'cancelled' }, 'time off cancelled'); };
 }
 function offWarn(pid, d) {
   const o = offOn(pid, d); if (!o.length) return true;
