@@ -454,7 +454,16 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .as-ovt tr.as-ov-w td:nth-child(4) { color: #a3191c; } .as-ovt tr.ask td:nth-child(3) { font-weight: 800; } .as-ovt tr.done td { opacity: .55; } .as-ovt select { max-width: 260px; font: inherit; font-size: 13px; }
 .as-ovt .ho-btn { white-space: nowrap; }
 .as-ovn { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; } .as-ovdone { display: inline-flex; gap: 4px; align-items: center; } .as-for { margin-top: 4px; font-size: 12.5px; } .as-forsel { font: inherit; font-size: 13px; max-width: 220px; }
-.mn-row { border-top: 1px solid var(--border); padding: 6px 0; font-size: 14px; } .inbox-row .inbox-btns { margin-top: 5px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; } .inbox-sel { font: inherit; font-size: 13px; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border); max-width: 100%; } .mn-row label { display: inline-flex; gap: 6px; align-items: center; }
+.mn-row { border-top: 1px solid var(--border); padding: 6px 0; font-size: 14px; } .inbox-chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 6px; }
+.inbox-chip { font: inherit; font-size: 12.5px; border: 1px solid var(--border); background: #fff; border-radius: 999px; padding: 3px 10px; cursor: pointer; }
+.inbox-chip:hover, .inbox-more:hover { background: #f6f4ee; }
+.inbox-more { font: inherit; font-size: 13px; font-weight: 600; border: 0; background: none; color: var(--ink); padding: 6px 0 2px; cursor: pointer; text-decoration: underline; }
+.inbox-page { position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: rgba(20, 20, 20, .35); z-index: 9000; display: flex; justify-content: center; align-items: stretch; padding: 3vh 12px; }
+.inbox-page-in { background: #fff; border-radius: 14px; width: 100%; max-width: 900px; overflow-y: auto; padding: 14px 18px 24px; box-shadow: 0 12px 40px rgba(0,0,0,.25); }
+.inbox-page-head { display: flex; align-items: center; gap: 10px; position: sticky; top: -14px; background: #fff; padding: 6px 0 8px; z-index: 1; font-size: 17px; }
+.inbox-filters { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 10px; } .inbox-filters select, .inbox-filters input { font: inherit; font-size: 13px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+.inbox-filters input { flex: 1; min-width: 160px; }
+.inbox-row .inbox-btns { margin-top: 5px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; } .inbox-sel { font: inherit; font-size: 13px; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border); max-width: 100%; } .mn-row label { display: inline-flex; gap: 6px; align-items: center; }
 /* glazing stands out (no colour of its own): heavier text and a dark outline */
 .as-e.as-glz { font-weight: 800; box-shadow: inset 0 0 0 2px currentColor; text-transform: none; } .as-e.as-glz b { font-weight: 900; }
 .as-e.as-glz > span { font-weight: 600; } .as-e.as-glz select { font-weight: 800; }
@@ -3101,21 +3110,73 @@ function inboxChange(id) {
   const hm = (h, mm, ap) => { h = +h % 12 + (/p/i.test(ap) ? 12 : 0); return String(h).padStart(2, '0') + ':' + (mm || '00'); };
   inboxDecide(id, 'change', hm(m[1], m[2], m[3]), hm(m[4], m[5], m[6]));
 }
+// ---- 📋 For you, its own page: filter by kind, studio and when; search; sort ----
+const INBOX_CARD_MAX = 3;
+const INBOX_LABEL = { cut_shift: ['shift to approve', 'shifts to approve'], evening_question: ['evening to decide', 'evenings to decide'],
+  as_note: ['note', 'notes'], short_day: ['short day', 'short days'], class_problem: ['class booking', 'class bookings'] };
+let _myNotes = [], _inboxPage = null;
+function inboxSorter(by) {
+  const d = x => String(x.day || '9999');
+  return by === 'studio' ? (a, b) => (STUDIO_NAMES[a.studio_id] || '').localeCompare(STUDIO_NAMES[b.studio_id] || '') || d(a).localeCompare(d(b))
+    : by === 'kind' ? (a, b) => Object.keys(INBOX_LABEL).indexOf(a.kind) - Object.keys(INBOX_LABEL).indexOf(b.kind) || d(a).localeCompare(d(b))
+    : (a, b) => d(a).localeCompare(d(b)) || (STUDIO_NAMES[a.studio_id] || '').localeCompare(STUDIO_NAMES[b.studio_id] || '');
+}
+function inboxPageOpen(kind) {
+  _inboxPage = { kind: kind || '', studio: '', when: '', q: '', sort: 'soon' };
+  let el = document.getElementById('inbox-page');
+  if (!el) { el = document.createElement('div'); el.id = 'inbox-page'; el.className = 'inbox-page'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', 'For you'); document.body.appendChild(el); }
+  el.style.display = ''; document.body.style.overflow = 'hidden';
+  inboxPageDraw();
+}
+function inboxPageClose() { const el = document.getElementById('inbox-page'); if (el) el.style.display = 'none'; document.body.style.overflow = ''; _inboxPage = null; }
+function inboxPageSet(k, v) { if (!_inboxPage) return; _inboxPage[k] = v; inboxPageDraw(k === 'q'); }
+function inboxPageDraw(keepFocus) {
+  const el = document.getElementById('inbox-page'), F = _inboxPage; if (!el || !F) return;
+  const today = new Date(); today.setHours(12, 0, 0, 0);
+  const until = F.when ? new Date(today.getTime() + (+F.when) * 86400000).toISOString().slice(0, 10) : null;
+  const q = F.q.trim().toLowerCase();
+  const rows = _inbox.filter(x => (!F.kind || x.kind === F.kind) && (!F.studio || x.studio_id === F.studio) && (!until || !x.day || String(x.day).slice(0, 10) <= until)
+      && (!q || [x.title, x.detail, STUDIO_NAMES[x.studio_id]].join(' ').toLowerCase().includes(q))).sort(inboxSorter(F.sort));
+  const studios = [...new Set(_inbox.map(x => x.studio_id).filter(Boolean))].sort((a, b) => (STUDIO_NAMES[a] || a).localeCompare(STUDIO_NAMES[b] || b));
+  const opt = (v, l, cur) => `<option value="${escAttr(v)}"${v === cur ? ' selected' : ''}>${esc(l)}</option>`;
+  const notes = _myNotes;
+  el.innerHTML = `<div class="inbox-page-in">
+    <div class="inbox-page-head"><b>📋 For you</b><span class="lab-sub">${rows.length} of ${_inbox.length} shown</span><span style="flex:1"></span><button class="ho-btn" onclick="inboxPageClose()" aria-label="Close">✕ Close</button></div>
+    <div class="inbox-filters">
+      <select onchange="inboxPageSet('kind', this.value)" aria-label="Kind">${opt('', 'Everything', F.kind)}${Object.keys(INBOX_LABEL).filter(k => _inbox.some(x => x.kind === k)).map(k => opt(k, INBOX_KIND[k] + ' ' + INBOX_LABEL[k][1][0].toUpperCase() + INBOX_LABEL[k][1].slice(1) + ' (' + _inbox.filter(x => x.kind === k).length + ')', F.kind)).join('')}</select>
+      <select onchange="inboxPageSet('studio', this.value)" aria-label="Studio">${opt('', 'All studios', F.studio)}${studios.map(st => opt(st, STUDIO_NAMES[st] || st, F.studio)).join('')}</select>
+      <select onchange="inboxPageSet('when', this.value)" aria-label="When">${opt('', 'Any day', F.when)}${opt('7', 'Next 7 days', F.when)}${opt('14', 'Next 14 days', F.when)}${opt('21', 'Next 3 weeks', F.when)}</select>
+      <select onchange="inboxPageSet('sort', this.value)" aria-label="Sort">${opt('soon', 'Soonest first', F.sort)}${opt('studio', 'By studio', F.sort)}${opt('kind', 'By kind', F.sort)}</select>
+      <input id="inbox-q" type="search" placeholder="Search…" value="${escAttr(F.q)}" oninput="inboxPageSet('q', this.value)" aria-label="Search">
+    </div>
+    <div class="inbox-list">${rows.length ? rows.map(inboxItemHtml).join('') : '<p class="lab-sub" style="padding:14px 0">Nothing matches.</p>'}</div>
+    ${notes.length ? `<h4 style="margin:16px 0 4px">Notes from home office (${notes.length})</h4>${notes.map(n => `<div class="mn-row"><label><input type="checkbox" onchange="myNoteDone('${n.id}')"> <b>${esc(new Date(n.day + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))}</b> · ${esc(STUDIO_NAMES[n.studio_id] || n.studio_id)}</label><div>${esc(n.body)}</div></div>`).join('')}` : ''}
+  </div>`;
+  if (keepFocus) { const i = document.getElementById('inbox-q'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }
+}
 async function myNotesLoad() {
   const el = document.getElementById('card-mynotes'); if (!el) return;
   let list = [];
   try { const r = await sb.rpc('hub_my_autosched_notes'); list = r.error ? [] : (r.data || []); } catch (e) { list = []; }
   try { const r = await sb.rpc('hub_inbox_mine'); _inbox = r.error ? [] : (r.data || []); } catch (e) { _inbox = []; }
+  if (_inboxPage) inboxPageDraw();
   if (!list.length && !_inbox.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
   const fmt = d => new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
   el.style.display = '';
-  const cuts = _inbox.filter(x => x.kind === 'cut_shift').length;
+  _myNotes = list;
+  const soon = _inbox.slice().sort(inboxSorter('soon')).slice(0, INBOX_CARD_MAX), more = _inbox.length - soon.length;
+  const chips = Object.keys(INBOX_LABEL).map(k => { const n = _inbox.filter(x => x.kind === k).length;
+    return n ? `<button class="inbox-chip" onclick="inboxPageOpen('${k}')">${INBOX_KIND[k]} ${n} ${esc(n === 1 ? INBOX_LABEL[k][0] : INBOX_LABEL[k][1])}</button>` : ''; }).join('');
   el.innerHTML = `<div class="lab-card"><div class="lab-row"><span class="lab-ttl">📋 For you</span><span class="lab-sub">${[
-      _inbox.length ? _inbox.length + ' to decide' + (cuts ? ' (' + cuts + ' shift' + (cuts === 1 ? '' : 's') + ' to approve)' : '') : '',
-      list.length ? list.length + ' note' + (list.length === 1 ? '' : 's') + ' from home office' : ''].filter(Boolean).join(' · ')}</span></div>
-    ${_inbox.map(inboxItemHtml).join('')}
-    ${list.map(n => `<div class="mn-row"><label><input type="checkbox" onchange="myNoteDone('${n.id}')"> <b>${esc(fmt(n.day))}</b> · ${esc(STUDIO_NAMES[n.studio_id] || n.studio_id)}</label><div>${esc(n.body)}</div>
-      <span class="lab-sub">from ${esc(String(n.created_by || '').split('@')[0])}</span></div>`).join('')}</div>`;
+      _inbox.length ? _inbox.length + ' to decide' : '',
+      list.length ? list.length + ' note' + (list.length === 1 ? '' : 's') + ' from home office' : ''].filter(Boolean).join(' · ')}</span>
+      ${_inbox.length ? `<span style="flex:1"></span><button class="ho-btn" onclick="inboxPageOpen('')">See all (${_inbox.length}) →</button>` : ''}</div>
+    ${chips ? `<div class="inbox-chips">${chips}</div>` : ''}
+    ${soon.map(inboxItemHtml).join('')}
+    ${more > 0 ? `<button class="inbox-more" onclick="inboxPageOpen('')">+ ${more} more: see all →</button>` : ''}
+    ${list.slice(0, INBOX_CARD_MAX).map(n => `<div class="mn-row"><label><input type="checkbox" onchange="myNoteDone('${n.id}')"> <b>${esc(fmt(n.day))}</b> · ${esc(STUDIO_NAMES[n.studio_id] || n.studio_id)}</label><div>${esc(n.body)}</div>
+      <span class="lab-sub">from ${esc(String(n.created_by || '').split('@')[0])}</span></div>`).join('')}
+    ${list.length > INBOX_CARD_MAX ? `<button class="inbox-more" onclick="inboxPageOpen('')">+ ${list.length - INBOX_CARD_MAX} more notes: see all →</button>` : ''}</div>`;
 }
 async function myNoteDone(id) {
   const { error } = await sb.rpc('hub_my_autosched_note_done', { p_id: id, p_done: true });
