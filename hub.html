@@ -9457,11 +9457,11 @@ function planDemoPlan() {
       busy: x.duration_minutes || 360,
       teachers: P.campTeam[x.id].map(t => { const p = (P.team || []).find(z => z.staff_id === t.staff_id); return p ? planWriteName(p) : (t.full_name || t.name); }) })),
     ...Object.keys(partyBy).map(id => { const x = P.sessions.find(z => z.id === id) || {}; return { key: id, start: hubMin(x.session_time), kind: 'party', teachers: partyBy[id], busy: partyBusy[id] }; }),
-    ...others.filter(x => x.session_type !== 'party' && P.booked[x.id] > 0).map(x => ({ key: x.id, start: hubMin(x.session_time), kind: 'other', teachers: [] }))
+    ...others.filter(x => x.session_type !== 'party' && P.booked[x.id] > 0).map(x => ({ key: x.id, start: hubMin(x.session_time), kind: 'other', teachers: [], demoBy: (P.staffBy[x.id] || {}).demo_by || '' }))
   ], P.roles);
 }
 // A person's busy blocks: teaching (kids class 90 min, wheel 90, party art time, team building 15)
-// and the first 30 minutes of anything they demo
+// and the first 15 minutes of anything they demo
 function planBusyFor(name, plan) {
   const k = hubNameKey(name);
   return ((plan || planDemoPlan())._blocks || []).filter(b => b.name === k).map(b => [b.start, b.end, b.why]);
@@ -9499,6 +9499,21 @@ function planSuggestBreaks() {
     : (skipped.length ? `Couldn't fit a break for ${skipped.join(', ')}.` : 'No breaks needed, or they’re already set.'));
 }
 
+// 🕐 Change time (admin): this workshop to another time the same day, with everyone booked on it (session_retime.sql)
+async function planRetime(id) {
+  const x = (_plan.sessions || []).find(z => z.id === id); if (!x) return;
+  const now = String(x.session_time || '').slice(0, 5);
+  const v = prompt(`${x.title}\nNow at ${shortTime(x.session_time)}. New time today (e.g. 3p or 3:30p)?\n\nEveryone booked moves with it, so contact them first.`, '');
+  if (!v) return;
+  const m = v.trim().toLowerCase().replace(/\s+/g, '').match(/^(\d{1,2})(?::(\d{2}))?([ap])m?$/);
+  if (!m) { alert('Use a time like 3p or 3:30p (with a or p).'); return; }
+  const h = (+m[1] % 12) + (m[3] === 'p' ? 12 : 0), t = String(h).padStart(2, '0') + ':' + (m[2] || '00');
+  if (t === now) return;
+  const { data, error } = await sb.rpc('hub_session_retime', { p_id: id, p_time: t });
+  if (error) { alert(/hub_session_retime/.test(error.message) ? 'Run session_retime.sql in Supabase first.' : error.message); return; }
+  await loadPlanDay(_plan.date);
+  _plan.msg = `Moved ${x.title} from ${data.from} to ${data.to}${data.bookings ? ` (${data.bookings} booking${data.bookings === 1 ? '' : 's'} moved with it)` : ''}.`; renderPlanDay();
+}
 async function planSave() {
   if (!planCanEdit()) { openPinModal(); return; }
   const P = _plan;
@@ -9979,7 +9994,7 @@ async function toggleClassList(sessionId) {
     const agSum = rows.reduce((t, b) => { const a = b.ages || {}; t.u8 += a.kids_under_8 || 0; t.k811 += a.kids_8_11 || 0; t.k1215 += a.kids_12_15 || 0; return t; }, { u8: 0, k811: 0, k1215: 0 });
     const agBits = [agSum.u8 ? `<span class="age-pill u8">👶 Under 8: ${agSum.u8}</span>` : '', agSum.k811 ? `<span class="age-pill k811">8–11: ${agSum.k811}</span>` : '', agSum.k1215 ? `<span class="age-pill k1215">12–15: ${agSum.k1215}</span>` : ''].filter(Boolean).join('');
     el.innerHTML = `<div class="cl-head"><b>${total}</b> ${planIsKids(x) ? 'enrolled' : 'booked'}${awayN ? ` <span class="goal-note">(+ ${awayN} away today)</span>` : ''}${agBits ? `<span class="age-sum">${agBits}</span>` : ''}
-        <span class="spacer"></span><button class="ho-btn" onclick="planEmail('${escAttr(x.id)}')">✉️ Email this class</button><button class="ho-btn" onclick="planEmailHistory('${escAttr(x.id)}')">Sent</button><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button>
+        <span class="spacer"></span>${!planIsKids(x) && _studioData && _studioData.isAdmin ? `<button class="ho-btn" onclick="planRetime('${escAttr(x.id)}')" title="Move this workshop to another time today (contact the families first)">🕐 Change time</button>` : ''}<button class="ho-btn" onclick="planEmail('${escAttr(x.id)}')">✉️ Email this class</button><button class="ho-btn" onclick="planEmailHistory('${escAttr(x.id)}')">Sent</button><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button>
 </div>
       ${rows.length || ghosts.length ? `<div class="oc-wrap"><table class="oc-table cl-table"><thead><tr><th>Name</th><th>Qty</th>${glazing ? '<th>Glazing</th>' : ''}<th>Extras</th><th>Phone</th><th>Order</th><th>Notes</th>${planMovable(x) || _hoCan.edit ? '<th></th>' : ''}</tr></thead><tbody>
       ${rows.map(b => {
@@ -15512,11 +15527,11 @@ function classStaffHtml(s) {
 // free, the Director; if the Director's busy too, it needs a demoer.
 // A kids class with no teacher set gets the first free demoer.
 const HUB_BUSY_MIN = { kids: 90, wheel: 90, party: 60 };
-const HUB_DEMO_MIN = 30;   // a demo keeps the demoer busy for the first 30 minutes of a session
+const HUB_DEMO_MIN = 15;   // a demo keeps the demoer busy for the first 15 minutes of a session (same as the day board)
 // A party keeps its teachers busy for its art time: what the customer chose (60 or 90
 // minutes) or the actual art time on the party form. Team building: 15 minutes.
 function hubPartyBusyMin(title, rawPayload, detail) {
-  if (/team\s*building/i.test(title || '')) return 15;
+  if (/team\s*building|get.?together/i.test(title || '')) return 15;   // (only the intro, then it runs like a workshop)
   let art = detail && detail.actual_art_time;
   if (!art) {
     try { const sub = getPartySubtype(title || ''); art = parseAddonDetails(parsePartyAddons(rawPayload, sub), sub).artTime; } catch (e) {}
@@ -15532,6 +15547,13 @@ function hubDemoPlan(rows, roles) {
   const director = String(roles.director || '').trim();
   const busy = [];   // { name, start, end }
   const isBusy = (n, t) => busy.some(b => b.name === hubNameKey(n) && t >= b.start && t < b.end);
+  // (Nov 8 2026, same as the day board) each role's break: nobody is picked to demo or teach on their break
+  ['director', 'teacher', 'teacher2', 'circler', 'circler2', 'circler3'].forEach(f => {
+    const who = String(roles[f] || '').trim(), m = String(roles['break_' + f] || '').match(/(\d{1,2}):(\d{2})\D+(\d{1,2}):(\d{2})/);
+    if (!who || !m) return;
+    const h = v => { v = +v; return v < 8 ? v + 12 : v; };
+    busy.push({ name: hubNameKey(who), start: h(m[1]) * 60 + +m[2], end: h(m[3]) * 60 + +m[4], why: 'break' });
+  });
   const out = {};
   const sorted = rows.slice().sort((a, b) => a.start - b.start);
   // 1. teaching blocks, in time order (a kids class with no teacher takes the first free demoer)
@@ -15544,8 +15566,10 @@ function hubDemoPlan(rows, roles) {
     names.forEach(n => busy.push({ name: hubNameKey(n), start: r.start, end: r.start + (r.busy || HUB_BUSY_MIN[r.kind] || 90), why: r.kind }));
     out[r.key] = { teachers: names, auto };
   });
-  // 2. everything else: free demoers, else the Director, else nobody
+  // 2. everything else: whoever the day board set for this time (session_staff.demo_by), else free demoers, else the Director, else nobody
   sorted.filter(r => r.kind === 'other').forEach(r => {
+    const set = String(r.demoBy || '').trim();
+    if (set) { out[r.key] = { demo: [set], set: true }; return; }
     const free = demoers.filter(n => !isBusy(n, r.start));
     if (free.length) out[r.key] = { demo: free };
     else if (director && !isBusy(director, r.start)) out[r.key] = { demo: [director], viaDirector: true };
@@ -15621,7 +15645,8 @@ function renderFloorToday(data) {
       : /wheel/.test(title) ? 'wheel'
       : (info.type === 'series' || info.type === 'class' || /class \d+ of \d+|week session/.test(title)) ? 'kids' : 'other';
     const teachers = !info ? [] : kind === 'party' ? (info.party || []) : kind === 'wheel' ? [info.staff.wheel_teacher] : kind === 'kids' ? [info.staff.teacher] : [];
-    return { key, start: hubMin(s.time), kind, teachers, booked: Number(s.bookingCount || 0), busy: kind === 'party' ? (info.partyBusy || hubPartyBusyMin(s.title)) : null };
+    return { key, start: hubMin(s.time), kind, teachers, booked: Number(s.bookingCount || 0), busy: kind === 'party' ? (info.partyBusy || hubPartyBusyMin(s.title)) : null,
+             demoBy: info && info.staff ? info.staff.demo_by || '' : '' };
   }).filter(r => r.kind !== 'skip'), (_classInfo && _classInfo.roles) || {});
   const offToday = allSessions.filter(notRunning);
   const rows = sessions.map(s => {
