@@ -19,6 +19,8 @@ header h1 { font-size: 18px; margin: 0 8px 0 0; }
 header select, header input, header button { font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); }
 header button { cursor: pointer; font-weight: 600; }
 header button.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+header button#save { background: #2f7d4a; border-color: #2f7d4a; } header button#save.dirty { box-shadow: 0 0 0 3px #f0b429; }
+header button:disabled { opacity: .5; cursor: default; }
 .switch { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
 .switch button { border: 0; border-radius: 0; padding: 7px 14px; background: #fff; }
 .switch button.on { background: var(--ink); color: #fff; }
@@ -64,6 +66,14 @@ main { padding: 14px 20px 40px; }
 .who select.role { font: inherit; font-size: 11.5px; padding: 1px 4px; border: 1px solid var(--line); border-radius: 6px; margin-left: 4px; background: #fff; }
 .lane { position: relative; flex: none; }
 .shift { position: absolute; top: 6px; bottom: 6px; background: #f1efe8; border-radius: 6px; }
+.shift.draft { background: repeating-linear-gradient(90deg, #f4f2ec 0 10px, #fbfaf6 10px 20px); border: 1px dashed #b9b2a2; }
+.sh-acts { float: right; } .sh-acts button { font: inherit; font-size: 11px; border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 0 5px; margin-left: 2px; cursor: pointer; color: var(--muted); }
+.sh-acts button:hover { color: var(--ink); border-color: #bbb; }
+.decide { background: var(--panel); border: 1px solid #f0d89a; border-radius: 12px; padding: 10px 14px; margin: 0 0 10px; }
+.decide h2 { font-size: 14px; margin: 0 0 6px; } .decide .it { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 6px 0; border-top: 1px solid #f4ecd2; font-size: 13px; }
+.decide .it:first-of-type { border-top: 0; } .decide .it .t { flex: 1; min-width: 220px; } .decide .it small { color: var(--muted); display: block; }
+.decide button, .decide select { font: inherit; font-size: 12px; padding: 3px 9px; border: 1px solid var(--line); border-radius: 999px; background: #fff; cursor: pointer; }
+.draft-tag { font-size: 10.5px; font-weight: 600; color: #6b6b63; border: 1px dashed #b9b2a2; border-radius: 999px; padding: 0 6px; margin-left: 4px; vertical-align: 1px; }
 .hour { position: absolute; top: 0; bottom: 0; border-left: 1px solid #f1ede3; }
 .times { display: flex; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); z-index: 6; }
 .times .who { font-size: 12px; color: var(--muted); padding-top: 10px; }
@@ -106,10 +116,13 @@ main { padding: 14px 20px 40px; }
   <button id="next" class="wk-only" aria-label="Week after">▶</button>
   <button id="load">Show</button>
   <span class="spacer"></span>
+  <button id="addsh" class="day-only" title="Add a shift for someone (a draft until you publish the day)">+ Add shift</button>
+  <button id="pub" class="day-only" title="Publish the day's draft shifts: they become approved, and staff get their usual notification" style="display:none">Publish</button>
   <button id="plan" class="primary day-only" title="Roles, then breaks, then demos (anything you've moved stays put)">Plan the day</button>
   <button id="brk" class="day-only" title="A 30-minute break for everyone on a shift over 5 hours who doesn't have one">Suggest breaks</button>
   <button id="demo" class="day-only" title="Give each demo (and any class or party with nobody) to the best person free then">Assign demos</button>
-  <button id="reset" class="day-only" title="Put everything back the way it was loaded (a try-out: nothing in the day view is saved yet)">Undo</button>
+  <button id="reset" class="day-only" title="Put everything back the way it was last saved">Undo</button>
+  <button id="save" class="primary day-only" title="Save roles, breaks, teachers and demoers to the Day plan (the Hub's Day plan and On stage follow it)">Save the day</button>
   <span class="note wk-only">Changes here are real</span>
 </header>
 <main id="main"><div class="msg">Loading…</div></main>
@@ -181,6 +194,19 @@ async function load() {
     // the people on shift (one row each)
     const people = (team.data || []).map(p => ({ id: p.staff_id, name: p.nickname || p.full_name || p.name || 'Someone', show: p.name || p.nickname || 'Someone',
       start: toMin(p.start_time), end: toMin(p.end_time), roles: [], job: '', hired: null, role: '' }));
+    // every shift that day (the Day plan's list is approved shifts only): ids for changing them, and drafts as their own rows
+    const dr = await sb.from('staff_shifts').select('id, staff_id, start_time, end_time, status').eq('studio_id', st).eq('shift_date', date);
+    (dr.data || []).forEach(x => { const p = people.find(z => z.id === x.staff_id); if (p && x.status !== 'draft') { p.shiftId = String(x.id); p.status = x.status; } });
+    const drafts = (dr.data || []).filter(x => x.status === 'draft' && x.start_time && x.end_time && !people.some(p => p.id === x.staff_id));
+    if (drafts.length) {
+      const dp = await sb.from('staff_profiles').select('id, display_name, preferred_name, nickname').in('id', [...new Set(drafts.map(x => x.staff_id))]);
+      const nm = {}; (dp.data || []).forEach(r => { nm[r.id] = r; });
+      drafts.forEach(x => { const r = nm[x.staff_id] || {};
+        people.push({ id: x.staff_id, name: (r.nickname || '').trim() || (r.preferred_name || '').trim() || r.display_name || 'Someone',
+          show: (r.preferred_name || '').trim() || r.display_name || r.nickname || 'Someone', start: toMin(x.start_time), end: toMin(x.end_time), roles: [], job: '', hired: null, role: '', draft: true,
+          shiftId: String(x.id), status: 'draft' }); });
+      people.sort((a, b) => a.start - b.start || a.show.localeCompare(b.show));
+    }
     // their job (manager / coordinator) and hire date (seniority), from their staff profile
     if (people.length) {
       const prof = await sb.from('staff_profiles').select('id, role, hire_date').in('id', people.map(p => p.id));
@@ -243,8 +269,14 @@ async function load() {
     });
     let lo = Math.min(8 * 60, ...people.map(p => p.start), ...blocks.map(b => b.start)), hi = Math.max(17 * 60, ...people.map(p => p.end), ...blocks.map(b => b.runEnd || b.end));
     lo = Math.floor(lo / 60) * 60; hi = Math.ceil(hi / 60) * 60;
-    D = { st, date, people, blocks, lo, hi, sessions, booked, rolesFromPlan };
+    let inbox = [];
+    try { const ib = await sb.rpc('hub_inbox_mine'); inbox = (ib.data || []).filter(x => x.studio_id === st && String(x.day || '').slice(0, 10) === date); } catch (e) {}
+    D = { st, date, people, blocks, lo, hi, sessions, booked, rolesFromPlan, startRoles: people.map(p => [p.id, p.role]), inbox };
     START = JSON.parse(JSON.stringify(blocks));
+    // breaks suggested straight away for anyone on a long shift without one (saved with Save the day)
+    const br = suggestBreaks();
+    if (br.added || br.missed.length) D.flash = [br.added ? `${br.added} break${br.added === 1 ? '' : 's'} suggested (dashed): Save the day to keep ${br.added === 1 ? 'it' : 'them'}` : '',
+      br.missed.length ? `no time found for a break for ${br.missed.join(', ')}` : ''].filter(Boolean).join(' · ');
     draw();
   } catch (e) {
     $('main').innerHTML = `<div class="msg"><b>Couldn't load that day.</b><br>${esc(e.message || e)}</div>`;
@@ -330,10 +362,11 @@ function draw() {
   })();
   const nobody = D.blocks.filter(b => !b.person);
   const rows = (nobody.length ? `<div class="row needs" data-person=""><div class="who"><b>Needs someone</b><small>${nobody.length} with nobody: drag onto a person</small></div><div class="lane" style="width:${W}px">${hourLines}${laneOut(nobody)}</div></div>` : '')
-    + D.people.map(p => `<div class="row" data-person="${esc(p.id)}"><div class="who"><b>${esc(p.show)}</b><small>${fmt(p.start)}–${fmt(p.end)}
+    + D.people.map(p => `<div class="row" data-person="${esc(p.id)}"><div class="who"><b>${esc(p.show)}${p.draft ? ' <span class="draft-tag">draft</span>' : ''}${p.shiftId ? `
+        <span class="sh-acts"><button title="Change ${esc(p.show)}'s shift times" onclick="dayShiftEdit('${esc(p.id)}')">✎</button><button title="Remove ${esc(p.show)}'s shift" onclick="dayShiftRemove('${esc(p.id)}')">✕</button></span>` : ''}</b><small>${fmt(p.start)}–${fmt(p.end)}
         <select class="role" aria-label="${esc(p.show)}'s role today" onchange="setRole('${esc(p.id)}', this.value)">${['Director', 'Demoer', 'Circler'].map(r => `<option${r === p.role ? ' selected' : ''}>${r}</option>`).join('')}</select></small>
         <small>${Math.round(mins(p.id) / 6) / 10}h teaching or demoing${D.blocks.some(b => b.person === p.id && b.kind === 'brk') ? '' : (p.end - p.start > 300 ? ' · <b style="color:#9a3412;display:inline">no break set</b>' : '')}</small></div>
-      <div class="lane" style="width:${W}px">${hourLines}<i class="shift" style="left:${x(p.start)}px;width:${(p.end - p.start) * PX}px"></i>${laneOut(D.blocks.filter(b => b.person === p.id))}</div></div>`).join('');
+      <div class="lane" style="width:${W}px">${hourLines}<i class="shift${p.draft ? ' draft' : ''}" style="left:${x(p.start)}px;width:${(p.end - p.start) * PX}px"></i>${laneOut(D.blocks.filter(b => b.person === p.id))}</div></div>`).join('');
   // coverage: on shift, minus anyone teaching, demoing or on a break; red at 0 while something's running
   const cells = [];
   for (let m = lo; m < hi; m += STEP) {
@@ -349,9 +382,22 @@ function draw() {
     if (s.person !== b.person) return `${b.kind === 'brk' ? 'Break' : b.title} (${fmt(b.start)}): ${name(s.person)} → ${name(b.person)}`;
     if (s.start !== b.start) return `${name(b.person)}'s break: ${fmt(s.start)} → ${fmt(b.start)}`;
     return null; }).filter(Boolean)
-    .concat(D.people.filter(p => p.roleSet).map(p => `${p.show}: ${p.role} today`))
+    .concat(D.people.filter(p => (D.startRoles.find(r => r[0] === p.id) || [])[1] !== p.role).map(p => `${p.show}: ${p.role} today`))
     .concat(D.blocks.filter(b => !START.some(s => s.id === b.id)).map(b => `New break for ${(D.people.find(p => p.id === b.person) || {}).show || 'someone'}: ${fmt(b.start)}–${fmt(b.end)}`));
+  const decide = (D.inbox || []).map(x => {
+    const btn = (a, l, v) => `<button onclick="dayDecide('${x.id}','${a}'${v ? `,'${v}'` : ''})">${l}</button>`;
+    let acts = '';
+    if (x.kind === 'cut_shift') acts = btn('approve', '✓ Approve') + btn('keep', 'Keep');
+    else if (x.kind === 'evening_question') { const P = x.payload || {}, n = Math.max(1, +P.usual || 1), pa = P.pad !== 'field';
+      const opts = (pa ? [['watch', 'Tell us if it books']] : []).concat([['close', 'Close the evening']]).concat(Array.from({ length: n }, (_, i) => [String(i + 1), `Open with ${i + 1} staff`])).concat([['more', 'One more teacher']]).concat(pa ? [['cancel_pa', 'Close the PA/PD day']] : []);
+      acts = `<select onchange="if(this.value) dayDecide('${x.id}','evening',this.value)"><option value="">Choose…</option>${opts.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join('')}</select>`; }
+    else acts = btn('done', '✓ Done');
+    const ico = { cut_shift: '✂️', short_day: '👤', evening_question: '🌆', as_note: '📝', class_problem: '📚' }[x.kind] || '•';
+    return `<div class="it"><span class="t">${ico} <b>${esc(x.title)}</b><small>${esc(x.detail || '')}</small></span>${acts}</div>`; }).join('');
+  const nDrafts = D.people.filter(p => p.draft).length, pb = $('pub');
+  if (pb) { pb.style.display = nDrafts ? '' : 'none'; pb.textContent = `Publish ${nDrafts} draft${nDrafts === 1 ? '' : 's'}`; }
   $('main').innerHTML = `${D.flash ? `<div class="flash">${esc(D.flash)}</div>` : ''}
+    ${decide ? `<div class="decide"><h2>To decide for this day (${(D.inbox || []).length})</h2>${decide}</div>` : ''}
     <div class="key"><span><i style="background:var(--kids);border-color:var(--kids-b)"></i>Kids class (${LEN.kids} min)</span><span><i style="background:var(--wheel);border-color:var(--wheel-b)"></i>Wheel</span>
       <span><i style="background:var(--party);border-color:var(--party-b)"></i>Party (its art time)</span><span><i style="background:var(--demo);border-color:var(--demo-b)"></i>Demo (${LEN.demo} min)</span>
       <span><i style="background:repeating-linear-gradient(135deg,#ececec 0 4px,#f7f7f7 4px 8px);border-color:#9a9a9a"></i>Break</span>
@@ -367,6 +413,8 @@ function draw() {
       <div class="panel"><h2>Problems (${list.length})</h2>${list.length ? `<ul>${list.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : '<p class="note">None: everyone is where they can be.</p>'}</div>
       <div class="panel"><h2>Changes (${changes.length})</h2>${changes.length ? `<ul>${changes.map(t => `<li>${esc(t)}</li>`).join('')}</ul><p class="note">Not saved: the day view is a try-out.</p>` : '<p class="note">Nothing moved yet.</p>'}</div>
     </div>`;
+  const sv = $('save'); if (sv) { sv.classList.toggle('dirty', changes.length > 0); sv.textContent = changes.length ? `Save the day (${changes.length})` : 'Save the day'; }
+  D.flash = '';
   wire();
 }
 
@@ -439,6 +487,110 @@ function planDay(which) {
   D.flash = parts.join(' · ') + '. Look it over: drag anything to change it.';
   draw(); D.flash = '';
 }
+
+// ---- shifts and decisions on the day, updated in place (no reload) ----
+async function pushNotify() { try { const { data: { session } } = await sb.auth.getSession();
+  fetch(`${SUPABASE_URL}/functions/v1/hub-push`, { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + (session ? session.access_token : SUPABASE_ANON_KEY) }, body: JSON.stringify({ action: 'shifts' }) }).catch(() => {}); } catch (e) {} }
+function dayPersonGone(pid) {   // their shift is gone: off the board, and whatever they had needs someone
+  D.blocks = D.blocks.filter(b => !(b.kind === 'brk' && b.person === pid));
+  D.blocks.forEach(b => { if (b.person === pid) b.person = null; });
+  D.people = D.people.filter(p => p.id !== pid);
+}
+async function dayDecide(id, action, value) {
+  const x = (D.inbox || []).find(i => i.id === id);
+  const { data, error } = await sb.rpc('hub_inbox_decide', { p_id: id, p_action: action, p_start: null, p_end: null, p_value: value || null });
+  if (error) { alert(error.message); return; }
+  D.inbox = D.inbox.filter(i => i.id !== id);
+  if (x && x.kind === 'cut_shift' && action === 'approve') {
+    const P = x.payload || {}, p = D.people.find(z => z.shiftId === String(P.shift_id));
+    if (p) { if (P.action === 'remove') dayPersonGone(p.id); else if (P.action === 'end' && P.new_end) p.end = toMin(P.new_end); else if (P.action === 'start' && P.new_start) p.start = toMin(P.new_start); }
+    if (p && p.status !== 'draft') pushNotify();
+  }
+  D.flash = data && data.applied ? 'Done: ' + data.applied : 'Done.'; draw();
+}
+async function dayShiftEdit(pid) {
+  const p = D.people.find(z => z.id === pid); if (!p) return;
+  const v = prompt(`${p.show}'s shift: new times (e.g. 8:30a-5p, at least 3 hours)`, fmt(p.start) + '-' + fmt(p.end)); if (v === null) return;
+  const r = parseRange(v); if (!r) { alert('Use a time like 8:30a-5p, with a or p on both times.'); return; }
+  const { error } = await sb.rpc('hub_board_shift_set', { p_id: p.shiftId, p_start: hhmm(r.start), p_end: hhmm(r.end), p_remove: false });
+  if (error) { alert(/hub_board_shift_set/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
+  p.start = r.start; p.end = r.end; if (!p.draft) pushNotify();
+  D.inbox = (D.inbox || []).filter(i => !(i.kind === 'cut_shift' && i.payload && i.payload.shift_id === p.shiftId));
+  D.flash = `${p.show}: ${fmt(r.start)}–${fmt(r.end)}${p.draft ? ' (draft)' : ''}.`; draw();
+}
+async function dayShiftRemove(pid) {
+  const p = D.people.find(z => z.id === pid); if (!p || !confirm(`Remove ${p.show}'s shift (${fmt(p.start)}–${fmt(p.end)})?`)) return;
+  const { error } = await sb.rpc('hub_board_shift_set', { p_id: p.shiftId, p_start: null, p_end: null, p_remove: true });
+  if (error) { alert(/hub_board_shift_set/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
+  if (!p.draft) pushNotify();
+  dayPersonGone(pid); D.flash = `${p.show}'s shift removed.`; draw();
+}
+let _staffList = null;
+async function dayShiftAdd() {
+  if (!_staffList || _staffList.st !== D.st) { const r = await sb.rpc('hub_board_staff', { p_studio: D.st });
+    if (r.error) { alert(/hub_board_staff/.test(r.error.message) ? 'Run week_board.sql in Supabase first.' : r.error.message); return; } _staffList = { st: D.st, list: r.data || [] }; }
+  closePop();
+  const pop = document.createElement('div'); pop.className = 'pop'; pop.id = 'pop';
+  const here = _staffList.list.filter(x => x.here && !D.people.some(p => p.id === x.id)), others = _staffList.list.filter(x => !x.here && !D.people.some(p => p.id === x.id));
+  pop.innerHTML = `<label>Add a shift on ${esc(new Date(D.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' }))}</label>
+    <select id="add-who"><option value="">Who?</option><optgroup label="${esc(STUDIO_NAMES[D.st] || D.st)}">${here.map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</optgroup>
+      <optgroup label="Other studios">${others.map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</optgroup></select>
+    <label style="margin-top:8px">Times (at least 3 hours)</label><input id="add-time" value="9a-5p" style="width:100%;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px">
+    <div class="row2"><button id="pop-ok">Add (as a draft)</button><button id="pop-x">Cancel</button></div>`;
+  document.body.appendChild(pop);
+  const r0 = $('addsh').getBoundingClientRect(); pop.style.left = Math.min(window.innerWidth - 280, r0.left) + 'px'; pop.style.top = (r0.bottom + 6) + 'px';
+  $('add-who').focus(); $('pop-x').onclick = closePop;
+  $('pop-ok').onclick = async () => {
+    const who = $('add-who').value, r = parseRange($('add-time').value);
+    if (!who) { alert('Choose who.'); return; } if (!r) { alert('Use a time like 9a-5p, with a or p on both times.'); return; }
+    const { data, error } = await sb.rpc('hub_board_shift_add', { p_staff: who, p_studio: D.st, p_date: D.date, p_start: hhmm(r.start), p_end: hhmm(r.end) });
+    if (error) { alert(/hub_board_shift_add/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
+    const inf = _staffList.list.find(x => x.id === who) || {};
+    D.people.push({ id: who, name: inf.write || inf.name || 'Someone', show: inf.name || 'Someone', start: r.start, end: r.end, roles: [], job: String(inf.role || ''), hired: inf.hired || null,
+      role: 'Circler', draft: true, shiftId: data && data.id, status: 'draft' });
+    D.people.sort((a, b) => a.start - b.start || a.show.localeCompare(b.show));
+    D.lo = Math.min(D.lo, Math.floor(r.start / 60) * 60); D.hi = Math.max(D.hi, Math.ceil(r.end / 60) * 60);
+    closePop(); D.flash = `${inf.name || 'Shift'} added: ${fmt(r.start)}–${fmt(r.end)} (a draft until you publish the day).`; draw();
+  };
+}
+async function dayPublish() {
+  const n = D.people.filter(p => p.draft).length; if (!n) return;
+  if (!confirm(`Publish ${n} draft shift${n === 1 ? '' : 's'} for this day? They become approved, and staff get their usual notification.`)) return;
+  const { data, error } = await sb.rpc('hub_board_day_publish', { p_studio: D.st, p_date: D.date });
+  if (error) { alert(/hub_board_day_publish/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
+  D.people.forEach(p => { if (p.draft) { p.draft = false; p.status = 'approved'; } });
+  pushNotify(); D.flash = `Published ${(data && data.published) || n} shift${n === 1 ? '' : 's'}.`; draw();
+}
+
+// ---- Save the day: to the Day plan (roles, breaks, teachers, party teachers, who demos each time) ----
+async function saveDay() {
+  if (!D) return;
+  const nameOf = id => { const p = D.people.find(x => x.id === id); return p ? p.name : ''; };
+  const breakOf = p => { const b = D.blocks.find(z => z.kind === 'brk' && z.person === p.id); return b ? `${fmtHM(b.start)}-${fmtHM(b.end)}` : ''; };
+  const roles = {}, senior = (a, b) => String(a.hired || '9999').localeCompare(String(b.hired || '9999'));
+  const dir = D.people.find(p => p.role === 'Director'), dem = D.people.find(p => p.role === 'Demoer');
+  const circ = D.people.filter(p => p.role === 'Circler').sort(senior);
+  const put = (f, p) => { roles[f] = p ? p.name : ''; roles['break_' + f] = p ? breakOf(p) : ''; };
+  put('director', dir); put('teacher', dem); put('teacher2', null);
+  put('circler', circ[0]); put('circler2', circ[1]); put('circler3', circ[2]);
+  const times = [], parties = {};
+  D.blocks.forEach(b => {
+    if (b.kind === 'kids') times.push({ session_id: b.session, teacher: nameOf(b.person) });
+    else if (b.kind === 'wheel') times.push({ session_id: b.session, wheel_teacher: nameOf(b.person) });
+    else if (b.kind === 'demo') times.push({ session_id: b.session, demo_by: nameOf(b.person) });
+    else if (b.kind === 'party' && b.booking) { const x = parties[b.booking] = parties[b.booking] || { booking_id: b.booking, t1: '', t2: '' }; x[b.slot === 2 ? 't2' : 't1'] = nameOf(b.person); }
+  });
+  const extra = circ.length > 3 ? `\n\n(${circ.slice(3).map(p => p.show).join(', ')}: more than 3 circlers; the Day plan keeps 3, so ${circ.length - 3 === 1 ? 'this one isn’t' : 'these aren’t'} saved as a circler.)` : '';
+  const { list } = problems();
+  if (!confirm(`Save this day to the Day plan?${list.length ? `\n\nThere ${list.length === 1 ? 'is 1 problem' : 'are ' + list.length + ' problems'} (see the list).` : ''}${extra}\n\nThe Hub's Day plan and On stage will show the same.`)) return;
+  const btn = $('save'); btn.disabled = true; btn.textContent = 'Saving…';
+  const { error } = await sb.rpc('hub_day_board_save', { p: { studio_id: D.st, date: D.date, roles, times, parties: Object.values(parties) } });
+  btn.disabled = false;
+  if (error) { btn.textContent = 'Save the day'; alert(/hub_day_board_save/.test(error.message) ? 'Run day_board_save.sql in Supabase first.' : error.message); return; }
+  await load();
+  D.flash = 'Saved. The Hub\u2019s Day plan and On stage now show this day.'; draw();
+}
+const fmtHM = m => { const h = Math.floor(m / 60), mm = m % 60; return (h % 12 || 12) + ':' + String(mm).padStart(2, '0'); };
 
 // ---- dragging (pointer: mouse, pen or touch) and clicking ----
 function wire() {
@@ -619,15 +771,22 @@ function openDay(d) { $('date').value = d; setMode('day'); }
 async function wkDecide(id, action, value) {
   const { data, error } = await sb.rpc('hub_inbox_decide', { p_id: id, p_action: action, p_start: null, p_end: null, p_value: value || null });
   if (error) { alert(error.message); return; }
+  const x = W.inbox.find(i => i.id === id);
+  W.inbox = W.inbox.filter(i => i.id !== id);
+  if (x && x.kind === 'cut_shift' && action === 'approve') {
+    const P = x.payload || {}, sh = W.shifts.find(z => String(z.id) === String(P.shift_id));
+    if (sh) { if (P.action === 'remove') W.shifts = W.shifts.filter(z => z !== sh); else if (P.action === 'end' && P.new_end) sh.end_time = P.new_end; else if (P.action === 'start' && P.new_start) sh.start_time = P.new_start; }
+  }
   if (data && data.applied) notifyShifts();
-  W.flash = data && data.applied ? 'Done: ' + data.applied : 'Done.'; loadWeek();
+  W.flash = data && data.applied ? 'Done: ' + data.applied : 'Done.'; drawWeek();
 }
 async function wkClose(id, close) {
   const s = W.sessions.find(x => x.id === id);
   if (close && !confirm(`Close ${s ? s.title : 'this time'}? Nobody is booked. It can be reopened (or undone in 🌙 Nightly run).`)) return;
   const { error } = await sb.rpc('hub_board_session_close', { p_id: id, p_close: close });
   if (error) { alert(/hub_board_session_close/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
-  W.flash = close ? 'Closed.' : 'Reopened.'; loadWeek();
+  if (s) s.spaces_left_cache = close ? 0 : Math.max(1, (+s.capacity || 1) - (W.booked[id] || 0));
+  W.flash = close ? `Closed: ${s ? s.title : ''}` : `Reopened: ${s ? s.title : ''}`; drawWeek();
 }
 async function wkShift(id) {
   const sh = W.shifts.find(x => String(x.id) === String(id)); if (!sh) return;
@@ -640,7 +799,9 @@ async function wkShift(id) {
   const { data, error } = await sb.rpc('hub_board_shift_set', args);
   if (error) { alert(/hub_board_shift_set/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
   if (data && data.status !== 'draft') notifyShifts();   // (an approved shift changed: the staff member's usual notification)
-  W.flash = 'Done: ' + (data && data.applied || ''); loadWeek();
+  if (args.p_remove) W.shifts = W.shifts.filter(z => String(z.id) !== String(id)); else { sh.start_time = args.p_start; sh.end_time = args.p_end; }
+  W.inbox = W.inbox.filter(i => !(i.kind === 'cut_shift' && i.payload && String(i.payload.shift_id) === String(id)));
+  W.flash = 'Done: ' + (data && data.applied || ''); drawWeek();
 }
 async function notifyShifts() {
   try { const { data: { session } } = await sb.auth.getSession();
@@ -667,7 +828,8 @@ const show = () => (MODE === 'week' ? loadWeek : load)();
   $('v-day').onclick = () => setMode('day'); $('v-week').onclick = () => setMode('week');
   $('prev').onclick = () => { $('date').value = addDays(sundayOf($('date').value), -7); loadWeek(); };
   $('next').onclick = () => { $('date').value = addDays(sundayOf($('date').value), 7); loadWeek(); };
-  $('reset').onclick = () => { if (START) { D.blocks = JSON.parse(JSON.stringify(START)); draw(); } };
+  $('reset').onclick = () => { if (START) { D.blocks = JSON.parse(JSON.stringify(START)); D.people.forEach(p => { p.role = (D.startRoles.find(r => r[0] === p.id) || [])[1] || p.role; p.roleSet = false; }); draw(); } };
+  $('save').onclick = saveDay; $('addsh').onclick = () => D && dayShiftAdd(); $('pub').onclick = () => D && dayPublish();
   $('plan').onclick = () => planDay('all'); $('brk').onclick = () => planDay('brk'); $('demo').onclick = () => planDay('demo');
   const { data: { session } } = await sb.auth.getSession();
   if (!session) { $('main').innerHTML = `<div class="msg"><b>Sign in to the Hub first</b> (with a home office login), then come back to this page. <a href="hub.html">Open the Hub</a></div>`; return; }
