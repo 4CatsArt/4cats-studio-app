@@ -1135,7 +1135,17 @@ const TRAINING_SHIFTS_NEEDED = 3
 let QUIET_BOOKED = 2
 // Managers (Nov 7 2026): 30–40 hours a week; those marked "aim for 40" get their full 40 (five 8-hour days) first
 let MGR_MIN_H = 30, MGR_MAX_H = 40
-function mgrTarget(ctx, p) { return ctx.aim40 && ctx.aim40.has(p.id) ? 40 : Math.max(MGR_MIN_H, p.min_weekly_hours || 0) }
+// A manager marked "aim for 40": 40 hours, minus 8 for each stat holiday that week, minus their approved time off (a full day 8,
+// part of a day its hours). Never made up on other days. Others: their minimum.
+function mgrOffHours(ctx, p) {
+  let h = 8 * ((ctx.statDays || []).length)
+  ;(ctx.toff || []).filter(o => o.staff_id === p.id && o.status === 'approved' && o.start_date <= ctx.to && o.end_date >= ctx.from).forEach(o => {
+    if (o.start_time && o.end_time) h += (toMin(o.end_time) - toMin(o.start_time)) / 60
+    else { for (let d = o.start_date > ctx.from ? o.start_date : ctx.from; d <= (o.end_date < ctx.to ? o.end_date : ctx.to); d = addDays(d, 1)) h += 8 }
+  })
+  return h
+}
+function mgrTarget(ctx, p) { return ctx.aim40 && ctx.aim40.has(p.id) ? Math.max(0, 40 - mgrOffHours(ctx, p)) : Math.max(MGR_MIN_H, p.min_weekly_hours || 0) }
 function maxHours(p) { return p.max_weekly_hours != null ? p.max_weekly_hours : (p.role === 'manager' ? MGR_MAX_H : null) }
 // Studio staffing's people for a day of the week (studio_staffing: sun … sat), or null
 function bdStaffingFor(ctx, date) {
@@ -1284,6 +1294,9 @@ async function bdLoad(studio) {
   // (Nov 7 2026) managers marked to aim for 40 hours (staffing_who_works.sql), and Studio staffing's people per day
   const aim = await sb.from('staff_profiles').select('id, aim_40').eq('aim_40', true)
   const aim40 = new Set(aim.error ? [] : (aim.data || []).map(r => r.id))
+  // stat holidays this week (this studio's province; Mon–Fri): a 40-hour manager's stat counts as 8 scheduled hours
+  const sh = await sb.from('stat_holidays').select('day, province').gte('day', from).lte('day', to)
+  const statDays = (sh.error ? [] : (sh.data || [])).filter(r => (r.province === 'ALL' || r.province === PROV_OF(studio)) && ![0, 6].includes(new Date(r.day + 'T12:00:00').getDay())).map(r => r.day)
   const ssr = await sb.from('studio_staffing').select('*').eq('studio_id', studio).maybeSingle()
   const staffing = ssr.error ? null : ssr.data
   // Auto-schedule's plan for each day (autosched_day_plan.sql): a minimum number of people, + Staff extras, the PA/PD evening
@@ -1329,7 +1342,7 @@ async function bdLoad(studio) {
     ;(st.data || []).forEach(r => { if (r.teacher && String(r.teacher).trim()) dayTeacher[r.session_id] = String(r.teacher).trim() })
   }
   return { studio, from, to, sessions: need.data || [], ruleBadge, badgeLabel, opening: opening.data, ot: ot.data, dayTeacher,
-           pool, everyone: people.data, badgesBy, notesBy, pastShifts, recentWeekends, classTeachers, coordinators, daySessions, dayScheduleError, minimums, partyToClose, wages, unav: unav.data, toff: toff.data, shifts: shifts.data, aim40, staffing, dayPlan }
+           pool, everyone: people.data, badgesBy, notesBy, pastShifts, recentWeekends, classTeachers, coordinators, daySessions, dayScheduleError, minimums, partyToClose, wages, unav: unav.data, toff: toff.data, shifts: shifts.data, aim40, staffing, dayPlan, statDays }
 }
 
 // Minimum people on for this studio at this weekday and time (studio_staffing_minimums), or 0
@@ -1767,7 +1780,14 @@ function bdPlaceManagers(ctx, blocks, pairPref) {
     if (chosenPair && !together(chosenPair)) splitDaysOff = true
     const best = chosenPair ||
       [1, 2, 3, 4, 5].map(d).filter(canWork).slice(0, 5 - fixed.length)
-    const chosen = fixed.concat(best).slice(0, 5)
+    // (Nov 8 2026) in a stat or time-off week, only as many full days as their target (8 h each): the stat and the time off
+    // count toward 40, and no make-up day is added. Weekends kept first, then the weekdays with the most to cover.
+    const daysWanted = Math.min(5, Math.round(mgrTarget(ctx, p) / 8))
+    let chosen = fixed.concat(best).slice(0, 5)
+    if (chosen.length > daysWanted) {
+      chosen = chosen.slice().sort((a, b) => (isWeekend(b) - isWeekend(a)) || (needOn(b) - needOn(a))).slice(0, daysWanted)
+      notes.push(`${p.display_name}: ${daysWanted} day${daysWanted === 1 ? '' : 's'} this week (${mgrOffHours(ctx, p)} h of stat holiday or time off count toward 40; no make-up day)`)
+    }
     chosen.forEach(date => bdManagerDay(ctx, blocks, p, date, notes))
   })
   return { notes, usedPairs, splitDaysOff }
