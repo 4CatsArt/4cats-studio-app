@@ -18,6 +18,8 @@ header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding
 header h1 { font-size: 18px; margin: 0 8px 0 0; }
 header select, header input, header button { font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); }
 header button { cursor: pointer; font-weight: 600; }
+header button.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+.flash { background: #fff7e0; border: 1px solid #f0d89a; border-radius: 10px; padding: 8px 12px; font-size: 13px; margin: 0 0 10px; }
 header button:focus-visible, header select:focus-visible, header input:focus-visible, .blk:focus-visible { outline: 2px solid var(--demo-b); outline-offset: 2px; }
 .spacer { flex: 1; }
 .note { color: var(--muted); font-size: 12.5px; }
@@ -69,6 +71,9 @@ main { padding: 14px 20px 40px; }
   <input id="date" type="date" aria-label="Day">
   <button id="load">Show the day</button>
   <span class="spacer"></span>
+  <button id="plan" class="primary" title="Breaks first, then demos (anything you've moved stays put)">Plan the day</button>
+  <button id="brk" title="A 30-minute break for everyone on a shift over 5 hours who doesn't have one">Suggest breaks</button>
+  <button id="demo" title="Give each demo (and any class or party with nobody) to the best person free then">Assign demos</button>
   <span class="note">A try-out: nothing is saved yet.</span>
   <button id="reset" title="Put everything back the way it was loaded">Undo my changes</button>
 </header>
@@ -252,8 +257,9 @@ function draw() {
     const name = id => (D.people.find(p => p.id === id) || {}).show || 'nobody';
     if (s.person !== b.person) return `${b.kind === 'brk' ? 'Break' : b.title} (${fmt(b.start)}): ${name(s.person)} → ${name(b.person)}`;
     if (s.start !== b.start) return `${name(b.person)}'s break: ${fmt(s.start)} → ${fmt(b.start)}`;
-    return null; }).filter(Boolean);
-  $('main').innerHTML = `
+    return null; }).filter(Boolean)
+    .concat(D.blocks.filter(b => !START.some(s => s.id === b.id)).map(b => `New break for ${(D.people.find(p => p.id === b.person) || {}).show || 'someone'}: ${fmt(b.start)}–${fmt(b.end)}`));
+  $('main').innerHTML = `${D.flash ? `<div class="flash">${esc(D.flash)}</div>` : ''}
     <div class="key"><span><i style="background:var(--kids);border-color:var(--kids-b)"></i>Kids class (${LEN.kids} min)</span><span><i style="background:var(--wheel);border-color:var(--wheel-b)"></i>Wheel</span>
       <span><i style="background:var(--party);border-color:var(--party-b)"></i>Party (its art time)</span><span><i style="background:var(--demo);border-color:var(--demo-b)"></i>Demo (${LEN.demo} min)</span>
       <span><i style="background:repeating-linear-gradient(135deg,#ececec 0 4px,#f7f7f7 4px 8px);border-color:#9a9a9a"></i>Break</span>
@@ -269,6 +275,73 @@ function draw() {
       <div class="panel"><h2>Changes (${changes.length})</h2>${changes.length ? `<ul>${changes.map(t => `<li>${esc(t)}</li>`).join('')}</ul><p class="note">Not saved: this page is a try-out.</p>` : '<p class="note">Nothing moved yet.</p>'}</div>
     </div>`;
   wire();
+}
+
+// ---- planning: suggest breaks, assign demos (anything moved by hand stays put) ----
+// free on the floor at minute m (on shift, not in any block), and whether anything's running then
+function freeAt(m, blocks) {
+  const on = D.people.filter(p => p.start <= m && p.end > m);
+  const busy = new Set(blocks.filter(b => b.person && b.start <= m && b.end > m).map(b => b.person));
+  return on.filter(p => !busy.has(p.id)).length;
+}
+const runningAt = m => D.blocks.some(b => b.kind !== 'brk' && b.start <= m && (b.runEnd || b.end) > m);
+const busyFor = (pid, a, z, blocks, except) => blocks.some(b => b !== except && b.person === pid && a < b.end && z > b.start);
+// the lowest "free on the floor" over a stretch, while something's running (99 when nothing is)
+function minFree(a, z, blocks) { let lo = 99; for (let m = a; m < z; m += STEP) if (runningAt(m)) lo = Math.min(lo, freeAt(m, blocks)); return lo; }
+
+// A 30-minute break for each shift over 5 hours without one: 2 to 5 hours in (never during their own teaching or demos),
+// where the most people stay free on the floor; nearest the middle of their shift on a tie.
+function suggestBreaks() {
+  let added = 0; const missed = [];
+  D.people.filter(p => p.end - p.start > 300 && !D.blocks.some(b => b.kind === 'brk' && b.person === p.id))
+    .sort((a, b) => a.start - b.start).forEach(p => {
+      const mid = p.start + (p.end - p.start) / 2, from = p.start + 120, to = Math.min(p.start + 300, p.end - 60);
+      let best = null;
+      for (let t = Math.ceil(from / STEP) * STEP; t <= to; t += STEP) {
+        if (busyFor(p.id, t, t + 30, D.blocks)) continue;
+        const trial = D.blocks.concat([{ person: p.id, start: t, end: t + 30, kind: 'brk' }]);
+        const score = [Math.min(minFree(t, t + 30, trial), 2), -Math.abs(t + 15 - mid)];
+        if (!best || score[0] > best.score[0] || (score[0] === best.score[0] && score[1] > best.score[1])) best = { t, score };
+      }
+      if (!best) { missed.push(p.show); return; }
+      D.blocks.push({ id: 'b-' + p.id + '-s', kind: 'brk', title: 'Break', sub: 'suggested', start: best.t, end: best.t + 30, person: p.id });
+      added++;
+    });
+  return { added, missed };
+}
+
+// Each demo (and any kids class or party with nobody) to the best person free then: the day's Demoers first, keeping someone
+// free on the floor where possible, and sharing the demos out evenly. Wheel stays as set (it needs a wheel-ready teacher).
+function assignDemos() {
+  let changed = 0, nobody = 0;
+  const load = {}; D.blocks.filter(b => b.person && b.kind !== 'brk').forEach(b => { load[b.person] = (load[b.person] || 0) + (b.end - b.start); });
+  const todo = D.blocks.filter(b => !b.locked && (b.kind === 'demo' || (!b.person && (b.kind === 'kids' || b.kind === 'party')))).sort((a, b) => a.start - b.start);
+  todo.forEach(b => { if (b.person) load[b.person] -= (b.end - b.start); b.person = null; });   // (start fresh for these)
+  todo.forEach(b => {
+    const cands = D.people.filter(p => p.start <= b.start && p.end >= b.end && !busyFor(p.id, b.start, b.end, D.blocks, b));
+    let best = null;
+    cands.forEach(p => {
+      const trial = D.blocks.map(x => x === b ? Object.assign({}, b, { person: p.id }) : x);
+      const keepsFloor = minFree(b.start, b.end, trial) >= 1 ? 1 : 0;
+      const demoer = p.roles.includes('Demoer') ? 1 : 0;
+      const score = [keepsFloor, demoer, -(load[p.id] || 0)];
+      if (!best || better(score, best.score)) best = { p, score };
+    });
+    const was = (START.find(s => s.id === b.id) || {}).person || null;
+    if (best) { b.person = best.p.id; load[best.p.id] = (load[best.p.id] || 0) + (b.end - b.start); } else nobody++;
+    if (b.person !== was) changed++;
+  });
+  return { changed, nobody };
+}
+// a beats b: compare score lists in order (the first difference decides)
+function better(a, b) { for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] > b[i]; return false; }
+function planDay(which) {
+  if (!D) return;
+  const parts = [];
+  if (which !== 'demo') { const r = suggestBreaks(); parts.push(r.added ? `${r.added} break${r.added === 1 ? '' : 's'} suggested` : 'No breaks needed (or already set)'); if (r.missed.length) parts.push(`no time found for a break for ${r.missed.join(', ')}`); }
+  if (which !== 'brk') { const r = assignDemos(); parts.push(`${r.changed} demo${r.changed === 1 ? '' : 's'} or class${r.changed === 1 ? '' : 'es'} given out`); if (r.nobody) parts.push(`${r.nobody} still need someone (everyone's busy)`); }
+  D.flash = parts.join(' · ') + '. Look it over: drag anything to change it.';
+  draw(); D.flash = '';
 }
 
 // ---- dragging (pointer: mouse, pen or touch) and clicking ----
@@ -306,6 +379,7 @@ function startDrag(e, el) {
     } else if (overRow) {
       b.person = overRow.dataset.person || null;
     }
+    b.locked = true;
     draw();
   };
   document.addEventListener('pointermove', move); document.addEventListener('pointerup', up);
@@ -331,6 +405,7 @@ function openPop(el) {
   $('pop-x').onclick = closePop;
   $('pop-ok').onclick = () => { const v = $('pop-sel').value;
     if (b.kind === 'brk') { const len = b.end - b.start; b.start = +v; b.end = b.start + len; } else b.person = v || null;
+    b.locked = true;
     closePop(); draw(); };
 }
 function closePop() { const p = $('pop'); if (p) p.remove(); }
@@ -345,6 +420,7 @@ document.addEventListener('pointerdown', e => { const p = $('pop'); if (p && !p.
   $('date').value = qs.get('date') || localDate(new Date());
   $('load').onclick = load; $('studio').onchange = load; $('date').onchange = load;
   $('reset').onclick = () => { if (START) { D.blocks = JSON.parse(JSON.stringify(START)); draw(); } };
+  $('plan').onclick = () => planDay('all'); $('brk').onclick = () => planDay('brk'); $('demo').onclick = () => planDay('demo');
   const { data: { session } } = await sb.auth.getSession();
   if (!session) { $('main').innerHTML = `<div class="msg"><b>Sign in to the Hub first</b> (with a home office login), then come back to this page. <a href="hub.html">Open the Hub</a></div>`; return; }
   const ok = await sb.rpc('admin_can', { p_section: 'ops', p_level: 'view' });
