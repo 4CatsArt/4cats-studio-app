@@ -1436,7 +1436,8 @@ function bdDayTeacher(ctx, date, ss) {
   const start = Math.floor((first - 30) / 15) * 15
   return { start, end: Math.max(17 * 60, start + DAY_TEACHER_SPAN) }
 }
-// Auto-schedule's plan for the day is a minimum (Nov 7 2026): at least Studio staffing's people while sessions run; a
+// Auto-schedule's plan for the day (Nov 7 2026; Nov 8: as a day total): Studio staffing's people work the day, added at its busiest
+// times (not all from opening); a
 // PA/PD or field trip evening as answered (closed: no minimum after 5pm; N staff; one more teacher); each 👤 + Staff extra
 // person on top, over the hours given, or the busiest 3 hours of the day when none were given.
 function bdApplyDayPlan(ctx, date, slots, ss) {
@@ -1459,11 +1460,17 @@ function bdApplyDayPlan(ctx, date, slots, ss) {
     if (t >= EVE && ev === 'close') return 0
     if (t >= EVE && /^\d+$/.test(ev || '')) return +ev
     if (t >= EVE && ev === 'more') return (plan.staff || 0) + 1
-    return plan.staff || 0
+    // (Nov 8 2026) not Studio staffing's number at every moment: that's how many people work the day, not how many must be
+    // there at 9am. Here, at least 1 while anything's on; the day's number is reached below by adding people at the busiest times.
+    return 1
   }
   const extras = []   // [from, to] for each extra person
   ;(plan.extra_hours || []).forEach(h => { if (h.from && h.to) extras.push([toMin(h.from), toMin(h.to)]) })
-  for (let i = extras.length; i < (plan.extra || 0); i++) {
+  // Studio staffing's people for the day (no evening answer): if the busiest moment needs fewer, the rest are added over the
+  // busiest stretches, like + Staff extras (so a quiet morning isn't staffed like the busy afternoon)
+  const peak = Math.max(0, ...slots.filter(x => x.t >= first && x.t < last).map(x => Math.max(x.rawNeed, 1)))
+  const toPlan = ev != null && ev !== '' ? 0 : Math.max(0, (plan.staff || 0) - peak)
+  for (let i = extras.length; i < (plan.extra || 0) + toPlan; i++) {
     // the busiest 3 hours of the day (by what's needed), for an extra with no hours given
     let best = null, bestSum = -1
     for (let a = 0; a < slots.length; a++) {
@@ -1476,7 +1483,8 @@ function bdApplyDayPlan(ctx, date, slots, ss) {
     extras.push(best || [slots[0].t, Math.min(slots[0].t + 180, slots[slots.length - 1].t + 15)])
   }
   slots.forEach(x => {
-    const f = floorAt(x.t) + extras.filter(e => x.t >= e[0] && x.t < e[1]).length
+    // the floor (evening answers; at least 1 while anything's on), then each extra person on top of what's needed then
+    const f = Math.max(x.rawNeed, floorAt(x.t)) + extras.filter(e => x.t >= e[0] && x.t < e[1]).length
     if (f > x.rawNeed) { x.need = Math.max(0, x.need + (f - x.rawNeed)); x.rawNeed = f; x.planFloor = true }
   })
   ctx.planNotes = ctx.planNotes || {}
