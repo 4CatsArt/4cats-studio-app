@@ -45,6 +45,7 @@ body.week .day-only { display: none; } body:not(.week) .wk-only { display: none;
 .wk .sh .x { position: absolute; top: 3px; right: 4px; font: inherit; font-size: 10.5px; line-height: 1; padding: 2px 4px; border-radius: 4px; border: 0; background: rgba(255,255,255,.25); color: inherit; cursor: pointer; opacity: 0; }
 .wk .sh:hover .x, .wk .sh:focus-within .x { opacity: 1; } .wk .sh.draft .x { background: rgba(0,0,0,.06); }
 .wk tr.gone .sh { box-shadow: 0 0 0 2px var(--bad); } .gone-tag { display: inline-block; margin: 2px 0; font-size: 10.5px; font-weight: 700; color: #fff; background: var(--bad); border-radius: 999px; padding: 1px 7px; }
+.wk-money { margin-top: 6px; font-size: 11.5px; color: var(--muted); line-height: 1.5; } .wk-money b { color: var(--ink); }
 .lab { display: inline-block; margin: 4px 4px 0 0; font-size: 11.5px; font-weight: 700; border-radius: 999px; padding: 1px 8px; }
 .lab.ok { background: #e3f3e8; color: #1f6b3a; } .lab.mid { background: #fdf0d2; color: #8a5a00; } .lab.high { background: #fbe1e1; color: #a12a2a; }
 .wk .sh.clash { box-shadow: 0 0 0 2px var(--bad); }
@@ -85,6 +86,11 @@ main { padding: 14px 20px 40px; }
 .shift.draft { background: repeating-linear-gradient(90deg, #f4f2ec 0 10px, #fbfaf6 10px 20px); border: 1px dashed #b9b2a2; }
 .sh-acts { float: right; } .sh-acts button { font: inherit; font-size: 11px; border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 0 5px; margin-left: 2px; cursor: pointer; color: var(--muted); }
 .sh-acts button:hover { color: var(--ink); border-color: #bbb; }
+.cok { background: var(--panel); border: 1px solid #c9daf3; border-radius: 12px; padding: 10px 14px; margin: 0 0 10px; font-size: 13px; }
+.cok h2 { font-size: 14px; margin: 0 0 4px; } .cok p { margin: 4px 0; }
+.cok-opts { display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0; } .cok-opts > div { flex: 1; min-width: 240px; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+.cok-opts > div.best { border-color: #2f7d4a; background: #eef7f0; }
+.cok .acts { display: flex; gap: 8px; flex-wrap: wrap; } .cok .acts button { font: inherit; font-size: 12.5px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--line); background: #fff; cursor: pointer; }
 .decide { background: var(--panel); border: 1px solid #f0d89a; border-radius: 12px; padding: 10px 14px; margin: 0 0 10px; }
 .decide h2 { font-size: 14px; margin: 0 0 6px; } .decide .it { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 6px 0; border-top: 1px solid #f4ecd2; font-size: 13px; }
 .decide .it:first-of-type { border-top: 0; } .decide .it .t { flex: 1; min-width: 220px; } .decide .it small { color: var(--muted); display: block; }
@@ -355,6 +361,7 @@ function problems() {
 // ---- drawing ----
 function draw() {
   setTimeout(dayLabourCheck, 0);   // (the labour estimate, when the shifts have changed)
+  setTimeout(cokCheck, 0);         // (close or keep the evening, when shifts or times have changed)
   const { lo, hi } = D, W = (hi - lo) * PX, x = m => (m - lo) * PX;
   const { bad, list } = problems();
   const hours = []; for (let m = lo; m <= hi; m += 60) hours.push(m);
@@ -444,6 +451,7 @@ function draw() {
   if (pb) { pb.style.display = nDrafts ? '' : 'none'; pb.textContent = `Publish ${nDrafts} draft${nDrafts === 1 ? '' : 's'}`; }
   $('main').innerHTML = `${D.flash ? `<div class="flash">${esc(D.flash)}</div>` : ''}
     ${decide ? `<div class="decide"><h2>To decide for this day (${(D.inbox || []).length})</h2>${decide}</div>` : ''}
+    ${cokHtml()}
     <div class="key"><span><i style="background:var(--kids);border-color:var(--kids-b)"></i>Kids class (${LEN.kids} min)</span><span><i style="background:var(--wheel);border-color:var(--wheel-b)"></i>Wheel</span>
       <span><i style="background:var(--party);border-color:var(--party-b)"></i>Party (its art time)</span><span><i style="background:var(--demo);border-color:var(--demo-b)"></i>Demo (${LEN.demo} min)</span>
       <span><i style="background:repeating-linear-gradient(135deg,#ececec 0 4px,#f7f7f7 4px 8px);border-color:#9a9a9a"></i>Break</span>
@@ -550,6 +558,61 @@ function dayLabourCheck() {
     if (error || !data || !D || D.st !== st || D.date !== date) return;   // (not a home office login, not set up yet, or moved on)
     D.labour = (data.days || [])[0] || null; draw();
   }, 600);
+}
+// ---- 🌆 Close or keep? (close_or_keep.sql): empty times past the end of the shifts ----
+let _cokT = null;
+function cokCheck() {
+  if (!D) return;
+  const sig = D.st + D.date + JSON.stringify(D.people.map(p => [p.id, p.end])) + JSON.stringify((D.sessions || []).map(x => [x.id, x.spaces_left_cache, x.session_time]));
+  if (D._cokSig === sig) return; D._cokSig = sig;
+  clearTimeout(_cokT);
+  _cokT = setTimeout(async () => {
+    const st = D.st, date = D.date;
+    const { data, error } = await sb.rpc('hub_board_close_or_keep', { p_studio: st, p_day: date });
+    if (!D || D.st !== st || D.date !== date) return;
+    D.cok = error ? null : data; draw();
+  }, 700);
+}
+function cokHtml() {
+  const c = D.cok; if (!c || !c.show) return '';
+  const m = c.money, h = n => (Math.round(n * 4) / 4) + ' h', $ = n => '$' + Math.round(+n || 0).toLocaleString('en-CA');
+  const list = c.times.map(t => `${esc(t.time)} ${esc(t.title.trim())}`).join(', ');
+  const exp = c.expected_people > 0 ? `usually pick up <b>~${c.expected_people} ${c.expected_people === 1 ? 'person' : 'people'}</b> from ${c.days_out} day${c.days_out === 1 ? '' : 's'} out${m ? `, about <b>${$(c.expected_revenue)}</b>` : ''}` : '<b>usually pick up nobody</b> from this far out';
+  const sug = c.suggest === 'keep' ? 'keep them open' : 'close them';
+  return `<div class="cok"><h2>🌆 Close or keep?</h2>
+    <p>${esc(c.who || 'The last shift')} finishes at <b>${esc(c.cover_until)}</b>. After that there ${c.times.length === 1 ? 'is <b>1 empty time</b>' : `are <b>${c.times.length} empty times</b>`} (${list}) running to <b>${esc(c.keep_until)}</b>.</p>
+    <div class="cok-opts">
+      <div class="${c.suggest === 'close' ? 'best' : ''}"><b>Close them</b><br>${c.close_hours > 0 ? `${esc(c.who)} stays until ${esc(c.close_until)} for what's booked: +${h(c.close_hours)}` : 'No extra hours: what\u2019s booked is covered'}${m ? ` · about ${$(c.close_cost)}` : ''}</div>
+      <div class="${c.suggest === 'keep' ? 'best' : ''}"><b>Keep them open</b><br>Someone until ${esc(c.keep_until)}: +${h(c.keep_hours)}${m ? ` · about ${$(c.keep_cost)}` : ''}. They ${exp}.</div>
+    </div>
+    <p class="muted" style="margin:6px 0">Suggested: <b>${sug}</b>${c.difference != null ? ` (about ${$(c.difference)} better)` : ''}.${c.no_history ? ` ${c.no_history} of them ${c.no_history === 1 ? 'has' : 'have'} no history yet, so ${c.no_history === 1 ? 'it counts' : 'they count'} as nobody.` : ''}</p>
+    <div class="acts"><button onclick="cokClose()">Close the ${c.times.length} time${c.times.length === 1 ? '' : 's'}${c.close_hours > 0 ? ` · ${esc(c.who)} to ${esc(c.close_until)}` : ''}</button>
+      ${c.shift_id ? `<button onclick="cokKeep()">Keep open · ${esc(c.who)} to ${esc(c.keep_until)}</button>` : ''}</div></div>`;
+}
+async function cokShiftEnd(hm) {   // the last shift's new end (its start stays)
+  const c = D.cok, p = D.people.find(z => z.shiftId === c.shift_id);
+  const { error } = await sb.rpc('hub_board_shift_set', { p_id: c.shift_id, p_start: c.shift_start, p_end: hm, p_remove: false });
+  if (error) { alert(error.message); return false; }
+  if (p) { const was = `${fmt(p.start)}–${fmt(p.end)}`; p.end = toMin(hm); D.hi = Math.max(D.hi, Math.ceil(p.end / 60) * 60);
+    if (!p.draft) queueNotify(p.id, p.show, `${new Date(D.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })}: ${was} → ${fmt(p.start)}–${fmt(p.end)}`); }
+  return true;
+}
+async function cokClose() {
+  const c = D.cok; if (!c) return;
+  if (!confirm(`Close ${c.times.length} empty time${c.times.length === 1 ? '' : 's'} (${c.times.map(t => t.time + ' ' + t.title.trim()).join(', ')})${c.close_hours > 0 ? ` and have ${c.who} stay until ${c.close_until}` : ''}?`)) return;
+  for (const t of c.times) {
+    const { error } = await sb.rpc('hub_board_session_close', { p_id: t.id, p_close: true });
+    if (error) { alert(error.message); return; }
+    const x = (D.sessions || []).find(z => z.id === t.id); if (x) x.spaces_left_cache = 0;
+  }
+  if (c.close_hours > 0 && c.shift_id && !(await cokShiftEnd(c.close_until_hm))) return;
+  D.cok = null; D.flash = `Closed ${c.times.length} time${c.times.length === 1 ? '' : 's'}${c.close_hours > 0 ? `; ${c.who} until ${c.close_until}` : ''}. Undo the closes in the Hub: 🌙 Nightly run → Last 7 days.`; draw();
+}
+async function cokKeep() {
+  const c = D.cok; if (!c) return;
+  if (!confirm(`Keep them open and extend ${c.who}'s shift to ${c.keep_until}?`)) return;
+  if (!(await cokShiftEnd(c.keep_until_hm))) return;
+  D.cok = null; D.flash = `Kept open: ${c.who} until ${c.keep_until}.`; draw();
 }
 // ---- a time on the day: change its time, or close it (empty, or no new bookings); families are looked after in the Hub ----
 function dayTimeMenu(id, el) {
@@ -947,7 +1010,10 @@ function drawWeek() {
     <div class="wk"><table>
       <thead><tr><th class="lbl">${esc(STUDIO_NAMES[W.st] || W.st)}<small>week of ${esc(dayLabel(W.from))}</small>${W.labour && W.labour.total != null
         ? `<div class="lab ${labClass(W.labour.total)}" title="Estimated labour: staff cost (scheduled shifts, drafts included) ÷ the revenue of the week's bookings so far">Labour ≈ ${W.labour.total}% now</div>${W.labour.totalExp != null && W.labour.totalExp !== W.labour.total
-          ? `<div class="lab ${labClass(W.labour.totalExp)}" title="${EXP_TIP}">≈ ${W.labour.totalExp}% expected</div>` : ''}` : ''}</th>${head}</tr></thead>
+          ? `<div class="lab ${labClass(W.labour.totalExp)}" title="${EXP_TIP}">≈ ${W.labour.totalExp}% expected</div>` : ''}` : ''}${W.labour && W.labour.cost != null ? `<div class="wk-money">
+          <div title="The week's scheduled shifts (drafts included, unpaid breaks off) at each person's wage">Staff cost <b>≈ ${money0(W.labour.cost)}</b></div>
+          <div title="Revenue of the week's bookings so far">Booked so far ${money0(W.labour.rev)}</div>
+          ${W.labour.expRev != null && W.labour.expRev !== W.labour.rev ? `<div title="${EXP_TIP}">Expected ≈ ${money0(W.labour.expRev)}</div>` : ''}</div>` : ''}</th>${head}</tr></thead>
       <tbody>
         <tr><td class="lbl"><b>To decide</b><small>📋 For you, this studio</small></td>${days.map(d => `<td>${items(d, ['short_day', 'evening_question', 'as_note', 'class_problem']).map(itemHtml).join('') || '<span class="muted">—</span>'}</td>`).join('')}</tr>
         ${shiftRows || `<tr><td class="lbl"><b>Shifts</b></td><td colspan="7" class="muted">No shifts this week yet: build them in the staff schedule.</td></tr>`}
@@ -969,9 +1035,10 @@ function wkLabourSoon() {
     if (!W || W.st !== st || W.from !== from) return;   // (moved on to another week)
     if (error || !data) { W._labOff = true; return; }   // (not a home office login, or not set up yet: nothing shown)
     const byDay = {}; (data.days || []).forEach(x => { byDay[x.date] = x; });
-    W.labour = { total: data.total_pct, totalExp: data.total_exp_pct, byDay }; drawWeek();
+    W.labour = { total: data.total_pct, totalExp: data.total_exp_pct, byDay, cost: data.total_labour, rev: data.total_revenue, expRev: data.total_expected_revenue }; drawWeek();
   }, 600);
 }
+const money0 = n => n == null ? '' : '$' + Math.round(+n).toLocaleString('en-CA');
 const labClass = pct => pct == null ? '' : pct <= 30 ? 'ok' : pct <= 40 ? 'mid' : 'high';
 const EXP_TIP = 'Expected: adds the late bookings this kind of time usually gets from this many days out (from past weeks), at its price';
 function labCell(d) {
