@@ -4873,7 +4873,7 @@ function asRulesHtml() {
   <ul>
     <li>The staff schedule plans at least as many people as Auto-schedule planned for each day, while anything is on. A <b>+ Staff</b> request adds one more person, over the hours given (or the busiest stretch).</li>
     <li>At least 1 person whenever anything is on. The day starts 30 minutes before the first booking.</li>
-    <li><b>Shifts:</b> standard shapes; on weekdays a shift ends when it's no longer needed (an evening helper might be 4:30–7:30, not to closing); at least 3 hours; at most <b>${hrs(S.max_paid_min)}</b> paid (with the unpaid break by province); no 6-hour shifts like 3:30–9:30 unless the break is clear. Weekend days end at 5pm; weekday shifts flex with bookings.</li>
+    <li><b>Shifts:</b> standard shapes; on weekdays any spare time goes at closing: a helper starts when first needed and stays to close (needed 7–8pm → 6:30–9:30, not 4:30–9:30); at least 3 hours; at most <b>${hrs(S.max_paid_min)}</b> paid (with the unpaid break by province); no 6-hour shifts like 3:30–9:30 unless the break is clear. Weekend days end at 5pm; weekday shifts flex with bookings.</li>
     <li><b>People:</b> never on unavailability or approved time off; one shift a day; at most <b>${n(S.max_days)}</b> days a week (2 days off, together if possible). Managers <b>${n(S.manager_min_hours)}–${n(S.manager_max_hours)}</b> hours a week (some marked to aim for ${n(S.manager_max_hours)}). New staff get 3 training shifts first. On-call staff only as a last resort.</li>
     <li><b>Weekends</b> follow 👥 Studio staffing's numbers. A <b>weekend floater</b> is only added if the day's labour stays under <b>${n(S.floater_max_pct)}%</b>, counting expected walk-ins.</li>
     <li>A class teacher also covers the studio during class when it's quiet: no party on, and at most <b>${n(S.quiet_booked)}</b> people at drop-in times.</li>
@@ -4888,6 +4888,7 @@ function asRulesHtml() {
     <li><b>Times expected to finish with fewer than ${n(S.low_people)} people</b>, ${n(S.low_close_days)} days out ("expected" = booked now plus the late bookings and walk-ins that time usually gets, from the last ${n(S.history_weeks)} weeks):
       <ul><li>nobody booked: it closes (spots to 0);</li><li>1 or 2 booked: it stays open, and a note asks whether to close it and move them;</li><li>not enough history to tell: it stays open.</li></ul></li>
     <li><b>A day with nothing booked at all</b> ${n(S.low_close_days)} days out: its workshop times close.</li>
+    <li><b>The class booking check:</b> every family should be on every week of the kids class they bought. Anyone missing a week, a week on a different day from week 1, or a paid class order with no booking is flagged in the morning.</li>
     <li><b>Then the staffing check</b> (the next 2 weeks): each studio's shifts against what's needed after those changes. It flags days that are <b>short</b> and shifts (or ends of shifts) that <b>could be cut</b>; it never changes a shift.</li>
     <li><b>Never:</b> deletes anything; changes anything with a booking; touches classes, camps, PA/PD days, wheel, field trips, booked parties, hidden times, or studios with Auto-schedule off. Every change can be undone.</li>
   </ul>
@@ -4895,13 +4896,14 @@ function asRulesHtml() {
   </div>`;
 }
 // ---- 🌙 The nightly run (autosched_nightly.sql): closes and swaps by itself every night once switched on (rules doc 13, 30–33) ----
-let _asn = { loaded: false, open: false, on: false, set: null, log: [], preview: null, busy: '', err: '', staff: [], staffAt: null, sopen: true };
+let _asn = { loaded: false, open: false, on: false, set: null, log: [], preview: null, busy: '', err: '', staff: [], staffAt: null, sopen: true, cls: [], clsErr: '' };
 const ASN_ACT = { one_splatter: '🎨 One Splatter at a time', staff_short: '👤 Short', staff_cut: '✂️ Could cut', close_party: '🎉 Party closed', one_room: '🎉 Down to one room', swap: '🔁 Swapped', close_low: '✕ Closed (low)', close_quiet_day: '✕ Closed (quiet day)', note_low: '📋 Note: low, with bookings', keep_no_history: '• Kept (no history)' };
 async function asNightlyLoad() {
   _asn.loaded = true;
   const [st, lg] = await Promise.all([sb.rpc('get_staffing_settings'), sb.rpc('hub_autosched_nightly_log', { p_days: 7 })]);
   if (lg.error) { _asn.err = /hub_autosched_nightly_log/.test(lg.error.message) ? 'Run autosched_nightly.sql in Supabase first.' : lg.error.message; asDraw(); return; }
-  _asn.set = st.data || {}; _asn.on = !!_asn.set.nightly_on; _asn.log = (lg.data || []).filter(a => !/^staff_/.test(a.action)); _asn.err = '';
+  _asn.set = st.data || {}; _asn.on = !!_asn.set.nightly_on; _asn.log = (lg.data || []).filter(a => !/^(staff_|class_)/.test(a.action)); _asn.err = '';
+  try { const cp = await sb.rpc('hub_class_problems'); _asn.clsErr = cp.error ? (/hub_class_problems/.test(cp.error.message) ? 'Run world_class_fix.sql in Supabase first.' : cp.error.message) : ''; _asn.cls = cp.error ? [] : (cp.data || []); } catch (e) { _asn.cls = []; }
   try { const sf = await sb.rpc('hub_autosched_staffing', { p_fresh: false }); _asn.staff = sf.error ? [] : (sf.data || []); _asn.staffAt = _asn.staff.length ? _asn.staff[0].checked_at : null; } catch (e) { _asn.staff = []; }
   asDraw();
 }
@@ -4922,6 +4924,22 @@ async function asStaffNote(st, d, text) {   // 📋 a note for the day (assign i
   if (error) { alert(error.message); return; }
   try { await asNotesLoad(); } catch (e) {}
   alert('Note added for ' + (STUDIO_NAMES[st] || st) + '. Assign it to someone in the Overview (📋 Notes): it goes to their tasks.');
+}
+// 📚 class bookings: families missing a week of a class they paid for, weeks on the wrong day, paid with no booking
+const ASN_CLS = { missing_week: '📚 Missing a week', off_day_week: '📅 Week on the wrong day', paid_not_booked: '💳 Paid, not booked' };
+async function asClassCheckNow() {
+  _asn.busy = 'cls'; asDraw();
+  const { data, error } = await sb.rpc('hub_class_problems'); _asn.busy = '';
+  if (error) { alert(error.message); asDraw(); return; }
+  _asn.cls = data || []; asDraw();
+}
+function asClassHtml() {
+  const L = _asn.cls || [], fmt = d => d ? new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }) : '';
+  return `<h4>📚 Class bookings <span class="fd-sm">${L.length ? `<b style="color:#b3261e">${L.length} to look at</b>` : 'all families on all their weeks'}</span>
+      <button class="ho-btn" ${_asn.busy ? 'disabled' : ''} onclick="asClassCheckNow()">${_asn.busy === 'cls' ? 'Checking…' : '↻ Check now'}</button></h4>
+    ${_asn.clsErr ? `<p class="fd-sm">${esc(_asn.clsErr)}</p>` : ''}
+    <p class="fd-sm">Every kids class: each family should be on every week of the class they bought. Checked every night; anything here needs a person (the repair in world_class_fix.sql fixes what it safely can).</p>
+    ${L.length ? `<table class="fd-tbl asn-tbl"><thead><tr><th>Day</th><th>Studio</th><th>What</th><th></th></tr></thead><tbody>${L.map(x => `<tr><td>${esc(fmt(x.day))}</td><td>${esc(STUDIO_NAMES[x.studio_id] || x.studio_id || '')}</td><td><b>${esc(ASN_CLS[x.problem] || x.problem)}</b></td><td>${esc((x.order ? x.order + ': ' : '') + (x.detail || ''))}</td></tr>`).join('')}</tbody></table>` : ''}`;
 }
 function asStaffHtml() {
   const L = _asn.staff || [], fmt = d => new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
@@ -4947,7 +4965,7 @@ function asNightlyHtml() {
   const last = N.log && N.log.length ? new Date(N.log[0].run_at) : null;
   const head = `<button class="asn-head" onclick="_asn.open=!_asn.open;asDraw()" aria-expanded="${N.open}">🌙 <b>Nightly run</b>
     <span class="asn-pill ${N.on ? 'on' : ''}">${N.on ? 'On' : 'Off'}</span>
-    <span class="fd-sm">${N.err ? esc(N.err) : last ? `last change ${esc(last.toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))} · ${real.length} change${real.length === 1 ? '' : 's'} this week` : N.on ? 'nothing changed yet' : 'switched off: nothing changes by itself'}${(N.staff || []).length ? ` · <b>${N.staff.filter(x => x.kind === 'staff_short').length} short, ${N.staff.filter(x => x.kind === 'staff_cut').length} could cut</b>` : ''}</span>
+    <span class="fd-sm">${N.err ? esc(N.err) : last ? `last change ${esc(last.toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))} · ${real.length} change${real.length === 1 ? '' : 's'} this week` : N.on ? 'nothing changed yet' : 'switched off: nothing changes by itself'}${(N.cls || []).length ? ` · <b style="color:#b3261e">${N.cls.length} class booking${N.cls.length === 1 ? '' : 's'} to look at</b>` : ''}${(N.staff || []).length ? ` · <b>${N.staff.filter(x => x.kind === 'staff_short').length} short, ${N.staff.filter(x => x.kind === 'staff_cut').length} could cut</b>` : ''}</span>
     <span class="asn-car">${N.open ? '▾' : '▸'}</span></button>`;
   if (!N.open || N.err) return `<div class="asn">${head}</div>`;
   return `<div class="asn">${head}<div class="asn-body">
@@ -4956,6 +4974,7 @@ function asNightlyHtml() {
       <button class="ho-btn" ${N.busy ? 'disabled' : ''} onclick="asNightlyPreview()">${N.busy === 'preview' ? 'Looking…' : '👁 Preview tonight’s run'}</button>
       ${_hoCan.edit ? `<button class="ho-btn" ${N.busy ? 'disabled' : ''} onclick="asNightlyNow()">${N.busy === 'run' ? 'Running…' : '▶ Run it now'}</button>` : ''}
       <span class="fd-sm">Settings (how low, how many days out): 👥 Studio staffing → 📏 Staffing rules.</span></div>
+    ${asClassHtml()}
     ${asStaffHtml()}
     ${N.preview ? `<h4>Tonight’s run would do this <span class="fd-sm">(nothing has changed)</span></h4>${asNightlyList(N.preview, false)}` : ''}
     <h4>The last 7 days</h4>${asNightlyList(N.log || [], true)}
@@ -15433,8 +15452,9 @@ function renderFloorToday(data) {
     .sort((a, b) => String(a.time).localeCompare(String(b.time)));
   // 0 booked and 0 spots open = not running today. A kids class with nobody enrolled isn't running either (rules doc 1:
   // nobody enrolled = no class, no teacher), once the class counts have loaded.
-  const isKidsClass = s => { const info = _classInfo && _classInfo.byKey[String(s.time || '').slice(0, 8) + '|' + s.title];
-    return !!(info && (info.type === 'class' || info.type === 'series')) || /class \d+ of \d+|week session/i.test(s.title || '') || s.title === 'Catch Up Class'; };
+  // (by its title only: workshops and glazing can share the database type 'class', and an open workshop with nobody booked
+  // yet must always show)
+  const isKidsClass = s => /class \d+ of \d+|week session/i.test(s.title || '') || s.title === 'Catch Up Class';
   const notRunning = s => {
     if (!_classInfo || Number(s.bookingCount || 0) > 0) return false;
     if (isKidsClass(s)) {
