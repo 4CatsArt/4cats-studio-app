@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4Cats planner lab: forecast look-back</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.1"></script>
+<style>
+  :root { --ink: #1f2a24; --mut: #6b6b63; --line: #e6e2d8; --bg: #f6f4ef; --good: #2f7d4a; --bad: #b3261e; --amb: #b7791f; }
+  * { box-sizing: border-box; } body { margin: 0; font-family: Inter, system-ui, -apple-system, sans-serif; color: var(--ink); background: var(--bg); }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 22px 18px 60px; } h1 { font-size: 22px; margin: 0 0 4px; } .lead { color: var(--mut); margin: 0 0 16px; max-width: 820px; line-height: 1.45; }
+  .panel { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; margin-bottom: 14px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; } .bar label { font-size: 14px; display: inline-flex; gap: 6px; align-items: center; }
+  .bar input[type=number] { width: 60px; font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 8px; }
+  button { font: inherit; border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 7px 16px; cursor: pointer; } button.primary { background: var(--ink); color: #fff; border-color: var(--ink); } button:disabled { opacity: .5; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; } th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; } th { font-size: 12px; color: var(--mut); font-weight: 700; }
+  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; } .good { color: var(--good); font-weight: 700; } .bad { color: var(--bad); font-weight: 700; } .amb { color: var(--amb); font-weight: 700; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; margin: 8px 0 12px; }
+  .card { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; } .card b { font-size: 22px; display: block; } .card span { font-size: 12.5px; color: var(--mut); }
+  h2 { font-size: 18px; margin: 4px 0 6px; } details summary { cursor: pointer; font-weight: 700; margin: 8px 0; } .muted { color: var(--mut); font-size: 12.5px; }
+  .tw { overflow-x: auto; } .msg { color: var(--bad); } #signin input { font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; margin-right: 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Planner lab: forecast look-back</h1>
+  <p class="lead">Read only: nothing here changes anything. For every drop-in time in the last weeks (workshops, glazing, Mini Make, wheel and kids workshops), it pretends to be 14, 7 and 3 days before, predicts the final number using only what was known then (bookings so far, plus how similar past times picked up late), and compares with what actually happened. It also checks the close-or-keep call 3 days before (under 3 = close).</p>
+  <div id="signin" class="panel" style="display:none"><b>Sign in</b> (your home office login)<div style="margin-top:8px"><input id="em" type="email" placeholder="Email"><input id="pw" type="password" placeholder="Password"><button class="primary" onclick="signIn()">Sign in</button> <span id="sm" class="msg"></span></div></div>
+  <div id="app" style="display:none">
+    <div class="panel bar">
+      <label><input type="checkbox" class="st" value="BC-YVR-MS" checked> Vancouver Main Street</label>
+      <label><input type="checkbox" class="st" value="ON-YYZ-AVE" checked> Toronto Avenue Road</label>
+      <label><input type="checkbox" class="st" value="ON-WTR-WTR" checked> Waterloo Uptown</label>
+      <label>Test the last <input id="wk" type="number" min="2" max="26" value="8"> weeks</label>
+      <label>learning from <input id="hw" type="number" min="4" max="40" value="12"> weeks before</label>
+      <button class="primary" id="run" onclick="run()">Run the look-back</button> <span id="status" class="muted"></span>
+    </div>
+    <div id="out"></div>
+  </div>
+</div>
+<script>
+const SUPABASE_URL = 'https://snxibhbhhchjthfmjtaj.supabase.co'
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueGliaGJoaGNoanRoZm1qdGFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNTk2ODAsImV4cCI6MjA5MjYzNTY4MH0.K-89Mx4SxU6N1hMmtK6Q79rWAtk6VTN9b5wemQxcZVA'
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY)
+const NAMES = { 'BC-YVR-MS': 'Vancouver Main Street', 'ON-YYZ-AVE': 'Toronto Avenue Road', 'ON-WTR-WTR': 'Waterloo Uptown' }
+const KIND = { workshop: 'Workshop', glazing: 'Glazing', mini: 'Mini Make', wheel: 'Wheel workshop', kidsws: 'Kids workshop' }
+const H = [14, 7, 3], LOW = 3
+const esc = t => String(t ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
+const ymd = d => d.toISOString().slice(0, 10)
+const addDays = (s, n) => { const d = new Date(s + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return ymd(d) }
+const mins = t => { const [h, m] = String(t).split(':').map(Number); return h * 60 + m }
+const tlabel = t => { const m = mins(t), h = Math.floor(m / 60), mm = m % 60; return (h % 12 || 12) + (mm ? ':' + String(mm).padStart(2, '0') : '') + (h < 12 ? 'am' : 'pm') }
+const median = a => { if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y), i = Math.floor(s.length / 2); return s.length % 2 ? s[i] : (s[i - 1] + s[i]) / 2 }
+const part = r => (r.dow === 0 || r.dow === 6 ? 'we' : 'wd') + (mins(r.session_time) < 12 * 60 ? 'am' : mins(r.session_time) < 17 * 60 ? 'pm' : 'eve')
+
+sb.auth.getSession().then(({ data: { session } }) => { if (session) show(); else document.getElementById('signin').style.display = '' })
+async function signIn() {
+  const { error } = await sb.auth.signInWithPassword({ email: document.getElementById('em').value.trim(), password: document.getElementById('pw').value })
+  if (error) { document.getElementById('sm').textContent = error.message; return }
+  document.getElementById('signin').style.display = 'none'; show()
+}
+function show() { document.getElementById('app').style.display = '' }
+
+// The forecast for one time, h days before: booked by then + the usual late pick-up of similar past times (known by then)
+function predict(r, h, hist) {
+  const key = 'booked_d' + h, cutoff = addDays(r.session_date, -h), asof = r[key]
+  const known = hist.filter(x => x.session_date < cutoff && x.kind === r.kind)
+  const tiers = [
+    known.filter(x => x.dow === r.dow && Math.abs(mins(x.session_time) - mins(r.session_time)) <= 60).slice(-8),
+    known.filter(x => part(x) === part(r)).slice(-12),
+    known.slice(-16)
+  ]
+  const comp = tiers.find(t => t.length >= 3) || tiers[2]
+  const pick = comp.length ? median(comp.map(x => Math.max(0, x.booked_final - x[key]))) : 0
+  const pred = Math.round(Math.min(r.capacity || 99, asof + pick))
+  return { asof, pred, basis: comp === tiers[0] ? 'same day and time' : comp === tiers[1] ? 'same part of the week' : comp.length ? 'any ' + KIND[r.kind].toLowerCase() : 'no history' }
+}
+
+async function run() {
+  const studios = [...document.querySelectorAll('.st:checked')].map(c => c.value)
+  const wk = Math.max(2, +document.getElementById('wk').value || 8), hw = Math.max(4, +document.getElementById('hw').value || 12)
+  const today = ymd(new Date()), evalFrom = addDays(today, -wk * 7), histFrom = addDays(evalFrom, -hw * 7)
+  const btn = document.getElementById('run'), st = document.getElementById('status'), out = document.getElementById('out')
+  btn.disabled = true; out.innerHTML = ''
+  let html = ''
+  for (const s of studios) {
+    st.textContent = 'Reading ' + NAMES[s] + '…'
+    const { data, error } = await sb.rpc('lab_slot_history', { p_studio_id: s, p_from: histFrom, p_to: addDays(today, -1) })
+    if (error) { html += '<div class="panel"><h2>' + esc(NAMES[s]) + '</h2><p class="msg">' + esc(/lab_slot_history/.test(error.message) ? 'Run planner_lab.sql first.' : error.message) + '</p></div>'; continue }
+    html += studioHtml(s, data || [], evalFrom)
+  }
+  out.innerHTML = html; st.textContent = ''; btn.disabled = false
+}
+
+function studioHtml(s, rows, evalFrom) {
+  const test = rows.filter(r => r.session_date >= evalFrom)
+  if (!test.length) return '<div class="panel"><h2>' + esc(NAMES[s]) + '</h2><p class="muted">No drop-in times in that window.</p></div>'
+  const res = test.map(r => { const o = { r }; H.forEach(h => { o[h] = predict(r, h, rows) }); return o })
+  const stat = h => {
+    const e = res.map(o => o[h].pred - o.r.booked_final), b = res.map(o => o[h].asof - o.r.booked_final)
+    const mae = a => a.reduce((t, x) => t + Math.abs(x), 0) / a.length
+    return { mae: mae(e), base: mae(b), within: res.filter(o => Math.abs(o[h].pred - o.r.booked_final) <= 2).length / res.length, bias: e.reduce((t, x) => t + x, 0) / e.length }
+  }
+  const S = H.map(h => ({ h, ...stat(h) }))
+  // the close-or-keep call 3 days before (under 3 = close)
+  const calls = res.map(o => ({ close: o[3].pred < LOW, low: o.r.booked_final < LOW }))
+  const right = calls.filter(c => c.close === c.low).length, lost = calls.filter(c => c.close && !c.low).length, wasted = calls.filter(c => !c.close && c.low).length
+  const avg = res.reduce((t, o) => t + o.r.booked_final, 0) / res.length
+  const fmt = (x, d = 1) => x.toFixed(d)
+  let h = '<div class="panel"><h2>' + esc(NAMES[s]) + '</h2><p class="muted">' + res.length + ' drop-in times tested · ' + fmt(avg) + ' people on average in the end</p>'
+  h += '<div class="cards">' +
+    '<div class="card"><b>' + fmt(S[2].mae) + '</b><span>people off, on average, predicting 3 days before (counting only bookings so far: ' + fmt(S[2].base) + ')</span></div>' +
+    '<div class="card"><b>' + Math.round(S[2].within * 100) + '%</b><span>of times predicted within 2 people, 3 days before</span></div>' +
+    '<div class="card"><b class="' + (right / calls.length >= .85 ? 'good' : right / calls.length >= .7 ? 'amb' : 'bad') + '">' + Math.round(right / calls.length * 100) + '%</b><span>close-or-keep calls right at 3 days (' + lost + ' closed that would have reached 3, ' + wasted + ' kept that stayed under 3)</span></div></div>'
+  h += '<div class="tw"><table><thead><tr><th>Predicting</th><th class="n">Off by (avg people)</th><th class="n">Bookings so far only</th><th class="n">Within 2</th><th class="n">Leans</th></tr></thead><tbody>' +
+    S.map(x => '<tr><td>' + x.h + ' days before</td><td class="n"><b>' + fmt(x.mae) + '</b></td><td class="n">' + fmt(x.base) + '</td><td class="n">' + Math.round(x.within * 100) + '%</td><td class="n">' + (Math.abs(x.bias) < .3 ? 'about right' : x.bias > 0 ? 'high by ' + fmt(x.bias) : 'low by ' + fmt(-x.bias)) + '</td></tr>').join('') + '</tbody></table></div>'
+  // by kind
+  const kinds = [...new Set(res.map(o => o.r.kind))]
+  h += '<details><summary>By kind of time</summary><div class="tw"><table><thead><tr><th>Kind</th><th class="n">Times</th><th class="n">Avg in the end</th><th class="n">Off by, 3 days before</th><th class="n">Under 3 in the end</th></tr></thead><tbody>' +
+    kinds.map(k => { const a = res.filter(o => o.r.kind === k); return '<tr><td>' + KIND[k] + '</td><td class="n">' + a.length + '</td><td class="n">' + fmt(a.reduce((t, o) => t + o.r.booked_final, 0) / a.length) + '</td><td class="n">' + fmt(a.reduce((t, o) => t + Math.abs(o[3].pred - o.r.booked_final), 0) / a.length) + '</td><td class="n">' + a.filter(o => o.r.booked_final < LOW).length + '</td></tr>' }).join('') + '</tbody></table></div></details>'
+  // every time
+  h += '<details><summary>Every time tested</summary><div class="tw"><table><thead><tr><th>Date</th><th>Time</th><th>Kind</th><th>Title</th><th class="n">14d</th><th class="n">7d</th><th class="n">3d</th><th class="n">Predicted (3d)</th><th class="n">Final</th><th>Close call</th><th>Based on</th></tr></thead><tbody>' +
+    res.map(o => { const r = o.r, p = o[3], close = p.pred < LOW, low = r.booked_final < LOW, d = new Date(r.session_date + 'T12:00:00Z');
+      return '<tr><td>' + d.toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' }) + '</td><td>' + tlabel(r.session_time) + '</td><td>' + KIND[r.kind] + '</td><td>' + esc(String(r.title).split('|')[0]) + '</td>' +
+        '<td class="n">' + r.booked_d14 + '</td><td class="n">' + r.booked_d7 + '</td><td class="n">' + r.booked_d3 + '</td><td class="n"><b>' + p.pred + '</b></td><td class="n">' + r.booked_final + '</td>' +
+        '<td>' + (close === low ? '<span class="good">✓ ' + (close ? 'close' : 'keep') + '</span>' : '<span class="bad">✗ ' + (close ? 'would close (got ' + r.booked_final + ')' : 'would keep (got ' + r.booked_final + ')') + '</span>') + '</td><td class="muted">' + esc(p.basis) + '</td></tr>' }).join('') + '</tbody></table></div></details></div>'
+  return h
+}
+</script>
+</body>
+</html>
