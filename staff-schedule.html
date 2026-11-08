@@ -1936,16 +1936,14 @@ function bdSnapToStandard(ctx, blocks) {
       if (near) fit = near
     }
     if (b.keepShape || !fit || (fit.start === b.start && fit.end === b.end)) return
-    // (Nov 8 2026, rules doc 18: weekday shifts flex with bookings) Mon–Fri, the shape's start, but the shift ends when it's no
-    // longer needed, on the half hour (at least 3 hours); and it starts no more than an hour before it's needed. Weekends keep
-    // the full standard shapes.
+    // (Nov 8 2026, rules doc 18: weekday shifts flex with bookings) Mon–Fri, any spare time goes at closing, where help is useful:
+    // the shift keeps the shape's end (closing) and starts when it's first needed, on the half hour, at least 3 hours before
+    // its end (e.g. needed 7–8pm → 6:30–9:30, not 4:30–9:30). Weekends keep the full standard shapes.
     const dow = parseYmd(b.date).getDay()
     if (dow >= 1 && dow <= 5) {
-      const needEnd = Math.ceil(b.end / 30) * 30, needStart = Math.floor(b.start / 30) * 30
-      const flex = { start: fit.start, end: fit.end }
-      if (flex.end - Math.max(needEnd, flex.start + 180) >= 60) flex.end = Math.max(needEnd, flex.start + 180)
-      if (Math.min(needStart, flex.end - 180) - flex.start >= 60) flex.start = Math.min(needStart, flex.end - 180)
-      fit = flex
+      const needStart = Math.floor(b.start / 30) * 30
+      const start = Math.min(needStart, fit.end - 180)
+      if (start > fit.start) fit = { start, end: fit.end }
     }
     if (b.staffId) {
       const p = ctx.pool.find(x => x.id === b.staffId)
@@ -1955,6 +1953,13 @@ function bdSnapToStandard(ctx, blocks) {
       if (ot && now + extra > ot.weekly_hours * 60 && now <= ot.weekly_hours * 60) return
     }
     b.start = fit.start; b.end = fit.end
+  })
+  // every shift at least 3 hours (one no standard shape fitted keeps its own times): stretched toward closing, else earlier
+  blocks.forEach(b => {
+    if (b.keepShape || b.end - b.start >= 180) return
+    const w = ctx.dayWindow[b.date] || { open: 0, close: 24 * 60 }
+    if (b.start + 180 <= w.close) b.end = b.start + 180                         // (3 hours from its start, if that's before closing)
+    else { b.end = Math.max(b.end, w.close); b.start = Math.max(Math.min(w.open, b.start), b.end - 180) }   // (else ending at closing, starting earlier)
   })
   // a training shift follows its lead's shift
   blocks.filter(b => b.training).forEach(t => {
@@ -2267,7 +2272,7 @@ function bdWeekSave(st, idx) {
   const r = bdParseRange((document.getElementById('sw-time') || {}).value || '')
   if (!r) { toast('Use a time like 8:30a-5p, with a or p on both times.', true); return }
   const who = (document.getElementById('sw-who') || {}).value || null
-  if (r.end - r.start < 180 && !confirm('This shift is shorter than 3 hours. Keep it?')) return
+  if (r.end - r.start < 180) { toast('Shifts are at least 3 hours. Make it 3 hours or longer.', true); return }   // (every shift: 3 hours at least)
   if (paidMins(st, r.start, r.end) > MAX_PAID && !confirm('More than 8 paid hours. Keep it?')) return
   b.start = r.start; b.end = r.end; b.staffId = who; b.edited = true; bdPlan.dirty = true
   bdWeekPopClose(); bdRefresh()
@@ -3231,7 +3236,7 @@ function bdEditTime(ev, idx) {
     if (!r) { toast('Use a time like 8:30a-5p, with a or p on both times.', true); bdRefresh(); return }
     const w = bdCtx.dayWindow[b.date], paid = paidMins(bdCtx.studio, r.start, r.end)
     const warns = []
-    if (r.end - r.start < 180) warns.push('shorter than 3 hours')
+    if (r.end - r.start < 180) { toast('Shifts are at least 3 hours. Make it 3 hours or longer.', true); bdRefresh(); return }   // (every shift: 3 hours at least)
     if (paid > MAX_PAID) warns.push('more than 8 paid hours (overtime in BC and AB)')
     if (w && (r.start < w.open || r.end > w.close)) warns.push('outside opening hours (' + bdFmtShort(w.open) + '–' + bdFmtShort(w.close) + ')')
     if (warns.length && !confirm('This shift would be ' + warns.join(', ') + '. Keep it?')) { bdRefresh(); return }
@@ -3329,7 +3334,7 @@ function bdCellClick(ev) {
       if (why && !confirm(p.display_name + ': ' + why + ' on ' + fmtDate(date) + '. Add this shift anyway?')) { input.remove(); return }
     }
     const paid = paidMins(bdCtx.studio, r.start, r.end), warns = []
-    if (r.end - r.start < 180) warns.push('shorter than 3 hours')
+    if (r.end - r.start < 180) { toast('Shifts are at least 3 hours. Make it 3 hours or longer.', true); input.remove(); return }   // (every shift: 3 hours at least)
     if (paid > MAX_PAID) warns.push('more than 8 paid hours (overtime in BC and AB)')
     if (!w) warns.push('on a day with nothing open')
     else if (r.start < w.open || r.end > w.close) warns.push('outside opening hours (' + bdFmtShort(w.open) + '–' + bdFmtShort(w.close) + ')')
