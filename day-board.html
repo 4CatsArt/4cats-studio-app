@@ -43,6 +43,7 @@ body.week .day-only { display: none; } body:not(.week) .wk-only { display: none;
 .wk .sh { position: relative; cursor: grab; } .wk .sh.dragging { opacity: .4; }
 .wk .sh .x { position: absolute; top: 3px; right: 4px; font: inherit; font-size: 10.5px; line-height: 1; padding: 2px 4px; border-radius: 4px; border: 0; background: rgba(255,255,255,.25); color: inherit; cursor: pointer; opacity: 0; }
 .wk .sh:hover .x, .wk .sh:focus-within .x { opacity: 1; } .wk .sh.draft .x { background: rgba(0,0,0,.06); }
+.wk tr.gone .sh { box-shadow: 0 0 0 2px var(--bad); } .gone-tag { display: inline-block; margin: 2px 0; font-size: 10.5px; font-weight: 700; color: #fff; background: var(--bad); border-radius: 999px; padding: 1px 7px; }
 .wk td.drop.over { background: #eef7f0; outline: 2px dashed #2f7d4a; outline-offset: -3px; }
 .wk .add { font: inherit; font-size: 13px; color: var(--muted); border: 1px dashed transparent; background: none; border-radius: 6px; width: 100%; padding: 6px 0; cursor: pointer; opacity: .25; }
 .wk td:hover .add, .wk .add:focus-visible { opacity: 1; border-color: #cfc9bb; } .wk .add.wide { opacity: .6; font-size: 12px; }
@@ -219,10 +220,11 @@ async function load() {
           shiftId: String(x.id), status: 'draft' }); });
       people.sort((a, b) => a.start - b.start || a.show.localeCompare(b.show));
     }
-    // their job (manager / coordinator) and hire date (seniority), from their staff profile
+    // their job (manager / coordinator) and hire date (seniority), from their staff profile; and anyone deactivated
     if (people.length) {
-      const prof = await sb.from('staff_profiles').select('id, role, hire_date').in('id', people.map(p => p.id));
-      (prof.data || []).forEach(r => { const p = people.find(x => x.id === r.id); if (p) { p.job = String(r.role || ''); p.hired = r.hire_date || null; } });
+      const prof = await sb.from('staff_profiles').select('id, role, hire_date, is_active, termination_date').in('id', people.map(p => p.id));
+      (prof.data || []).forEach(r => { const p = people.find(x => x.id === r.id); if (p) { p.job = String(r.role || ''); p.hired = r.hire_date || null;
+        p.gone = r.is_active === false ? 'deactivated' : r.termination_date && r.termination_date < date ? 'past their last day' : ''; } });
     }
     const findPerson = n => { const k = key(n); if (!k) return null;
       return people.find(p => key(p.name) === k || key(p.show) === k) || people.find(p => key(p.show).split(' ')[0] === k.split(' ')[0]) || null; };
@@ -330,6 +332,7 @@ function problems() {
     });
   });
   D.blocks.filter(b => !b.person).forEach(b => { bad[b.id] = 1; list.push(`${b.title} at ${fmt(b.start)} has nobody`); });
+  D.people.filter(p => p.gone).forEach(p => list.push(`${p.show} is ${p.gone} but has a shift this day: remove it (✕) or give their work to someone else`));
   // breaks never at the same time: someone is always on
   const brks = D.blocks.filter(b => b.kind === 'brk' && b.person);
   brks.forEach((b, i) => brks.slice(i + 1).forEach(c => { if (b.start < c.end && c.start < b.end) { bad[b.id] = bad[c.id] = 1;
@@ -390,7 +393,7 @@ function draw() {
   })();
   const nobody = D.blocks.filter(b => !b.person);
   const rows = (nobody.length ? `<div class="row needs" data-person=""><div class="who"><b>Needs someone</b><small>${nobody.length} with nobody: drag onto a person</small></div><div class="lane" style="width:${W}px">${hourLines}${laneOut(nobody)}</div></div>` : '')
-    + D.people.map(p => `<div class="row" data-person="${esc(p.id)}"><div class="who"><b>${esc(p.show)}${p.draft ? ' <span class="draft-tag">draft</span>' : ''}${p.shiftId ? `
+    + D.people.map(p => `<div class="row" data-person="${esc(p.id)}"><div class="who"><b>${esc(p.show)}${p.draft ? ' <span class="draft-tag">draft</span>' : ''}${p.gone ? ` <span class="gone-tag">${esc(p.gone)}</span>` : ''}${p.shiftId ? `
         <span class="sh-acts"><button title="Change ${esc(p.show)}'s shift times" onclick="dayShiftEdit('${esc(p.id)}')">✎</button><button title="Remove ${esc(p.show)}'s shift" onclick="dayShiftRemove('${esc(p.id)}')">✕</button></span>` : ''}</b><small>${fmt(p.start)}–${fmt(p.end)}
         <select class="role" aria-label="${esc(p.show)}'s role today" onchange="setRole('${esc(p.id)}', this.value)">${['Director', 'Demoer', 'Circler'].map(r => `<option${r === p.role ? ' selected' : ''}>${r}</option>`).join('')}</select></small>
         <small>${Math.round(mins(p.id) / 6) / 10}h teaching or demoing${D.blocks.some(b => b.person === p.id && b.kind === 'brk') ? '' : (p.end - p.start > 300 ? ' · <b style="color:#9a3412;display:inline">no break set</b>' : '')}</small></div>
@@ -765,11 +768,12 @@ async function loadWeek() {
     const rosters = await Promise.all(week2.map(x => sb.rpc('get_class_week_bookings', { p_session_id: x.id })));
     week2.forEach((x, i) => { if (!rosters[i].error) booked[x.id] = (rosters[i].data || []).reduce((n, b) => n + (b.qty || 0), 0); });
     const staffIds = [...new Set((shifts.data || []).map(r => r.staff_id))];
-    const prof = staffIds.length ? await sb.from('staff_profiles').select('id, display_name, preferred_name').in('id', staffIds) : { data: [] };
-    const names = {}; (prof.data || []).forEach(p => { names[p.id] = (p.preferred_name || '').trim() || p.display_name || 'Someone'; });
+    const prof = staffIds.length ? await sb.from('staff_profiles').select('id, display_name, preferred_name, is_active, termination_date').in('id', staffIds) : { data: [] };
+    const names = {}, gone = {}; (prof.data || []).forEach(p => { names[p.id] = (p.preferred_name || '').trim() || p.display_name || 'Someone';
+      if (p.is_active === false) gone[p.id] = 'deactivated'; else if (p.termination_date && p.termination_date < to) gone[p.id] = 'last day ' + dayLabel(p.termination_date); });
     const days = Array.from({ length: 7 }, (_, i) => addDays(from, i));
     W = { st, from, to, days, sessions, booked, need: need.error ? [] : (need.data || []), needErr: need.error ? need.error.message : '',
-          shifts: shifts.data || [], names, inbox: (inbox.data || []).filter(x => x.studio_id === st && x.day && String(x.day).slice(0, 10) >= from && String(x.day).slice(0, 10) <= to) };
+          shifts: shifts.data || [], names, gone, inbox: (inbox.data || []).filter(x => x.studio_id === st && x.day && String(x.day).slice(0, 10) >= from && String(x.day).slice(0, 10) <= to) };
     drawWeek();
   } catch (e) { $('main').innerHTML = `<div class="msg"><b>Couldn't load that week.</b><br>${esc(e.message || e)}</div>`; }
 }
@@ -809,7 +813,7 @@ function drawWeek() {
     return `<th><button class="day" onclick="openDay('${d}')" title="Open this day's day board">${esc(dayLabel(d))}</button>
       <div class="cov" title="8am–10pm: red = short, amber = more than needed, green = right">${c.cls.map((k, i) => `<i class="${k}" title="${fmt(c.lo + i * 30)}"></i>`).join('')}</div>
       <small>${n} time${n === 1 ? '' : 's'} booked · need ${c.needH}h, scheduled ${c.haveH}h${c.drafts ? ' (drafts)' : ''}${todo ? ` · <b style="color:var(--bad)">${todo} to decide</b>` : ''}</small></th>`; }).join('');
-  const shiftRows = people.map(pid => `<tr><td class="lbl"><b>${esc(W.names[pid] || 'Someone')}</b><small>${Math.round(W.shifts.filter(x => x.staff_id === pid).reduce((t, x) => t + (toMin(x.end_time) - toMin(x.start_time)), 0) / 6) / 10}h this week</small></td>${days.map(d => {
+  const shiftRows = people.map(pid => `<tr${W.gone && W.gone[pid] ? ' class="gone"' : ''}><td class="lbl"><b>${esc(W.names[pid] || 'Someone')}</b>${W.gone && W.gone[pid] ? `<span class="gone-tag">${esc(W.gone[pid])}</span>` : ''}<small>${Math.round(W.shifts.filter(x => x.staff_id === pid).reduce((t, x) => t + (toMin(x.end_time) - toMin(x.start_time)), 0) / 6) / 10}h this week</small></td>${days.map(d => {
       const mine = W.shifts.filter(x => x.staff_id === pid && x.shift_date === d);
       return `<td class="drop" data-staff="${esc(pid)}" data-day="${d}">${mine.map(sh => `<div class="sh${sh.status === 'draft' ? ' draft' : ''}" draggable="true" data-shift="${esc(String(sh.id))}" role="button" tabindex="0"
           onclick="if(!event.target.closest('.x')) wkShift('${sh.id}')" title="Click to change the times · drag to another day or person">${fmt(toMin(sh.start_time))}–${fmt(toMin(sh.end_time))}
