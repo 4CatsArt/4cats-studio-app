@@ -488,7 +488,7 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .asn-pill { font-size: 12px; font-weight: 700; padding: 1px 9px; border-radius: 999px; background: #eee; color: #666; } .asn-pill.on { background: #e2f1e8; color: #1d5640; }
 .asn-body { padding: 0 14px 12px; } .asn-body h4 { margin: 12px 0 6px; font-size: 13.5px; }
 .asn-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; } .asn-sw { display: flex; gap: 6px; align-items: center; font-weight: 600; }
-.asn-tbl td { font-size: 13px; vertical-align: top; } .asn-undone td { opacity: .5; text-decoration: line-through; } .asn-undone td:last-child { text-decoration: none; }
+.asn-tbl td { font-size: 13px; vertical-align: top; } .asn-body h4 .ho-btn { margin-left: 8px; font-weight: 400; } .asn-undone td { opacity: .5; text-decoration: line-through; } .asn-undone td:last-child { text-decoration: none; }
 .stf-rb { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; margin: 16px 0; max-width: 980px; }
 .stf-rb h3 { margin: 0 0 4px; font-size: 17px; } .stf-rb h4 { margin: 14px 0 6px; font-size: 13.5px; color: var(--ink-soft); }
 .stf-rtbl input, .stf-si input { width: 72px; font: inherit; padding: 4px 6px; border: 1px solid var(--border); border-radius: 8px; text-align: right; }
@@ -4864,6 +4864,7 @@ function asRulesHtml() {
     <li>An open party time counts as "could still book" until it closes.</li>
     <li><b>Unbooked party times close ${n(S.open_party_close_days)} days before.</b></li>
     <li><b>Double or triple party times</b> with 2 or more rooms still open go down to <b>one room ${n(S.party_one_room_days)} days before</b> (Splatter closes before Kids).</li>
+    <li><b>Splatter: only one at a time per studio.</b> The moment a Splatter time is booked, any other Splatter at that studio and time closes; two open Splatter times at the same time never both stay open.</li>
     <li><b>Adult Get-Together slots</b> are one time each, at every studio: they're never part of the "down to one room" rule, and only close when unbooked ${n(S.open_party_close_days)} days before.</li>
     <li>Field trips are never closed by these rules.</li>
   </ul>
@@ -4887,19 +4888,51 @@ function asRulesHtml() {
     <li><b>Times expected to finish with fewer than ${n(S.low_people)} people</b>, ${n(S.low_close_days)} days out ("expected" = booked now plus the late bookings and walk-ins that time usually gets, from the last ${n(S.history_weeks)} weeks):
       <ul><li>nobody booked: it closes (spots to 0);</li><li>1 or 2 booked: it stays open, and a note asks whether to close it and move them;</li><li>not enough history to tell: it stays open.</li></ul></li>
     <li><b>A day with nothing booked at all</b> ${n(S.low_close_days)} days out: its workshop times close.</li>
+    <li><b>Then the staffing check</b> (the next 2 weeks): each studio's shifts against what's needed after those changes. It flags days that are <b>short</b> and shifts (or ends of shifts) that <b>could be cut</b>; it never changes a shift.</li>
     <li><b>Never:</b> deletes anything; changes anything with a booking; touches classes, camps, PA/PD days, wheel, field trips, booked parties, hidden times, or studios with Auto-schedule off. Every change can be undone.</li>
   </ul>
   ${_asRules.err ? `<p class="fd-sm">(Some numbers are the defaults: ${esc(_asRules.err)})</p>` : ''}
   </div>`;
 }
 // ---- 🌙 The nightly run (autosched_nightly.sql): closes and swaps by itself every night once switched on (rules doc 13, 30–33) ----
-let _asn = { loaded: false, open: false, on: false, set: null, log: [], preview: null, busy: '', err: '' };
-const ASN_ACT = { close_party: '🎉 Party closed', one_room: '🎉 Down to one room', swap: '🔁 Swapped', close_low: '✕ Closed (low)', close_quiet_day: '✕ Closed (quiet day)', note_low: '📋 Note: low, with bookings', keep_no_history: '• Kept (no history)' };
+let _asn = { loaded: false, open: false, on: false, set: null, log: [], preview: null, busy: '', err: '', staff: [], staffAt: null, sopen: true };
+const ASN_ACT = { one_splatter: '🎨 One Splatter at a time', staff_short: '👤 Short', staff_cut: '✂️ Could cut', close_party: '🎉 Party closed', one_room: '🎉 Down to one room', swap: '🔁 Swapped', close_low: '✕ Closed (low)', close_quiet_day: '✕ Closed (quiet day)', note_low: '📋 Note: low, with bookings', keep_no_history: '• Kept (no history)' };
 async function asNightlyLoad() {
   _asn.loaded = true;
   const [st, lg] = await Promise.all([sb.rpc('get_staffing_settings'), sb.rpc('hub_autosched_nightly_log', { p_days: 7 })]);
   if (lg.error) { _asn.err = /hub_autosched_nightly_log/.test(lg.error.message) ? 'Run autosched_nightly.sql in Supabase first.' : lg.error.message; asDraw(); return; }
-  _asn.set = st.data || {}; _asn.on = !!_asn.set.nightly_on; _asn.log = lg.data || []; _asn.err = ''; asDraw();
+  _asn.set = st.data || {}; _asn.on = !!_asn.set.nightly_on; _asn.log = (lg.data || []).filter(a => !/^staff_/.test(a.action)); _asn.err = '';
+  try { const sf = await sb.rpc('hub_autosched_staffing', { p_fresh: false }); _asn.staff = sf.error ? [] : (sf.data || []); _asn.staffAt = _asn.staff.length ? _asn.staff[0].checked_at : null; } catch (e) { _asn.staff = []; }
+  asDraw();
+}
+// 👥 the staffing check: shifts against what's needed (flags only; you decide, the staff schedule makes the change)
+async function asStaffCheckNow() {
+  _asn.busy = 'staff'; asDraw();
+  const { data, error } = await sb.rpc('hub_autosched_staffing', { p_fresh: true });
+  _asn.busy = '';
+  if (error) { alert(error.message); asDraw(); return; }
+  _asn.staff = data || []; _asn.staffAt = new Date().toISOString(); asDraw();
+}
+async function asStaffExtra(st, d) {   // 👤 request another staff on that day (the + Staff flow: hours, To-do note, the staff schedule places them)
+  if (!_as.plan || d < _as.week || d > asAddDays(_as.week, 6)) { _as.week = asMonday(d); _as.plan = null; await asMake(); }
+  await asExtra(st, d, 1);
+}
+async function asStaffNote(st, d, text) {   // 📋 a note for the day (assign it to the coordinator in the Overview: it goes to their tasks)
+  const { error } = await sb.rpc('hub_autosched_note_save', { p: { studio_id: st, day: d, kind: 'staff', body: 'Staffing: ' + text } });
+  if (error) { alert(error.message); return; }
+  try { await asNotesLoad(); } catch (e) {}
+  alert('Note added for ' + (STUDIO_NAMES[st] || st) + '. Assign it to someone in the Overview (📋 Notes): it goes to their tasks.');
+}
+function asStaffHtml() {
+  const L = _asn.staff || [], fmt = d => new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
+  const short = L.filter(x => x.kind === 'staff_short'), cut = L.filter(x => x.kind === 'staff_cut');
+  const row = x => `<tr><td>${esc(fmt(x.day))}</td><td>${esc(STUDIO_NAMES[x.studio_id] || x.studio_id)}</td><td><b>${esc(ASN_ACT[x.kind] || x.kind)}</b></td><td>${esc(x.detail || '')}</td>
+    <td style="white-space:nowrap">${_hoCan.edit ? (x.kind === 'staff_short' ? `<button class="ho-btn" onclick="asStaffExtra('${escAttr(x.studio_id)}','${escAttr(String(x.day).slice(0, 10))}')">👤 + Staff</button> ` : '')
+      + `<button class="ho-btn" onclick="asStaffNote('${escAttr(x.studio_id)}','${escAttr(String(x.day).slice(0, 10))}', this.closest('tr').children[3].textContent)">📋 Note</button>` : ''}</td></tr>`;
+  return `<h4>👥 Staffing check: the next 2 weeks <span class="fd-sm">${_asn.staffAt ? 'checked ' + esc(new Date(_asn.staffAt).toLocaleString('en-CA', { weekday: 'short', hour: 'numeric', minute: '2-digit' })) : 'not checked yet'} · ${short.length} short · ${cut.length} could cut</span>
+      <button class="ho-btn" ${_asn.busy ? 'disabled' : ''} onclick="asStaffCheckNow()">${_asn.busy === 'staff' ? 'Checking…' : '↻ Check now'}</button></h4>
+    <p class="fd-sm">Shifts against what each day needs now (the same rules as the staff schedule, after tonight’s closings). Nothing changes by itself: <b>+ Staff</b> asks the staff schedule for one more person; <b>Note</b> puts it on the day’s To-do (assign it to the coordinator and it goes to their tasks). Shorten or remove a shift in the staff schedule.</p>
+    ${L.length ? `<table class="fd-tbl asn-tbl"><thead><tr><th>Day</th><th>Studio</th><th>What</th><th></th><th></th></tr></thead><tbody>${short.concat(cut).map(row).join('')}</tbody></table>` : '<p class="fd-sm">Nothing to flag.</p>'}`;
 }
 function asNightlyList(list, withUndo) {
   if (!list.length) return '<p class="fd-sm">Nothing.</p>';
@@ -4914,7 +4947,7 @@ function asNightlyHtml() {
   const last = N.log && N.log.length ? new Date(N.log[0].run_at) : null;
   const head = `<button class="asn-head" onclick="_asn.open=!_asn.open;asDraw()" aria-expanded="${N.open}">🌙 <b>Nightly run</b>
     <span class="asn-pill ${N.on ? 'on' : ''}">${N.on ? 'On' : 'Off'}</span>
-    <span class="fd-sm">${N.err ? esc(N.err) : last ? `last change ${esc(last.toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))} · ${real.length} change${real.length === 1 ? '' : 's'} this week` : N.on ? 'nothing changed yet' : 'switched off: nothing changes by itself'}</span>
+    <span class="fd-sm">${N.err ? esc(N.err) : last ? `last change ${esc(last.toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))} · ${real.length} change${real.length === 1 ? '' : 's'} this week` : N.on ? 'nothing changed yet' : 'switched off: nothing changes by itself'}${(N.staff || []).length ? ` · <b>${N.staff.filter(x => x.kind === 'staff_short').length} short, ${N.staff.filter(x => x.kind === 'staff_cut').length} could cut</b>` : ''}</span>
     <span class="asn-car">${N.open ? '▾' : '▸'}</span></button>`;
   if (!N.open || N.err) return `<div class="asn">${head}</div>`;
   return `<div class="asn">${head}<div class="asn-body">
@@ -4923,6 +4956,7 @@ function asNightlyHtml() {
       <button class="ho-btn" ${N.busy ? 'disabled' : ''} onclick="asNightlyPreview()">${N.busy === 'preview' ? 'Looking…' : '👁 Preview tonight’s run'}</button>
       ${_hoCan.edit ? `<button class="ho-btn" ${N.busy ? 'disabled' : ''} onclick="asNightlyNow()">${N.busy === 'run' ? 'Running…' : '▶ Run it now'}</button>` : ''}
       <span class="fd-sm">Settings (how low, how many days out): 👥 Studio staffing → 📏 Staffing rules.</span></div>
+    ${asStaffHtml()}
     ${N.preview ? `<h4>Tonight’s run would do this <span class="fd-sm">(nothing has changed)</span></h4>${asNightlyList(N.preview, false)}` : ''}
     <h4>The last 7 days</h4>${asNightlyList(N.log || [], true)}
   </div></div>`;
