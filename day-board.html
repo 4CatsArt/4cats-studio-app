@@ -39,6 +39,13 @@ body.week .day-only { display: none; } body:not(.week) .wk-only { display: none;
 .wk .sh { display: block; width: 100%; text-align: left; font: inherit; font-size: 12px; font-weight: 600; border-radius: 6px; padding: 4px 6px; margin: 0 0 4px; cursor: pointer; border: 1px solid #2f7d4a; background: #2f7d4a; color: #fff; }
 .wk .sh.draft { background: #e7f7ec; color: #1d4d2c; border: 1px dashed #2f9a55; }
 .wk .sh small { display: block; font-weight: 400; opacity: .85; }
+.wk .sh { position: relative; cursor: grab; } .wk .sh.dragging { opacity: .4; }
+.wk .sh .x { position: absolute; top: 3px; right: 4px; font: inherit; font-size: 10.5px; line-height: 1; padding: 2px 4px; border-radius: 4px; border: 0; background: rgba(255,255,255,.25); color: inherit; cursor: pointer; opacity: 0; }
+.wk .sh:hover .x, .wk .sh:focus-within .x { opacity: 1; } .wk .sh.draft .x { background: rgba(0,0,0,.06); }
+.wk td.drop.over { background: #eef7f0; outline: 2px dashed #2f7d4a; outline-offset: -3px; }
+.wk .add { font: inherit; font-size: 13px; color: var(--muted); border: 1px dashed transparent; background: none; border-radius: 6px; width: 100%; padding: 6px 0; cursor: pointer; opacity: .25; }
+.wk td:hover .add, .wk .add:focus-visible { opacity: 1; border-color: #cfc9bb; } .wk .add.wide { opacity: .6; font-size: 12px; }
+.pubwk { font: inherit; font-size: 13px; font-weight: 600; padding: 6px 14px; border-radius: 999px; border: 0; background: #2f7d4a; color: #fff; cursor: pointer; }
 .wk .it { border-radius: 6px; padding: 5px 6px; margin: 0 0 4px; background: #fff7e0; border: 1px solid #f0d89a; font-size: 12px; }
 .wk .it.cut { background: #fdecec; border-color: #e7a9ad; } .wk .it.short { background: #fdecec; border-color: #e7a9ad; }
 .wk .it .acts { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
@@ -272,9 +279,12 @@ async function load() {
     });
     let lo = Math.min(8 * 60, ...people.map(p => p.start), ...blocks.map(b => b.start)), hi = Math.max(17 * 60, ...people.map(p => p.end), ...blocks.map(b => b.runEnd || b.end));
     lo = Math.floor(lo / 60) * 60; hi = Math.ceil(hi / 60) * 60;
+    const partyGuests = {};
+    partyBk.forEach(b => { const d = (pd.data || []).find(z => z.booking_id === b.id) || {};
+      partyGuests[b.session_id] = (partyGuests[b.session_id] || 0) + (+d.expected_guests || +b.qty || 0); });
     let inbox = [];
     try { const ib = await sb.rpc('hub_inbox_mine'); inbox = (ib.data || []).filter(x => x.studio_id === st && String(x.day || '').slice(0, 10) === date); } catch (e) {}
-    D = { st, date, people, blocks, lo, hi, sessions, booked, rolesFromPlan, startRoles: people.map(p => [p.id, p.role]), inbox };
+    D = { st, date, people, blocks, lo, hi, sessions, booked, rolesFromPlan, startRoles: people.map(p => [p.id, p.role]), inbox, partyGuests };
     START = JSON.parse(JSON.stringify(blocks));
     // breaks suggested straight away for anyone on a long shift without one (saved with Save the day)
     const br = suggestBreaks();
@@ -352,16 +362,29 @@ function draw() {
     if (/class \d+ of \d+|week session|catch up class/i.test(title) && !n && kidsStarted(x)) return null;
     const len = +x.duration_minutes || (/class \d+ of \d+|week session/i.test(title) ? LEN.kids : /mini\s*make/i.test(title) ? 90 : /party|get.?together|slot/i.test(title) ? 120 : 120);
     const closed = !n && x.spaces_left_cache !== null && +x.spaces_left_cache <= 0;
-    return { id: 'ses-' + x.id, start: t0, end: t0 + len, title: title.split('|')[0].trim(), n, cap: x.capacity, closed };
+    const guests = x.session_type === 'party' && n ? (D.partyGuests || {})[x.id] || 0 : 0;
+    return { id: 'ses-' + x.id, start: t0, end: t0 + len, title: title.split('|')[0].trim(), full: title, n, cap: x.capacity, closed, party: x.session_type === 'party', guests };
   }).filter(Boolean);
+  const closedN = sesList.filter(r => r.closed).length;
   const sesRow = (() => {
-    const sorted = sesList.slice().sort((a, b) => a.start - b.start), ends = [];
+    const sorted = sesList.filter(r => !r.closed).sort((a, b) => a.start - b.start), ends = [];   // (closed times aren't shown)
     sorted.forEach(r => { let l = ends.findIndex(e => e <= r.start); if (l < 0) { l = ends.length; ends.push(0); } ends[l] = r.end; r._lane = l; });
     const lanes = Math.max(1, ends.length), h = 24;
-    return `<div class="row times-row"><div class="who"><b>Times</b><small>${sesList.filter(r => !r.closed).length} open · ${sesList.reduce((t, r) => t + r.n, 0)} registered</small></div>
+    return `<div class="row times-row"><div class="who"><b>Times</b><small>${(() => {
+          // people by kind: kids classes (enrolled), parties (guests), glazing, workshops (Mini Make and wheel too), camps
+          const kindOf = r => r.party ? 'party' : /class \d+ of \d+|week session|catch up class/i.test(r.full) ? 'kids' : /glaz/i.test(r.full) ? 'glaze'
+            : /camp|pa day|pd day|pa\/pd|no[\s-]school/i.test(r.full) ? 'camp' : 'work';
+          const by = { kids: 0, party: 0, glaze: 0, work: 0, camp: 0 };
+          sesList.forEach(r => { by[kindOf(r)] += r.party ? (r.guests || 0) : r.n; });
+          const total = Object.values(by).reduce((t, v) => t + v, 0);
+          const lines = [['kids', 'in kids classes'], ['party', 'party goers'], ['glaze', 'glazers'], ['work', 'in workshops'], ['camp', 'campers']]
+            .filter(([k]) => by[k] > 0).map(([k, l]) => `${by[k]} ${l}`);
+          const dayWord = D.date === localDate(new Date()) ? 'today' : 'this day';
+          return `<span style="font-weight:700;color:var(--ink)">${total} ${total === 1 ? 'person' : 'people'} ${dayWord}</span>${lines.length ? '<br>' + lines.join('<br>') : ''}<br>${sesList.filter(r => !r.closed).length} times open`;
+        })()}${closedN ? ` · ${closedN} closed not shown` : ''}</small></div>
       <div class="lane" style="width:${W}px;height:${lanes * (h + 3) + 8}px">${hourLines}${sorted.map(r => `<div class="ses-chip${r.n ? '' : ' empty'}${r.closed ? ' closed' : ''}"
         style="left:${x(r.start)}px;width:${Math.max(30, (r.end - r.start) * PX - 2)}px;top:${5 + r._lane * (h + 3)}px;height:${h}px"
-        title="${esc(fmt(r.start) + '–' + fmt(r.end) + ' ' + r.title + ': ' + r.n + (r.cap != null ? ' of ' + r.cap : '') + ' registered' + (r.closed ? ' (closed)' : ''))}"><b>${r.n}${r.cap != null ? '/' + r.cap : ''}</b> ${esc(fmt(r.start) + ' ' + r.title)}</div>`).join('')}</div></div>`;
+        title="${esc(fmt(r.start) + '–' + fmt(r.end) + ' ' + r.title + ': ' + (r.guests ? r.guests + ' guests' : r.n + (r.cap != null ? ' of ' + r.cap : '') + ' registered') + (r.closed ? ' (closed)' : ''))}"><b>${r.guests ? r.guests + ' guests' : r.n + (r.cap != null ? '/' + r.cap : '')}</b> ${esc(fmt(r.start) + ' ' + r.title)}</div>`).join('')}</div></div>`;
   })();
   const nobody = D.blocks.filter(b => !b.person);
   const rows = (nobody.length ? `<div class="row needs" data-person=""><div class="who"><b>Needs someone</b><small>${nobody.length} with nobody: drag onto a person</small></div><div class="lane" style="width:${W}px">${hourLines}${laneOut(nobody)}</div></div>` : '')
@@ -749,17 +772,24 @@ function drawWeek() {
     return `<th><button class="day" onclick="openDay('${d}')" title="Open this day's day board">${esc(dayLabel(d))}</button>
       <div class="cov" title="8am–10pm: red = short, amber = more than needed, green = right">${c.cls.map((k, i) => `<i class="${k}" title="${fmt(c.lo + i * 30)}"></i>`).join('')}</div>
       <small>${n} time${n === 1 ? '' : 's'} booked · need ${c.needH}h, scheduled ${c.haveH}h${c.drafts ? ' (drafts)' : ''}${todo ? ` · <b style="color:var(--bad)">${todo} to decide</b>` : ''}</small></th>`; }).join('');
-  const shiftRows = people.map(pid => `<tr><td class="lbl"><b>${esc(W.names[pid] || 'Someone')}</b><small>${Math.round(W.shifts.filter(x => x.staff_id === pid).reduce((t, x) => t + (toMin(x.end_time) - toMin(x.start_time)), 0) / 6) / 10}h this week</small></td>${days.map(d =>
-    `<td>${W.shifts.filter(x => x.staff_id === pid && x.shift_date === d).map(sh => `<button class="sh${sh.status === 'draft' ? ' draft' : ''}" onclick="wkShift('${sh.id}')" title="Change or remove">${fmt(toMin(sh.start_time))}–${fmt(toMin(sh.end_time))}<small>${sh.status === 'draft' ? 'draft' : 'approved'}</small></button>${cutFor(sh).map(itemHtml).join('')}`).join('')}</td>`).join('')}</tr>`).join('');
+  const shiftRows = people.map(pid => `<tr><td class="lbl"><b>${esc(W.names[pid] || 'Someone')}</b><small>${Math.round(W.shifts.filter(x => x.staff_id === pid).reduce((t, x) => t + (toMin(x.end_time) - toMin(x.start_time)), 0) / 6) / 10}h this week</small></td>${days.map(d => {
+      const mine = W.shifts.filter(x => x.staff_id === pid && x.shift_date === d);
+      return `<td class="drop" data-staff="${esc(pid)}" data-day="${d}">${mine.map(sh => `<div class="sh${sh.status === 'draft' ? ' draft' : ''}" draggable="true" data-shift="${esc(String(sh.id))}" role="button" tabindex="0"
+          onclick="if(!event.target.closest('.x')) wkShift('${sh.id}')" title="Click to change the times · drag to another day or person">${fmt(toMin(sh.start_time))}–${fmt(toMin(sh.end_time))}
+          <button class="x" title="Remove this shift" onclick="event.stopPropagation(); wkRemove('${sh.id}')">✕</button><small>${sh.status === 'draft' ? 'draft' : 'approved'}</small></div>${cutFor(sh).map(itemHtml).join('')}`).join('')
+        || (W.dayWindowOpen !== false ? `<button class="add" title="Add a shift for ${esc(W.names[pid] || 'them')} on ${esc(dayLabel(d))}" onclick="wkAddFor('${esc(pid)}','${d}')">+</button>` : '')}</td>`; }).join('')}</tr>`).join('')
+    + `<tr><td class="lbl"><small>Someone not on this week?</small></td>${days.map(d => `<td><button class="add wide" onclick="wkAddSomeone('${d}', this)">+ Add someone</button></td>`).join('')}</tr>`;
   const sesRow = days.map(d => `<td>${W.sessions.filter(x => x.session_date === d && (x.show !== false || (W.booked[x.id] || 0) > 0)).map(x => {
       const n = W.booked[x.id] || 0, closed = n === 0 && x.spaces_left_cache !== null && +x.spaces_left_cache <= 0, pa = PA.test(x.title || '');
       const kids = KIDS.test(x.title || ''); if (kids && !n && kidsStarted(x)) return '';
       const cap = x.capacity != null ? '/' + x.capacity : '';
       const act = n > 0 ? '' : closed ? `<button onclick="wkClose('${x.id}', false)">Reopen</button>` : `<button onclick="wkClose('${x.id}', true)">${pa ? 'Close PA/PD day' : 'Close'}</button>`;
       return `<div class="ses${closed ? ' closed' : ''}${pa ? ' pa' : ''}"><span>${fmt(toMin(x.session_time))} ${esc(String(x.title || '').split('|')[0].trim())} <span class="muted">${n}${cap}</span></span>${act}</div>`; }).join('') || '<span class="muted">Nothing on</span>'}</td>`).join('');
+  const nDraft = W.shifts.filter(x => x.status === 'draft').length;
   $('main').innerHTML = `${W.flash ? `<div class="flash">${esc(W.flash)}</div>` : ''}
+    ${nDraft ? `<div class="flash" style="display:flex;align-items:center;gap:10px;background:#eef7f0;border-color:#b9dcc3">${nDraft} draft shift${nDraft === 1 ? '' : 's'} this week (dashed): staff see them once published.<span style="flex:1"></span><button class="pubwk" onclick="wkPublishWeek()">Publish ${nDraft} draft${nDraft === 1 ? '' : 's'}</button></div>` : ''}
     <div class="key"><span><i style="background:var(--bad);border-color:var(--bad)"></i>Short</span><span><i style="background:var(--warn);border-color:var(--warn)"></i>More than needed</span>
-      <span><i style="background:#8cc79d;border-color:#8cc79d"></i>Right</span><span>Click a day to open its day board · click a shift to change or remove it</span>
+      <span><i style="background:#8cc79d;border-color:#8cc79d"></i>Right</span><span>Click a day to open its day board · click a shift to change its times · drag it to another day or person · ✕ removes it · + adds one</span>
       ${W.needErr ? `<span style="color:var(--bad)">Need not loaded: ${esc(W.needErr)}</span>` : ''}</div>
     <div class="wk"><table>
       <thead><tr><th class="lbl">${esc(STUDIO_NAMES[W.st] || W.st)}<small>week of ${esc(dayLabel(W.from))}</small></th>${head}</tr></thead>
@@ -769,6 +799,74 @@ function drawWeek() {
         <tr><td class="lbl"><b>Times</b><small>close an empty one, or reopen it</small></td>${sesRow}</tr>
       </tbody></table></div>`;
   W.flash = '';
+  wkWireDrag();
+}
+// ---- dragging a shift to another day / person (HTML drag and drop: a computer, where the week board is used) ----
+function wkWireDrag() {
+  document.querySelectorAll('.wk .sh[draggable]').forEach(el => {
+    el.addEventListener('dragstart', e => { e.dataTransfer.setData('text/plain', el.dataset.shift); e.dataTransfer.effectAllowed = 'move'; el.classList.add('dragging'); });
+    el.addEventListener('dragend', () => el.classList.remove('dragging'));
+  });
+  document.querySelectorAll('.wk td.drop').forEach(td => {
+    td.addEventListener('dragover', e => { e.preventDefault(); td.classList.add('over'); });
+    td.addEventListener('dragleave', () => td.classList.remove('over'));
+    td.addEventListener('drop', e => { e.preventDefault(); td.classList.remove('over'); wkMove(e.dataTransfer.getData('text/plain'), td.dataset.staff, td.dataset.day); });
+  });
+}
+async function wkMove(id, staff, day) {
+  const sh = W.shifts.find(x => String(x.id) === String(id)); if (!sh || (sh.staff_id === staff && sh.shift_date === day)) return;
+  const { data, error } = await sb.rpc('hub_board_shift_move', { p_id: String(id), p_staff: staff, p_date: day });
+  if (error) { alert(/hub_board_shift_move/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
+  const was = `${W.names[sh.staff_id] || ''} ${dayLabel(sh.shift_date)}`;
+  sh.staff_id = staff; sh.shift_date = day;
+  W.inbox = W.inbox.filter(i => !(i.kind === 'cut_shift' && i.payload && String(i.payload.shift_id) === String(id)));
+  if (sh.status !== 'draft') notifyShifts();
+  W.flash = `Moved: ${was} → ${W.names[staff] || ''} ${dayLabel(day)}.`; drawWeek();
+}
+async function wkRemove(id) {
+  const sh = W.shifts.find(x => String(x.id) === String(id)); if (!sh) return;
+  if (!confirm(`Remove ${W.names[sh.staff_id] || 'this'}'s shift on ${dayLabel(sh.shift_date)} (${fmt(toMin(sh.start_time))}–${fmt(toMin(sh.end_time))})?`)) return;
+  const { error } = await sb.rpc('hub_board_shift_set', { p_id: String(id), p_start: null, p_end: null, p_remove: true });
+  if (error) { alert(error.message); return; }
+  W.shifts = W.shifts.filter(x => x !== sh);
+  W.inbox = W.inbox.filter(i => !(i.kind === 'cut_shift' && i.payload && String(i.payload.shift_id) === String(id)));
+  if (sh.status !== 'draft') notifyShifts();
+  W.flash = 'Shift removed.'; drawWeek();
+}
+async function wkAddFor(staff, day, nameKnown) {
+  const v = prompt(`${W.names[staff] || nameKnown || 'Add a shift'}, ${dayLabel(day)}: times (e.g. 9a-5p, at least 3 hours)`, '9a-5p'); if (!v) return;
+  const r = parseRange(v); if (!r) { alert('Use a time like 9a-5p, with a or p on both times.'); return; }
+  const { data, error } = await sb.rpc('hub_board_shift_add', { p_staff: staff, p_studio: W.st, p_date: day, p_start: hhmm(r.start), p_end: hhmm(r.end) });
+  if (error) { alert(/hub_board_shift_add/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
+  if (nameKnown) W.names[staff] = nameKnown;
+  W.shifts.push({ id: data && data.id, staff_id: staff, shift_date: day, start_time: hhmm(r.start) + ':00', end_time: hhmm(r.end) + ':00', status: 'draft' });
+  W.flash = `Added ${W.names[staff] || ''}: ${dayLabel(day)} ${fmt(r.start)}–${fmt(r.end)} (a draft).`; drawWeek();
+}
+let _wkStaff = null;
+async function wkAddSomeone(day, btn) {
+  if (!_wkStaff || _wkStaff.st !== W.st) { const r = await sb.rpc('hub_board_staff', { p_studio: W.st });
+    if (r.error) { alert(/hub_board_staff/.test(r.error.message) ? 'Run week_board.sql in Supabase first.' : r.error.message); return; } _wkStaff = { st: W.st, list: r.data || [] }; }
+  closePop();
+  const onDay = new Set(W.shifts.filter(x => x.shift_date === day).map(x => x.staff_id));
+  const here = _wkStaff.list.filter(x => x.here && !onDay.has(x.id)), others = _wkStaff.list.filter(x => !x.here && !onDay.has(x.id));
+  const pop = document.createElement('div'); pop.className = 'pop'; pop.id = 'pop';
+  pop.innerHTML = `<label>Add a shift on ${esc(dayLabel(day))}</label>
+    <select id="add-who"><option value="">Who?</option><optgroup label="${esc(STUDIO_NAMES[W.st] || W.st)}">${here.map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</optgroup>
+      <optgroup label="Other studios">${others.map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</optgroup></select>
+    <div class="row2"><button id="pop-ok">Next: the times</button><button id="pop-x">Cancel</button></div>`;
+  document.body.appendChild(pop);
+  const r0 = btn.getBoundingClientRect(); pop.style.left = Math.min(window.innerWidth - 280, r0.left) + 'px'; pop.style.top = Math.min(window.innerHeight - 140, r0.bottom + 6) + 'px';
+  $('add-who').focus(); $('pop-x').onclick = closePop;
+  $('pop-ok').onclick = () => { const who = $('add-who').value; if (!who) { alert('Choose who.'); return; }
+    const inf = _wkStaff.list.find(x => x.id === who) || {}; closePop(); wkAddFor(who, day, inf.name); };
+}
+async function wkPublishWeek() {
+  const n = W.shifts.filter(x => x.status === 'draft').length; if (!n) return;
+  if (!confirm(`Publish ${n} draft shift${n === 1 ? '' : 's'} for the week of ${dayLabel(W.from)}? They become approved, and staff get their usual notification.`)) return;
+  const { data, error } = await sb.rpc('hub_board_week_publish', { p_studio: W.st, p_from: W.from, p_to: W.to });
+  if (error) { alert(/hub_board_week_publish/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
+  W.shifts.forEach(x => { if (x.status === 'draft') x.status = 'approved'; });
+  notifyShifts(); W.flash = `Published ${(data && data.published) || n} shift${n === 1 ? '' : 's'}.`; drawWeek();
 }
 function openDay(d) { $('date').value = d; setMode('day'); }
 async function wkDecide(id, action, value) {
