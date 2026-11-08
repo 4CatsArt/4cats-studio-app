@@ -372,6 +372,7 @@ table.pl-staff .bad { color: var(--bad); }
     <button class="tab" data-view="plan" onclick="switchView('plan')">Plan offerings</button>
     <button class="tab" data-view="timeoff" onclick="switchView('timeoff')">Time off<span class="count" id="pending-count" style="display:none"></span></button>
     <button class="tab" data-view="unavail" onclick="switchView('unavail')">Unavailability</button>
+    <button class="tab" data-view="moves" onclick="switchView('moves'); mvLoad()">🚚 Moving studios</button>
     <button class="tab" data-view="import" onclick="switchView('import')">Import from Sling</button>
     <div class="top-bar-right"><button class="signout-btn" onclick="signOut()">Sign out</button></div>
   </div>
@@ -515,6 +516,24 @@ table.pl-staff .bad { color: var(--bad); }
     </div>
 
     <!-- ===== IMPORT ===== -->
+    <div class="view" id="view-moves">
+      <div class="panel" style="margin-bottom:1rem">
+        <h2 style="margin:0 0 6px;font-size:17px">Moving studios</h2>
+        <p class="muted small" style="margin:0 0 12px;line-height:1.5">Someone working at another studio from a date (students in the summer and September, a move to another city or province).
+          Before the date they're only scheduled at their current studio; from the date, at the new one. On the date their profile switches by itself overnight.
+          Tick <b>keep</b> if they should still be able to cover shifts at their old studio.</p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+          <label class="field" style="min-width:220px"><span>Who</span><select class="input" id="mv-who"></select></label>
+          <label class="field" style="min-width:220px"><span>New home studio</span><select class="input" id="mv-to"></select></label>
+          <label class="field"><span>From</span><input class="input" type="date" id="mv-from"></label>
+          <label class="field" style="flex-direction:row;align-items:center;gap:6px;padding-bottom:8px"><input type="checkbox" id="mv-keep"> keep their old studio too</label>
+          <label class="field" style="min-width:200px;flex:1"><span>Note (optional)</span><input class="input" id="mv-note" placeholder="e.g. summer in Victoria"></label>
+          <button class="btn primary" onclick="mvSave()">Set the move</button>
+        </div>
+      </div>
+      <div class="panel" id="mv-list"><p class="muted">Loading…</p></div>
+    </div>
+
     <div class="view" id="view-import">
       <!-- Shifts from Sling (Oct 2026): until we're off Sling, the Sling schedule
            export can be brought in so the Hub's "Who's working" and labour use
@@ -765,6 +784,49 @@ async function bdAutoDrafts() {
     '<p class="muted small">Nothing is approved: review them, then approve as usual. Only studios with no shifts at all that week are built automatically.</p>')
 }
 
+// ── 🚚 Moving studios (staff_studio_moves.sql) ──
+async function mvLoad() {
+  const who = document.getElementById('mv-who'), to = document.getElementById('mv-to'), fr = document.getElementById('mv-from');
+  if (!who.options.length) {
+    who.innerHTML = '<option value="">Choose…</option>' + staff.filter(x => x.is_active !== false).map(x => `<option value="${x.id}">${esc(x.display_name)}</option>`).join('')
+    to.innerHTML = '<option value="">Choose…</option>' + Object.entries(STUDIO_NAMES).sort((a, b) => a[1].localeCompare(b[1])).map(([id, n]) => `<option value="${id}">${esc(n)}</option>`).join('')
+    fr.value = addDays(todayStr(), 1); fr.min = todayStr()
+  }
+  const box = document.getElementById('mv-list')
+  const { data, error } = await sb.from('staff_studio_moves').select('*').order('from_date', { ascending: false }).limit(200)
+  if (error) { box.innerHTML = `<p class="muted">${esc(/staff_studio_moves/.test(error.message) ? 'Run staff_studio_moves.sql in Supabase first.' : error.message)}</p>`; return }
+  const rows = data || [], st = id => STUDIO_NAMES[id] || id || '?'
+  box.innerHTML = rows.length ? `<table class="list"><thead><tr><th>Who</th><th>From</th><th>Move</th><th>Keeps old studio</th><th>Status</th><th></th></tr></thead><tbody>${rows.map(m => `<tr>
+      <td>${esc((staffById[m.staff_id] || {}).display_name || 'Someone')}${m.note ? `<div class="muted small">${esc(m.note)}</div>` : ''}</td><td>${esc(fmtDate(m.from_date))}</td>
+      <td>${esc(st(m.old_studio))} → <b>${esc(st(m.new_studio))}</b></td><td>${m.keep_old ? 'Yes' : 'No'}</td>
+      <td>${m.status === 'planned' ? 'Coming up' : m.status === 'done' ? 'Done' : 'Cancelled'}</td>
+      <td>${m.status === 'planned' ? `<button class="btn small" onclick="mvCancel('${m.id}')">Cancel</button>` : ''}</td></tr>`).join('')}</tbody></table>`
+    : '<p class="muted">No moves set yet.</p>'
+}
+async function mvSave() {
+  const v = id => document.getElementById(id).value
+  if (!v('mv-who') || !v('mv-to') || !v('mv-from')) { toast('Choose who, the new studio and the date.', true); return }
+  const { error } = await sb.rpc('hub_staff_move_save', { p: { staff_id: v('mv-who'), new_studio: v('mv-to'), from_date: v('mv-from'), keep_old: document.getElementById('mv-keep').checked, note: v('mv-note') || null } })
+  if (error) { toast(/hub_staff_move_save/.test(error.message) ? 'Run staff_studio_moves.sql in Supabase first.' : error.message, true); return }
+  toast('Move set. Weeks from that date schedule them at the new studio (rebuild any already built).')
+  document.getElementById('mv-note').value = ''; mvLoad()
+}
+async function mvCancel(id) {
+  if (!confirm('Cancel this move?')) return
+  const { error } = await sb.rpc('hub_staff_move_cancel', { p_id: id })
+  if (error) { toast(error.message, true); return }
+  mvLoad()
+}
+// Which studios someone can work at on a date: their profile now, with any planned move up to that date applied
+// (and a move already done but dated after that day undone), so a week that spans a move gets each day right.
+function bdStudiosOn(ctx, p, date) {
+  const set = new Set((p.studio_ids || []).concat(p.home_studio_id ? [p.home_studio_id] : []))
+  ;(ctx.moves || []).filter(m => m.staff_id === p.id).sort((a, b) => a.from_date.localeCompare(b.from_date)).forEach(m => {
+    if (m.status === 'planned' && m.from_date <= date) { set.add(m.new_studio); if (!m.keep_old && m.old_studio) set.delete(m.old_studio) }
+    if (m.status === 'done' && m.from_date > date) { if (m.old_studio) set.add(m.old_studio); set.delete(m.new_studio) }
+  })
+  return set
+}
 function switchView(v) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === v))
   document.querySelectorAll('.view').forEach(el => el.classList.toggle('active', el.id === 'view-' + v))
@@ -1316,8 +1378,12 @@ async function bdLoad(studio) {
   const notesBy = {}; notes.data.forEach(n => { if (n.notes) notesBy[n.staff_id] = n.notes })
   people.data.forEach(applyPreferredName)
   // Only people employed for at least one day of this week (hire date / last day on their profile)
+  // (Nov 8 2026) moving studios: people moving IN during the week are in the pool too; each day is then checked (bdStudiosOn)
+  const mvr = await sb.from('staff_studio_moves').select('*').in('status', ['planned', 'done']).lte('from_date', to)
+  const moves = mvr.error ? [] : (mvr.data || [])
+  const movingIn = new Set(moves.filter(m => m.status === 'planned' && m.new_studio === studio).map(m => m.staff_id))
   const pool = people.data.filter(p => p.is_active && !p.exclude_from_schedule && employedDuring(p, from, to) &&
-    (!(p.studio_ids || []).length || p.studio_ids.includes(studio)))
+    (!(p.studio_ids || []).length || p.studio_ids.includes(studio) || p.home_studio_id === studio || movingIn.has(p.id)))
   // Shifts worked before this week (any studio), only for people without the solo badge.
   // We only need to know whether it's 3 yet, so one small count per person.
   // Weekend shifts in the 4 weeks before this one, for taking turns on weekends
@@ -1342,7 +1408,7 @@ async function bdLoad(studio) {
     ;(st.data || []).forEach(r => { if (r.teacher && String(r.teacher).trim()) dayTeacher[r.session_id] = String(r.teacher).trim() })
   }
   return { studio, from, to, sessions: need.data || [], ruleBadge, badgeLabel, opening: opening.data, ot: ot.data, dayTeacher,
-           pool, everyone: people.data, badgesBy, notesBy, pastShifts, recentWeekends, classTeachers, coordinators, daySessions, dayScheduleError, minimums, partyToClose, wages, unav: unav.data, toff: toff.data, shifts: shifts.data, aim40, staffing, dayPlan, statDays }
+           pool, everyone: people.data, badgesBy, notesBy, pastShifts, recentWeekends, classTeachers, coordinators, daySessions, dayScheduleError, minimums, partyToClose, wages, unav: unav.data, toff: toff.data, shifts: shifts.data, aim40, staffing, dayPlan, statDays, moves }
 }
 
 // Minimum people on for this studio at this weekday and time (studio_staffing_minimums), or 0
@@ -1600,6 +1666,8 @@ function bdTrainingDone(ctx, p, blocks, beforeDate) {
 // Why a person can't take a block (hard rules); null = they can
 function bdBlocked(ctx, p, blk, state) {
   const date = blk.date, dow = parseYmd(date).getDay()
+  // moving studios: not at this studio on this date (before their move here, or after their move away)
+  if ((ctx.moves || []).some(m => m.staff_id === p.id)) { const st = bdStudiosOn(ctx, p, date); if (st.size && !st.has(ctx.studio)) return 'at another studio then (moving studios)' }
   const gone = employmentBlock(p, date)
   if (gone) return gone
   if (!blk.training && state.blocks && bdTrainingDone(ctx, p, state.blocks, date) !== null)
