@@ -292,6 +292,7 @@ async function load() {
         if (!n) return;   // (nobody enrolled: not running)
         const len = Math.max(LEN.kids, +x.duration_minutes || 0);
         let p = findPerson((staffBy[x.id] || {}).teacher), auto = false;
+        if ((staffBy[x.id] || {}).teacher === 'none') { blocks.push({ id: 'k-' + x.id, kind: 'kids', session: x.id, title: title.split('|')[0].trim(), sub: `${n} enrolled`, start: t0, end: t0 + len, person: null, notNeeded: true }); return; }
         if (!p) { p = demoers.find(d => !busyAt(d.id, t0, t0 + len)) || (director && !busyAt(director.id, t0, t0 + len) ? director : null); auto = !!p; }
         blocks.push({ id: 'k-' + x.id, kind: 'kids', session: x.id, title: title.split('|')[0].trim(), sub: `${n} enrolled · ${len} min${auto ? ' · auto' : ''}`, start: t0, end: t0 + len, person: p ? p.id : null, auto });
       } else if (false) {   // (wheel times are handled above: one block, one teacher)
@@ -306,21 +307,22 @@ async function load() {
           const field = /field\s*trip/i.test(title);
           const len = intro ? LEN.intro : field ? Math.max(60, +x.duration_minutes || 120) : /90/.test(String(d.actual_art_time || '')) ? 90 : 60;
           let t1 = findPerson(d.party_teacher1), t2 = findPerson(d.party_teacher2), auto1 = false;
+          const off1 = d.party_teacher1 === 'none', off2 = d.party_teacher2 === 'none';
           // (Nov 8 2026) no teacher set: someone free for the whole party (the Demoer, then the Director, then anyone on shift), marked auto
-          if (!t1) {
+          if (!t1 && !off1) {
             const order = demoers.concat(director ? [director] : []).concat(people.filter(q => q.role !== 'Demoer' && q !== director));
             t1 = order.find(q => !busyAt(q.id, t0, t0 + len)) || null; auto1 = !!t1;
           }
           const guests = d.expected_guests || b.qty || '';
-          blocks.push({ id: 'p1-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 1, title, sub: `${guests ? guests + (field ? ' children · ' : ' guests · ') : ''}${len} min ${intro ? 'intro' : field ? 'field trip' : 'art time'}${auto1 ? ' · auto' : ''}`, start: t0, end: t0 + len, person: t1 ? t1.id : null });
-          if (t2 || (field ? +guests > 30 : !intro && +guests > 15) || (intro && +guests > 20)) blocks.push({ id: 'p2-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 2, title, sub: `second teacher · ${len} min`, start: t0, end: t0 + len, person: t2 ? t2.id : null });
+          blocks.push({ id: 'p1-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 1, title, sub: `${guests ? guests + (field ? ' children · ' : ' guests · ') : ''}${len} min ${intro ? 'intro' : field ? 'field trip' : 'art time'}${auto1 ? ' · auto' : ''}`, start: t0, end: t0 + len, person: t1 ? t1.id : null, notNeeded: off1 });
+          if (t2 || off2 || (field ? +guests > 30 : !intro && +guests > 15) || (intro && +guests > 20)) blocks.push({ id: 'p2-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 2, title, sub: `second teacher · ${len} min`, start: t0, end: t0 + len, person: t2 ? t2.id : null, notNeeded: off2 });
         });
       } else {
         if (!n) return;   // (nobody booked yet: nothing to demo)
         // the demo: someone set for this time, else the first free demoer, else the Director
-        const set = findPerson((staffBy[x.id] || {}).demo_by);
-        const p = set || demoers.find(d => !busyAt(d.id, t0, t0 + LEN.demo)) || (director && !busyAt(director.id, t0, t0 + LEN.demo) ? director : null);
-        blocks.push({ id: 'd-' + x.id, kind: 'demo', session: x.id, n, title, sub: `${n} booked · demo ${LEN.demo} min`, start: t0, end: t0 + LEN.demo, person: p ? p.id : null,
+        const set = findPerson((staffBy[x.id] || {}).demo_by), offD = (staffBy[x.id] || {}).demo_by === 'none';
+        const p = offD ? null : set || demoers.find(d => !busyAt(d.id, t0, t0 + LEN.demo)) || (director && !busyAt(director.id, t0, t0 + LEN.demo) ? director : null);
+        blocks.push({ id: 'd-' + x.id, kind: 'demo', session: x.id, n, title, sub: `${n} booked · demo ${LEN.demo} min`, start: t0, end: t0 + LEN.demo, person: p ? p.id : null, notNeeded: offD,
           runEnd: t0 + (+x.duration_minutes || 120) });
       }
     });
@@ -392,7 +394,7 @@ function problems() {
         list.push(`${p ? p.show : 'Someone'}: ${b.kind === 'brk' ? 'break' : b.title} and ${c.kind === 'brk' ? 'break' : c.title} overlap at ${fmt(Math.max(b.start, c.start))}`); } });
     });
   });
-  D.blocks.filter(b => !b.person).forEach(b => { bad[b.id] = 1; list.push(`${b.title} at ${fmt(b.start)} has nobody`); });
+  D.blocks.filter(b => !b.person && !b.notNeeded).forEach(b => { bad[b.id] = 1; list.push(`${b.title} at ${fmt(b.start)} has nobody`); });
   D.people.forEach(p => { const c = offClashDay(p.id, p.start, p.end); if (c.length) list.push(`${p.show} has a shift but is ${c.map(offText).join(' and ')}: change or remove the shift`); });
   D.people.filter(p => p.gone).forEach(p => list.push(`${p.show} is ${p.gone} but has a shift this day: remove it (✕) or give their work to someone else`));
   // breaks never at the same time: someone is always on
@@ -457,7 +459,7 @@ function draw() {
         style="left:${x(r.start)}px;width:${Math.max(30, (r.end - r.start) * PX - 2)}px;top:${5 + r._lane * (h + 3)}px;height:${h}px"
         title="${esc(fmt(r.start) + '–' + fmt(r.end) + ' ' + r.title + ': ' + (r.guests ? r.guests + ' guests' : r.n + (r.cap != null ? ' of ' + r.cap : '') + ' registered') + (r.closed ? ' (closed)' : ''))}"><b>${r.guests ? r.guests + ' guests' : r.n + (r.cap != null ? '/' + r.cap : '')}</b> ${esc(fmt(r.start) + ' ' + r.title)}</div>`).join('')}</div></div>`;
   })();
-  const nobody = D.blocks.filter(b => !b.person);
+  const nobody = D.blocks.filter(b => !b.person && !b.notNeeded);
   const rows = (nobody.length ? `<div class="row needs" data-person=""><div class="who"><b>Needs someone</b><small>${nobody.length} with nobody: drag onto a person</small></div><div class="lane" style="width:${W}px">${hourLines}${laneOut(nobody)}</div></div>` : '')
     + D.people.map(p => `<div class="row" data-person="${esc(p.id)}"><div class="who"><b>${esc(p.show)}${p.draft ? ' <span class="draft-tag">draft</span>' : ''}${p.gone ? ` <span class="gone-tag">${esc(p.gone)}</span>` : ''}${offClashDay(p.id, p.start, p.end).map(o => ` <span class="gone-tag">${esc(offText(o))}</span>`).join('')}${p.shiftId ? `
         <span class="sh-acts"><button title="Change ${esc(p.show)}'s shift times" onclick="dayShiftEdit('${esc(p.id)}')">✎</button><button title="Remove ${esc(p.show)}'s shift" onclick="dayShiftRemove('${esc(p.id)}')">✕</button></span>` : ''}</b><small>${fmt(p.start)}–${fmt(p.end)}
@@ -476,6 +478,7 @@ function draw() {
   }
   const changes = START.map(s => { const b = D.blocks.find(z => z.id === s.id); if (!b) return null;
     const name = id => (D.people.find(p => p.id === id) || {}).show || 'nobody';
+    if (b.notNeeded && !s.notNeeded) return `${b.title} (${fmt(b.start)}): no ${b.kind === 'demo' ? 'demo' : 'teacher'} (not needed)`;
     if (s.person !== b.person) return `${b.kind === 'brk' ? 'Break' : b.title} (${fmt(b.start)}): ${name(s.person)} → ${name(b.person)}`;
     if (s.start !== b.start) return `${name(b.person)}'s break: ${fmt(s.start)} → ${fmt(b.start)}`;
     return null; }).filter(Boolean)
@@ -562,7 +565,7 @@ function suggestBreaks() {
 function assignDemos() {
   let changed = 0, nobody = 0;
   const load = {}; D.blocks.filter(b => b.person && b.kind !== 'brk').forEach(b => { load[b.person] = (load[b.person] || 0) + (b.end - b.start); });
-  const todo = D.blocks.filter(b => !b.locked && (b.kind === 'demo' || b.auto || (!b.person && (b.kind === 'kids' || b.kind === 'party')))).sort((a, b) => a.start - b.start);
+  const todo = D.blocks.filter(b => !b.locked && !b.notNeeded && (b.kind === 'demo' || b.auto || (!b.person && (b.kind === 'kids' || b.kind === 'party')))).sort((a, b) => a.start - b.start);
   todo.forEach(b => { if (b.person) load[b.person] -= (b.end - b.start); b.person = null; });   // (start fresh for these)
   todo.forEach(b => {
     const cands = D.people.filter(p => p.start <= b.start && p.end >= b.end && !busyFor(p.id, b.start, b.end, D.blocks, b));
@@ -590,7 +593,7 @@ function planDay(which) {
   if (which !== 'demo') { const r = suggestBreaks(); parts.push(r.added ? `${r.added} break${r.added === 1 ? '' : 's'} suggested` : 'No breaks needed (or already set)'); if (r.missed.length) parts.push(`no time found for a break for ${r.missed.join(', ')}`); }
   if (which !== 'brk') {
     let given = 0;
-    D.blocks.filter(b => b.kind === 'party' && !b.person && !b.locked).sort((a, b) => a.start - b.start).forEach(b => {
+    D.blocks.filter(b => b.kind === 'party' && !b.person && !b.locked && !b.notNeeded).sort((a, b) => a.start - b.start).forEach(b => {
       const order = D.people.filter(p => p.role === 'Demoer').concat(D.people.filter(p => p.role === 'Director')).concat(D.people.filter(p => !['Demoer', 'Director'].includes(p.role)));
       const p = order.find(q => b.start >= q.start && b.end <= q.end && !busyFor(q.id, b.start, b.end, D.blocks, b));
       if (p) { b.person = p.id; given++; }
@@ -901,6 +904,7 @@ async function dayPublish() {
 async function saveDay() {
   if (!D) return;
   const nameOf = id => { const p = D.people.find(x => x.id === id); return p ? p.name : ''; };
+  const whoOf = b => b.notNeeded ? 'none' : nameOf(b.person);   // ("no teacher (not needed)" is remembered as 'none')
   const breakOf = p => { const b = D.blocks.find(z => z.kind === 'brk' && z.person === p.id); return b ? `${fmtHM(b.start)}-${fmtHM(b.end)}` : ''; };
   const roles = {}, senior = (a, b) => String(a.hired || '9999').localeCompare(String(b.hired || '9999'));
   const dir = D.people.find(p => p.role === 'Director'), dem = D.people.find(p => p.role === 'Demoer');
@@ -910,10 +914,10 @@ async function saveDay() {
   put('circler', circ[0]); put('circler2', circ[1]); put('circler3', circ[2]);
   const times = [], parties = {};
   D.blocks.forEach(b => {
-    if (b.kind === 'kids') times.push({ session_id: b.session, teacher: nameOf(b.person) });
-    else if (b.kind === 'wheel') (b.sessions || [b.session]).forEach(sid => times.push({ session_id: sid, wheel_teacher: nameOf(b.person) }));
-    else if (b.kind === 'demo') times.push({ session_id: b.session, demo_by: nameOf(b.person) });
-    else if (b.kind === 'party' && b.booking) { const x = parties[b.booking] = parties[b.booking] || { booking_id: b.booking, t1: '', t2: '' }; x[b.slot === 2 ? 't2' : 't1'] = nameOf(b.person); }
+    if (b.kind === 'kids') times.push({ session_id: b.session, teacher: whoOf(b) });
+    else if (b.kind === 'wheel') (b.sessions || [b.session]).forEach(sid => times.push({ session_id: sid, wheel_teacher: whoOf(b) }));
+    else if (b.kind === 'demo') times.push({ session_id: b.session, demo_by: whoOf(b) });
+    else if (b.kind === 'party' && b.booking) { const x = parties[b.booking] = parties[b.booking] || { booking_id: b.booking, t1: '', t2: '' }; x[b.slot === 2 ? 't2' : 't1'] = whoOf(b); }
   });
   const extra = circ.length > 3 ? `\n\n(${circ.slice(3).map(p => p.show).join(', ')}: more than 3 circlers; the Day plan keeps 3, so ${circ.length - 3 === 1 ? 'this one isn’t' : 'these aren’t'} saved as a circler.)` : '';
   const { list } = problems();
@@ -979,7 +983,7 @@ function openPop(el) {
        <select id="pop-sel">${Array.from({ length: Math.floor((D.hi - D.lo) / STEP) }, (_, i) => D.lo + i * STEP).map(m => `<option value="${m}" ${m === b.start ? 'selected' : ''}>${fmt(m)}</option>`).join('')}</select>
        <div class="row2"><button id="pop-ok">Move break</button><button id="pop-del">Remove break</button><button id="pop-x">Cancel</button></div>`
     : `<label>${esc(b.title)} · ${fmt(b.start)}–${fmt(b.end)}: who?</label>
-       <select id="pop-sel"><option value="">Nobody</option>${D.people.map(p => `<option value="${esc(p.id)}" ${p.id === b.person ? 'selected' : ''}>${esc(p.show)}${off(p) ? ' (not on shift then)' : busy(p) ? ' (busy then)' : ''}</option>`).join('')}</select>
+       <select id="pop-sel"><option value="">Nobody (needs someone)</option><option value="__none" ${b.notNeeded ? 'selected' : ''}>No ${b.kind === 'demo' ? 'demo' : 'teacher'} (not needed)</option>${D.people.map(p => `<option value="${esc(p.id)}" ${p.id === b.person ? 'selected' : ''}>${esc(p.show)}${off(p) ? ' (not on shift then)' : busy(p) ? ' (busy then)' : ''}</option>`).join('')}</select>
        <div class="row2"><button id="pop-ok">Give it to them</button><button id="pop-x">Cancel</button></div>`;
   document.body.appendChild(pop);
   const r = el.getBoundingClientRect();
@@ -988,7 +992,9 @@ function openPop(el) {
   $('pop-x').onclick = closePop;
   if ($('pop-del')) $('pop-del').onclick = () => { D.blocks = D.blocks.filter(z => z !== b); closePop(); D.flash = 'Break removed (Save the day to keep it that way).'; draw(); };
   $('pop-ok').onclick = () => { const v = $('pop-sel').value;
-    if (b.kind === 'brk') { const len = b.end - b.start; b.start = +v; b.end = b.start + len; } else b.person = v || null;
+    if (b.kind === 'brk') { const len = b.end - b.start; b.start = +v; b.end = b.start + len; }
+    else if (v === '__none') { b.person = null; b.notNeeded = true; }
+    else { b.person = v || null; b.notNeeded = false; }
     b.locked = true;
     closePop(); draw(); };
 }
