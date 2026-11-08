@@ -702,6 +702,54 @@ async function initApp(user) {
   initBuild()
   initPlan()
   await Promise.all([loadTimeOff(), loadUnavail()])
+  setTimeout(() => { bdAutoDrafts().catch(e => console.warn('automatic drafts:', e)) }, 1500)
+}
+
+// ── Automatic drafts (Nov 8 2026): when the page opens, any studio with no shifts at all (draft or approved) for the week
+// 3 weeks out gets its drafts built and saved, quietly, the same way Build all studios does (approved shifts are never
+// touched). Once per week per browser; skipped while you're in the middle of building something.
+const BD_AUTO_WEEKS_AHEAD = 3
+async function bdAutoDrafts() {
+  const target = sundayOf(addDays(todayStr(), 7 * BD_AUTO_WEEKS_AHEAD)), to = addDays(target, 6)
+  const key = 'fc_autodrafts_' + target
+  try { if (localStorage.getItem(key)) return } catch (e) { }
+  if (bdStudios.length || bdAnyDirty()) return
+  const { data: canEdit } = await sb.rpc('admin_can', { p_section: 'people', p_level: 'edit' })
+  if (canEdit !== true) return
+  const [{ data: sf }, { data: have }] = await Promise.all([
+    sb.from('studio_staffing').select('*'),
+    sb.from('staff_shifts').select('studio_id').gte('shift_date', target).lte('shift_date', to)
+  ])
+  const days = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'], with_ = new Set((have || []).map(r => r.studio_id))
+  const missing = Object.keys(STUDIO_NAMES).filter(id => { const r = (sf || []).find(x => x.studio_id === id); return (!r || days.some(k => +r[k] > 0)) && !with_.has(id) })
+  try { localStorage.setItem(key, new Date().toISOString()) } catch (e) { }
+  if (!missing.length) return
+  const box = document.getElementById('bd-all'), say = h => { if (box) { box.style.display = ''; box.innerHTML = h } }
+  const keepWeek = bdWeek
+  bdWeek = target
+  const out = []
+  for (let i = 0; i < missing.length; i++) {
+    const st = missing[i]
+    if (bdAnyDirty() && bdStudios.some(x => !missing.includes(x))) break   // (you started working: stop here)
+    say('<b>📋 Building drafts for the week of ' + esc(fmtDate(target)) + '</b> <span class="muted">(automatic: these studios have no schedule yet) ' + (i + 1) + ' of ' + missing.length + ': ' + esc(STUDIO_NAMES[st] || st) + '</span>')
+    try {
+      bdStudios.push(st)
+      await bdBuildOne(st)
+      const rows = bdDraftRows(st), err = await bdWriteDrafts(st, rows)
+      if (err) throw new Error(err)
+      const plan = bdPlans[st].plan; plan.dirty = false; plan.saved = true
+      out.push({ st, shifts: rows.length, unfilled: plan.blocks.filter(b => !b.staffId && !b.training && !b.topUp).length })
+    } catch (e) { out.push({ st, error: e.message || String(e) }) }
+  }
+  bdWeek = keepWeek; bdStudios = []; bdPlans = {}; bdUpdateWeekLabel(); bdRenderStudioPicker(); renderAll()
+  const ok = out.filter(x => !x.error), unf = ok.reduce((t, x) => t + x.unfilled, 0)
+  say('<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b>📋 Drafts built automatically for the week of ' + esc(fmtDate(target)) + '</b>' +
+    '<span class="muted">' + ok.length + ' studio' + (ok.length === 1 ? '' : 's') + ' had no schedule yet: ' + ok.reduce((t, x) => t + x.shifts, 0) + ' draft shifts' + (unf ? ' · <b style="color:var(--bad)">' + unf + ' unfilled</b>' : '') +
+    (out.length > ok.length ? ' · ' + (out.length - ok.length) + ' not built' : '') + '</span><span class="spacer" style="flex:1"></span>' +
+    '<button class="btn good" onclick="bdWeek=\'' + target + '\';bdUpdateWeekLabel();bdOpenStudios(' + JSON.stringify(ok.map(x => x.st).slice(0, BD_MAX_STUDIOS)).replace(/"/g, '&quot;') + ')">Review them</button>' +
+    '<button class="btn" onclick="document.getElementById(\'bd-all\').style.display=\'none\'">Hide</button></div>' +
+    (out.length > ok.length ? '<p class="muted small">Not built: ' + out.filter(x => x.error).map(x => esc(STUDIO_NAMES[x.st] || x.st) + ' (' + esc(x.error) + ')').join('; ') + '</p>' : '') +
+    '<p class="muted small">Nothing is approved: review them, then approve as usual. Only studios with no shifts at all that week are built automatically.</p>')
 }
 
 function switchView(v) {
@@ -1066,14 +1114,14 @@ function renderCoverage() {
    ===================================================================== */
 // Every shift: at most 8 h PAID. With the unpaid break that's an 8.5 h span (e.g. 1:00–9:30pm).
 // Everyone gets at least 2 days off a week (max 5 days), ideally back to back.
-const MAX_PAID = 480
-const MAX_DAYS = 5
+let MAX_PAID = 480
+let MAX_DAYS = 5
 const TRAINING_SHIFTS_NEEDED = 3
 // A class teacher also looks after the studio while the class runs, when the studio is quiet:
 // no party running and at most this many people booked into drop-in sessions at that time.
-const QUIET_BOOKED = 2
+let QUIET_BOOKED = 2
 // Managers (Nov 7 2026): 30–40 hours a week; those marked "aim for 40" get their full 40 (five 8-hour days) first
-const MGR_MIN_H = 30, MGR_MAX_H = 40
+let MGR_MIN_H = 30, MGR_MAX_H = 40
 function mgrTarget(ctx, p) { return ctx.aim40 && ctx.aim40.has(p.id) ? 40 : Math.max(MGR_MIN_H, p.min_weekly_hours || 0) }
 function maxHours(p) { return p.max_weekly_hours != null ? p.max_weekly_hours : (p.role === 'manager' ? MGR_MAX_H : null) }
 // Studio staffing's people for a day of the week (studio_staffing: sun … sat), or null
@@ -1083,9 +1131,21 @@ function bdStaffingFor(ctx, date) {
   return v == null || v === '' ? null : Number(v)
 }
 // A kids class's teacher is tied up this long after it ends (tidying, handing kids back), so nothing else is planned on them
-const CLASS_AFTER_MIN = 15
+let CLASS_AFTER_MIN = 15
 // An open day with nothing booked this many days before closes (no shifts); a weekend floater only under this labour %
-const QUIET_CLOSE_DAYS = 3, FLOATER_MAX_PCT = 25
+let QUIET_CLOSE_DAYS = 3, FLOATER_MAX_PCT = 25
+// The shared staffing settings (staffing_settings.sql; Hub → 👥 Studio staffing → 📏 Staffing rules): the same numbers
+// Auto-schedule and get_staffing_need use. The values above are the defaults; bdSettingsLoad() takes the saved ones.
+async function bdSettingsLoad() {
+  try {
+    const { data, error } = await sb.rpc('get_staffing_settings')
+    if (error || !data) return
+    const n = (k, d) => (data[k] != null && data[k] !== '' && isFinite(+data[k])) ? +data[k] : d
+    MAX_PAID = n('max_paid_min', 480); MAX_DAYS = n('max_days', 5); QUIET_BOOKED = n('quiet_booked', 2)
+    MGR_MIN_H = n('manager_min_hours', 30); MGR_MAX_H = n('manager_max_hours', 40); CLASS_AFTER_MIN = n('class_after_min', 15)
+    QUIET_CLOSE_DAYS = n('quiet_close_days', 3); FLOATER_MAX_PCT = n('floater_max_pct', 25); DAY_TEACHER_SPAN = n('day_teacher_span_min', 450)
+  } catch (e) { /* the defaults */ }
+}
 // Standard shift shapes (finance.html's Quick Shifts plus the 8:30–1 morning). Every shift the
 // generator makes is rounded out to the shortest of these that covers it.
 const STANDARD_SHIFTS = [
@@ -1176,6 +1236,7 @@ const overlaps = (a1, a2, b1, b2) => a1 < b2 && b1 < a2
 
 async function bdLoad(studio) {
   const from = bdWeek, to = addDays(bdWeek, 6)
+  await bdSettingsLoad()   // (the shared staffing settings: the same numbers as Auto-schedule)
   const [need, rules, opening, ot, breaks, people, badges, notes, unav, toff, shifts] = await Promise.all([
     sb.rpc('get_staffing_need', { p_studio_id: studio, p_from: from, p_to: to }),
     sb.from('staffing_rules').select('label, required_badge').eq('active', true),
@@ -1351,7 +1412,7 @@ function bdDayNeed(ctx, date) {
 
 // A field trip or PA/PD day (an evening answer in Auto-schedule's plan): its daytime teacher is one of the day's staff,
 // from 30 minutes before the trip / camp to about 7.5 hours later (10:30 → 6; a camp at least until 5pm). null otherwise.
-const DAY_TEACHER_SPAN = 450
+let DAY_TEACHER_SPAN = 450
 function bdDayTeacher(ctx, date, ss) {
   const plan = (ctx.dayPlan || {})[date]
   if (!plan || plan.evening == null || plan.evening === '') return null
