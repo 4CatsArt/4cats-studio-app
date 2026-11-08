@@ -480,8 +480,10 @@ table.pl-staff .bad { color: var(--bad); }
                 <option value="vacation">Vacation</option><option value="sick">Sick</option>
                 <option value="medical">Medical leave</option><option value="personal">Personal</option><option value="unpaid">Unpaid</option><option value="other">Other</option>
               </select></label>
-            <button class="btn primary" onclick="addTimeOff()">Save as approved</button>
+            <button class="btn primary" id="to-save" onclick="addTimeOff()">Save as approved</button>
+            <button class="btn" id="to-stopedit" style="display:none" onclick="stopEditTimeOff()">Cancel editing</button>
           </div>
+          <p class="small" id="to-editing" style="display:none;margin-top:8px;font-weight:600;color:#1f6b3a"></p>
           <p class="muted small" style="margin-top:8px">Leave the times blank for full days. Part-day time off can only cover one day.</p>
         </div>
       </div>
@@ -883,6 +885,7 @@ function renderTimeOff() {
       let actions = ''
       if (r.status === 'pending') actions = '<button class="btn small good" onclick="setTimeOffStatus(\'' + r.id + '\',\'approved\')">Approve</button><button class="btn small bad" onclick="setTimeOffStatus(\'' + r.id + '\',\'denied\')">Deny</button>'
       else if (r.status === 'approved') actions = '<button class="btn small" onclick="setTimeOffStatus(\'' + r.id + '\',\'cancelled\')">Cancel</button>'
+      if (r.status === 'pending' || r.status === 'approved') actions = '<button class="btn small" onclick="editTimeOff(\'' + r.id + '\')">Edit</button>' + actions
       else actions = '<button class="btn small" onclick="setTimeOffStatus(\'' + r.id + '\',\'pending\')">Reopen</button>'
       return '<tr><td class="person">' + esc(staffName(r.staff_id)) + '</td><td>' + dates + '</td><td>' + fmtRange(r.start_time, r.end_time) +
         '</td><td>' + esc(r.type === 'sick' ? (r.source === 'staff_sick' ? 'sick (called in)' : 'sick leave') : r.type === 'medical' ? 'medical leave' : r.type === 'vacation' ? 'time off' : r.type) +
@@ -912,6 +915,30 @@ async function setTimeOffStatus(id, status) {
   await loadTimeOff()
 }
 
+let editingTimeOff = null
+function editTimeOff(id) {
+  const r = timeOffRows.find(x => String(x.id) === String(id)); if (!r) return
+  editingTimeOff = r.id
+  const f = document.getElementById('to-form'); f.style.display = ''
+  const set = (k, v) => { document.getElementById(k).value = v || '' }
+  set('to-staff', r.staff_id); set('to-start', r.start_date); set('to-end', r.end_date)
+  set('to-from', r.start_time ? String(r.start_time).slice(0, 5) : ''); set('to-until', r.end_time ? String(r.end_time).slice(0, 5) : '')
+  set('to-type', r.type)
+  document.getElementById('to-staff').disabled = true   // (the person stays the same: cancel and add new for someone else)
+  document.getElementById('to-save').textContent = 'Save changes'
+  document.getElementById('to-stopedit').style.display = ''
+  const e = document.getElementById('to-editing'); e.style.display = ''
+  e.textContent = 'Editing ' + staffName(r.staff_id) + '\u2019s time off (' + (r.start_date === r.end_date ? fmtDate(r.start_date) : fmtDate(r.start_date) + ' to ' + fmtDate(r.end_date)) + '). Change the days or times, then Save changes.'
+  f.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
+function stopEditTimeOff() {
+  editingTimeOff = null
+  document.getElementById('to-staff').disabled = false
+  document.getElementById('to-save').textContent = 'Save as approved'
+  document.getElementById('to-stopedit').style.display = 'none'
+  document.getElementById('to-editing').style.display = 'none'
+  ;['to-start', 'to-end', 'to-from', 'to-until'].forEach(id => { document.getElementById(id).value = '' })
+}
 async function addTimeOff() {
   const staff_id = document.getElementById('to-staff').value
   const start_date = document.getElementById('to-start').value
@@ -923,6 +950,13 @@ async function addTimeOff() {
   if (!!from !== !!until) { toast('Enter both times for part-day time off, or neither.', true); return }
   if (from && start_date !== end_date) { toast('Part-day time off can only cover one day.', true); return }
   if (from && until <= from) { toast('The end time must be after the start time.', true); return }
+  if (editingTimeOff) {   // an edit: the days, times and type change; it stays approved (or pending, if it was)
+    const patch = { start_date, end_date, start_time: from || null, end_time: until || null, type: document.getElementById('to-type').value,
+      updated_at: new Date().toISOString(), reviewed_by: currentUser.id, reviewed_at: new Date().toISOString() }
+    const { error } = await sb.from('staff_time_off').update(patch).eq('id', editingTimeOff)
+    if (error) { toast(error.message, true); return }
+    toast('Time off changed'); stopEditTimeOff(); await loadTimeOff(); return
+  }
   const row = {
     staff_id, start_date, end_date, start_time: from || null, end_time: until || null,
     type: document.getElementById('to-type').value, status: 'approved', source: 'admin',
