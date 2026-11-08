@@ -19,7 +19,8 @@ header h1 { font-size: 18px; margin: 0 8px 0 0; }
 header select, header input, header button { font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); }
 header button { cursor: pointer; font-weight: 600; }
 header button.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
-header button#save { background: #2f7d4a; border-color: #2f7d4a; } header button#save.dirty { box-shadow: 0 0 0 3px #f0b429; }
+header button#save { background: #2f7d4a; border-color: #2f7d4a; }
+header button#sendupd { background: #fff7e0; border-color: #f0b429; color: #6b4b00; } header button#save.dirty { box-shadow: 0 0 0 3px #f0b429; }
 header button:disabled { opacity: .5; cursor: default; }
 .switch { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
 .switch button { border: 0; border-radius: 0; padding: 7px 14px; background: #fff; }
@@ -123,6 +124,7 @@ main { padding: 14px 20px 40px; }
   <button id="next" class="wk-only" aria-label="Week after">▶</button>
   <button id="load">Show</button>
   <span class="spacer"></span>
+  <button id="sendupd" style="display:none" title="Changed or published shifts: let the staff know now (their usual notification)">Send updates to staff</button>
   <button id="addsh" class="day-only" title="Add a shift for someone (a draft until you publish the day)">+ Add shift</button>
   <button id="pub" class="day-only" title="Publish the day's draft shifts: they become approved, and staff get their usual notification" style="display:none">Publish</button>
   <button id="plan" class="primary day-only" title="Roles, then breaks, then demos (anything you've moved stays put)">Plan the day</button>
@@ -515,6 +517,40 @@ function planDay(which) {
 }
 
 // ---- shifts and decisions on the day, updated in place (no reload) ----
+// Notifications wait until you press "Send updates to staff" (changes themselves are saved as you go)
+// The list waits (and survives a reload) until you send: one round of notifications for everything, grouped by person
+const PEND_KEY = 'dayboard_pending_updates';
+let _pending = []; try { _pending = JSON.parse(localStorage.getItem(PEND_KEY) || '[]') || []; } catch (e) { _pending = []; }
+function savePending() { try { localStorage.setItem(PEND_KEY, JSON.stringify(_pending)); } catch (e) {} notifyBar(); }
+function queueNotify(staffId, name, text) { _pending.push({ staffId: staffId || '?', name: name || 'Someone', text: text || 'shift changed', at: Date.now() }); savePending(); }
+function pendingPeople() { const by = {}; _pending.forEach(x => { (by[x.staffId] = by[x.staffId] || { name: x.name, items: [] }).items.push(x.text); }); return Object.values(by); }
+function notifyBar() {
+  const b = $('sendupd'); if (!b) return;
+  const n = pendingPeople().length;
+  b.style.display = n ? '' : 'none';
+  b.textContent = `Send updates to staff (${n} ${n === 1 ? 'person' : 'people'})`;
+}
+function sendUpdates() {
+  const people = pendingPeople(); if (!people.length) return;
+  closePop();
+  const pop = document.createElement('div'); pop.className = 'pop'; pop.id = 'pop'; pop.style.width = '420px';
+  pop.innerHTML = `<label>Shift changes waiting to be sent: one round of notifications for everyone</label>
+    <div style="max-height:320px;overflow:auto;margin:6px 0">${people.map(p => `<div style="padding:6px 0;border-top:1px solid #eee"><b>${esc(p.name)}</b>
+      <div style="font-size:12.5px;color:var(--muted)">${p.items.map(esc).join('<br>')}</div></div>`).join('')}</div>
+    <div class="row2"><button id="pop-ok" style="background:#2f7d4a;color:#fff;border-color:#2f7d4a">Send now</button><button id="pop-x">Not yet</button>
+      <button id="pop-clear" title="The changes stay; nobody is notified">Clear the list</button></div>`;
+  document.body.appendChild(pop);
+  const r0 = $('sendupd').getBoundingClientRect(); pop.style.left = Math.max(8, Math.min(window.innerWidth - 440, r0.right - 420)) + 'px'; pop.style.top = (r0.bottom + 6) + 'px';
+  $('pop-x').onclick = closePop;
+  $('pop-clear').onclick = () => { if (!confirm('Clear the list? The changes stay as they are; nobody is notified.')) return; _pending = []; savePending(); closePop(); };
+  $('pop-ok').onclick = async () => {
+    await pushNotify();   // (one call for everything: the notification service tells each person about their changes)
+    const n = people.length; _pending = []; savePending(); closePop();
+    const msg = `Updates sent to ${n} ${n === 1 ? 'person' : 'people'}.`;
+    if (MODE === 'week' && W) { W.flash = msg; drawWeek(); } else if (D) { D.flash = msg; draw(); }
+  };
+}
+window.addEventListener('beforeunload', e => { if (_pending.length) { e.preventDefault(); e.returnValue = ''; } });
 async function pushNotify() { try { const { data: { session } } = await sb.auth.getSession();
   fetch(`${SUPABASE_URL}/functions/v1/hub-push`, { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + (session ? session.access_token : SUPABASE_ANON_KEY) }, body: JSON.stringify({ action: 'shifts' }) }).catch(() => {}); } catch (e) {} }
 function dayPersonGone(pid) {   // their shift is gone: off the board, and whatever they had needs someone
@@ -530,7 +566,7 @@ async function dayDecide(id, action, value) {
   if (x && x.kind === 'cut_shift' && action === 'approve') {
     const P = x.payload || {}, p = D.people.find(z => z.shiftId === String(P.shift_id));
     if (p) { if (P.action === 'remove') dayPersonGone(p.id); else if (P.action === 'end' && P.new_end) p.end = toMin(P.new_end); else if (P.action === 'start' && P.new_start) p.start = toMin(P.new_start); }
-    if (p && p.status !== 'draft') pushNotify();
+    if (p && p.status !== 'draft') queueNotify(p.id, p.show, `${new Date(D.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })}: ${data && data.applied || 'shift changed'}`);
   }
   D.flash = data && data.applied ? 'Done: ' + data.applied : 'Done.'; draw();
 }
@@ -540,7 +576,8 @@ async function dayShiftEdit(pid) {
   const r = parseRange(v); if (!r) { alert('Use a time like 8:30a-5p, with a or p on both times.'); return; }
   const { error } = await sb.rpc('hub_board_shift_set', { p_id: p.shiftId, p_start: hhmm(r.start), p_end: hhmm(r.end), p_remove: false });
   if (error) { alert(/hub_board_shift_set/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
-  p.start = r.start; p.end = r.end; if (!p.draft) pushNotify();
+  const was = `${fmt(p.start)}–${fmt(p.end)}`;
+  p.start = r.start; p.end = r.end; if (!p.draft) queueNotify(p.id, p.show, `${new Date(D.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })}: ${was} → ${fmt(r.start)}–${fmt(r.end)}`);
   D.inbox = (D.inbox || []).filter(i => !(i.kind === 'cut_shift' && i.payload && i.payload.shift_id === p.shiftId));
   D.flash = `${p.show}: ${fmt(r.start)}–${fmt(r.end)}${p.draft ? ' (draft)' : ''}.`; draw();
 }
@@ -548,7 +585,7 @@ async function dayShiftRemove(pid) {
   const p = D.people.find(z => z.id === pid); if (!p || !confirm(`Remove ${p.show}'s shift (${fmt(p.start)}–${fmt(p.end)})?`)) return;
   const { error } = await sb.rpc('hub_board_shift_set', { p_id: p.shiftId, p_start: null, p_end: null, p_remove: true });
   if (error) { alert(/hub_board_shift_set/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
-  if (!p.draft) pushNotify();
+  if (!p.draft) queueNotify(p.id, p.show, `${new Date(D.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })}: shift removed (was ${fmt(p.start)}–${fmt(p.end)})`);
   dayPersonGone(pid); D.flash = `${p.show}'s shift removed.`; draw();
 }
 let _staffList = null;
@@ -581,11 +618,11 @@ async function dayShiftAdd() {
 }
 async function dayPublish() {
   const n = D.people.filter(p => p.draft).length; if (!n) return;
-  if (!confirm(`Publish ${n} draft shift${n === 1 ? '' : 's'} for this day? They become approved, and staff get their usual notification.`)) return;
+  if (!confirm(`Publish ${n} draft shift${n === 1 ? '' : 's'} for this day? They become approved; staff are told when you press Send updates to staff.`)) return;
   const { data, error } = await sb.rpc('hub_board_day_publish', { p_studio: D.st, p_date: D.date });
   if (error) { alert(/hub_board_day_publish/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
-  D.people.forEach(p => { if (p.draft) { p.draft = false; p.status = 'approved'; } });
-  pushNotify(); D.flash = `Published ${(data && data.published) || n} shift${n === 1 ? '' : 's'}.`; draw();
+  D.people.forEach(p => { if (p.draft) { queueNotify(p.id, p.show, `${new Date(D.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })}: new shift ${fmt(p.start)}–${fmt(p.end)}`); p.draft = false; p.status = 'approved'; } });
+  D.flash = `Published ${(data && data.published) || n} shift${n === 1 ? '' : 's'}.`; draw();
 }
 
 // ---- Save the day: to the Day plan (roles, breaks, teachers, party teachers, who demos each time) ----
@@ -817,10 +854,14 @@ async function wkMove(id, staff, day) {
   const sh = W.shifts.find(x => String(x.id) === String(id)); if (!sh || (sh.staff_id === staff && sh.shift_date === day)) return;
   const { data, error } = await sb.rpc('hub_board_shift_move', { p_id: String(id), p_staff: staff, p_date: day });
   if (error) { alert(/hub_board_shift_move/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
-  const was = `${W.names[sh.staff_id] || ''} ${dayLabel(sh.shift_date)}`;
+  const was = `${W.names[sh.staff_id] || ''} ${dayLabel(sh.shift_date)}`, oldStaff = sh.staff_id, oldDay = sh.shift_date;
   sh.staff_id = staff; sh.shift_date = day;
   W.inbox = W.inbox.filter(i => !(i.kind === 'cut_shift' && i.payload && String(i.payload.shift_id) === String(id)));
-  if (sh.status !== 'draft') notifyShifts();
+  if (sh.status !== 'draft') {
+    const t = `${fmt(toMin(sh.start_time))}–${fmt(toMin(sh.end_time))}`;
+    if (oldStaff === staff) queueNotify(staff, W.names[staff], `${dayLabel(oldDay)} → ${dayLabel(day)} (${t})`);
+    else { queueNotify(oldStaff, W.names[oldStaff], `${dayLabel(oldDay)}: shift removed (${t})`); queueNotify(staff, W.names[staff], `${dayLabel(day)}: new shift ${t}`); }
+  }
   W.flash = `Moved: ${was} → ${W.names[staff] || ''} ${dayLabel(day)}.`; drawWeek();
 }
 async function wkRemove(id) {
@@ -830,7 +871,7 @@ async function wkRemove(id) {
   if (error) { alert(error.message); return; }
   W.shifts = W.shifts.filter(x => x !== sh);
   W.inbox = W.inbox.filter(i => !(i.kind === 'cut_shift' && i.payload && String(i.payload.shift_id) === String(id)));
-  if (sh.status !== 'draft') notifyShifts();
+  if (sh.status !== 'draft') queueNotify(sh.staff_id, W.names[sh.staff_id], `${dayLabel(sh.shift_date)}: shift removed (was ${fmt(toMin(sh.start_time))}–${fmt(toMin(sh.end_time))})`);
   W.flash = 'Shift removed.'; drawWeek();
 }
 async function wkAddFor(staff, day, nameKnown) {
@@ -862,11 +903,11 @@ async function wkAddSomeone(day, btn) {
 }
 async function wkPublishWeek() {
   const n = W.shifts.filter(x => x.status === 'draft').length; if (!n) return;
-  if (!confirm(`Publish ${n} draft shift${n === 1 ? '' : 's'} for the week of ${dayLabel(W.from)}? They become approved, and staff get their usual notification.`)) return;
+  if (!confirm(`Publish ${n} draft shift${n === 1 ? '' : 's'} for the week of ${dayLabel(W.from)}? They become approved; staff are told when you press Send updates to staff.`)) return;
   const { data, error } = await sb.rpc('hub_board_week_publish', { p_studio: W.st, p_from: W.from, p_to: W.to });
   if (error) { alert(/hub_board_week_publish/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
-  W.shifts.forEach(x => { if (x.status === 'draft') x.status = 'approved'; });
-  notifyShifts(); W.flash = `Published ${(data && data.published) || n} shift${n === 1 ? '' : 's'}.`; drawWeek();
+  W.shifts.forEach(x => { if (x.status === 'draft') { queueNotify(x.staff_id, W.names[x.staff_id], `${dayLabel(x.shift_date)}: new shift ${fmt(toMin(x.start_time))}–${fmt(toMin(x.end_time))}`); x.status = 'approved'; } });
+  W.flash = `Published ${(data && data.published) || n} shift${n === 1 ? '' : 's'}.`; drawWeek();
 }
 function openDay(d) { $('date').value = d; setMode('day'); }
 async function wkDecide(id, action, value) {
@@ -878,7 +919,8 @@ async function wkDecide(id, action, value) {
     const P = x.payload || {}, sh = W.shifts.find(z => String(z.id) === String(P.shift_id));
     if (sh) { if (P.action === 'remove') W.shifts = W.shifts.filter(z => z !== sh); else if (P.action === 'end' && P.new_end) sh.end_time = P.new_end; else if (P.action === 'start' && P.new_start) sh.start_time = P.new_start; }
   }
-  if (data && data.applied) notifyShifts();
+  if (data && data.applied && x && x.payload) { const s0 = W.shifts.find(z => String(z.id) === String(x.payload.shift_id)) || {};
+    queueNotify(s0.staff_id || x.payload.shift_id, W.names[s0.staff_id] || x.payload.staff || '', `${dayLabel(String(x.day).slice(0, 10))}: ${data.applied}`); }
   W.flash = data && data.applied ? 'Done: ' + data.applied : 'Done.'; drawWeek();
 }
 async function wkClose(id, close) {
@@ -899,7 +941,7 @@ async function wkShift(id) {
     args = { p_id: String(id), p_start: hhmm(r.start), p_end: hhmm(r.end), p_remove: false }; }
   const { data, error } = await sb.rpc('hub_board_shift_set', args);
   if (error) { alert(/hub_board_shift_set/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
-  if (data && data.status !== 'draft') notifyShifts();   // (an approved shift changed: the staff member's usual notification)
+  if (data && data.status !== 'draft') queueNotify(sh.staff_id, W.names[sh.staff_id], `${dayLabel(sh.shift_date)}: ${data.applied || 'shift changed'}`);   // (an approved shift changed)
   if (args.p_remove) W.shifts = W.shifts.filter(z => String(z.id) !== String(id)); else { sh.start_time = args.p_start; sh.end_time = args.p_end; }
   W.inbox = W.inbox.filter(i => !(i.kind === 'cut_shift' && i.payload && String(i.payload.shift_id) === String(id)));
   W.flash = 'Done: ' + (data && data.applied || ''); drawWeek();
@@ -930,7 +972,7 @@ const show = () => (MODE === 'week' ? loadWeek : load)();
   $('prev').onclick = () => { $('date').value = addDays(sundayOf($('date').value), -7); loadWeek(); };
   $('next').onclick = () => { $('date').value = addDays(sundayOf($('date').value), 7); loadWeek(); };
   $('reset').onclick = () => { if (START) { D.blocks = JSON.parse(JSON.stringify(START)); D.people.forEach(p => { p.role = (D.startRoles.find(r => r[0] === p.id) || [])[1] || p.role; p.roleSet = false; }); draw(); } };
-  $('save').onclick = saveDay; $('addsh').onclick = () => D && dayShiftAdd(); $('pub').onclick = () => D && dayPublish();
+  $('save').onclick = saveDay; $('sendupd').onclick = sendUpdates; notifyBar(); $('addsh').onclick = () => D && dayShiftAdd(); $('pub').onclick = () => D && dayPublish();
   $('plan').onclick = () => planDay('all'); $('brk').onclick = () => planDay('brk'); $('demo').onclick = () => planDay('demo');
   const { data: { session } } = await sb.auth.getSession();
   if (!session) { $('main').innerHTML = `<div class="msg"><b>Sign in to the Hub first</b> (with a home office login), then come back to this page. <a href="hub.html">Open the Hub</a></div>`; return; }
