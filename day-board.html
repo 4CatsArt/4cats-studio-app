@@ -269,15 +269,31 @@ async function load() {
       const n = booked[x.id] || 0, t0 = toMin(x.session_time), title = String(x.title || '');
       if (x.show === false && !n) return;
       if (/camp|pa day|pd day|pa\/pd/i.test(title)) return;   // (camps have their own team)
+      if (/wheel/i.test(title)) {
+        // (Nov 8 2026) the wheel is always ONE person: wheel times that overlap (a Clay Wheel class and a Wheel Workshop at 7:30)
+        // share one block and one wheel teacher, with everyone at the wheel added together
+        if (!n) return;
+        const len = Math.max(LEN.wheel, +x.duration_minutes || 0), short = title.split('|')[0].trim();
+        const w = blocks.find(b => b.kind === 'wheel' && t0 < b.end && t0 + len > b.start);
+        const set = findPerson((staffBy[x.id] || {}).wheel_teacher) || findPerson((staffBy[x.id] || {}).teacher);
+        if (w) {
+          w.sessions.push(x.id); w.n += n; w.end = Math.max(w.end, t0 + len); w.start = Math.min(w.start, t0);
+          if (!w.title.includes(short)) w.title += ' + ' + short;
+          w.sub = `${w.n} at the wheel · one teacher`;
+          if (!w.person && set) w.person = set.id;
+        } else {
+          blocks.push({ id: 'w-' + x.id, kind: 'wheel', session: x.id, sessions: [x.id], n, title: short, sub: `${n} booked · ${len} min`, start: t0, end: t0 + len, person: set ? set.id : null });
+        }
+        return;
+      }
       if (isKids(x)) {
         if (!n) return;   // (nobody enrolled: not running)
         const len = Math.max(LEN.kids, +x.duration_minutes || 0);
         let p = findPerson((staffBy[x.id] || {}).teacher), auto = false;
         if (!p) { p = demoers.find(d => !busyAt(d.id, t0, t0 + len)) || (director && !busyAt(director.id, t0, t0 + len) ? director : null); auto = !!p; }
         blocks.push({ id: 'k-' + x.id, kind: 'kids', session: x.id, title: title.split('|')[0].trim(), sub: `${n} enrolled · ${len} min${auto ? ' · auto' : ''}`, start: t0, end: t0 + len, person: p ? p.id : null, auto });
-      } else if (/wheel/i.test(title)) {
-        if (!n) return;
-        const p = findPerson((staffBy[x.id] || {}).wheel_teacher);
+      } else if (false) {   // (wheel times are handled above: one block, one teacher)
+        const p = null;
         blocks.push({ id: 'w-' + x.id, kind: 'wheel', session: x.id, title, sub: `${n} booked · ${LEN.wheel} min`, start: t0, end: t0 + LEN.wheel, person: p ? p.id : null });
       } else if (x.session_type === 'party') {
         partyBk.filter(b => b.session_id === x.id).forEach(b => {
@@ -663,7 +679,7 @@ function dayTimeMenu(id, el) {
     if (error) { alert(/hub_session_retime/.test(error.message) ? 'Run session_retime.sql in Supabase first.' : error.message); return; }
     const delta = r.start - t0;
     x.session_time = hhmm(r.start) + ':00';
-    D.blocks.forEach(b => { if (b.session === id) { b.start += delta; b.end += delta; } });   // (its class, party or demo moves with it)
+    D.blocks.forEach(b => { if (b.session === id || (b.sessions || []).includes(id)) { b.start += delta; b.end += delta; } });   // (its class, party, demo or wheel block moves with it)
     D.lo = Math.min(D.lo, Math.floor(r.start / 60) * 60);
     closePop(); D.flash = `Moved ${title} from ${data.from} to ${data.to}${data.bookings ? ` (${data.bookings} booking${data.bookings === 1 ? '' : 's'} moved with it)` : ''}. Check who's demoing it.`; draw();
   };
@@ -837,7 +853,7 @@ async function saveDay() {
   const times = [], parties = {};
   D.blocks.forEach(b => {
     if (b.kind === 'kids') times.push({ session_id: b.session, teacher: nameOf(b.person) });
-    else if (b.kind === 'wheel') times.push({ session_id: b.session, wheel_teacher: nameOf(b.person) });
+    else if (b.kind === 'wheel') (b.sessions || [b.session]).forEach(sid => times.push({ session_id: sid, wheel_teacher: nameOf(b.person) }));
     else if (b.kind === 'demo') times.push({ session_id: b.session, demo_by: nameOf(b.person) });
     else if (b.kind === 'party' && b.booking) { const x = parties[b.booking] = parties[b.booking] || { booking_id: b.booking, t1: '', t2: '' }; x[b.slot === 2 ? 't2' : 't1'] = nameOf(b.person); }
   });
