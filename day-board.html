@@ -49,6 +49,7 @@ body.week .day-only { display: none; } body:not(.week) .wk-only { display: none;
 .lab.ok { background: #e3f3e8; color: #1f6b3a; } .lab.mid { background: #fdf0d2; color: #8a5a00; } .lab.high { background: #fbe1e1; color: #a12a2a; }
 .wk .sh.clash { box-shadow: 0 0 0 2px var(--bad); }
 .off { font-size: 11.5px; font-weight: 600; border-radius: 6px; padding: 3px 6px; margin-bottom: 4px; }
+.off.else { background: #e5eefb; color: #2b4f86; border: 1px solid #c9daf3; }
 .off.toff { background: #f6ead7; color: #7a5520; border: 1px solid #ead2ad; } .off.unav { background: #eeece6; color: #6b6b63; border: 1px solid #dedad0; }
 .wk td.drop.over { background: #eef7f0; outline: 2px dashed #2f7d4a; outline-offset: -3px; }
 .wk .add { font: inherit; font-size: 13px; color: var(--muted); border: 1px dashed transparent; background: none; border-radius: 6px; width: 100%; padding: 6px 0; cursor: pointer; opacity: .25; }
@@ -707,7 +708,7 @@ async function dayShiftAdd() {
     const who = $('add-who').value, r = parseRange($('add-time').value);
     if (!who) { alert('Choose who.'); return; } if (!r) { alert('Use a time like 9a-5p, with a or p on both times.'); return; }
     const { data, error } = await sb.rpc('hub_board_shift_add', { p_staff: who, p_studio: D.st, p_date: D.date, p_start: hhmm(r.start), p_end: hhmm(r.end) });
-    if (error) { alert(/hub_board_shift_add/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
+    if (error) { alert(/hub_board_shift_add/.test(error.message) ? 'Run week_board.sql in Supabase first.' : niceErr(error.message)); return; }
     const inf = _staffList.list.find(x => x.id === who) || {};
     D.people.push({ id: who, name: inf.write || inf.name || 'Someone', show: inf.name || 'Someone', start: r.start, end: r.end, roles: [], job: String(inf.role || ''), hired: inf.hired || null,
       role: 'Circler', draft: true, shiftId: data && data.id, status: 'draft' });
@@ -870,6 +871,8 @@ async function loadWeek() {
     // the studio's team (its own staff), as rows even with no shifts this week
     let team = []; try { const tr = await sb.rpc('hub_board_staff', { p_studio: st }); team = (tr.data || []).filter(x => x.here).map(x => x.id); } catch (e) {}
     const staffIds = [...new Set((shifts.data || []).map(r => r.staff_id).concat(team))];
+    const elseR = staffIds.length ? await sb.from('staff_shifts').select('staff_id, studio_id, shift_date, start_time, end_time, status')
+      .in('staff_id', staffIds).neq('studio_id', st).gte('shift_date', from).lte('shift_date', to).not('start_time', 'is', null) : { data: [] };
     const [toffR, unavR] = staffIds.length ? await Promise.all([
       sb.from('staff_time_off').select('staff_id, start_date, end_date, start_time, end_time, status').in('staff_id', staffIds).in('status', ['approved', 'pending']).lte('start_date', to).gte('end_date', from),
       sb.from('staff_unavailability').select('staff_id, day_of_week, start_time, end_time, effective_from, effective_to').in('staff_id', staffIds)
@@ -879,7 +882,7 @@ async function loadWeek() {
       if (p.is_active === false) gone[p.id] = 'deactivated'; else if (p.termination_date && p.termination_date < to) gone[p.id] = 'last day ' + dayLabel(p.termination_date); });
     const days = Array.from({ length: 7 }, (_, i) => addDays(from, i));
     W = { st, from, to, days, sessions, booked, need: need.error ? [] : (need.data || []), needErr: need.error ? need.error.message : '',
-          shifts: shifts.data || [], names, gone, team, toff: toffR.data || [], unav: unavR.data || [], inbox: (inbox.data || []).filter(x => x.studio_id === st && x.day && String(x.day).slice(0, 10) >= from && String(x.day).slice(0, 10) <= to) };
+          shifts: shifts.data || [], names, gone, team, toff: toffR.data || [], unav: unavR.data || [], elsewhere: elseR.data || [], inbox: (inbox.data || []).filter(x => x.studio_id === st && x.day && String(x.day).slice(0, 10) >= from && String(x.day).slice(0, 10) <= to) };
     drawWeek();
   } catch (e) { $('main').innerHTML = `<div class="msg"><b>Couldn't load that week.</b><br>${esc(e.message || e)}</div>`; }
 }
@@ -923,10 +926,11 @@ function drawWeek() {
       <small>${n} time${n === 1 ? '' : 's'} booked · need ${c.needH}h, scheduled ${c.haveH}h${c.drafts ? ' (drafts)' : ''}${todo ? ` · <b style="color:var(--bad)">${todo} to decide</b>` : ''}</small>${labCell(d)}</th>`; }).join('');
   const shiftRows = people.map(pid => `<tr${W.gone && W.gone[pid] ? ' class="gone"' : ''}><td class="lbl"><b>${esc(W.names[pid] || 'Someone')}</b>${W.gone && W.gone[pid] ? `<span class="gone-tag">${esc(W.gone[pid])}</span>` : ''}<small>${Math.round(W.shifts.filter(x => x.staff_id === pid).reduce((t, x) => t + (toMin(x.end_time) - toMin(x.start_time)), 0) / 6) / 10}h this week</small></td>${days.map(d => {
       const mine = W.shifts.filter(x => x.staff_id === pid && x.shift_date === d);
-      return `<td class="drop" data-staff="${esc(pid)}" data-day="${d}">${offChips(pid, d)}${mine.map(sh => `<div class="sh${sh.status === 'draft' ? ' draft' : ''}${offClash(pid, d, sh) ? ' clash' : ''}" draggable="true" data-shift="${esc(String(sh.id))}" role="button" tabindex="0"
+      const away = (W.elsewhere || []).filter(x => x.staff_id === pid && x.shift_date === d);
+      return `<td class="drop" data-staff="${esc(pid)}" data-day="${d}">${offChips(pid, d)}${away.map(x => `<div class="off else" title="A shift at another studio that day (one shift a day)">@ ${esc(STUDIO_NAMES[x.studio_id] || x.studio_id)} ${fmt(toMin(x.start_time))}–${fmt(toMin(x.end_time))}${x.status === 'draft' ? ' · draft' : ''}</div>`).join('')}${mine.map(sh => `<div class="sh${sh.status === 'draft' ? ' draft' : ''}${offClash(pid, d, sh) ? ' clash' : ''}" draggable="true" data-shift="${esc(String(sh.id))}" role="button" tabindex="0"
           onclick="if(!event.target.closest('.x')) wkShift('${sh.id}')" title="Click to change the times · drag to another day or person">${fmt(toMin(sh.start_time))}–${fmt(toMin(sh.end_time))}
           <button class="x" title="Remove this shift" onclick="event.stopPropagation(); wkRemove('${sh.id}')">✕</button><small>${sh.status === 'draft' ? 'draft' : 'approved'}</small></div>${cutFor(sh).map(itemHtml).join('')}`).join('')
-        || (W.dayWindowOpen !== false ? `<button class="add" title="Add a shift for ${esc(W.names[pid] || 'them')} on ${esc(dayLabel(d))}" onclick="wkAddFor('${esc(pid)}','${d}')">+</button>` : '')}</td>`; }).join('')}</tr>`).join('')
+        || (away.length ? '' : W.dayWindowOpen !== false ? `<button class="add" title="Add a shift for ${esc(W.names[pid] || 'them')} on ${esc(dayLabel(d))}" onclick="wkAddFor('${esc(pid)}','${d}')">+</button>` : '')}</td>`; }).join('')}</tr>`).join('')
     + `<tr><td class="lbl"><small>Someone not on this week?</small></td>${days.map(d => `<td><button class="add wide" onclick="wkAddSomeone('${d}', this)">+ Add someone</button></td>`).join('')}</tr>`;
   const sesRow = days.map(d => `<td>${W.sessions.filter(x => x.session_date === d && (x.show !== false || (W.booked[x.id] || 0) > 0)).map(x => {
       const n = W.booked[x.id] || 0, closed = n === 0 && x.spaces_left_cache !== null && +x.spaces_left_cache <= 0, pa = PA.test(x.title || '');
@@ -976,6 +980,7 @@ function labCell(d) {
   if (x.pct == null) return x.state === 'no_bookings' || (x.hours > 0) ? `<div class="lab high" title="Staff scheduled, but no bookings yet that day">Labour: no bookings yet</div>${exp}` : '';
   return `<div class="lab ${labClass(x.pct)}" title="Estimated labour: staff cost (scheduled shifts, drafts included) ÷ the revenue of that day's bookings so far">Labour ≈ ${x.pct}% now</div>${exp}`;
 }
+const niceErr = m => String(m || '').replace(/\b[A-Z]{2}-[A-Z]{2,4}-[A-Z]{2,4}\b/g, id => STUDIO_NAMES[id] || id);
 // ---- time off and unavailability (staff_time_off, staff_unavailability) ----
 function offOn(pid, d) {
   const out = [];
@@ -1017,7 +1022,7 @@ async function wkMove(id, staff, day) {
   const sh = W.shifts.find(x => String(x.id) === String(id)); if (!sh || (sh.staff_id === staff && sh.shift_date === day)) return;
   if (!offWarn(staff, day)) return;
   const { data, error } = await sb.rpc('hub_board_shift_move', { p_id: String(id), p_staff: staff, p_date: day });
-  if (error) { alert(/hub_board_shift_move/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
+  if (error) { alert(/hub_board_shift_move/.test(error.message) ? 'Run week_board.sql in Supabase first.' : niceErr(error.message)); return; }
   const was = `${W.names[sh.staff_id] || ''} ${dayLabel(sh.shift_date)}`, oldStaff = sh.staff_id, oldDay = sh.shift_date;
   sh.staff_id = staff; sh.shift_date = day;
   W.inbox = W.inbox.filter(i => !(i.kind === 'cut_shift' && i.payload && String(i.payload.shift_id) === String(id)));
@@ -1043,7 +1048,7 @@ async function wkAddFor(staff, day, nameKnown) {
   const v = prompt(`${W.names[staff] || nameKnown || 'Add a shift'}, ${dayLabel(day)}: times (e.g. 9a-5p, at least 3 hours)`, '9a-5p'); if (!v) return;
   const r = parseRange(v); if (!r) { alert('Use a time like 9a-5p, with a or p on both times.'); return; }
   const { data, error } = await sb.rpc('hub_board_shift_add', { p_staff: staff, p_studio: W.st, p_date: day, p_start: hhmm(r.start), p_end: hhmm(r.end) });
-  if (error) { alert(/hub_board_shift_add/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
+  if (error) { alert(/hub_board_shift_add/.test(error.message) ? 'Run week_board.sql in Supabase first.' : niceErr(error.message)); return; }
   if (nameKnown) W.names[staff] = nameKnown;
   W.shifts.push({ id: data && data.id, staff_id: staff, shift_date: day, start_time: hhmm(r.start) + ':00', end_time: hhmm(r.end) + ':00', status: 'draft' });
   W.flash = `Added ${W.names[staff] || ''}: ${dayLabel(day)} ${fmt(r.start)}–${fmt(r.end)} (a draft).`; drawWeek();
