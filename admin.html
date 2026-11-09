@@ -332,6 +332,9 @@ select:focus, input:focus { border-color: #888; }
 .sh-bulkgrid label { display: flex; gap: 5px; align-items: center; }
 .sh-sprow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 4px 0; font-size: 12px; }
 .sh-sprow input { font-size: 12px; padding: 3px 6px; border: 0.5px solid #d0d0c8; border-radius: 5px; }
+.infl-a { display: flex; gap: 14px; flex-wrap: wrap; border: 1px solid #ece7dc; border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; background: #fff; }
+.infl-a-main { flex: 1 1 420px; display: grid; gap: 4px; font-size: 13.5px; } .infl-a-side { flex: 0 0 150px; display: grid; gap: 6px; align-content: start; text-align: center; font-size: 13px; }
+.infl-a-shots { display: flex; gap: 6px; flex-wrap: wrap; } .infl-a-shots img { width: 90px; height: 90px; object-fit: cover; border-radius: 6px; border: 1px solid #ddd; }
 </style>
 </head>
 <body>
@@ -13695,6 +13698,7 @@ async function frShowDay(studioId, day) {
     <button id="cp-subbtn-mentoring" onclick="cpSwitchSub('mentoring')" class="cp-subbtn">🎓 Mentoring</button>
     <button id="cp-subbtn-flash" onclick="cpSwitchSub('flash')" class="cp-subbtn">⚡ Flash Challenges</button>
     <button id="cp-subbtn-instagram" onclick="cpSwitchSub('instagram')" class="cp-subbtn">📸 Instagram</button>
+    <button id="cp-subbtn-influencer" onclick="cpSwitchSub('influencer')" class="cp-subbtn">📣 Influencer posts<span id="cp-infl-badge" class="tab-badge" style="display:none;margin-left:6px"></span></button>
   </div>
 
   <div id="cp-body"><div class="empty">Loading…</div></div>
@@ -13796,7 +13800,74 @@ async function cpRefresh() {
   cpRender()
 }
 
+// =====================================================================================================================
+// 📣 Influencer posts (influencer_reports.sql): coordinators report an influencer collaboration from the Hub; Approve awards the
+// Earning Rule "influencer_post" (1,000 points) to the studio's coordinator on the post date, Send back returns it with a note.
+// =====================================================================================================================
+let inflA = { rows: null, status: 'submitted', err: '' }
+const INFL_RULE = 'influencer_post'
+async function inflAdminBadge() {
+  try { const r = await sb.rpc('admin_influencer_waiting'); const b = document.getElementById('cp-infl-badge'); if (b && !r.error) { b.textContent = r.data || ''; b.style.display = r.data ? 'inline-block' : 'none' } } catch (e) {}
+}
+async function inflAdminLoad() {
+  const body = document.getElementById('cp-body'); body.innerHTML = '<div class="empty">Loading…</div>'
+  const { data, error } = await sb.rpc('admin_influencer_reports', { p_status: inflA.status })
+  inflA.rows = error ? [] : (data || []); inflA.err = error ? (/admin_influencer_reports/.test(error.message) ? 'Run influencer_reports.sql in Supabase first.' : error.message) : ''
+  inflAdminDraw(); inflAdminBadge()
+}
+function inflRoleFor(r) {
+  if (!cpData) return null
+  const d = r.post_date || String(r.created_at).slice(0, 10)
+  return (cpData.roles || []).find(x => x.studio_id === r.studio_id && x.start_date <= d && (!x.end_date || x.end_date >= d))
+      || cpCurrentRoles().find(x => x.studio_id === r.studio_id) || null
+}
+function inflAdminDraw() {
+  const body = document.getElementById('cp-body')
+  const rule = cpData && (cpData.rules || []).find(x => x.code === INFL_RULE)
+  let h = `<div class="cp-muted" style="margin-bottom:0.75rem">Coordinators report influencer collaborations from the Hub: what was agreed, the post link(s) and screenshot(s).
+      <b>Approve</b> gives the studio's coordinator the <b>${rule ? cpEsc(rule.name) + ' (' + cpFmt(cpRulePoints(rule)) + ' pts)' : 'influencer_post'}</b> points; <b>Send back</b> returns it with your note.</div>`
+  if (cpData && !rule) h += `<div class="empty" style="color:#c0392b;text-align:left">Add an Earning Rule first: name <b>Influencer post</b>, code <b>influencer_post</b>, <b>1,000</b> points each. Approving uses it.</div>`
+  h += `<div style="margin-bottom:0.75rem"><select onchange="inflA.status=this.value;inflAdminLoad()">${[['submitted', 'Waiting for approval'], ['returned', 'Sent back'], ['approved', 'Approved'], ['all', 'All']].map(o => `<option value="${o[0]}"${o[0] === inflA.status ? ' selected' : ''}>${o[1]}</option>`).join('')}</select></div>`
+  if (inflA.err) h += `<div class="empty" style="color:#c0392b">${cpEsc(inflA.err)}</div>`
+  else if (!inflA.rows.length) h += '<div class="empty">Nothing here.</div>'
+  else h += inflA.rows.map(r => {
+    const role = inflRoleFor(r), who = role ? cpStaffName(role.staff_profile_id) : 'no coordinator on file'
+    return `<div class="infl-a">
+      <div class="infl-a-main"><div><b>${cpEsc(getStudioName(r.studio_id))}</b> · <b>@${cpEsc(String(r.handle).replace(/^@/, ''))}</b>${r.influencer_name ? ' (' + cpEsc(r.influencer_name) + ')' : ''}
+          <span class="cp-muted">${cpEsc(r.platform)}${r.followers ? ' · ' + cpFmt(r.followers) + ' followers' : ''}${r.post_date ? ' · posted ' + cpEsc(r.post_date) : ''}</span></div>
+        <div><b>Agreed:</b> ${cpEsc(r.agreement)}</div>
+        <div>${(r.post_urls || []).map((u, i) => `<a href="${cpEsc(u)}" target="_blank" rel="noopener">Post${(r.post_urls || []).length > 1 ? ' ' + (i + 1) : ''} ↗</a>`).join(' · ')}</div>
+        <div class="infl-a-shots">${(r.screenshots || []).map(u => `<a href="${cpEsc(u)}" target="_blank" rel="noopener"><img src="${cpEsc(u)}" alt="Screenshot"></a>`).join('')}</div>
+        ${r.note ? `<div class="cp-muted">${cpEsc(r.note)}</div>` : ''}
+        ${r.repeat ? `<div style="color:#b45309;font-size:12px">⚠️ This studio already has ${r.repeat} approved report${r.repeat === 1 ? '' : 's'} for this handle.</div>` : ''}
+        <div class="cp-muted">Reported ${cpDateLabel(r.created_at)}${r.reported_by ? ' by ' + cpEsc(r.reported_by) : ''} · points go to <b>${cpEsc(who)}</b></div></div>
+      <div class="infl-a-side">${r.status === 'submitted'
+        ? `<button class="btn btn-primary btn-sm" onclick="inflApprove('${r.id}')">Approve</button><button class="btn btn-secondary btn-sm" onclick="inflReturn('${r.id}')">Send back</button>`
+        : r.status === 'approved' ? `✅ +${cpFmt(r.points_awarded || 0)}<div class="cp-muted">${cpDateLabel(r.reviewed_at)}</div>` : `↩️ Sent back<div class="cp-muted">${cpEsc(r.review_note || '')}</div>`}</div></div>`
+  }).join('')
+  body.innerHTML = h
+}
+async function inflApprove(id) {
+  const r = inflA.rows.find(x => x.id === id), role = r && inflRoleFor(r)
+  if (!role) { alert('There\u2019s no coordinator on file for this studio, so the points have nowhere to go.'); return }
+  if (!confirm(`Approve @${String(r.handle).replace(/^@/, '')} for ${getStudioName(r.studio_id)}? The points go to ${cpStaffName(role.staff_profile_id)}.`)) return
+  try {
+    const res = await cpRequest('add_manual_earn', { coordinator_role_id: role.id, rule_code: INFL_RULE, quantity: 1, date: r.post_date || cpData.today,
+      note: `Influencer post: @${String(r.handle).replace(/^@/, '')} (${r.platform})` })
+    const { error } = await sb.rpc('admin_influencer_review', { p_id: id, p_decision: 'approved', p_note: null, p_points: res.points || null })
+    if (error) throw error
+    await cpRefresh().catch(() => {}); cpSub = 'influencer'; inflAdminLoad()
+  } catch (e) { alert(/rule/i.test(e.message || '') ? 'Add the Earning Rule "influencer_post" (1,000 points) first. ' + e.message : e.message) }
+}
+async function inflReturn(id) {
+  const note = prompt('What does the coordinator need to fix? (They see this.)'); if (note == null) return
+  const { error } = await sb.rpc('admin_influencer_review', { p_id: id, p_decision: 'returned', p_note: note, p_points: null })
+  if (error) { alert(error.message); return }
+  inflAdminLoad()
+}
+
 async function cpLoadBadge() {
+  inflAdminBadge()
   try { cpData = await cpRequest('get_all'); cpUpdateBadges() } catch (e) { /* schema or function not live yet — stay quiet */ }
 }
 
@@ -13819,6 +13890,7 @@ function cpRender() {
   const body = document.getElementById('cp-body')
   if (cpSub === 'coordinators') { scLoad(); return }
   if (cpSub === 'instagram') { igLoad(); return }
+  if (cpSub === 'influencer') { inflAdminLoad(); return }
   if (!cpData) { body.innerHTML = `<div class="empty" style="color:#c0392b">${cpEsc(cpLoadError || 'Points data isn\'t loaded yet.')}</div>`; return }
   if (cpSub === 'rules') body.innerHTML = cpRenderRules()
   if (cpSub === 'prizes') body.innerHTML = cpRenderPrizes()
