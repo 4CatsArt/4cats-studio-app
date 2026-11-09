@@ -7638,12 +7638,87 @@ const FT_COLS = [['status', 'Status', 'status', 112], ['follow_up', 'Follow up',
   ['booked_date', 'Booked date', 'date', 128], ['booked_time', 'Time', 'time', 104], ['quote', 'Quote $', 'money', 86], ['invoice_sent', 'Invoice sent', 'date', 128],
   ['invoice_due', 'Invoice due', 'date', 128], ['paid_on', 'Paid', 'date', 128], ['assigned_to', 'Who’s on it', 'text', 110], ['staff_note', 'Staff note', 'text', 220],
   ['notes', 'Their questions', 'notes', 200], ['source', 'From', 'source', 98], ['created_at', 'Received', 'ro', 96]];
+
+// =====================================================================================================================
+// 🧾 Field trip invoices (field_trip_invoices.sql): from a tracker row, hold the time and email the invoice (World's invoice page:
+// project, children, terms, $100 deposit before tax or pay in full, Stripe). After the trip: the balance invoice, or paid at the studio.
+// =====================================================================================================================
+const FTI_ST = { sent: '⏳ Invoice sent', deposit_paid: '✓ Deposit paid', paid: '✓ Paid', balance_sent: '🧾 Balance sent', closed: '✓ Paid (studio)', cancelled: 'Cancelled', released: 'Released (unpaid)' };
+const ftiDl = d => d ? new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '';
+function ftInvOf(reqId) { return (_ft.inv || []).filter(i => i.request_id === reqId).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null; }
+function ftInvCell(r) {
+  if (_ft.inv === null) return _ft.invErr && /hub_ft_invoices/.test(_ft.invErr) ? '<span class="fd-sm">Run field_trip_invoices.sql</span>' : '';
+  const i = ftInvOf(r.id), ed = _hoCan.edit, b = (a, l, p) => `<button class="ho-btn sm${p ? ' primary' : ''}" onclick="ftInvAct('${escAttr(i.id)}','${a}')">${l}</button>`;
+  if (!i || ['cancelled', 'released'].includes(i.status)) return (i ? `<span class="cust-st">${esc(FTI_ST[i.status])}</span> ` : '') + (ed ? `<button class="ho-btn sm" onclick="ftInvNew('${escAttr(r.id)}')">🧾 Invoice</button>` : '');
+  const what = i.status === 'sent' ? `deposit due ${ftiDl(i.pay_by)}` : i.status === 'balance_sent' ? `$${Number(i.balance || 0).toFixed(2)} due ${ftiDl(i.balance_due)}` : i.status === 'deposit_paid' ? `trip ${ftiDl(i.day)}` : '';
+  return `<span class="cust-st cust-${i.status === 'sent' || i.status === 'balance_sent' ? 'held' : 'booked'}" title="${escAttr(`${i.school || ''} · ${i.day} ${String(i.at).slice(0, 5)} · ${i.students} children · ${i.project || 'project to choose'}${i.agreed_at ? ' · terms agreed by ' + i.agreed_name : ''} · paid so far $${Number(i.paid_total || 0).toFixed(2)} before tax`)}">${esc(FTI_ST[i.status] || i.status)}</span> <span class="fd-sm">${esc(what)}</span>
+    ${ed ? `<div class="cust-acts" style="margin:4px 0 0">${i.status === 'sent' ? b('send', i.sent_at ? 'Resend' : 'Send', !i.sent_at) + b('extend', 'Extend') + b('cancel', 'Cancel')
+      : i.status === 'deposit_paid' ? b('balance', 'Balance invoice', true) + b('paid_studio', 'Paid at studio') + b('cancel', 'Cancel')
+      : i.status === 'balance_sent' ? b('send', 'Resend') + b('paid_studio', 'Paid at studio') : ''}</div>` : ''}`;
+}
+let _ftProjects = null;
+async function ftInvNew(reqId) {
+  const r = (_ft.rows || []).find(x => x.id === reqId) || {};
+  if (_ftProjects === null) { try { const d = await fetch(`${SUPABASE_URL}/functions/v1/public-studio-data?view=fieldtrips`, { headers: { Authorization: 'Bearer ' + SUPABASE_ANON_KEY, apikey: SUPABASE_ANON_KEY } }).then(x => x.json()); _ftProjects = ((d && d.pricing && d.pricing.projects) || []); } catch (e) { _ftProjects = []; } }
+  const pb = (() => { const d = new Date(); d.setDate(d.getDate() + 7); return localDateStr(d); })();
+  const st = Object.keys(STUDIO_NAMES).sort((a, b) => STUDIO_NAMES[a].localeCompare(STUDIO_NAMES[b]));
+  openDutySheet(`<h3>🧾 Field trip invoice</h3><p class="ho-intro">Holds the time (workshops in it close) and emails ${esc(r.email || 'the contact')} the invoice: they confirm the project and children, agree to the terms, and pay the deposit or the full estimate. Unpaid by the deposit date, it\u2019s released.</p>
+    <div class="me-form">
+      <label>School / group<input id="fi-school" value="${escAttr(r.school || '')}"></label>
+      <label>Contact<input id="fi-contact" value="${escAttr(r.contact_name || '')}"></label>
+      <label>Email<input id="fi-email" type="email" value="${escAttr(r.email || '')}"></label>
+      <label>Phone<input id="fi-phone" value="${escAttr(r.phone || '')}"></label>
+      <label>Studio<select id="fi-studio">${st.map(x => `<option value="${x}"${x === r.studio_id ? ' selected' : ''}>${esc(STUDIO_NAMES[x])}</option>`).join('')}</select></label>
+      <label>Date<input id="fi-day" type="date" value="${escAttr(r.booked_date || '')}"></label>
+      <label>Start time<input id="fi-at" type="time" step="900" value="${escAttr(String(r.booked_time || '').slice(0, 5))}"></label>
+      <label>Children<input id="fi-students" type="number" min="1" value="${escAttr(r.students || 10)}"></label>
+      <label>Adults<input id="fi-adults" type="number" min="0" value="${escAttr(r.adults || 0)}"></label>
+      <label>Project<select id="fi-project"><option value="">Let them choose</option>${(_ftProjects || []).map(p => `<option value="${escAttr(p.label)}"${String(r.project || '').toLowerCase().includes(String(p.label).toLowerCase()) ? ' selected' : ''}>${esc(p.label)} ($${Number(p.price).toFixed(2)} each)</option>`).join('')}</select></label>
+      <label>Deposit (before tax)<input id="fi-deposit" type="number" min="0" step="0.01" value="100"></label>
+      <label>Deposit due by<input id="fi-pay" type="date" value="${escAttr(pb)}"></label>
+      <label>Note (optional, on the invoice)<input id="fi-note" maxlength="300"></label>
+    </div><div id="fi-msg"></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="fi-go" onclick="ftInvCreate('${escAttr(reqId)}')">Hold the time and email the invoice</button></div>`);
+}
+async function ftInvCreate(reqId) {
+  const v = id => ((document.getElementById(id) || {}).value || '').trim(), msg = document.getElementById('fi-msg'), btn = document.getElementById('fi-go');
+  const p = { request_id: reqId, school: v('fi-school'), contact_name: v('fi-contact'), email: v('fi-email'), phone: v('fi-phone'), studio_id: v('fi-studio'), day: v('fi-day'), at: v('fi-at'),
+    students: v('fi-students'), adults: v('fi-adults'), project: v('fi-project'), deposit: v('fi-deposit'), pay_by: v('fi-pay'), note: v('fi-note') };
+  if (!p.day || !p.at) { msg.innerHTML = '<div class="me-msg err">Choose the date and start time.</div>'; return; }
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const { data, error } = await sb.rpc('hub_ft_invoice_create', { p });
+  if (error) { btn.disabled = false; btn.textContent = 'Try again'; msg.innerHTML = `<div class="me-msg err">${esc(/hub_ft_invoice_create/.test(error.message) ? 'Run field_trip_invoices.sql in Supabase first.' : error.message)}</div>`; return; }
+  const r = await ftInvEmail(data.id);
+  closeDutySheet(); alert(r.ok ? 'Held, and the invoice was emailed to ' + p.email + '.' : 'Held, but the invoice email didn\u2019t send: ' + r.error + ' (use Send).'); ftLoad();
+}
+async function ftInvEmail(id) {
+  const ses = await sb.auth.getSession(), tk = ses && ses.data && ses.data.session && ses.data.session.access_token;
+  const r = await fetch(`${SUPABASE_URL}/functions/v1/custom-party-invite`, { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + (tk || SUPABASE_ANON_KEY) }, body: JSON.stringify({ ft_id: id }) }).catch(() => null);
+  const d = r ? await r.json().catch(() => ({})) : {};
+  return r && r.ok ? { ok: true, link: d.link } : { ok: false, error: d.error || 'please try again' };
+}
+async function ftInvAct(id, action) {
+  const i = (_ft.inv || []).concat((_cust && _cust.ft) || []).find(x => x.id === id) || {};
+  if (action === 'send') { const r = await ftInvEmail(id); if (r.ok && r.link) { try { await navigator.clipboard.writeText(r.link); } catch (e) {} } alert(r.ok ? 'Emailed (and the link copied).' : 'The email didn\u2019t send: ' + r.error); ftAfter(); return; }
+  let date = null, n = null;
+  if (action === 'extend') { date = prompt('New deposit due date (YYYY-MM-DD):', String(i.pay_by || '')); if (!date) return; }
+  if (action === 'balance') { n = prompt(`How many children came? (at least ${10} are charged)`, String(i.students || '')); if (!n) return; n = parseInt(n, 10); if (!(n > 0)) { alert('Enter a number.'); return; } }
+  if (action === 'paid_studio' && !confirm('Mark this field trip as paid in full at the studio?')) return;
+  if (action === 'cancel' && !confirm(i.status === 'sent' ? 'Cancel this invoice? The time is released and its workshops reopen.' : 'Cancel this field trip? (The deposit is non-refundable under the terms.)')) return;
+  const { data, error } = await sb.rpc('hub_ft_invoice_action', { p_id: id, p_action: action, p_date: date, p_students: n });
+  if (error) { alert(error.message); return; }
+  if (action === 'balance') { const r = await ftInvEmail(id); alert(r.ok ? `Balance invoice emailed: $${Number(data.balance || 0).toFixed(2)} + tax, due ${ftiDl(data.balance_due)}.` : 'Saved, but the email didn\u2019t send: ' + r.error + ' (use Resend).'); }
+  ftAfter();
+}
+function ftAfter() { if (paneVisible('ft-pane')) ftLoad(); if (_plan && paneVisible('plan-pane')) customLoad(true).then(() => renderPlanDay()); }
+
 function openFtPane() {
   if (!_hoCan.view) { alert('Field trips are for home office admins.'); return; }
   showOnlyPane('ft-pane'); setActiveNav('nav-ft'); ftLoad();
 }
 async function ftLoad() {
   _ft.rows = null; ftDraw();
+  try { const iv = await sb.rpc('hub_ft_invoices', { p_studio: null }); _ft.inv = iv.error ? null : (iv.data || []); _ft.invErr = iv.error ? iv.error.message : ''; } catch (e) { _ft.inv = null; }
   let data = null, error = null;
   try { ({ data, error } = await sb.rpc('hub_field_trips', { p_status: _ft.status })); } catch (e) { error = e; }
   if (data && !Array.isArray(data)) data = [];
@@ -7698,8 +7773,8 @@ function ftDrawPage(el) {
   if (F.err) h += `<div class="goal-note">${esc(F.err)}</div>`;
   else if (R === null) h += '<div class="goal-note">Loading…</div>';
   else if (!rows.length) h += '<div class="goal-note">No field trip requests here.</div>';
-  else h += `<div class="fd-tbl-wrap ft-wrap"><table class="fd-tbl ft-tbl"><thead><tr>${FT_COLS.map(c => `<th style="min-width:${c[3]}px"><button class="fd-th${F.sort === c[0] ? ' on' : ''}" onclick="ftSort('${c[0]}')">${esc(c[1])}${F.sort === c[0] ? (F.desc ? ' ▼' : ' ▲') : ''}</button></th>`).join('')}${_hoCan.edit ? '<th></th>' : ''}</tr></thead><tbody>` +
-    rows.map(r => `<tr class="${r.follow_up && r.follow_up <= today && !['booked', 'declined'].includes(r.status) ? 'ft-due' : ''} ft-r-${escAttr(r.status || 'new')}">${FT_COLS.map(c => ftCell(r, c)).join('')}` +
+  else h += `<div class="fd-tbl-wrap ft-wrap"><table class="fd-tbl ft-tbl"><thead><tr><th style="min-width:200px">Invoice</th>${FT_COLS.map(c => `<th style="min-width:${c[3]}px"><button class="fd-th${F.sort === c[0] ? ' on' : ''}" onclick="ftSort('${c[0]}')">${esc(c[1])}${F.sort === c[0] ? (F.desc ? ' ▼' : ' ▲') : ''}</button></th>`).join('')}${_hoCan.edit ? '<th></th>' : ''}</tr></thead><tbody>` +
+    rows.map(r => `<tr class="${r.follow_up && r.follow_up <= today && !['booked', 'declined'].includes(r.status) ? 'ft-due' : ''} ft-r-${escAttr(r.status || 'new')}"><td class="ft-inv">${ftInvCell(r)}</td>${FT_COLS.map(c => ftCell(r, c)).join('')}` +
       (_hoCan.edit ? `<td class="ft-x">${F.saving[r.id] === 1 ? '…' : F.saving[r.id] === 2 ? '✓' : `<button title="Delete this row" onclick="ftDel('${escAttr(r.id)}')">🗑</button>`}</td>` : '') + '</tr>').join('') + '</tbody></table></div>';
   el.innerHTML = h;
   const w1 = el.querySelector('.ft-wrap'); if (w1 && keep) { w1.scrollTop = keep[0]; w1.scrollLeft = keep[1]; }
@@ -9158,7 +9233,7 @@ function planOptions(current) {
 // 0 booked and 0 spaces left = not running (kids classes and catch-ups are
 // counted differently, so they always show).
 function planNotRunning(x) {
-  if (planIsKids(x) || x.title === 'Catch Up Class') return false;
+  if (planIsKids(x) || x.title === 'Catch Up Class' || x.held_until) return false;   // (a held custom time or field trip: always shown)
   return !(_plan.booked[x.id] > 0) && x.spaces_left_cache !== null && x.spaces_left_cache !== undefined && Number(x.spaces_left_cache) <= 0;
 }
 // Pre-orders, note and class list bits shown on every session row.
@@ -9555,14 +9630,15 @@ async function customLoad(force) {
   const st = _sessionStudioId; if (!st) return;
   if (!force && _cust.studio === st && _cust.rows && Date.now() - _cust.at < 60000) return;
   const { data, error } = await sb.rpc('hub_custom_holds', { p_studio: st });
-  _cust = { studio: st, rows: error ? [] : (data || []), at: Date.now(), err: error ? (/hub_custom_holds/.test(error.message) ? 'Run custom_party_times.sql in Supabase first.' : error.message) : '' };
+  let ft = []; try { const f = await sb.rpc('hub_ft_invoices', { p_studio: st }); ft = f.error ? [] : (f.data || []); } catch (e) {}
+  _cust = { studio: st, rows: error ? [] : (data || []), ft, at: Date.now(), err: error ? (/hub_custom_holds/.test(error.message) ? 'Run custom_party_times.sql in Supabase first.' : error.message) : '' };
 }
 async function customDraw(date) {
   const el = document.getElementById('plan-custom'); if (!el) return;
   if (!_sessionStudioId) { el.innerHTML = ''; return; }
   const first = !(_cust.studio === _sessionStudioId && _cust.rows);
   await customLoad(false);
-  if (first && _plan && (_cust.rows || []).some(h => (h.status === 'held' || h.status === 'booked') && h.day === _plan.date)) { renderPlanDay(); return; }
+  if (first && _plan && ((_cust.rows || []).some(h => (h.status === 'held' || h.status === 'booked') && h.day === _plan.date) || (_cust.ft || []).some(h => h.status === 'sent' && h.day === _plan.date))) { renderPlanDay(); return; }
   if (!planCanEdit()) { el.innerHTML = ''; return; }   // (everyone sees a held time's line; the box and its buttons are for coordinators and home office)
   const admin = !!(_studioData && _studioData.isAdmin), live = (_cust.rows || []).filter(r => r.status === 'requested');   // (held times: their actions are on their own line in the day)
   const dl = d => new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
@@ -9585,6 +9661,13 @@ function customTag(x) {
 }
 // a held custom time's line on the Schedule: on hold, for whom, link sent when, pay by when
 function customHeldHtml(x) {
+  const fi = (_cust.ft || []).find(h => h.session_id === x.id && h.status === 'sent');
+  if (fi) {
+    const admin = !!(_studioData && _studioData.isAdmin);
+    return `<span class="cust-st cust-held" title="${escAttr(`${fi.students} children · ${fi.project || 'project to choose'} · contact ${fi.contact_name || ''} ${fi.email || ''}${fi.phone ? ' ' + fi.phone : ''}`)}">⏳ On hold: field trip</span> for <b>${esc(fi.school || fi.contact_name || '')}</b>
+      · ${fi.sent_at ? 'invoice sent ' + esc(ftiDl(fi.sent_at)) : '<b style="color:#b45309">invoice not sent yet</b>'} · deposit due by <b>${esc(ftiDl(fi.pay_by))}</b>
+      ${admin ? `<span class="cust-acts"><button class="ho-btn sm" onclick="ftInvAct('${escAttr(fi.id)}','send')">${fi.sent_at ? 'Resend' : 'Send'}</button><button class="ho-btn sm" onclick="ftInvAct('${escAttr(fi.id)}','extend')">Extend</button><button class="ho-btn sm" onclick="ftInvAct('${escAttr(fi.id)}','cancel')">Cancel</button></span>` : ''}`;
+  }
   const r = (_cust.rows || []).find(h => h.session_id === x.id && h.status === 'held'); if (!r) return '';
   const dl = d => new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
   const sent = r.sent_at ? new Date(r.sent_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '';
