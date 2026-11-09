@@ -2318,6 +2318,12 @@ tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decorati
 .pb-blk.brk, .pb-key i.brk { background: repeating-linear-gradient(135deg, #ececec 0 4px, #f7f7f7 4px 8px); border-color: #9a9a9a; color: #555; }
 .pb-ghost { position: fixed; z-index: 3000; pointer-events: none; opacity: .9; box-shadow: 0 6px 18px rgba(0,0,0,.2); }
 .pb-pick { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.cust-box { border: 1px solid #ecdfc6; background: #fffaf0; border-radius: 12px; padding: 10px 12px; margin: 6px 0 10px; }
+.cust-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; } .cust-head .spacer { flex: 1; }
+.cust-row { padding: 6px 0; border-top: 1px dashed #ecdfc6; font-size: 13.5px; } .cust-row.today { background: #fff3d6; border-radius: 8px; padding: 6px 8px; }
+.cust-st { display: inline-block; font-size: 11.5px; font-weight: 800; padding: 1px 8px; border-radius: 999px; background: #eee; margin-right: 6px; }
+.cust-held { background: #fff0c2; color: #6b4b00; } .cust-requested { background: #e5edfb; color: #23406e; } .cust-booked { background: #e3f3e8; color: #1f5130; }
+.cust-acts { display: inline-flex; gap: 6px; margin-left: 6px; flex-wrap: wrap; }
 </style>
 </head>
 <body>
@@ -2760,6 +2766,7 @@ tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decorati
     <p class="ho-intro" id="plan-intro"></p>
     <div id="plan-labour"></div>
     <div id="plan-dayboard" class="admin-only-link" style="display:none;margin:4px 0 8px"></div>
+    <div id="plan-custom"></div>
     <div id="plan-idea-pin"></div>
     <div class="plan-days" id="plan-days"></div>
     <!-- Floor plan for the day (Day view's own code). Outside plan-body so redraws don't wipe it. -->
@@ -8718,7 +8725,7 @@ async function loadPlanDay(date) {
   try {
     const [team, sess] = await Promise.all([
       sb.rpc('hub_team_on_date', { p_studio_id: st, p_date: date }),
-      sb.from('sessions').select('id, title, session_date, session_time, session_type, duration_minutes, capacity, spaces_left_cache, show, world_item_id, world_party').eq('studio_id', st).eq('session_date', date).order('session_time')
+      sb.from('sessions').select('id, title, session_date, session_time, session_type, duration_minutes, capacity, spaces_left_cache, show, world_item_id, world_party, held_until').eq('studio_id', st).eq('session_date', date).order('session_time')
         .then(r => r.error && /world_party/.test(r.error.message) ? sb.from('sessions').select('id, title, session_date, session_time, session_type, duration_minutes, capacity, spaces_left_cache, show, world_item_id').eq('studio_id', st).eq('session_date', date).order('session_time') : r)
     ]);
     if (team.error) throw team.error;
@@ -8773,7 +8780,7 @@ async function loadPlanDay(date) {
     // Same rows as the Day view: hidden sessions only if someone's booked, and
     // capacity-0 rows only if booked (kids class weeks and catch-ups always).
     const isWeek2 = x => /\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(x.title || '');
-    sessions = sessions.filter(x => (x.show !== false || booked[x.id] > 0) &&
+    sessions = sessions.filter(x => (x.show !== false || booked[x.id] > 0 || x.held_until) &&
       // closed sessions (0 or negative spots) stay, under "Not running", so they can be reopened;
       // empty kids class sign-up rows ("6 Week Session") stay hidden, like the Day view
       (booked[x.id] > 0 || x.capacity === null || x.capacity > 0 || isWeek2(x) || x.title === 'Catch Up Class' || !/week session/i.test(x.title || '')));
@@ -9382,6 +9389,7 @@ function renderPlanDay() {
   // Party forms: keep the open forms' own elements (and anything typed) across redraws.
   setTimeout(placePartyForms, 0);
   if (edit) setTimeout(loadTimecards, 0);
+  try { customDraw(P.date); } catch (e) {}   // 🎉 custom party / get-together times (custom_party_times.sql)
   // (Nov 9 2026) 🗂️ Board view: the same day as a timeline by person; only moving teaching and demos between people
   planViewButtons();
   if (planView() === 'board') { body.innerHTML = planBoardHtml(); planBoardWire(); return; }
@@ -9531,6 +9539,95 @@ function planBoardWire() {
       document.addEventListener('pointermove', move, { passive: false }); document.addEventListener('pointerup', up);
     });
   });
+}
+
+
+// =====================================================================================================================
+// 🎉 Custom party and get-together times (custom_party_times.sql, custom-party-invite): a hidden World-run time held for one
+// customer until a pay-by date, with a secret link to World's normal party booking (paid on the usual invoice).
+// Home office makes them (and approves requests); coordinators request them.
+// =====================================================================================================================
+let _cust = { studio: null, rows: null, at: 0, err: '' };
+const CUST_KIND = { kids: 'Kids Party', splatter: 'Splatter Party', get_together: 'Adult Get-Together' };
+const CUST_ST = { requested: '📝 Requested', held: '⏳ Held', booked: '✓ Booked', released: 'Released (not paid)', cancelled: 'Cancelled', declined: 'Declined' };
+async function customLoad(force) {
+  const st = _sessionStudioId; if (!st) return;
+  if (!force && _cust.studio === st && _cust.rows && Date.now() - _cust.at < 60000) return;
+  const { data, error } = await sb.rpc('hub_custom_holds', { p_studio: st });
+  _cust = { studio: st, rows: error ? [] : (data || []), at: Date.now(), err: error ? (/hub_custom_holds/.test(error.message) ? 'Run custom_party_times.sql in Supabase first.' : error.message) : '' };
+}
+async function customDraw(date) {
+  const el = document.getElementById('plan-custom'); if (!el) return;
+  if (!_sessionStudioId || !planCanEdit()) { el.innerHTML = ''; return; }
+  await customLoad(false);
+  const admin = !!(_studioData && _studioData.isAdmin), live = (_cust.rows || []).filter(r => r.status === 'requested' || r.status === 'held' || (r.status === 'booked' && r.day >= localDateStr(new Date())));
+  const dl = d => new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
+  const row = r => `<div class="cust-row${r.day === date ? ' today' : ''}"><span class="cust-st cust-${escAttr(r.status)}">${esc(CUST_ST[r.status] || r.status)}</span>
+      <b>${esc(CUST_KIND[r.kind] || r.kind)}</b> · ${esc(dl(r.day))} ${esc(shortTime(String(r.at).slice(0, 5)))} · ${esc(r.customer_name || '')} <span class="goal-note">${esc(r.customer_email || '')}</span>
+      ${r.status === 'held' ? `<span class="goal-note">· pay by ${esc(dl(r.pay_by))}${r.sent_at ? '' : ' · <b style="color:#b45309">link not sent</b>'}${r.closed_n ? ` · ${r.closed_n} workshop${r.closed_n === 1 ? '' : 's'} closed` : ''}</span>` : ''}
+      ${r.status === 'requested' && r.requested_by ? `<span class="goal-note">· requested by ${esc(r.requested_by)}</span>` : ''}
+      ${r.note ? `<div class="goal-note">📝 ${esc(r.note)}</div>` : ''}
+      <span class="cust-acts">${admin && r.status === 'requested' ? `<button class="ho-btn sm primary" onclick="customAct('${escAttr(r.id)}','approve')">Approve & send</button><button class="ho-btn sm" onclick="customAct('${escAttr(r.id)}','cancel')">Decline</button>` : ''}
+        ${admin && r.status === 'held' ? `<button class="ho-btn sm${r.sent_at ? '' : ' primary'}" onclick="customSend('${escAttr(r.id)}')">${r.sent_at ? 'Resend link' : 'Send link'}</button><button class="ho-btn sm" onclick="customAct('${escAttr(r.id)}','extend')">Extend</button><button class="ho-btn sm" onclick="customAct('${escAttr(r.id)}','cancel')">Cancel</button>` : ''}</span></div>`;
+  el.innerHTML = `<div class="cust-box"><div class="cust-head"><b>🎉 Custom party times</b><span class="goal-note">${admin ? 'held for one customer, booked through a private link' : 'ask home office for a party or get-together at another time'}</span>
+      <span class="spacer"></span><button class="ho-btn sm" onclick="customNew()">${admin ? '+ Custom party time' : '+ Request a custom time'}</button></div>
+    ${_cust.err ? `<div class="goal-note">${esc(_cust.err)}</div>` : live.length ? live.map(row).join('') : ''}</div>`;
+}
+function customNew() {
+  const admin = !!(_studioData && _studioData.isAdmin), d0 = (_plan && _plan.date) || localDateStr(new Date());
+  const pb = (() => { const d = new Date(); d.setDate(d.getDate() + 2); return localDateStr(d); })();
+  openDutySheet(`<h3>🎉 ${admin ? 'Custom party time' : 'Request a custom party time'}</h3>
+    <p class="ho-intro">${admin ? 'A private time held for one customer. They get a link to book it on 4Cats World (the normal party booking, paid as usual). Workshops in its 2 hours close while it\u2019s held; if it isn\u2019t booked by the pay-by date, it\u2019s released.' : 'Home office will check it and send the customer their private booking link.'}</p>
+    <div class="me-form">
+      <label>What<select id="cu-kind"><option value="kids">Kids Party</option><option value="splatter">Splatter Party</option><option value="get_together">Adult Get-Together</option></select></label>
+      <label>Date<input type="date" id="cu-day" value="${escAttr(d0)}"></label>
+      <label>Start time<input type="time" id="cu-at" step="900"></label>
+      <label>Customer name<input id="cu-name" autocomplete="off"></label>
+      <label>Customer email<input id="cu-email" type="email" autocomplete="off"></label>
+      <label>Phone (optional)<input id="cu-phone" autocomplete="off"></label>
+      ${admin ? `<label>Pay by<input type="date" id="cu-pay" value="${escAttr(pb)}"></label>` : ''}
+      <label>Note (optional, in the email)<input id="cu-note" maxlength="300" placeholder="e.g. as discussed on the phone"></label>
+    </div><div id="cu-msg"></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="cu-go" onclick="customCreate()">${admin ? 'Hold it and email the link' : 'Send the request'}</button></div>`);
+}
+async function customCreate() {
+  const v = id => (document.getElementById(id) || {}).value || '', msg = document.getElementById('cu-msg'), btn = document.getElementById('cu-go');
+  const p = { studio_id: _sessionStudioId, kind: v('cu-kind'), day: v('cu-day'), at: v('cu-at'), customer_name: v('cu-name').trim(), customer_email: v('cu-email').trim(),
+    customer_phone: v('cu-phone').trim(), pay_by: v('cu-pay') || null, note: v('cu-note').trim() };
+  if (!p.day || !p.at) { msg.innerHTML = '<div class="me-msg err">Choose the date and start time.</div>'; return; }
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const { data, error } = await sb.rpc('hub_custom_hold_create', { p });
+  if (error) { btn.disabled = false; btn.textContent = 'Try again'; msg.innerHTML = `<div class="me-msg err">${esc(/hub_custom_hold_create/.test(error.message) ? 'Run custom_party_times.sql in Supabase first.' : error.message)}</div>`; return; }
+  let note = data.status === 'requested' ? 'Request sent to home office.' : 'Held.';
+  if (data.status === 'held') { const r = await customEmail(data.id); note = r.ok ? 'Held, and the link was emailed to ' + p.customer_email + '.' : 'Held, but the email didn\u2019t send: ' + r.error + ' (use Send link).'; }
+  closeDutySheet(); await customLoad(true); if (_plan) { await loadPlanDay(_plan.date); _plan.msg = note; renderPlanDay(); } else alert(note);
+}
+async function customEmail(id) {
+  const ses = await sb.auth.getSession(), tk = ses && ses.data && ses.data.session && ses.data.session.access_token;
+  const r = await fetch(`${SUPABASE_URL}/functions/v1/custom-party-invite`, { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + (tk || SUPABASE_ANON_KEY) },
+    body: JSON.stringify({ hold_id: id }) }).catch(() => null);
+  const d = r ? await r.json().catch(() => ({})) : {};
+  return r && r.ok ? { ok: true, link: d.link } : { ok: false, error: d.error || 'please try again' };
+}
+async function customSend(id) {
+  const r = await customEmail(id);
+  if (r.ok && r.link) { try { await navigator.clipboard.writeText(r.link); } catch (e) {} }
+  await customLoad(true); if (_plan) { _plan.msg = r.ok ? 'Link emailed (and copied, to paste into a message if you like).' : 'The email didn\u2019t send: ' + r.error; renderPlanDay(); }
+}
+async function customAct(id, action) {
+  const r0 = (_cust.rows || []).find(x => x.id === id) || {};
+  let pay = null;
+  if (action === 'extend' || action === 'approve') {
+    const d = new Date(); d.setDate(d.getDate() + 2);
+    pay = prompt(action === 'extend' ? 'New pay-by date (YYYY-MM-DD):' : 'Pay by (YYYY-MM-DD):', action === 'extend' ? String(r0.pay_by || '') : localDateStr(d));
+    if (!pay) return; if (!/^\d{4}-\d{2}-\d{2}$/.test(pay)) { alert('Use a date like 2026-11-20.'); return; }
+  }
+  if (action === 'cancel' && !confirm(r0.status === 'requested' ? 'Decline this request?' : 'Cancel this held time? It closes, and the workshops it closed reopen.')) return;
+  const { error } = await sb.rpc('hub_custom_hold_action', { p_id: id, p_action: action, p_pay_by: pay });
+  if (error) { alert(error.message); return; }
+  let note = action === 'cancel' ? (r0.status === 'requested' ? 'Request declined.' : 'Cancelled: the time is released.') : action === 'extend' ? 'Pay-by date changed.' : 'Approved and held.';
+  if (action === 'approve') { const r = await customEmail(id); note = r.ok ? 'Approved, held, and the link emailed.' : 'Approved and held, but the email didn\u2019t send: ' + r.error; }
+  await customLoad(true); if (_plan) { await loadPlanDay(_plan.date); _plan.msg = note; renderPlanDay(); }
 }
 
 function planTouched(msg) { _plan.dirty = true; _plan.msg = ''; const m = document.getElementById('plan-msg'); if (m) m.textContent = msg || 'Unsaved changes'; }
