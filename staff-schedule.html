@@ -370,6 +370,7 @@ table.pl-staff .bad { color: var(--bad); }
     <button class="tab active" data-view="build" onclick="switchView('build')">Build schedule</button>
     <button class="tab" data-view="coverage" onclick="switchView('coverage')">Coverage</button>
     <button class="tab" data-view="plan" onclick="switchView('plan')">Plan offerings</button>
+    <button class="tab" data-view="person" onclick="switchView('person'); psLoad()">👤 Person</button>
     <button class="tab" data-view="timeoff" onclick="switchView('timeoff')">Time off<span class="count" id="pending-count" style="display:none"></span></button>
     <button class="tab" data-view="unavail" onclick="switchView('unavail')">Unavailability</button>
     <button class="tab" data-view="moves" onclick="switchView('moves'); mvLoad()">🚚 Moving studios</button>
@@ -450,6 +451,20 @@ table.pl-staff .bad { color: var(--bad); }
         and sends the planned staff to Build schedule as draft shifts. Until then, planned staff stay with the plan only.
       </div>
       <div id="pl-body"><div class="panel"><div class="empty">Choose a studio to start planning.</div></div></div>
+    </div>
+
+    <!-- ===== ONE PERSON (Nov 9 2026): their schedule across every studio, and home office (WFH) days ===== -->
+    <div class="view" id="view-person">
+      <div class="toolbar">
+        <select class="input staff-select" id="ps-staff" onchange="psLoad()" title="Whose schedule"></select>
+        <button class="btn" onclick="psWeek(-1)" aria-label="Earlier">&#9664;</button>
+        <strong id="ps-range" style="min-width:210px;text-align:center"></strong>
+        <button class="btn" onclick="psWeek(1)" aria-label="Later">&#9654;</button>
+        <select class="input" id="ps-weeks" onchange="psLoad()" title="How many weeks"><option value="1">1 week</option><option value="2">2 weeks</option><option value="4" selected>4 weeks</option></select>
+        <span class="spacer"></span>
+        <span class="muted small">🏠 Home office (WFH) days don't count at any studio (labour %, coverage); they're home office labour.</span>
+      </div>
+      <div id="ps-body"><div class="panel"><div class="empty">Choose a person.</div></div></div>
     </div>
 
     <!-- ===== TIME OFF ===== -->
@@ -1019,6 +1034,83 @@ async function addTimeOff() {
   toast('Time off saved')
   ;['to-start', 'to-end', 'to-from', 'to-until'].forEach(id => { document.getElementById(id).value = '' })
   await loadTimeOff()
+}
+
+
+/* =====================================================================
+   👤 PERSON (Nov 9 2026): one person's schedule across every studio (shifts, time off, unavailability), a few weeks at a
+   time, and home office (WFH) days: shifts with studio_id '__HOME_OFFICE__' (the payroll code for home office), so they never
+   count at a studio (coverage, labour %), and the builder sees the person as busy that day.
+   ===================================================================== */
+const HOME_OFFICE = '__HOME_OFFICE__'
+let psStart = null, psShifts = [], psFor = null
+function psMonday(d) { const x = parseYmd(d); const w = (x.getDay() + 6) % 7; x.setDate(x.getDate() - w); return ymd(x) }
+function psWeek(n) { const d = parseYmd(psStart || psMonday(todayStr())); d.setDate(d.getDate() + 7 * n * (+document.getElementById('ps-weeks').value || 1)); psStart = ymd(d); psLoad() }
+const psPaid = sh => { const [a, b] = [sh.start_time, sh.end_time].map(t => { const [h, m] = String(t).split(':').map(Number); return h * 60 + (m || 0) }); const m = b - a; return m > 300 ? m - 30 : m }
+async function psLoad() {
+  if (!psStart) psStart = psMonday(todayStr())
+  const sel = document.getElementById('ps-staff'), pid = sel.value, weeks = +document.getElementById('ps-weeks').value || 4
+  const end = parseYmd(psStart); end.setDate(end.getDate() + 7 * weeks - 1); const to = ymd(end)
+  document.getElementById('ps-range').textContent = shortDay(psStart) + ' \u2013 ' + shortDay(to)
+  const body = document.getElementById('ps-body')
+  if (!pid) { body.innerHTML = '<div class="panel"><div class="empty">Choose a person.</div></div>'; return }
+  body.innerHTML = '<div class="panel"><div class="loading">Loading\u2026</div></div>'
+  const { data, error } = await sb.from('staff_shifts').select('*').eq('staff_id', pid).gte('shift_date', psStart).lte('shift_date', to).order('shift_date').order('start_time')
+  if (error) { body.innerHTML = '<div class="panel"><div class="empty">' + esc(error.message) + '</div></div>'; return }
+  psShifts = data || []; psFor = pid; psDraw(to)
+}
+function psDraw(to) {
+  const pid = psFor, weeks = +document.getElementById('ps-weeks').value || 4, days = []
+  for (let d = parseYmd(psStart), i = 0; i < 7 * weeks; i++, d.setDate(d.getDate() + 1)) days.push(ymd(d))
+  const p = staffById[pid] || {}
+  const offs = (timeOffRows || []).filter(r => r.staff_id === pid && r.status !== 'denied' && r.status !== 'cancelled')
+  const unav = (unavailRows || []).filter(r => r.staff_id === pid)
+  let h = '<div class="panel"><div class="panel-body" style="padding:10px 14px"><b>' + esc(staffName(pid)) + '</b>' + (p.home_studio_id ? ' <span class="muted small">\u00b7 home studio ' + esc(STUDIO_NAMES[p.home_studio_id] || p.home_studio_id) + '</span>' : '') +
+    (p.min_weekly_hours != null || p.max_weekly_hours != null ? ' <span class="muted small">\u00b7 ' + (p.min_weekly_hours != null ? 'at least ' + p.min_weekly_hours + 'h' : '') + (p.max_weekly_hours != null ? (p.min_weekly_hours != null ? ', ' : '') + 'at most ' + p.max_weekly_hours + 'h' : '') + ' a week</span>' : '') + '</div>'
+  for (let w = 0; w < weeks; w++) {
+    const wd = days.slice(w * 7, w * 7 + 7), mine = psShifts.filter(x => wd.includes(x.shift_date))
+    const paid = Math.round(mine.reduce((t, x) => t + psPaid(x), 0) / 6) / 10, wfh = Math.round(mine.filter(x => x.studio_id === HOME_OFFICE).reduce((t, x) => t + psPaid(x), 0) / 6) / 10
+    h += '<table class="list" style="margin-bottom:6px"><thead><tr><th colspan="4">Week of ' + esc(fmtDate(wd[0])) + ' \u00b7 <span style="font-weight:600">' + paid + 'h paid' + (wfh ? ' (' + wfh + 'h home office)' : '') + ' on ' + new Set(mine.map(x => x.shift_date)).size + ' days</span></th></tr></thead><tbody>' +
+      wd.map(d => {
+        const sh = mine.filter(x => x.shift_date === d), dow = parseYmd(d).getDay()
+        const off = offs.filter(r => r.start_date <= d && r.end_date >= d)
+        const un = unav.filter(r => Number(r.day_of_week) === dow && (!r.effective_from || r.effective_from <= d) && (!r.effective_to || r.effective_to >= d))
+        const cells = sh.map(x => { const wfhS = x.studio_id === HOME_OFFICE
+          return '<div style="display:flex;gap:8px;align-items:center;margin:2px 0"><span class="pill" style="' + (wfhS ? 'background:#eef3ff;color:#23406e' : '') + '">' + esc(wfhS ? '\ud83c\udfe0 Home office' : (STUDIO_NAMES[x.studio_id] || x.studio_id)) + '</span>' +
+            '<b>' + esc(fmtRange(x.start_time, x.end_time)) + '</b><span class="muted small">' + Math.round(psPaid(x) / 6) / 10 + 'h \u00b7 ' + esc(x.status) + '</span>' +
+            (wfhS ? '<button class="btn small" onclick="psWfh(\'' + d + '\',\'' + x.id + '\')">Edit</button><button class="btn small bad" onclick="psWfhRemove(\'' + x.id + '\')">Remove</button>' : '') + '</div>' }).join('')
+        const notes = off.map(r => '<span class="pill pending" title="' + esc(r.note || '') + '">Time off' + (r.start_time ? ' ' + esc(fmtRange(r.start_time, r.end_time)) : '') + ' \u00b7 ' + esc(r.status) + '</span>').join(' ') +
+          un.map(r => '<span class="pill source">Unavailable' + (r.start_time ? ' ' + esc(fmtRange(r.start_time, r.end_time)) : '') + '</span>').join(' ')
+        return '<tr><td style="width:170px"><b>' + esc(parseYmd(d).toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })) + '</b></td><td>' + (cells || '<span class="muted small">\u2014</span>') + '</td><td>' + notes + '</td>' +
+          '<td class="actions" style="width:150px">' + (sh.some(x => x.studio_id === HOME_OFFICE) ? '' : '<button class="btn small" onclick="psWfh(\'' + d + '\')">+ \ud83c\udfe0 WFH day</button>') + '</td></tr>'
+      }).join('') + '</tbody></table>'
+  }
+  document.getElementById('ps-body').innerHTML = h + '</div>'
+}
+// Add or change a home office (WFH) day: times, saved as an approved shift (home office days have no draft step)
+async function psWfh(date, id) {
+  const cur = id ? psShifts.find(x => String(x.id) === String(id)) : null
+  const fm = t => { const [h, m] = String(t).split(':').map(Number); return (h % 12 || 12) + (m ? ':' + String(m).padStart(2, '0') : '') + (h >= 12 ? 'p' : 'a') }
+  const v = prompt(staffName(psFor) + ', ' + fmtDate(date) + ': home office (WFH) times, e.g. 9a-5p', cur ? fm(cur.start_time) + '-' + fm(cur.end_time) : '9a-5p'); if (!v) return
+  const m = v.replace(/\s+/g, '').toLowerCase().match(/^(\d{1,2})(?::(\d{2}))?([ap])m?-(\d{1,2})(?::(\d{2}))?([ap])m?$/)
+  if (!m) { toast('Use times like 9a-5p, with a or p on both.', true); return }
+  const mins = (h, mm, ap) => ((+h % 12) + (ap === 'p' ? 12 : 0)) * 60 + (+mm || 0), a = mins(m[1], m[2], m[3]), b = mins(m[4], m[5], m[6])
+  if (b - a < 60) { toast('The end is before the start (or under an hour).', true); return }
+  const other = psShifts.filter(x => x.shift_date === date && x.studio_id !== HOME_OFFICE)
+  if (other.length && !confirm(staffName(psFor) + ' also has a studio shift that day (' + other.map(x => (STUDIO_NAMES[x.studio_id] || x.studio_id) + ' ' + fmtRange(x.start_time, x.end_time)).join(', ') + '). Add the home office time too?')) return
+  const off = (timeOffRows || []).filter(r => r.staff_id === psFor && r.status === 'approved' && r.start_date <= date && r.end_date >= date)
+  if (off.length && !confirm(staffName(psFor) + ' has approved time off that day. Add a home office day anyway?')) return
+  const row = { start_time: fromMin(a), end_time: fromMin(b) }
+  const r = cur ? await sb.from('staff_shifts').update(row).eq('id', cur.id)
+    : await sb.from('staff_shifts').insert(Object.assign({ staff_id: psFor, studio_id: HOME_OFFICE, shift_date: date, status: 'approved' }, row))
+  if (r.error) { toast('Not saved: ' + r.error.message + (/foreign key|violates check/i.test(r.error.message) ? ' (send this message to Claude: shifts don\u2019t accept home office yet)' : ''), true); return }
+  toast(cur ? 'Home office day changed' : 'Home office day added'); psLoad()
+}
+async function psWfhRemove(id) {
+  if (!confirm('Remove this home office day?')) return
+  const { error } = await sb.from('staff_shifts').delete().eq('id', id).eq('studio_id', HOME_OFFICE)
+  if (error) { toast(error.message, true); return }
+  toast('Home office day removed'); psLoad()
 }
 
 /* ---------- unavailability ---------- */
