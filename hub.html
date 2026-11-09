@@ -2355,6 +2355,8 @@ tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decorati
 .pb-blk.open { background: #fff !important; border: 1.5px solid #d9d2c4 !important; color: #555 !important; box-shadow: none !important; } .pb-openrow .pb-who b { color: #888; }
 .oc-alert { background: #fdecec; border: 1.5px solid #f3b4b4; color: #7f1d1d; border-radius: 14px; padding: 10px 14px; margin: 0 0 10px; font-size: 14.5px; line-height: 1.45; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .hero-hours { display: inline-block; margin-left: 10px; padding: 2px 10px; border-radius: 999px; background: rgba(255,255,255,.22); font-weight: 600; white-space: nowrap; }
+.pb-blk.open.booked { background: #f4f1ea !important; border-color: #cfc6b4 !important; color: #333 !important; } .pb-blk.open { cursor: pointer; } .pb-blk:not(.move) { cursor: pointer; }
+.pb-det { background: #fbf8f2; border-radius: 10px; padding: 8px 12px; margin: 0 0 8px; }
 </style>
 </head>
 <body>
@@ -9608,6 +9610,7 @@ function planSetView(v) { try { localStorage.setItem('hub_plan_view', v); } catc
 function planViewButtons() { const v = planView(), a = document.getElementById('plan-v-list'), b = document.getElementById('plan-v-board');
   if (a) a.classList.toggle('primary', v === 'list'); if (b) b.classList.toggle('primary', v === 'board'); }
 let _pbBlocks = [];
+function planBoardCanMove() { return planCanEdit() || !!_sessionStudioId; }
 function planBoardBlocks() {
   const P = _plan, dplan = planDemoPlan(), out = [];
   const tl = x => String(x.title || '').split('|')[0].trim();
@@ -9629,13 +9632,19 @@ function planBoardBlocks() {
   return out;
 }
 function planBoardHtml() {
-  const P = _plan, edit = planCanEdit(), blocks = _pbBlocks = planBoardBlocks();
+  const P = _plan, edit = planBoardCanMove(), blocks = _pbBlocks = planBoardBlocks();
   const people = (P.team || []).map(p => ({ p, wn: planWriteName(p), keys: [hubNameKey(planWriteName(p)), hubNameKey(p.name)], a: hubMin(p.start_time), z: hubMin(p.end_time) }));
   const laneOf = b => { const k = hubNameKey(b.who); return k ? people.find(x => x.keys.includes(k)) || null : null; };
   // (Nov 9 2026) the times not booked yet, in white above the people (as on the day board): information only
   const tl0 = x => String(x.title || '').split('|')[0].trim();
-  const openTimes = P.sessions.filter(x => !planIsKids(x) && !planIsCamp(x) && !planNotRunning(x) && !((P.booked[x.id] || 0) > 0))
-    .map(x => { const a = hubMin(x.session_time); return { id: 'o:' + x.id, kind: 'open', title: x.partySlot ? 'Party slot' : tl0(x), sub: x.held_until ? 'on hold' : x.partySlot ? (x.spaces_left_cache || 0) + ' open' : (x.spaces_left_cache != null ? x.spaces_left_cache + ' spots' : 'not booked'), start: a, end: a + (+x.duration_minutes || (x.session_type === 'party' ? 120 : 90)), fixed: true }; });
+  const ptIds = new Set((P.parties || []).map(pt => pt.session && pt.session.id));
+  const openTimes = P.sessions.filter(x => !planIsCamp(x) && !planNotRunning(x) && !ptIds.has(x.id))
+    .map(x => { const a = hubMin(x.session_time), n = P.booked[x.id] || 0; return { id: 'o:' + x.id, kind: n > 0 ? 'open booked' : 'open', sid: x.id, title: x.partySlot ? 'Party slot' : tl0(x),
+      sub: x.held_until ? 'on hold' : x.partySlot ? (x.spaces_left_cache || 0) + ' open' : n > 0 ? n + (planIsKids(x) ? ' enrolled' : ' booked') : (x.spaces_left_cache != null ? x.spaces_left_cache + ' spots' : 'not booked'),
+      start: a, end: a + (+x.duration_minutes || (x.session_type === 'party' ? 120 : 90)), fixed: true }; });
+  (P.parties || []).forEach(pt => { const x = pt.session || {}, a = hubMin(x.session_time);
+    openTimes.push({ id: 'o:p' + x.id, kind: 'open booked', sid: x.id, title: tl0(x) + (pt.booking && pt.booking.customer_name ? ' · ' + pt.booking.customer_name : ''), sub: (pt.guests ? pt.guests + ' guests' : 'booked'), start: a, end: a + (+x.duration_minutes || 120), fixed: true, party: pt }); });
+  _pbOpen = openTimes;
   const all = people.map(x => x.a).concat(blocks.map(b => b.start), openTimes.map(b => b.start)), ends = people.map(x => x.z).concat(blocks.map(b => b.end), openTimes.map(b => b.end));
   const lo = Math.floor((all.length ? Math.min(...all) : 9 * 60) / 60) * 60, hi = Math.ceil((ends.length ? Math.max(...ends) : 17 * 60) / 60) * 60, span = Math.max(60, hi - lo);
   const pct = m => ((m - lo) / span * 100).toFixed(3) + '%', w = (a, z) => ((z - a) / span * 100).toFixed(3) + '%';
@@ -9658,10 +9667,10 @@ function planBoardHtml() {
   const [y, m, d] = P.date.split('-').map(Number);
   return `<div class="pb-head"><b>${esc(new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }))}</b>
       <span class="pb-key"><i class="kids"></i>Kids class <i class="wheel"></i>Wheel <i class="party"></i>Party (art time) <i class="demo"></i>Demo <i class="brk"></i>Break</span>
-      <span class="spacer"></span>${edit ? `<span class="plan-msg" id="plan-msg">${esc(P.msg || (P.dirty ? 'Unsaved changes' : ''))}</span><button class="ho-btn" onclick="planSuggestBreaks()">☕ Suggest breaks</button><button class="ho-btn primary" onclick="planSave()"${P.dirty ? '' : ' disabled'}>Save</button>` : `<button class="ho-btn" onclick="openPinModal()">🔒 Unlock to move</button>`}</div>
+      <span class="spacer"></span>${edit ? `<span class="plan-msg" id="plan-msg">${esc(P.msg || (P.dirty ? 'Unsaved changes' : ''))}</span>${planCanEdit() ? '<button class="ho-btn" onclick="planSuggestBreaks()">☕ Suggest breaks</button>' : ''}<button class="ho-btn primary" onclick="planSave()"${P.dirty ? '' : ' disabled'}>Save</button>` : `<button class="ho-btn" onclick="openPinModal()">🔒 Unlock to move</button>`}</div>
     <p class="ho-intro" style="margin:4px 0 8px">${edit ? 'Drag a class, party, wheel time or demo onto someone to give it to them, or tap it and pick. Then Save. Dashed = suggested; red outline = a clash or outside their shift.' : 'Who’s teaching and demoing when. A coordinator can move things between people after unlocking with their PIN.'}</p>
     <div class="pb-board"><div class="pb-row pb-times"><div class="pb-who"></div><div class="pb-lane" style="height:22px">${hours.map(m => `<span class="pb-hr" style="left:${pct(m)}">${hl(m)}</span>`).join('')}</div></div>
-      ${openTimes.length ? lane('', 'Not booked yet', 'open times', openTimes, null).replace('pb-lane drop', 'pb-lane').replace('class="pb-row"', 'class="pb-row pb-openrow"') : ''}
+      ${openTimes.length ? lane('', 'The day', 'every time · white = not booked yet', openTimes, null).replace('pb-lane drop', 'pb-lane').replace('class="pb-row"', 'class="pb-row pb-openrow"') : ''}
       ${lanes || '<div class="ho-intro" style="padding:10px">No shifts posted for this day yet.</div>'}
       ${nobody.length ? lane('', 'Nobody yet', 'needs someone', nobody, null) : ''}</div>`;
 }
@@ -9674,17 +9683,29 @@ function planBoardGive(id, wn) {
   else if (b.kind === 'demo') { P.demoBy = P.demoBy || {}; P.demoBy[b.sid] = wn; }
   P.dirty = true; P.msg = ''; renderPlanDay();
 }
+let _pbOpen = [];
+function planBoardDetails(b) {   // the full title, time, numbers, and for parties the art and party time
+  const x = (_plan.sessions || []).find(z => z.id === b.sid) || ((_plan.parties || []).find(p => p.session && p.session.id === b.sid) || {}).session || {};
+  const pt = b.party || (_plan.parties || []).find(p => p.session && p.session.id === b.sid);
+  let h = `<div class="pb-det"><div><b>${esc(String(x.title || b.title || '').split('|')[0].trim() || b.title)}</b></div><div class="goal-note">${esc(mHm(b.start))}–${esc(mHm(b.end))}${b.sub ? ' · ' + esc(b.sub) : ''}${b.who ? ' · ' + esc(b.who) : ''}</div>`;
+  if (pt) { const d = pt.detail || {}; let ad = {}; try { ad = parseAddonDetails(parsePartyAddons(pt.booking && pt.booking.raw_payload, getPartySubtype(x.title || '')), getPartySubtype(x.title || '')) || {}; } catch (e) {}
+    h += `<div class="goal-note">🎨 Art time: <b>${esc(d.actual_art_time || ad.artTime || (/get.?together/i.test(x.title || '') ? '90 min' : '60 min'))}</b> · 🎉 Party time after: <b>${esc((d.actual_party_time || ad.partyTime || 'none').replace(/^none$/, 'none'))}</b>${pt.guests ? ` · ${pt.guests} guests` : ''}${pt.booking && pt.booking.customer_name ? ` · ${esc(pt.booking.customer_name)}` : ''}</div>`; }
+  return h + '</div>';
+}
 function planBoardPick(id) {
-  const b = _pbBlocks.find(z => z.id === id); if (!b || b.fixed) return;
+  const b = _pbBlocks.find(z => z.id === id) || _pbOpen.find(z => z.id === id); if (!b) return;
+  if (b.fixed || !planBoardCanMove()) { openDutySheet(`<h3>${esc(b.title)}</h3>${planBoardDetails(b)}<div class="sheet-actions"><button onclick="closeDutySheet()">Close</button></div>`); return; }
   window._pbPickId = id;
-  openDutySheet(`<h3>${esc(b.title)} · ${esc(mHm(b.start))}–${esc(mHm(b.end))}</h3><p class="ho-intro">Who ${b.kind === 'demo' ? 'demos' : 'teaches'} it?</p>
+  openDutySheet(`<h3>${esc(b.title)} · ${esc(mHm(b.start))}–${esc(mHm(b.end))}</h3>${planBoardDetails(b)}<p class="ho-intro">Who ${b.kind === 'demo' ? 'demos' : 'teaches'} it?</p>
     <div class="pb-pick">${(_plan.team || []).map((p, i) => `<button class="ho-btn${hubNameKey(planWriteName(p)) === hubNameKey(b.who) ? ' primary' : ''}" onclick="closeDutySheet(); planBoardGive(window._pbPickId, planWriteName(_plan.team[${i}]))">${esc(p.name)} <small>${esc(shortTime(p.start_time))}–${esc(shortTime(p.end_time))}</small></button>`).join('')}
       <button class="ho-btn" onclick="closeDutySheet(); planBoardGive(window._pbPickId, '')">Nobody (needs someone)</button></div>
     <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button></div>`);
 }
 // drag (mouse, pen or finger) onto someone's row; a tap opens the picker
 function planBoardWire() {
-  if (!planCanEdit()) return;
+  // tap any fixed block (the day's times, breaks) for its details
+  document.querySelectorAll('#plan-body .pb-blk:not(.move)').forEach(el => el.addEventListener('click', () => planBoardPick(el.dataset.id)));
+  if (!planBoardCanMove()) return;
   document.querySelectorAll('#plan-body .pb-blk.move').forEach(el => {
     el.addEventListener('pointerdown', ev => {
       if (ev.button > 0) return;
@@ -10038,7 +10059,7 @@ async function planRetime(id) {
   _plan.msg = `Moved ${x.title} from ${data.from} to ${data.to}${data.bookings ? ` (${data.bookings} booking${data.bookings === 1 ? '' : 's'} moved with it)` : ''}.${mailed}`; renderPlanDay();
 }
 async function planSave() {
-  if (!planCanEdit()) { openPinModal(); return; }
+  if (!planCanEdit() && !(planView() === 'board' && planBoardCanMove())) { openPinModal(); return; }
   const P = _plan;
   const m = document.getElementById('plan-msg'); if (m) m.textContent = 'Saving…';
   try {
