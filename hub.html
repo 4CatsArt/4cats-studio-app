@@ -2299,6 +2299,8 @@ tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decorati
 .fam-cgrp-item .fam-what b { font-weight: 600; }
 .inbox-links { font-size: 12.5px; font-weight: 600; margin-left: 4px; white-space: nowrap; } .inbox-links a { color: var(--accent, #c8232c); }
 .inbox-why { width: 100%; box-sizing: border-box; font: inherit; font-size: 12.5px; padding: 5px 8px; border: 1px solid #e3dccd; border-radius: 8px; margin: 4px 0; }
+.ws-tag.shut { background: #fde8e8; color: #9b1c1c; font-size: 12px; padding: 3px 10px; }
+.ws-row.ws-shut { border-style: dashed; border-color: #e3b4b4; background: #fbf6f6; } .ws-row.ws-shut .t { color: #9b1c1c; text-decoration: line-through; }
 </style>
 </head>
 <body>
@@ -3214,12 +3216,37 @@ async function myNoteDone(id) {
 // Past days: hours worked (punches; a shift with no punches counts as planned). Today and on: planned shifts.
 // Admin only while it's being built; $ amounts only for finance logins (the database decides).
 const _labour = { cache: {}, busy: {} };
-function labourCan() { return !!(_studioData && _studioData.isAdmin); }
+function labourCan() { return !!(_studioData && _studioData.isAdmin) || !!_sessionPin; }
+// (Nov 9 2026) coordinators: their own studio's labour %, through hub_day_labour_coord (the coordinator PIN; % only, no $)
+const labourAdmin = () => !!(_studioData && _studioData.isAdmin);
+function labourRpc(studio, from, to) {
+  return labourAdmin() ? sb.rpc('hub_day_labour', { p_studio_id: studio, p_from: from, p_to: to })
+    : sb.rpc('hub_day_labour_coord', { p_studio_id: studio, p_from: from, p_to: to, p_pin: _sessionPin });
+}
+// the week (Sunday to Saturday, like pay periods) that a day is in: its labour % against that week's bookings
+function labourWeekOf(date) { const d = new Date(date + 'T12:00:00'); d.setDate(d.getDate() - d.getDay()); const a = localDateStr(d); d.setDate(d.getDate() + 6); return [a, localDateStr(d)]; }
+async function labourWeekGet(studio, date) {
+  const [a, z] = labourWeekOf(date), k = 'w|' + studio + '|' + a + '|' + (labourAdmin() ? 'a' : 'c');
+  if (_labour.cache[k] && Date.now() - _labour.cache[k].at < 5 * 60 * 1000) return _labour.cache[k].d;
+  if (_labour.busy[k]) return _labour.busy[k];
+  _labour.busy[k] = labourRpc(studio, a, z).then(r => {
+    delete _labour.busy[k];
+    if (r.error) return { err: /hub_day_labour/.test(r.error.message) ? 'Run hub_day_labour.sql first.' : r.error.message };
+    const d = { pct: r.data.total_pct, exp_pct: r.data.total_exp_pct, from: a, to: z };
+    _labour.cache[k] = { at: Date.now(), d }; return d;
+  });
+  return _labour.busy[k];
+}
+function labourWeekHtml(w) {
+  if (!w || w.err) return '';
+  const lbl = new Date(w.from + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) + '–' + new Date(w.to + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' });
+  return `<span class="lab-item" title="Labour against the bookings for the whole week (Sun–Sat), worked hours for past days and planned for the rest"><span class="lab-k">This week (${esc(lbl)})</span>${w.pct == null ? '<span class="lab-pct off">No bookings</span>' : `<span class="lab-pct ${labStaffCls(w.pct)}">${w.pct}%</span>`}</span>`;
+}
 async function labourGet(studio, date) {
-  const k = studio + '|' + date;
+  const k = studio + '|' + date + '|' + (labourAdmin() ? 'a' : 'c');
   if (_labour.cache[k] && Date.now() - _labour.cache[k].at < 60 * 1000) return _labour.cache[k].d;
   if (_labour.busy[k]) return _labour.busy[k];
-  _labour.busy[k] = sb.rpc('hub_day_labour', { p_studio_id: studio, p_from: date, p_to: date }).then(r => {
+  _labour.busy[k] = labourRpc(studio, date, date).then(r => {
     delete _labour.busy[k];
     if (r.error) return { err: /hub_day_labour/.test(r.error.message) ? 'Run hub_day_labour.sql first.' : r.error.message };
     const d = Object.assign({ money: r.data.money, today: r.data.today }, (r.data.days || [])[0] || {});
@@ -3270,20 +3297,22 @@ function labourSubHtml(d) {
 async function labourCardLoad() {
   const el = document.getElementById('card-labour'); if (!el) return;
   if (!labourCan() || !_sessionStudioId) { el.style.display = 'none'; return; }
-  const today = localDateStr(new Date()), d = await labourGet(_sessionStudioId, today);
+  const today = localDateStr(new Date()), [d, w] = await Promise.all([labourGet(_sessionStudioId, today), labourWeekGet(_sessionStudioId, today)]);
+  if (!labourCan()) { el.style.display = 'none'; return; }   // (the PIN view may have closed while it loaded)
   el.style.display = '';
   el.innerHTML = `<div class="lab-card"><div class="lab-row"><span class="lab-ttl">📊 Labour today</span>${labourPctHtml(d)}<span class="spacer"></span>
-      ${d && d.money ? `<button class="ho-btn" onclick="labourTable('${escAttr(_sessionStudioId)}','${today}')">Details</button>` : ''}<span class="lab-admin" title="Only home office sees this for now">admin</span></div>
+      ${d && d.money ? `<button class="ho-btn" onclick="labourTable('${escAttr(_sessionStudioId)}','${today}')">Details</button>` : ''}${labourAdmin() ? '<span class="lab-admin" title="Home office and coordinators see this">admin</span>' : ''}</div>
+    ${labourWeekHtml(w) ? `<div class="lab-pair">${labourWeekHtml(w)}</div>` : ''}
     ${labourHintHtml(d)}${d && d.money ? `<div class="lab-pair">${labourMarginHtml(d, true)}${labourSoldHtml(d, true)}</div><div class="lab-sub">${labourSubHtml(d)}</div>` : ''}</div>`;
 }
 async function labourLineLoad(elId, date) {
   const el = document.getElementById(elId); if (!el) return;
   if (!labourCan() || !_sessionStudioId || !date) { el.innerHTML = ''; return; }
   el.innerHTML = '<div class="lab-line"><span class="lab-sub">📊 Labour…</span></div>';
-  const d = await labourGet(_sessionStudioId, date);
+  const [d, w] = await Promise.all([labourGet(_sessionStudioId, date), labourWeekGet(_sessionStudioId, date)]);
   if (!document.getElementById(elId) || (_plan && _plan.date !== date && elId === 'plan-labour')) return;
-  el.innerHTML = `<div class="lab-line"><span class="lab-ttl">📊 Labour</span>${labourPctHtml(d)}<span class="lab-sub" title="Out of every $1 booked, how many cents pay staff. Doesn’t include rent, utilities or other costs.">goal ${LAB_GOAL}%</span>
-    ${d && d.money ? `${labourMarginHtml(d, false)}${labourSoldHtml(d, false)}<span class="lab-sub">${labourSubHtml(d)}</span><button class="ho-btn" onclick="labourTable('${escAttr(_sessionStudioId)}','${date}')">Details</button>` : ''}<span class="lab-admin" title="Only home office sees this for now">admin</span></div>`;
+  el.innerHTML = `<div class="lab-line"><span class="lab-ttl">📊 Labour</span>${labourPctHtml(d)}<span class="lab-sub" title="Out of every $1 booked, how many cents pay staff. Doesn’t include rent, utilities or other costs.">goal ${LAB_GOAL}%</span>${labourWeekHtml(w)}
+    ${d && d.money ? `${labourMarginHtml(d, false)}${labourSoldHtml(d, false)}<span class="lab-sub">${labourSubHtml(d)}</span><button class="ho-btn" onclick="labourTable('${escAttr(_sessionStudioId)}','${date}')">Details</button>` : ''}${labourAdmin() ? '<span class="lab-admin" title="Home office and coordinators see this">admin</span>' : ''}</div>`;
 }
 async function labourTable(studio, date) {
   const d = await labourGet(studio, date); if (!d || d.err) { alert((d && d.err) || 'Not loaded.'); return; }
@@ -8897,6 +8926,12 @@ async function wsEnsureItem(pre) {
   _wsProjects = null;   // reload: it's on World now
   return data;
 }
+// Reopen a time closed to bookings (e.g. on the day board): its open spots back (hub_board_session_close)
+async function wsReopen(id) {
+  const { error } = await sb.rpc('hub_board_session_close', { p_id: id, p_close: false });
+  if (error) { alert(/hub_board_session_close/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
+  await loadPlanDay(_plan.date); _plan.msg = 'Reopened to bookings.'; renderPlanDay();
+}
 function wsTime(t) { const [h, m] = String(t).split(':').map(Number); return `${h % 12 || 12}${m ? ':' + String(m).padStart(2, '0') : ''}${h >= 12 ? 'pm' : 'am'}`; }
 function wsDayHtml() {
   const W = _plan.ws;
@@ -8907,18 +8942,22 @@ function wsDayHtml() {
   const itemOpts = sel => items.map(i => `<option value="${escAttr(i.id)}"${i.id === sel ? ' selected' : ''}>${esc(i.title)}</option>`).join('');
   const shown = new Set((_plan.sessions || []).filter(z => !planNotRunning(z)).map(z => String(z.id)));   // the ones in the day's list above
   const rows = times.filter(t => !shown.has(String(t.session_id))).map(t => {   // the others have their controls on their own row above   // the others have their controls on their own row above
-    const quiet = t.show && t.spots > 0 && t.date >= today && t.date <= soon && t.booked / t.spots < 0.3;
-    return `<div class="plan-sess ws-row${t.show ? '' : ' off'}${quiet ? ' ws-quiet' : ''}">
+    // (Nov 9 2026) closed (no spots open: e.g. closed on the day board) or hidden, said clearly, with the way back
+    const ses = (_plan.sessions || []).find(z => String(z.id) === String(t.session_id));
+    const closed = t.show && !t.booked && ses && ses.spaces_left_cache !== null && ses.spaces_left_cache !== undefined && Number(ses.spaces_left_cache) <= 0;
+    const quiet = !closed && t.show && t.spots > 0 && t.date >= today && t.date <= soon && t.booked / t.spots < 0.3;
+    return `<div class="plan-sess ws-row${t.show && !closed ? '' : ' off ws-shut'}${quiet ? ' ws-quiet' : ''}">
       <span class="t">${esc(wsTime(t.time))}</span>
       <span class="nm">${t.booked ? esc(t.title) : `<select class="ws-swap" onchange="wsUpdate('${escAttr(t.session_id)}', { p_item: this.value })" title="Swap the workshop (nobody's booked yet)">${itemOpts(t.item_id)}</select>`}
-        ${quiet ? '<span class="ws-tag">Quiet</span>' : ''}${t.show ? '' : '<span class="ws-tag off">Hidden</span>'}</span>
+        ${quiet ? '<span class="ws-tag">Quiet</span>' : ''}${!t.show ? '<span class="ws-tag shut">🙈 Hidden: not on World</span>' : closed ? '<span class="ws-tag shut">🔒 Closed: not taking bookings</span>' : ''}</span>
       <span class="ws-count"><b>${t.booked}</b> / <input type="number" min="${Math.max(1, t.booked)}" max="200" value="${t.spots}" onchange="wsUpdate('${escAttr(t.session_id)}', { p_spots: +this.value })" aria-label="Spots"> booked</span>
-      <button class="ho-btn" onclick="wsUpdate('${escAttr(t.session_id)}', { p_show: ${!t.show} })">${t.show ? 'Hide' : 'Show'}</button>
+      ${closed ? `<button class="ho-btn primary" onclick="wsReopen('${escAttr(t.session_id)}')" title="Open it to bookings again">Reopen</button>`
+        : `<button class="ho-btn${t.show ? '' : ' primary'}" onclick="wsUpdate('${escAttr(t.session_id)}', { p_show: ${!t.show} })">${t.show ? 'Hide' : 'Show'}</button>`}
       ${t.booked ? '' : `<button class="ho-btn" onclick="wsRemove('${escAttr(t.session_id)}')">Remove</button>`}
     </div>`;
   }).join('');
   return `<div class="ho-section-head">🎨 Add a World workshop <span class="goal-note" style="font-weight:400">· sold on World, no Shopify products. This day\u2019s are in the list above, with their controls.</span></div>
-    ${rows ? `<div class="goal-note" style="margin:2px 0 4px">Not in the list above (hidden, or no spots):</div>${rows}` : ''}
+    ${rows ? `<div class="goal-note" style="margin:2px 0 4px"><b>Closed or hidden this day</b> (not in the list above): reopen or show them here.</div>${rows}` : ''}
     ${items.length || (_wsProjects || []).length ? `${wsSetupHtml('ws')}<div class="ws-add">
       ${wsPickerHtml('ws', items)}
       <input type="time" id="ws-time" step="900" aria-label="Time">
@@ -18244,6 +18283,7 @@ async function submitCoordinatorPin() {
     drawKilnCard();                            // kiln status becomes editable
   }
   loadCoordinatorCards(data.studioId);
+  try { labourCardLoad(); } catch (e) {}   // (Nov 9 2026) 📊 labour % for the coordinator
   loadFlashChallenges(data.studioId); // the SC can now claim
   refreshCoordBadges();
   checkAdjustPower();
@@ -18268,6 +18308,7 @@ function endCoordinatorView(reload = true) {
     if (el) el.innerHTML = '';
   });
   _adjustStaff = null;
+  try { labourCardLoad(); } catch (e) {}   // (the coordinator's labour card goes again, unless home office)
   drawKilnCard();   // kiln status back to read-only (admin logins stay editable)
   const adminLogin = !!(_studioData && _studioData.isAdmin);
   if (paneVisible('points-pane') || paneVisible('instagram-pane') || paneVisible('occupancy-pane') || (paneVisible('ackc-pane') && _ackcMode === 'coord') ||
