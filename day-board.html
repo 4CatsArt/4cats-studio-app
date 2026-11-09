@@ -165,6 +165,7 @@ main { padding: 14px 20px 40px; }
   <button id="brk" class="day-only" title="A 30-minute break for everyone on a shift over 5 hours: no more than 5 hours of work before or after it">Suggest breaks</button>
   <button id="demo" class="day-only" title="Give each demo (and any class or party with nobody) to the best person free then">Assign demos</button>
   <button id="reset" class="day-only" title="Put everything back the way it was last saved">Undo</button>
+  <button id="ahead" class="day-only" title="Plan and save the days ahead (only days nobody has saved yet), so the Hub shows the plan as the starting point">📅 Plan ahead</button>
   <button id="save" class="primary day-only" title="Save roles, breaks, teachers and demoers to the Day plan (the Hub's Day plan and On stage follow it)">Save the day</button>
   <span class="note wk-only">Changes here are real</span>
 </header>
@@ -1183,7 +1184,7 @@ async function dayPublish() {
 }
 
 // ---- Save the day: to the Day plan (roles, breaks, teachers, party teachers, who demos each time) ----
-async function saveDay() {
+async function saveDay(quiet) {
   if (!D) return;
   const nameOf = id => { const p = D.people.find(x => x.id === id); return p ? p.name : ''; };
   const whoOf = b => b.notNeeded ? 'none' : nameOf(b.person);   // ("no teacher (not needed)" is remembered as 'none')
@@ -1203,11 +1204,11 @@ async function saveDay() {
   });
   const extra = circ.length > 3 ? `\n\n(${circ.slice(3).map(p => p.show).join(', ')}: more than 3 circlers; the Day plan keeps 3, so ${circ.length - 3 === 1 ? 'this one isn’t' : 'these aren’t'} saved as a circler.)` : '';
   const { list } = problems();
-  if (!confirm(`Save this day to the Day plan?${list.length ? `\n\nThere ${list.length === 1 ? 'is 1 problem' : 'are ' + list.length + ' problems'} (see the list).` : ''}${extra}\n\nThe Hub's Day plan and On stage will show the same.`)) return;
+  if (quiet !== true && !confirm(`Save this day to the Day plan?${list.length ? `\n\nThere ${list.length === 1 ? 'is 1 problem' : 'are ' + list.length + ' problems'} (see the list).` : ''}${extra}\n\nThe Hub's Day plan and On stage will show the same.`)) return;
   const btn = $('save'); btn.disabled = true; btn.textContent = 'Saving…';
   const { error } = await sb.rpc('hub_day_board_save', { p: { studio_id: D.st, date: D.date, roles, times, parties: Object.values(parties) } });
   btn.disabled = false;
-  if (error) { btn.textContent = 'Save the day'; alert(/hub_day_board_save/.test(error.message) ? 'Run day_board_save.sql in Supabase first.' : error.message); return; }
+  if (error) { btn.textContent = 'Save the day'; if (quiet === true) throw new Error(error.message); alert(/hub_day_board_save/.test(error.message) ? 'Run day_board_save.sql in Supabase first.' : error.message); return; }
   await load();
   D.flash = 'Saved. The Hub\u2019s Day plan and On stage now show this day.'; draw();
 }
@@ -1727,6 +1728,39 @@ function setMode(m) {
 }
 const show = () => (MODE === 'week' ? loadWeek : load)();
 
+
+// ---- (Nov 9 2026) 📅 Plan ahead: Plan the day + Save the day for the days ahead, so the Hub's Schedule starts from this plan ----
+// Only days nobody has saved yet (no roles saved for the day) and with someone on shift; a saved day is never changed.
+// ?autoplan=1&studio=…&date=… (the Hub, for home office): the same for that one day, then tells the Hub.
+async function planOne(st, date) {
+  $('studio').value = st; $('date').value = date;
+  await load();
+  if (!D || D.st !== st || D.date !== date) return 'not loaded';
+  if (!D.people.length) return 'nobody on shift';
+  if (D.rolesFromPlan) return 'already saved';
+  planDay('all');
+  await saveDay(true);
+  return 'planned';
+}
+async function planAhead() {
+  const n = parseInt(prompt('Plan and save how many days ahead (from tomorrow)? Only days nobody has saved yet are planned.', '14'), 10);
+  if (!(n > 0)) return;
+  const all = confirm(`All studios? (OK = all ${Object.keys(STUDIO_NAMES).length} studios · Cancel = only ${STUDIO_NAMES[$('studio').value] || 'this studio'})`);
+  const studios = all ? Object.keys(STUDIO_NAMES) : [$('studio').value], start = addDays(localDate(new Date()), 1), keepSt = $('studio').value, keepDate = $('date').value;
+  const tally = { planned: 0, skipped: 0, failed: [] }, total = studios.length * n; let done = 0;
+  const bar = document.createElement('div'); bar.className = 'msg'; bar.style.cssText = 'position:fixed;left:50%;top:12px;transform:translateX(-50%);z-index:999;background:#fff;box-shadow:0 4px 18px rgba(0,0,0,.15)';
+  document.body.appendChild(bar);
+  for (const st of studios) for (let i = 0; i < n; i++) {
+    const date = addDays(start, i);
+    bar.textContent = `📅 Planning ${STUDIO_NAMES[st] || st}, ${date} (${++done} of ${total}) · ${tally.planned} planned`;
+    try { const r = await planOne(st, date); if (r === 'planned') tally.planned++; else tally.skipped++; }
+    catch (e) { tally.failed.push(`${STUDIO_NAMES[st] || st} ${date}: ${e.message || e}`); }
+  }
+  bar.remove();
+  $('studio').value = keepSt; $('date').value = keepDate; await load();
+  alert(`📅 Planned and saved ${tally.planned} day${tally.planned === 1 ? '' : 's'}; ${tally.skipped} skipped (already saved, or nobody on shift).${tally.failed.length ? `\n\nCouldn\u2019t plan:\n${tally.failed.slice(0, 10).join('\n')}` : ''}`);
+}
+
 // ---- start ----
 (async function init() {
   const qs = new URLSearchParams(location.search);
@@ -1745,12 +1779,18 @@ const show = () => (MODE === 'week' ? loadWeek : load)();
   $('next').onclick = () => stepTo(1);
   $('reset').onclick = () => { if (START) { D.blocks = JSON.parse(JSON.stringify(START)); D.people.forEach(p => { p.role = (D.startRoles.find(r => r[0] === p.id) || [])[1] || p.role; p.roleSet = false; }); draw(); } };
   $('wkstart').value = WEEK_MON ? 'mon' : 'sun';
-  $('save').onclick = saveDay; $('sendupd').onclick = sendUpdates; notifyBar(); $('addsh').onclick = () => D && dayShiftAdd(); $('addws').onclick = () => D && dayWorkshopAdd(); $('lockday').onclick = () => D && dayLockToggle(); $('pub').onclick = () => D && dayPublish();
+  $('save').onclick = () => saveDay(); $('ahead').onclick = planAhead; $('sendupd').onclick = sendUpdates; notifyBar(); $('addsh').onclick = () => D && dayShiftAdd(); $('addws').onclick = () => D && dayWorkshopAdd(); $('lockday').onclick = () => D && dayLockToggle(); $('pub').onclick = () => D && dayPublish();
   $('plan').onclick = () => planDay('all'); $('brk').onclick = () => planDay('brk'); $('demo').onclick = () => planDay('demo');
   const { data: { session } } = await sb.auth.getSession();
   if (!session) { $('main').innerHTML = `<div class="msg"><b>Sign in to the Hub first</b> (with a home office login), then come back to this page. <a href="hub.html">Open the Hub</a></div>`; return; }
   const ok = await sb.rpc('admin_can', { p_section: 'ops', p_level: 'view' });
   if (ok.error || ok.data !== true) { $('main').innerHTML = '<div class="msg">This page is for home office logins with Studio Ops access.</div>'; return; }
+  if (qs.get('autoplan') === '1' && qs.get('studio') && qs.get('date')) {   // (the Hub: plan and save this one day, then say so)
+    MODE = 'day'; let r = 'failed';
+    try { r = await planOne(qs.get('studio'), qs.get('date')); } catch (e) { r = 'failed: ' + (e.message || e); }
+    try { parent.postMessage({ dayboard: 'autoplan', studio: qs.get('studio'), date: qs.get('date'), result: r }, '*'); } catch (e) {}
+    return;
+  }
   setMode(qs.get('view') === 'week' ? 'week' : 'day');
 })();
 </script>
