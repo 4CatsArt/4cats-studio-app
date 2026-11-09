@@ -1448,7 +1448,7 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
     html += priceTiersHtml();
     html += partyPricingHtml();
     html += memberPricingHtml();
-    html += campPricingHtml();
+    html += campPricingHtml() + taxesHtml();
     html += membershipHtml();
     html += memCodesHtml();
     html += memInvitesHtml();
@@ -1502,7 +1502,7 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
     bindPriceTiers();
     bindPartyPricing();
     bindCredits();
-    bindCampPricing();
+    bindCampPricing(); bindTaxes();
     bindSales();
     bindPromos();
     bindStamps();
@@ -2722,6 +2722,33 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
     var out = String(t || '').split('+').map(function (p) { var m = p.trim().match(/^(GST|PST|HST)\s*([\d.]+)\s*%?$/i); return m ? [m[1].toUpperCase(), Number(m[2])] : null; });
     return out.every(Boolean) && out.length ? out : null;
   }
+  // ---- (Nov 9 2026) 🧾 Taxes: for everything paid with Stripe (World checkouts, the Hub's front desk, invoices). Stored with camp
+  // pricing (camp_pricing.taxes), where every checkout already reads them.
+  function taxesHtml() {
+    if (campPricing === null) return '';
+    var tx = campPricing.taxes || {};
+    return '<section class="panel" style="margin-top:20px" id="taxSec" data-foldname="Taxes"><h2>\ud83e\uddfe Taxes</h2>' +
+      '<p class="sub">For everything paid on World and at the Hub\u2019s front desk: workshops, classes, camps, parties, kits and charges. Write each like <b>GST 5</b>, or <b>GST 5 + PST 7</b>.</p>' +
+      '<table class="cp-tax"><thead><tr><th></th>' + PROVS.map(function (p) { return '<th>' + p + '</th>'; }).join('') + '</tr></thead><tbody>' +
+      [['services', 'Services (workshops, classes, camps, parties, aftercare)'], ['goods', 'Goods (kits, items, snacks)']].map(function (c) {
+        return '<tr><td><b>' + c[1] + '</b></td>' + PROVS.map(function (p) { return '<td><input type="text" data-tax="' + c[0] + '|' + p + '" value="' + esc(taxText((tx[c[0]] || {})[p])) + '"' + (canEdit ? '' : ' disabled') + '></td>'; }).join('') + '</tr>';
+      }).join('') + '</tbody></table>' +
+      (canEdit ? '<div style="display:flex;gap:8px;align-items:center;margin-top:12px"><button class="btn btn-berry" type="button" id="taxSave">Save taxes</button><span class="help" id="taxMsg"></span></div>' : '') + '</section>';
+  }
+  function bindTaxes() {
+    var b = $('taxSave'); if (!b) return;
+    b.addEventListener('click', async function () {
+      var taxes = { services: {}, goods: {} }, bad = null;
+      document.querySelectorAll('#taxSec [data-tax]').forEach(function (el) { var k = el.dataset.tax.split('|'), t = parseTax(el.value); if (!t) bad = k[1] + ' ' + k[0]; else taxes[k[0]][k[1]] = t; });
+      if (bad) { $('taxMsg').textContent = 'Check ' + bad + ': write it like GST 5 or GST 5 + PST 7.'; return; }
+      b.disabled = true; $('taxMsg').textContent = 'Saving\u2026';
+      var P2 = Object.assign({}, campPricing, { taxes: taxes });
+      var r = await sb.rpc('world_setting_set', { p_key: 'camp_pricing', p_value: P2 });
+      b.disabled = false;
+      if (r.error) { $('taxMsg').textContent = r.error.message; return; }
+      campPricing = P2; $('taxMsg').textContent = 'Saved \u2713';
+    });
+  }
   function campPricingHtml() {
     if (campPricing === null) return '<section class="panel" style="margin-top:20px"><h2>Camp pricing</h2><p class="sub">Run world_stripe_camps.sql in Supabase to switch this on.</p></section>';
     var P = campPricing, tx = P.taxes || {};
@@ -2747,21 +2774,13 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
       '<div class="cp-grid">' + num('cp_full', 'Full day', P.full_day, 0.01, '$') + num('cp_half', 'Half day', P.half_day, 0.01, '$') + num('cp_pa', 'PA/PD Day (non-members)', P.pa_day != null ? P.pa_day : 119, 0.01, '$') + '<div class="field"><label for="cp_member">Members save</label><span class="ty-num" style="width:100%"><input type="number" id="cp_member" value="' + esc(P.member_pct) + '" disabled><i>%</i></span><span class="help">Set in Member pricing.</span></div>' +
       num('cp_mmin', 'Multi-day discount from', P.multi_day_min, 1, 'days') + num('cp_mpct', 'Multi-day discount', P.multi_day_pct, 0.5, '%') + num('cp_after', 'Aftercare per child per day', P.aftercare, 0.01, '$') + '</div>' +
       '<label class="check" style="margin:4px 0 12px"><input type="checkbox" id="cp_aftertax"' + (P.aftercare_taxed ? ' checked' : '') + (canEdit ? '' : ' disabled') + '> Aftercare is taxed</label>' +
-      '<h3 style="margin:8px 0 6px">Taxes</h3><p class="help" style="margin:0 0 8px">Write each like <b>GST 5</b>, or <b>GST 5 + PST 7</b>. Camps and aftercare are \u201cservices\u201d; \u201cgoods\u201d is for items like kits later.</p>' +
-      '<table class="cp-tax"><thead><tr><th></th>' + PROVS.map(function (p) { return '<th>' + p + '</th>'; }).join('') + '</tr></thead><tbody>' +
-      [['services', 'Services (camps, aftercare)'], ['goods', 'Goods (kits, items)']].map(function (c) {
-        return '<tr><td><b>' + c[1] + '</b></td>' + PROVS.map(function (p) { return '<td><input type="text" data-tax="' + c[0] + '|' + p + '" value="' + esc(taxText((tx[c[0]] || {})[p])) + '"' + (canEdit ? '' : ' disabled') + '></td>'; }).join('') + '</tr>';
-      }).join('') + '</tbody></table>' +
+      '<p class="help" style="margin:4px 0 0">Taxes: see <b>\ud83e\uddfe Taxes</b> below (they apply to everything paid on World and at the front desk).</p>' +
       '<div class="cp-preview" id="cpPreview"></div>' +
       (canEdit ? '<div style="display:flex;gap:8px;align-items:center;margin-top:12px"><button class="btn btn-berry" type="button" id="campPriceSave">Save camp pricing</button><span class="help" id="campPriceMsg"></span></div>' : '') + '</section>';
   }
   function campPriceDraft() {
     var v = function (id) { return Number($(id).value); };
-    var taxes = { services: {}, goods: {} }, bad = null;
-    document.querySelectorAll('[data-tax]').forEach(function (el) {
-      var k = el.dataset.tax.split('|'), t = parseTax(el.value);
-      if (!t) bad = k[1] + ' ' + k[0]; else taxes[k[0]][k[1]] = t;
-    });
+    var taxes = campPricing.taxes || { services: {}, goods: {} }, bad = null;   // (Nov 9 2026: edited in the Taxes section)
     return { bad: bad, P: Object.assign({}, campPricing, { use_stripe: $('cp_live').checked, full_day: v('cp_full'), half_day: v('cp_half'), pa_day: v('cp_pa'), member_pct: v('cp_member'),
       multi_day_min: Math.round(v('cp_mmin')), multi_day_pct: v('cp_mpct'), aftercare: v('cp_after'), aftercare_taxed: $('cp_aftertax').checked, taxes: taxes }) };
   }
