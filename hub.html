@@ -2352,6 +2352,9 @@ tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decorati
 .wu-f input:focus, .wu-f select:focus, .wu-f textarea:focus { outline: 2px solid #f6c6d6; border-color: #e58aaa !important; }
 .wu-foot { border-top-color: #f3cad8 !important; } .wu-calc { background: #fff; border: 1px solid #f3dce4; border-radius: 12px; padding: 6px 12px; }
 .wu-extras { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; margin: 10px 0 2px; padding: 8px 12px; background: #fff; border: 1px solid #f3dce4; border-radius: 12px; } .wu-chk { display: flex; gap: 6px; align-items: center; font-size: 14px; }
+.pb-blk.open { background: #fff !important; border: 1.5px solid #d9d2c4 !important; color: #555 !important; box-shadow: none !important; } .pb-openrow .pb-who b { color: #888; }
+.oc-alert { background: #fdecec; border: 1.5px solid #f3b4b4; color: #7f1d1d; border-radius: 14px; padding: 10px 14px; margin: 0 0 10px; font-size: 14.5px; line-height: 1.45; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.hero-hours { display: inline-block; margin-left: 10px; padding: 2px 10px; border-radius: 999px; background: rgba(255,255,255,.22); font-weight: 600; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -2561,6 +2564,7 @@ tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decorati
         <!-- Kiln status (hub_kiln_status.sql): shown to customers on 4Cats World. -->
         <div class="card kiln-card" id="card-kiln" style="display:none"></div>
         <!-- Opening / closing lists (hub_checklists.sql). Tap a ring to open the list. -->
+        <div id="oc-alerts"></div>
         <div class="card oc-card" id="card-open-close" style="display:none"></div>
       </div>
     </div>
@@ -3426,6 +3430,20 @@ async function planTimeOffLoad(date) {
     }).join('');
   } catch (e) { el.innerHTML = `<span class="pto-h">🌴 Time off couldn’t load: ${esc(e.message || e)}</span>`; }
 }
+let _heroHours = { studio: null, data: undefined };
+function heroHoursHtml(st) {
+  if (_heroHours.studio !== st) {
+    _heroHours = { studio: st, data: undefined };
+    sb.rpc('hub_studio_hours_get', { p_studio: st }).then(r => { _heroHours.data = r.error ? null : (r.data || null); if (_lastHeroData) renderDailyHero(_lastHeroData); }, () => { _heroHours.data = null; });
+    return '';
+  }
+  const H = _heroHours.data; if (!H) return '';
+  const now = new Date(), todayStr = localDateStr(now), dayNo = (now.getDay() + 6) % 7 + 1;
+  const sp = (H.special || []).find(x => x.date === todayStr), d = sp || (H.week || []).find(x => x.day === dayNo);
+  if (!d) return '';
+  const t = x => { if (!x) return ''; const [h, m] = String(x).split(':').map(Number); return (h % 12 || 12) + (m ? ':' + String(m).padStart(2, '0') : '') + (h >= 12 ? 'pm' : 'am'); };
+  return `<span class="hero-hours" title="Studio hours (as families see them on 4Cats World)">🕒 ${d.closed ? 'Closed today' : 'Open today ' + t(d.open) + '–' + t(d.close)}${sp && sp.label ? ' · ' + esc(sp.label) : ''}</span>`;
+}
 function renderDailyHero(data) {
   _lastHeroData = data;
   try { myNotesLoad(); } catch (e) {}
@@ -3452,9 +3470,11 @@ function renderDailyHero(data) {
     : n === 0 && evText ? `${evText.charAt(0).toUpperCase() + evText.slice(1)}${people} at ${esc(studioName)} today`
     : n === 0 ? `Nothing booked at ${esc(studioName)} today${people ? ` · ${_teamCount} on the team` : ''}`
     : `${n} session${n === 1 ? '' : 's'}${evText ? ', ' + evText : ''}${people} at ${esc(studioName)} today`;
+  // (Nov 9 2026) the studio's open hours today (Studio hours: the week, or today's special day)
+  const hrs = heroHoursHtml(data.studioId);
   container.innerHTML = `
     <div class="hero-greeting">${heroGreetingHtml(data.firstName)}</div>
-    <div class="hero-sub">${sub}</div>`;
+    <div class="hero-sub">${sub}${hrs}</div>`;
   renderFloorToday(data);
 }
 
@@ -8388,7 +8408,37 @@ function ringSvg(done, total, finished) {
       stroke-dasharray="${(c * frac).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 38 38)"></circle>` : ''}
     <text x="38" y="43" text-anchor="middle" font-family="Fredoka, Inter, sans-serif" font-size="${finished ? 20 : 15}" font-weight="600" fill="#1f1b3a">${finished ? '✓' : total ? `${done}/${total}` : '–'}</text></svg>`;
 }
+// (Nov 9 2026) ⚠️ Studio alerts: the last open day's closing list wasn't finished; the opening list isn't done an hour into the first shift.
+//   The closing list: hub_checklist_history (this studio's last 14 days). The opening list: today's (hub_checklist). The first shift: today's team.
+let _ocAlertPrev = { studio: null, at: 0, day: null }, _ocAlertTimer = null;
+async function ocAlerts() {
+  const box = document.getElementById('oc-alerts'); if (!box) return;
+  const st = _sessionStudioId; if (!st || (_studioData && _studioData.isAdmin && !_sessionStudioId)) { box.innerHTML = ''; return; }
+  const out = [], nice = d => new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'long', month: 'short', day: 'numeric' });
+  // the last day the studio was open before today: its closing list (looked up at most every 30 minutes)
+  if (_ocAlertPrev.studio !== st || Date.now() - _ocAlertPrev.at > 30 * 60000) {
+    _ocAlertPrev = { studio: st, at: Date.now(), day: null };
+    try {
+      const to = new Date(); to.setDate(to.getDate() - 1); const from = new Date(); from.setDate(from.getDate() - 14);
+      const { data } = await sb.rpc('hub_checklist_history', { p_from: localDateStr(from), p_to: localDateStr(to) });
+      _ocAlertPrev.day = (data || []).filter(d => d.studio_id === st && d.status === 'open' && !d.today && !d.future).sort((a, b) => String(b.date).localeCompare(String(a.date)))[0] || null;
+    } catch (e) { /* not available for this login: no alert */ }
+  }
+  const last = _ocAlertPrev.day;
+  if (last && !(last.close && last.close.finished_at))
+    out.push(`<div class="oc-alert">⚠️ <b>${esc(nice(last.date))}’s closing list wasn’t finished.</b> Please check the studio was closed up properly${last.close ? ' (it was started, not finished)' : ''}.</div>`);
+  // today's opening list, an hour into the first shift
+  const firsts = (_teamPeople || []).flatMap(p => (p.shifts || []).map(x => hmToMin(x.start))).filter(n => n > 0);
+  const run = _oc.open && _oc.open.run, has = _oc.open && clTasks(_oc.open.items).length;
+  if (has && firsts.length && !(run && run.finished_at)) {
+    const first = Math.min(...firsts), now = new Date(), nowMin = now.getHours() * 60 + now.getMinutes();
+    if (nowMin >= first + 60) out.push(`<div class="oc-alert">⏰ <b>The opening list isn’t done yet.</b> The first shift started at ${esc(shortTime(String(Math.floor(first / 60)).padStart(2, '0') + ':' + String(first % 60).padStart(2, '0')))}.${run ? ` (${clProgress(_oc.open).done} of ${clProgress(_oc.open).total} done)` : ''} <button class="ho-btn sm" onclick="openChecklist('open')">Open the list</button></div>`);
+  }
+  box.innerHTML = out.join('');
+  clearTimeout(_ocAlertTimer); _ocAlertTimer = setTimeout(ocAlerts, 5 * 60000);
+}
 function renderOpenClose() {
+  setTimeout(ocAlerts, 0);
   const el = document.getElementById('card-open-close');
   const ring = list => {
     const data = _oc[list];
@@ -8930,8 +8980,9 @@ async function loadPlanDay(date) {
           if (!products.length) return;   // (only 0-spot leftovers here: no party offered at this time)
           // closed from the Schedule (every party product here set to 0 spots left)
           const closed = products.length > 0 && products.every(x => x.spaces_left_cache !== null && x.spaces_left_cache !== undefined && Number(x.spaces_left_cache) <= 0);
-          if (open > 0) openRows.push({ id: 'slot-' + t, title: closed ? 'Party slot (closed)' : 'Open party slot', session_date: date, session_time: t + ':00', session_type: 'party',
-            capacity: closed ? 0 : open, spaces_left_cache: closed ? 0 : open, show: true, partySlot: true, slotClosed: closed, slotProducts: products,
+          const live = closed ? 0 : Math.min(open, Math.max(0, ...products.map(x => x.spaces_left_cache == null ? open : Number(x.spaces_left_cache) || 0)));   // (rooms closed one at a time)
+          if (open > 0) openRows.push({ id: 'slot-' + t, title: closed ? 'Party slot (closed)' : live < open ? `Open party slot (${open - live} of ${open} closed)` : 'Open party slot', session_date: date, session_time: t + ':00', session_type: 'party',
+            capacity: closed ? 0 : live, spaces_left_cache: closed ? 0 : live, show: true, partySlot: true, slotClosed: closed, slotProducts: products, slotOpenRooms: open, slotLive: live,
             slotRooms: slotsAt[t] || 0, slotBooked: bookedAt[t] || 0,
             slotKinds: [...new Set(products.filter(x => (Number(x.spaces_left_cache) || 0) > 0).map(x => /splatter/i.test(x.title) ? 'Splatter' : 'Kids'))] });
         });
@@ -9479,6 +9530,7 @@ function renderPlanDay() {
         ${pick(pt.t1, `planParty(${i}, 1, this.value)`)}
         ${edit || pt.t2 ? pick(pt.t2, `planParty(${i}, 2, this.value)`) : ''}
         <button class="icon-pencil" title="Add a note" aria-label="Add a note" onclick="planEditNote('${escAttr(pt.session.id)}')">✏️</button>
+        ${planPartyCancelOk(pt) ? `<button class="ho-btn sm" title="${escAttr(_hoCan.edit ? 'Cancel or change this party (home office: any time)' : 'Cancel or change this party (up to 14 days before)')}" onclick="openBookingAdmin(['${escAttr(pt.booking_id)}'], ${escAttr(JSON.stringify((pt.booking && pt.booking.customer_name) || 'this party'))}, false)">Cancel…</button>` : ''}
         <button class="pf-btn${P.partyForms[pt.booking_id] ? ' open' : ''}" onclick="togglePartyForm(${i})">${P.partyForms[pt.booking_id] ? 'Close form' : '🎉 Party form'}</button></div>
         ${i === P.parties.findIndex(z => z.session.id === pt.session.id) ? planNoteHtml(pt.session) : ''}
         <div class="pf-wrap" data-pf="${escAttr(pt.booking_id)}"></div>`]),
@@ -9492,7 +9544,7 @@ function renderPlanDay() {
           : planIsCamp(x) ? planCampLine(x)
           : (demoers.length || P.roles.director) && demoPlan[x.id] ? `<span class="floor-staff" style="margin-top:4px">${hubDemoChips(demoPlan[x.id])}</span>` : esc(dayCover)}</div></span>
         ${planRowExtras(x)}${planCount(x)}<span class="kind-chip kind-${sessionKind(x.title)[1]}">${esc(sessionKind(x.title)[0])}</span>${x.session_type === 'party' ? (planCanAdjust() ? (x.partySlot
-          ? `${x.slotClosed ? '' : `<button class="ho-btn spots-btn" onclick="planBookParty('${escAttr(x.session_date)}', '${escAttr(String(x.session_time).slice(0, 5))}')" title="Book a party at this time (Front desk)">Book</button>`}<button class="ho-btn spots-btn" onclick="planSlotOpenClose('${escAttr(x.id)}', ${x.slotClosed ? 'true' : 'false'})">${x.slotClosed ? 'Reopen' : 'Close slot'}</button>`
+          ? `${x.slotClosed ? '' : `<button class="ho-btn spots-btn" onclick="planBookParty('${escAttr(x.session_date)}', '${escAttr(String(x.session_time).slice(0, 5))}')" title="Book a party at this time (Front desk)">Book</button>`}${!x.slotClosed && x.slotLive < x.slotOpenRooms ? `<button class="ho-btn spots-btn" onclick="planSlotOpenClose('${escAttr(x.id)}', true)">Reopen one</button>` : ''}<button class="ho-btn spots-btn" onclick="planSlotOpenClose('${escAttr(x.id)}', ${x.slotClosed ? 'true' : 'false'})">${x.slotClosed ? 'Reopen' : 'Close slot'}</button>`
           : `<button class="ho-btn spots-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Spots</button>`) : '') : planRowTools(x)}</div>${planNoteHtml(x)}<div class="pf-wrap" data-cl="${escAttr(x.id)}"></div>`]),
     ...(P.early || []).map(e => { const m = hmM(e.session.session_time) - 15, t = String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
       return [m, `<div class="plan-sess cu15"><span class="t">${esc(shortTime(t))}</span><span class="nm">15-min catch-up · ${esc(e.session.title)}<div class="sub">Coming 15 minutes early to catch up on a missed class: <b>${esc(e.kids.join(' · '))}</b>. They stay for the ${esc(shortTime(e.session.session_time))} class.</div></span><span class="kind-chip">15 min</span></div>`]; }),
@@ -9530,7 +9582,7 @@ function renderPlanDay() {
           ${pp.missingGuests ? `<div class="pp-note">${pp.missingGuests} part${pp.missingGuests === 1 ? 'y has' : 'ies have'}n't entered a guest count yet, so ${pp.missingGuests === 1 ? 'it isn’t' : 'they aren’t'} in the total.</div>` : ''}</div>`;
       })()}
     </div>
-    <div class="ho-section-head">👥 Staff today <span class="goal-note" style="font-weight:400">· role, break${edit ? ' and timecard' : ''} for each person</span></div>
+    <div class="ho-section-head">👥 Staff today <span class="goal-note" style="font-weight:400">· role, break${edit ? ' and timecard' : ''} for each person</span>${edit ? ' <button class="ho-btn sm" style="margin-left:8px" onclick="planSuggestBreaks()">☕ Suggest breaks</button>' : ''}</div>
     ${edit ? '<div id="tc-box"><div class="goal-note">Loading…</div></div>' : planStaffListHtml()}
     <div class="ho-section-head">Everything on this day</div>${sessRows || '<div class="ho-intro">Nothing running this day.</div>'}
     ${planCanShifts() ? wsDayHtml() : ''}
@@ -9580,7 +9632,11 @@ function planBoardHtml() {
   const P = _plan, edit = planCanEdit(), blocks = _pbBlocks = planBoardBlocks();
   const people = (P.team || []).map(p => ({ p, wn: planWriteName(p), keys: [hubNameKey(planWriteName(p)), hubNameKey(p.name)], a: hubMin(p.start_time), z: hubMin(p.end_time) }));
   const laneOf = b => { const k = hubNameKey(b.who); return k ? people.find(x => x.keys.includes(k)) || null : null; };
-  const all = people.map(x => x.a).concat(blocks.map(b => b.start)), ends = people.map(x => x.z).concat(blocks.map(b => b.end));
+  // (Nov 9 2026) the times not booked yet, in white above the people (as on the day board): information only
+  const tl0 = x => String(x.title || '').split('|')[0].trim();
+  const openTimes = P.sessions.filter(x => !planIsKids(x) && !planIsCamp(x) && !planNotRunning(x) && !((P.booked[x.id] || 0) > 0))
+    .map(x => { const a = hubMin(x.session_time); return { id: 'o:' + x.id, kind: 'open', title: x.partySlot ? 'Party slot' : tl0(x), sub: x.held_until ? 'on hold' : x.partySlot ? (x.spaces_left_cache || 0) + ' open' : (x.spaces_left_cache != null ? x.spaces_left_cache + ' spots' : 'not booked'), start: a, end: a + (+x.duration_minutes || (x.session_type === 'party' ? 120 : 90)), fixed: true }; });
+  const all = people.map(x => x.a).concat(blocks.map(b => b.start), openTimes.map(b => b.start)), ends = people.map(x => x.z).concat(blocks.map(b => b.end), openTimes.map(b => b.end));
   const lo = Math.floor((all.length ? Math.min(...all) : 9 * 60) / 60) * 60, hi = Math.ceil((ends.length ? Math.max(...ends) : 17 * 60) / 60) * 60, span = Math.max(60, hi - lo);
   const pct = m => ((m - lo) / span * 100).toFixed(3) + '%', w = (a, z) => ((z - a) / span * 100).toFixed(3) + '%';
   const hl = m => { const h = Math.floor(m / 60); return (h % 12 || 12) + (h >= 12 ? 'p' : 'a'); };
@@ -9602,9 +9658,10 @@ function planBoardHtml() {
   const [y, m, d] = P.date.split('-').map(Number);
   return `<div class="pb-head"><b>${esc(new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }))}</b>
       <span class="pb-key"><i class="kids"></i>Kids class <i class="wheel"></i>Wheel <i class="party"></i>Party (art time) <i class="demo"></i>Demo <i class="brk"></i>Break</span>
-      <span class="spacer"></span>${edit ? `<span class="plan-msg" id="plan-msg">${esc(P.msg || (P.dirty ? 'Unsaved changes' : ''))}</span><button class="ho-btn primary" onclick="planSave()"${P.dirty ? '' : ' disabled'}>Save</button>` : `<button class="ho-btn" onclick="openPinModal()">🔒 Unlock to move</button>`}</div>
+      <span class="spacer"></span>${edit ? `<span class="plan-msg" id="plan-msg">${esc(P.msg || (P.dirty ? 'Unsaved changes' : ''))}</span><button class="ho-btn" onclick="planSuggestBreaks()">☕ Suggest breaks</button><button class="ho-btn primary" onclick="planSave()"${P.dirty ? '' : ' disabled'}>Save</button>` : `<button class="ho-btn" onclick="openPinModal()">🔒 Unlock to move</button>`}</div>
     <p class="ho-intro" style="margin:4px 0 8px">${edit ? 'Drag a class, party, wheel time or demo onto someone to give it to them, or tap it and pick. Then Save. Dashed = suggested; red outline = a clash or outside their shift.' : 'Who’s teaching and demoing when. A coordinator can move things between people after unlocking with their PIN.'}</p>
     <div class="pb-board"><div class="pb-row pb-times"><div class="pb-who"></div><div class="pb-lane" style="height:22px">${hours.map(m => `<span class="pb-hr" style="left:${pct(m)}">${hl(m)}</span>`).join('')}</div></div>
+      ${openTimes.length ? lane('', 'Not booked yet', 'open times', openTimes, null).replace('pb-lane drop', 'pb-lane').replace('class="pb-row"', 'class="pb-row pb-openrow"') : ''}
       ${lanes || '<div class="ho-intro" style="padding:10px">No shifts posted for this day yet.</div>'}
       ${nobody.length ? lane('', 'Nobody yet', 'needs someone', nobody, null) : ''}</div>`;
 }
@@ -10163,12 +10220,21 @@ function planSlotOpenClose(slotId, reopen) {
     <div class="ho-intro" style="margin:0">${reopen ? 'Customers will be able to book a party at this time again.' : 'Customers won’t be able to book a party at this time online.'}
       ${(x.slotProducts || []).some(p => p.world_party) ? 'This changes the party times on World (booked parties stay booked).' : `This changes ${names.length} product${names.length === 1 ? '' : 's'} on Shopify: ${esc(names.join(', '))}.`}</div>
     <div id="slot-msg" class="ho-intro" style="margin:8px 0 0"></div>
-    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="slot-go" onclick="planSlotGo('${escAttr(slotId)}', ${reopen ? 'true' : 'false'})">${reopen ? 'Reopen it' : 'Close it'}</button></div>`);
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button>${!reopen && (x.slotLive || 0) > 1 ? `<button id="slot-go1" onclick="planSlotGo('${escAttr(slotId)}', false, 1)">Close 1 of the ${x.slotLive} rooms</button><button class="primary" id="slot-go" onclick="planSlotGo('${escAttr(slotId)}', false)">Close all ${x.slotLive}</button>`
+      : reopen && !x.slotClosed ? `<button class="primary" id="slot-go" onclick="planSlotGo('${escAttr(slotId)}', true, 1)">Reopen one room</button>`
+      : `<button class="primary" id="slot-go" onclick="planSlotGo('${escAttr(slotId)}', ${reopen ? 'true' : 'false'})">${reopen ? 'Reopen it' : 'Close it'}</button>`}</div>`);
 }
-async function planSlotGo(slotId, reopen) {
+async function planSlotGo(slotId, reopen, one) {
   const x = _plan.sessions.find(z => z.id === slotId); if (!x) return;
   const msg = document.getElementById('slot-msg'), btn = document.getElementById('slot-go');
-  btn.disabled = true;
+  btn.disabled = true; const b1 = document.getElementById('slot-go1'); if (b1) b1.disabled = true;
+  if (one && (x.slotProducts || []).some(p => p.world_party)) {   // one room (World-run): hub_party_slot_rooms (hub_fixes_nov9.sql)
+    msg.textContent = 'Updating…';
+    const { error } = await sb.rpc('hub_party_slot_rooms', { p_studio: _sessionStudioId, p_date: x.session_date, p_time: x.session_time, p_delta: reopen ? 1 : -1 });
+    if (error) { msg.textContent = /hub_party_slot_rooms/i.test(error.message) ? 'Run hub_fixes_nov9.sql in Supabase first.' : error.message; btn.disabled = false; if (b1) b1.disabled = false; return; }
+    closeDutySheet(); await loadPlanDay(_plan.date);
+    _plan.msg = `${shortTime(x.session_time)}: one party room ${reopen ? 'reopened' : 'closed'} on World`; renderPlanDay(); return;
+  }
   if ((x.slotProducts || []).some(p => p.world_party)) {   // World-run party times: no Shopify step
     msg.textContent = 'Updating…';
     const { data, error } = await sb.rpc('hub_party_slot_set', { p_studio: _sessionStudioId, p_date: x.session_date, p_time: x.session_time, p_open: !!reopen, p_pin: _sessionPin || null });
@@ -10187,13 +10253,14 @@ async function planSlotGo(slotId, reopen) {
       const v = d && !d.error && d.variants ? d.variants.find(z => z.variant_title === STUDIO_VARIANT_MAP[_sessionStudioId]) : null;
       if (!v) { skipped.push(p.title); continue; }
       const old = Number(v.inventory_quantity || 0);
-      const set = await call({ action: 'set', inventory_item_id: v.inventory_item_id, quantity: qty, pin: _sessionPin || null, studio_id: _sessionStudioId, product_title: title });
+      const qtyNow = one ? Math.max(0, Math.min(x.slotOpenRooms || 1, old + (reopen ? 1 : -1))) : qty;   // (one room at a time)
+      const set = await call({ action: 'set', inventory_item_id: v.inventory_item_id, quantity: qtyNow, pin: _sessionPin || null, studio_id: _sessionStudioId, product_title: title });
       if (!set || !set.inventory_level) { skipped.push(p.title + (set && set.error ? ` (${set.error})` : '')); continue; }
-      await sb.from('sessions').update({ capacity: qty, spaces_left_cache: qty }).eq('id', p.id);
+      await sb.from('sessions').update(one ? { spaces_left_cache: qtyNow } : { capacity: qty, spaces_left_cache: qty }).eq('id', p.id);
       try {
         await sb.from('spaces_adjustment_log').insert({ session_id: p.id, studio_id: _sessionStudioId, session_title: p.title, session_date: p.session_date,
           session_time: p.session_time, staff_id: _adjustStaff ? _adjustStaff.id : null, staff_name: _adjustStaff ? _adjustStaff.display_name : 'Home office (Hub)',
-          made_by_role: _adjustStaff ? (_adjustStaff.role || 'coordinator') : 'admin', old_spaces_left: old, new_spaces_left: qty });
+          made_by_role: _adjustStaff ? (_adjustStaff.role || 'coordinator') : 'admin', old_spaces_left: old, new_spaces_left: qtyNow });
       } catch (e) {}
       done.push(p.title);
     } catch (e) { skipped.push(p.title); }
@@ -12434,6 +12501,14 @@ function buildPartyFormEl(pt) {
   }, 0);
   return el;
 }
+// (Nov 9 2026) Cancel a party from the Schedule (the Families tab's Change / Cancel): home office any time; coordinators up to 14 days before
+function planPartyCancelOk(pt) {
+  if (!pt || !pt.booking_id || !pt.session) return false;
+  if (_hoCan && _hoCan.edit) return true;
+  if (!planCanEdit()) return false;
+  const days = Math.round((new Date(String(pt.session.session_date) + 'T12:00:00') - new Date(localDateStr(new Date()) + 'T12:00:00')) / 86400000);
+  return days >= 14;
+}
 function togglePartyForm(i) {
   const pt = _plan.parties[i];
   if (!pt) return;
@@ -13441,6 +13516,9 @@ function drawIdeas() {
     .slice().sort((a, b) => allMode ? ((STUDIO_NAMES[a.studio_id] || a.studio_id || '~').localeCompare(STUDIO_NAMES[b.studio_id] || b.studio_id || '~') || String((a.dates || [])[0] || a.created_at).localeCompare(String((b.dates || [])[0] || b.created_at))) : 0);
   if (!_ideas.length) { body.innerHTML = '<div class="ho-intro">No suggestions yet. Families send them from 4Cats World’s home page (“Suggest a date!”).</div>'; return; }
   let h = '<div class="ho-intro">What families suggested on 4Cats World. Mark <b>Date added</b> when you’ve put it on the schedule: the family gets an email with a link.</div>';
+  // (Nov 9 2026) seen ones are hidden (the list was very long); a button shows them again
+  const seenN = shown.filter(ideaIsSeen).length;
+  if (seenN) h += '<p style="margin:0 0 10px"><button class="ho-btn sm" onclick="_ideaShowSeen=!_ideaShowSeen;drawIdeas()">' + (_ideaShowSeen ? 'Hide the ' + seenN + ' seen' : 'Show seen (' + seenN + ')') + '</button></p>';
   // The report: suggested workshops that families set up, and how many got booked
   const setUp = shown.filter(x => x.session_id), gotBooked = setUp.filter(x => (_ideaBooked[x.id] || {}).booked > 0);
   if (setUp.length) {
@@ -13472,7 +13550,7 @@ function drawIdeas() {
   groups.forEach(g => {
     // unseen ones families set up on World show under New (that's what the badge counts) until "Mark as seen"
     const isNewAuto = x => x.auto_swap && !x.seen_at;
-    const list = shown.filter(x => g[0] === 'new' ? ((x.status || 'new') === 'new' || isNewAuto(x)) : g[0] === 'added' ? x.status === 'added' && !isNewAuto(x) : (x.status || 'new') === g[0]); if (!list.length) return;
+    const list = shown.filter(x => (_ideaShowSeen || !ideaIsSeen(x)) && (g[0] === 'new' ? ((x.status || 'new') === 'new' || isNewAuto(x)) : g[0] === 'added' ? x.status === 'added' && !isNewAuto(x) : (x.status || 'new') === g[0])); if (!list.length) return;
     const unseenAuto = g[0] === 'new' ? list.filter(isNewAuto).map(x => x.id) : [];
     const grouped = ideaGroups(list);
     h += '<h3 class="idea-grp">' + g[1] + ' <span>' + grouped.length + '</span>' +
@@ -13535,6 +13613,8 @@ async function ideaFillTimes(key) {
   sel2.innerHTML = '<option value="">' + (T.list.length ? 'Choose the time you added… (or skip)' : 'No times on those dates yet (skip)') + '</option>' +
     T.list.map(x => '<option value="' + esc(x.id) + '"' + (x.id === cur ? ' selected' : '') + '>' + esc(nice(x.date) + ' · ' + shortTime(x.time) + ' · ' + String(x.title || '').split('|')[0].trim() + (x.booked ? ' (' + x.booked + ' booked)' : '')) + '</option>').join('');
 }
+let _ideaShowSeen = false;
+function ideaIsSeen(x) { return (x.auto_swap && !!x.seen_at) || x.status === 'seen'; }   // (marked as seen: hidden unless "Show seen")
 async function ideaSeen(idList) {
   const ids = String(idList).split(',').filter(Boolean);
   const { error } = await sb.rpc('hub_idea_seen', { p_ids: ids });
@@ -16062,7 +16142,7 @@ function renderTeamToday(rows) {
     byPerson.set(r.staff_id, p);
   });
   const people = [...byPerson.values()];
-  _teamPeople = people;
+  _teamPeople = people; setTimeout(() => { try { ocAlerts(); } catch (e) {} }, 0);
   _teamCount = people.length;
   if (_dutiesLoaded) renderDuties(); // duty pickers use today's team
   if (_classInfo && _lastHeroData) renderFloorToday(_lastHeroData); // role chips use avatars
