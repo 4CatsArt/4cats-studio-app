@@ -81,6 +81,7 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
 .req-dates { display: flex; flex-direction: column; gap: 2px; } .req-go { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .req-more { width: 100%; } .req-more summary { cursor: pointer; font-size: 13px; color: #6b5a3a; } .req-st { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 4px 10px; margin: 6px 0; font-size: 13px; }
 .req-st > div { display: flex; flex-direction: column; } @media (max-width: 760px) { .req-row { grid-template-columns: 1fr; } }
+.req-al { display: block; margin: 0 0 4px 26px; font-size: 13px; font-weight: 700; color: #1d6b39; }
 </style>
 </head>
 <body>
@@ -188,6 +189,13 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
       var r = await sb.rpc('hub_ideas_list', { p_studio: null, p_all: true });
       var today = todayStr();
       reqs = (r.data || []).filter(function (x) { return x.kind === 'pa_days' && (x.status || 'new') !== 'added' && x.status !== 'declined' && x.status !== 'done' && (x.dates || []).some(function (d) { return d >= today; }); });
+      // already on? a camp day at their studio on each date they asked for
+      for (var i = 0; i < reqs.length; i++) {
+        var x = reqs[i], ds = (x.dates || []).filter(function (d) { return d >= today; }).sort(); x.already = {};
+        if (!x.studio_id || !ds.length) continue;
+        var ex = await sb.rpc('camp_days_list', { p_from: ds[0], p_to: ds[ds.length - 1], p_studio: x.studio_id, p_program: null });
+        (ex.data || []).forEach(function (d) { if (ds.indexOf(String(d.session_date).slice(0, 10)) !== -1 && !d.closed) (x.already[String(d.session_date).slice(0, 10)] = x.already[String(d.session_date).slice(0, 10)] || []).push(d); });
+      }
     } catch (e) { reqs = []; }
   }
   function reqsHtml() {
@@ -202,11 +210,13 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
         return '<div class="req-row"><div class="req-who"><b>' + esc(nameById[x.studio_id] || x.studio_id || 'No studio') + '</b> · ' + esc(x.name || 'A family') + (x.email ? ' · ' + esc(x.email) : '') +
             (x.kids ? ' · ' + esc(x.kids) + ' kid' + (x.kids === 1 ? '' : 's') + (x.ages ? ' (ages ' + esc(x.ages) + ')' : '') : '') + (x.school ? ' · ' + esc(x.school) : '') +
             (x.details ? '<div class="sub" style="margin:2px 0 0">' + esc(x.details) + '</div>' : '') + '</div>' +
-          '<div class="req-dates">' + ds.map(function (d) { return '<label class="check"><input type="checkbox" data-rqdate="' + i + '" value="' + d + '"' + (P.dates[d] ? ' checked' : '') + '> ' + esc(niceDate(d)) + '</label>'; }).join('') + '</div>' +
+          '<div class="req-dates">' + ds.map(function (d) { var al = (x.already || {})[d];
+            return '<label class="check"><input type="checkbox" data-rqdate="' + i + '" value="' + d + '"' + (P.dates[d] ? ' checked' : '') + '> ' + esc(niceDate(d)) + '</label>' +
+              (al ? '<span class="req-al">\u2713 Already on: ' + esc(al[0].program || 'a camp day') + ' \u00b7 ' + al.reduce(function (t, z) { return t + (+z.booked || 0); }, 0) + ' booked</span>' : ''); }).join('') + '</div>' +
           (canEdit ? '<div class="req-go"><select data-rqprog="' + i + '">' + (pas.length ? pas.map(function (p) { return '<option value="' + esc(p.id) + '"' + (p.id === P.prog ? ' selected' : '') + '>' + esc(p.name) + '</option>'; }).join('') : '<option value="">Add a PA/PD day program first</option>') + '</select>' +
             '<details class="req-more"><summary>+ Other studios too (' + Object.keys(P.studios).filter(function (k) { return P.studios[k] && k !== x.studio_id; }).length + ')</summary><div class="req-st">' +
               STUDIOS.map(function (g) { return '<div><b>' + esc(g.group) + '</b>' + g.list.map(function (st) { return '<label class="check"><input type="checkbox" data-rqst="' + i + '" value="' + st[0] + '"' + (P.studios[st[0]] ? ' checked' : '') + '> ' + esc(st[1]) + '</label>'; }).join('') + '</div>'; }).join('') + '</div></details>' +
-            '<button class="btn btn-berry" type="button" data-rqok="' + i + '"' + (pas.length ? '' : ' disabled') + '>✓ Approve</button><button class="btn btn-plain" type="button" data-rqno="' + i + '">Not this time</button></div>' : '') +
+            '<button class="btn btn-berry" type="button" data-rqok="' + i + '"' + (pas.length ? '' : ' disabled') + '>' + (ds.length && ds.every(function (d) { return (x.already || {})[d]; }) ? '\u2713 Let them know it\u2019s on' : '\u2713 Approve') + '</button><button class="btn btn-plain" type="button" data-rqno="' + i + '">Not this time</button></div>' : '') +
         '</div>';
       }).join('') + '</section>';
   }
@@ -223,7 +233,9 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
     var studios = Object.keys(P.studios).filter(function (k) { return P.studios[k]; }), dates = Object.keys(P.dates).filter(function (k) { return P.dates[k]; }).sort();
     if (!P.prog) { flash = ['err', 'Choose the PA/PD day program.']; render(); return; }
     if (!studios.length || !dates.length) { flash = ['err', 'Tick at least one studio and one date.']; render(); return; }
-    if (!confirm('Make ' + dates.length + ' PA/PD day' + (dates.length === 1 ? '' : 's') + ' at ' + studios.length + ' studio' + (studios.length === 1 ? '' : 's') + ', and email ' + (x.email || 'the family') + ' that it\u2019s on?')) return;
+    var allOn = studios.length === 1 && studios[0] === x.studio_id && dates.every(function (d) { return (x.already || {})[d]; });
+    if (!confirm(allOn ? 'It\u2019s already on at ' + (nameById[x.studio_id] || x.studio_id) + '. Email ' + (x.email || 'the family') + ' that it\u2019s on, with the link to book?'
+      : 'Make ' + dates.length + ' PA/PD day' + (dates.length === 1 ? '' : 's') + ' at ' + studios.length + ' studio' + (studios.length === 1 ? '' : 's') + ' (any already there are skipped), and email ' + (x.email || 'the family') + ' that it\u2019s on?')) return;
     var r = await sb.rpc('camp_days_create', { p_program: P.prog, p_studios: studios, p_dates: dates });
     if (r.error) { flash = ['err', r.error.message]; render(); return; }
     var emailed = false;
