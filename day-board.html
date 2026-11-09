@@ -156,7 +156,7 @@ main { padding: 14px 20px 40px; }
   <button id="addsh" class="day-only" title="Add a shift for someone (a draft until you publish the day)">+ Add shift</button>
   <button id="pub" class="day-only" title="Publish the day's draft shifts: they become approved, and staff get their usual notification" style="display:none">Publish</button>
   <button id="plan" class="primary day-only" title="Roles, then breaks, then demos (anything you've moved stays put)">Plan the day</button>
-  <button id="brk" class="day-only" title="A 30-minute break for everyone on a shift over 5 hours who doesn't have one">Suggest breaks</button>
+  <button id="brk" class="day-only" title="A 30-minute break for everyone on a shift over 5 hours: no more than 5 hours of work before or after it">Suggest breaks</button>
   <button id="demo" class="day-only" title="Give each demo (and any class or party with nobody) to the best person free then">Assign demos</button>
   <button id="reset" class="day-only" title="Put everything back the way it was last saved">Undo</button>
   <button id="save" class="primary day-only" title="Save roles, breaks, teachers and demoers to the Day plan (the Hub's Day plan and On stage follow it)">Save the day</button>
@@ -411,6 +411,14 @@ function problems() {
   D.blocks.filter(b => !b.person && !b.notNeeded).forEach(b => { bad[b.id] = 1; list.push(`${b.title} at ${fmt(b.start)} has nobody`); });
   D.people.forEach(p => { const c = offClashDay(p.id, p.start, p.end); if (c.length) list.push(`${p.show} has a shift but is ${c.map(offText).join(' and ')}: change or remove the shift`); });
   D.people.filter(p => p.gone).forEach(p => list.push(`${p.show} is ${p.gone} but has a shift this day: remove it (✕) or give their work to someone else`));
+  // (Nov 9 2026) the 5-hour rule: a break on every shift over 5 hours, with no more than 5 hours of work before or after it
+  D.people.forEach(p => {
+    if (p.end - p.start <= BRK_MAX) return;
+    const b = D.blocks.find(z => z.kind === 'brk' && z.person === p.id);
+    if (!b) { list.push(`${p.show} (${fmt(p.start)}–${fmt(p.end)}) has no break: over 5 hours needs one (Suggest breaks)`); return; }
+    if (brkBad(p, b)) { bad[b.id] = 1; const w = brkWindow(p);
+      list.push(`${p.show}'s break at ${fmt(b.start)} leaves ${b.start - p.start > BRK_MAX ? Math.round((b.start - p.start) / 6) / 10 + ' hours before it' : Math.round((p.end - b.end) / 6) / 10 + ' hours after it'}: over the 5-hour rule (between ${fmt(w.from)} and ${fmt(w.to)} works)`); }
+  });
   // breaks never at the same time: someone is always on
   const brks = D.blocks.filter(b => b.kind === 'brk' && b.person);
   brks.forEach((b, i) => brks.slice(i + 1).forEach(c => { if (b.start < c.end && c.start < b.end) { bad[b.id] = bad[c.id] = 1;
@@ -557,13 +565,26 @@ const busyFor = (pid, a, z, blocks, except) => blocks.some(b => b !== except && 
 // the lowest "free on the floor" over a stretch, while something's running (99 when nothing is)
 function minFree(a, z, blocks) { let lo = 99; for (let m = a; m < z; m += STEP) if (runningAt(m)) lo = Math.min(lo, freeAt(m, blocks)); return lo; }
 
-// A 30-minute break for each shift over 5 hours without one: 2 to 5 hours in (never during their own teaching or demos),
-// where the most people stay free on the floor; nearest the middle of their shift on a tie.
+// (Nov 9 2026) The 5-hour rule: nobody works more than 5 hours without a break, before it AND after it. So a 30-minute break
+// starts no later than 5 hours in, and ends no earlier than 5 hours before the shift ends (and not in the first 2 hours or
+// the last hour, when there's room). E.g. 8:30a-5p: the break starts between 11:30 and 1:30.
+const BRK_LEN = 30, BRK_MAX = 300;
+function brkWindow(p) {
+  const from = Math.max(p.start + 120, p.end - BRK_MAX - BRK_LEN), to = Math.min(p.start + BRK_MAX, p.end - 60);
+  return from <= to ? { from, to } : { from: Math.max(p.start, p.end - BRK_MAX - BRK_LEN), to: Math.min(p.start + BRK_MAX, p.end - BRK_LEN) };
+}
+// a break that breaks the rule: more than 5 hours of work before it, or after it
+function brkBad(p, b) { return !!(p && b && (b.start - p.start > BRK_MAX || p.end - b.end > BRK_MAX)); }
+// A 30-minute break for each shift over 5 hours without one (or whose suggested break breaks the 5-hour rule), within the
+// window above, never during their own teaching or demos, where the most people stay free on the floor; nearest the middle on a tie.
+// A break moved by hand is never moved (it's flagged in Problems instead).
 function suggestBreaks() {
   let added = 0; const missed = [];
-  D.people.filter(p => p.end - p.start > 300 && !D.blocks.some(b => b.kind === 'brk' && b.person === p.id))
+  D.people.forEach(p => { const b = D.blocks.find(z => z.kind === 'brk' && z.person === p.id);
+    if (b && !b.locked && (p.end - p.start <= BRK_MAX || brkBad(p, b))) D.blocks = D.blocks.filter(z => z !== b); });   // (redone below)
+  D.people.filter(p => p.end - p.start > BRK_MAX && !D.blocks.some(b => b.kind === 'brk' && b.person === p.id))
     .sort((a, b) => a.start - b.start).forEach(p => {
-      const mid = p.start + (p.end - p.start) / 2, from = p.start + 120, to = Math.min(p.start + 300, p.end - 60);
+      const mid = p.start + (p.end - p.start) / 2, w = brkWindow(p), from = w.from, to = w.to;
       let best = null;
       for (let t = Math.ceil(from / STEP) * STEP; t <= to; t += STEP) {
         if (busyFor(p.id, t, t + 30, D.blocks)) continue;
@@ -770,7 +791,9 @@ function dayTimeMenu(id, el) {
         <button id="tm-cclose" title="Every upcoming week closes, and the class comes off World; the families enrolled keep their spots">Close the class to new registrations</button>
         <div class="muted" style="font-size:11.5px;margin:4px 0 8px;line-height:1.45">All its weeks close and it comes off World, so you can call ${n ? 'the families' : 'anyone who asks'} about moving to another time. Undo in the nightly log reopens it.</div>`
       : `<div style="display:flex;gap:6px;align-items:center;margin:6px 0"><input id="tm-new" placeholder="New time, e.g. 3p" style="flex:1;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px"><button id="tm-move">🕐 Change time</button></div>
-         <div class="muted" style="font-size:12px;margin-bottom:8px">${n ? 'Everyone booked moves with it: contact them first.' : 'Same day, another time.'}</div>`}
+         ${n ? `<label style="display:flex;gap:6px;align-items:center;font-size:12.5px;font-weight:600;margin:2px 0 4px"><input type="checkbox" id="tm-mail" checked> Email the ${n} booked about the new time</label>
+         <input id="tm-mnote" placeholder="Note in the email (optional), e.g. the earlier time was full" style="width:100%;box-sizing:border-box;font:inherit;font-size:12.5px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;margin-bottom:4px">` : ''}
+         <div class="muted" style="font-size:12px;margin-bottom:8px">${n ? 'Everyone booked moves with it.' : 'Same day, another time.'}</div>`}
     <div class="row2">${!kids ? `<button id="tm-close" title="${n ? 'Stops new bookings; the families booked keep their spot' : 'Closes it (Undo in the nightly log)'}">${n ? 'Close to new bookings' : 'Close it'}</button>` : ''}<button id="pop-x">Not now</button></div>
     ${n ? `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--line)"><label style="font-size:12.5px">Cancel it: Registrations moves or refunds the ${n} booked</label>
         <input id="tm-cnote" placeholder="Note for them (optional), e.g. no wheel teacher" style="width:100%;box-sizing:border-box;font:inherit;font-size:12.5px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;margin:4px 0 6px">
@@ -790,10 +813,19 @@ function dayTimeMenu(id, el) {
     const { data, error } = await sb.rpc('hub_session_retime', { p_id: id, p_time: hhmm(r.start) });
     if (error) { alert(/hub_session_retime/.test(error.message) ? 'Run session_retime.sql in Supabase first.' : error.message); return; }
     const delta = r.start - t0;
+    // (Nov 9 2026) the families booked: an email with the new time (session-time-email)
+    let mailed = '';
+    if ($('tm-mail') && $('tm-mail').checked && data.bookings) {
+      const ses = await sb.auth.getSession(), tk = ses && ses.data && ses.data.session && ses.data.session.access_token;
+      const mr = await fetch(`${SUPABASE_URL}/functions/v1/session-time-email`, { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + (tk || SUPABASE_ANON_KEY) },
+        body: JSON.stringify({ session_id: id, from_time: hhmm(t0), note: ($('tm-mnote') || {}).value || '' }) }).catch(() => null);
+      const md = mr ? await mr.json().catch(() => ({})) : {};
+      mailed = mr && mr.ok ? ` Emailed ${md.sent} famil${md.sent === 1 ? 'y' : 'ies'}${md.failed ? ` (${md.failed} didn't send)` : ''}.` : ` The emails didn't send: ${md.error || 'please email the families'}.`;
+    }
     x.session_time = hhmm(r.start) + ':00';
     D.blocks.forEach(b => { if (b.session === id || (b.sessions || []).includes(id)) { b.start += delta; b.end += delta; } });   // (its class, party, demo or wheel block moves with it)
     D.lo = Math.min(D.lo, Math.floor(r.start / 60) * 60);
-    closePop(); D.flash = `Moved ${title} from ${data.from} to ${data.to}${data.bookings ? ` (${data.bookings} booking${data.bookings === 1 ? '' : 's'} moved with it)` : ''}. Check who's demoing it.`; draw();
+    closePop(); D.flash = `Moved ${title} from ${data.from} to ${data.to}${data.bookings ? ` (${data.bookings} booking${data.bookings === 1 ? '' : 's'} moved with it)` : ''}.${mailed} Check who's demoing it.`; draw();
   };
   if ($('tm-cclose')) $('tm-cclose').onclick = async () => {
     if (!confirm(`Close ${title} to new registrations? Every upcoming week closes and the class comes off World. ${n ? 'The ' + n + ' enrolled keep their spots.' : ''}`)) return;
@@ -885,7 +917,7 @@ function dayPersonGone(pid) {   // their shift is gone: off the board, and whate
 function dayFitBreak(p) {
   const b = D.blocks.find(z => z.kind === 'brk' && z.person === p.id); if (!b) return '';
   if (p.end - p.start <= 300) { D.blocks = D.blocks.filter(z => z !== b); return 'No break needed at 5 hours or less: removed.'; }
-  if (b.start < p.start || b.end > p.end) { const len = b.end - b.start; b.start = Math.max(p.start + 120, Math.min(b.start, p.end - len - 60)); b.end = b.start + len; return 'Their break moved inside the new shift.'; }
+  if (b.start < p.start || b.end > p.end || brkBad(p, b)) { const len = b.end - b.start, w = brkWindow(p); b.start = Math.ceil(Math.max(w.from, Math.min(b.start, w.to)) / STEP) * STEP; b.end = b.start + len; return 'Their break moved to fit the new shift (the 5-hour rule).'; }
   return '';
 }
 async function dayDecide(id, action, value) {
