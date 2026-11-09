@@ -140,6 +140,8 @@ main { padding: 14px 20px 40px; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 .why { display: block; width: 100%; box-sizing: border-box; font: inherit; font-size: 12px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 7px; margin-top: 4px; background: #fff; }
 .ptimes { margin-left: 4px; color: #9b2a5a; font-weight: 800; }
+.locked-bar { background: #eef3ff; border: 1px solid #cfdcf7; color: #23406e; border-radius: 10px; padding: 8px 12px; margin: 0 0 10px; } .locked-bar button { margin-left: 8px; }
+.wk-lock { border: 1px solid var(--line); background: #fff; border-radius: 999px; font-size: 11px; padding: 1px 8px; cursor: pointer; margin: 3px 4px 0 0; } .wk-lock.on { background: #eef3ff; border-color: #9fb6e6; color: #23406e; font-weight: 700; }
 </style>
 </head>
 <body>
@@ -156,6 +158,7 @@ main { padding: 14px 20px 40px; }
   <span class="spacer"></span>
   <button id="sendupd" style="display:none" title="Changed or published shifts: let the staff know now (their usual notification)">Send updates to staff</button>
   <button id="addsh" class="day-only" title="Add a shift for someone (a draft until you publish the day)">+ Add shift</button>
+  <button id="lockday" class="day-only" title="Lock this day: the nightly run won't add workshops or swap their projects">🔒 Lock day</button>
   <button id="addws" class="day-only" title="Add a World workshop or Mini Make at this studio this day (sold on World)">+ Add workshop</button>
   <button id="pub" class="day-only" title="Publish the day's draft shifts: they become approved, and staff get their usual notification" style="display:none">Publish</button>
   <button id="plan" class="primary day-only" title="Roles, then breaks, then demos (anything you've moved stays put)">Plan the day</button>
@@ -403,6 +406,9 @@ async function load() {
     try { const ib = await sb.rpc('hub_inbox_mine'); inbox = (ib.data || []).filter(x => x.studio_id === st && String(x.day || '').slice(0, 10) === date); } catch (e) {}
     D = { st, date, people, blocks, lo, hi, sessions, booked, partyTimes, rolesFromPlan, startRoles: people.map(p => [p.id, p.role]), inbox, partyGuests, partyUnknown, partyBk, pd: pd.data || [], off, offNames, dayNote };
     START = JSON.parse(JSON.stringify(blocks));
+    // (Nov 9 2026) 🔒 is the day locked from the nightly run? (day_lock.sql; quietly skipped if not set up)
+    D.lock = null; lockBtn();
+    sb.rpc('hub_day_locks', { p_studio: st, p_from: date, p_to: date }).then(r => { if (!r.error && D && D.st === st && D.date === date) { D.lock = (r.data || [])[0] || null; lockBtn(); draw(); } }, () => {});
     // breaks suggested straight away for anyone on a long shift without one (saved with Save the day)
     const br = suggestBreaks();
     if (br.added || br.missed.length) D.flash = [br.added ? `${br.added} break${br.added === 1 ? '' : 's'} suggested (dashed): Save the day to keep ${br.added === 1 ? 'it' : 'them'}` : '',
@@ -571,6 +577,7 @@ function draw() {
     <div class="decide"${decide ? '' : ' style="padding:6px 14px"'}><h2 style="display:flex;align-items:center;gap:10px${decide ? '' : ';margin:0'}">${decide ? `To decide for this day (${(D.inbox || []).length})` : '<span class="muted" style="font-weight:500">Nothing to decide for this day</span>'}
       <span style="flex:1"></span><button onclick="dayNoteEdit()" style="font-weight:500" title="A note for this day: shown here, on the week board, on the Hub's home page and in the Team app">📝 ${D.dayNote ? 'Edit' : ''} Day note</button><button onclick="dayTodo()" style="font-weight:500">+ Add a to-do</button></h2>${decide}</div>
     ${D.dayNote ? `<div class="daynote" role="button" tabindex="0" onclick="dayNoteEdit()" title="Click to change">📝 <b>Day note:</b> ${esc(D.dayNote)}</div>` : ''}
+    ${D.lock ? `<div class="locked-bar">🔒 <b>Locked:</b> the nightly run won\u2019t add workshops or swap their projects this day${D.lock.locked_by ? ` <span class="muted">(by ${esc(D.lock.locked_by)})</span>` : ''}. It still closes empty times. <button onclick="dayLockToggle()">Unlock</button></div>` : ''}
     ${cokHtml()}
     ${(() => { const ids = Object.keys(D.off || {}); if (!ids.length) return '';
       return `<div class="offline"><b>Off this day:</b> ${ids.map(id => `${esc((D.offNames || {})[id] || 'Someone')} <span class="muted">(${D.off[id].map(offText).map(esc).join(', ')})</span>`).join(' · ')}</div>`; })()}
@@ -949,6 +956,15 @@ async function dayWorkshopAdd() {
     if (error) { $('ws-ok').disabled = false; alert(/world_item_date_add/.test(error.message) ? 'Run world_items.sql in Supabase first.' : niceErr(error.message)); return; }
     closePop(); await load(); D.flash = `Added: ${it.title} at ${fmt(m)} (${spots} spots), on sale on World now. Check who demos it.`; draw();
   };
+}
+// ---- (Nov 9 2026) 🔒 Lock the day from the nightly run (no workshops added, no projects swapped; day_lock.sql) ----
+function lockBtn() { const b = $('lockday'); if (!b) return; const on = !!(D && D.lock); b.textContent = on ? '🔓 Unlock day' : '🔒 Lock day'; b.classList.toggle('primary', on); }
+async function dayLockToggle() {
+  const on = !(D && D.lock);
+  if (on && !confirm('Lock this day? The nightly run won\u2019t add workshops here or swap their projects. (It still closes empty times.)')) return;
+  const { error } = await sb.rpc('hub_day_lock_set', { p_studio: D.st, p_day: D.date, p_lock: on });
+  if (error) { alert(/hub_day_lock_set/.test(error.message) ? 'Run day_lock.sql in Supabase first.' : error.message); return; }
+  D.lock = on ? { locked_by: '' } : null; lockBtn(); D.flash = on ? 'Locked: the nightly run won\u2019t add or swap workshops this day.' : 'Unlocked.'; draw();
 }
 // ---- (Nov 9 2026) Reopen a closed time from the Changes box ----
 async function dayReopen(id) {
@@ -1355,7 +1371,9 @@ async function loadWeek() {
     const days = Array.from({ length: 7 }, (_, i) => addDays(from, i));
     const dayNotes = {};
     try { const dn = await sb.from('hub_day_notes').select('day, note').eq('studio_id', st).gte('day', from).lte('day', to); (dn.data || []).forEach(x => { dayNotes[x.day] = x.note; }); } catch (e) {}
-    W = { dayNotes, st, from, to, days, sessions, booked, need: need.error ? [] : (need.data || []), needErr: need.error ? need.error.message : '',
+    const locks = {};
+    try { const lk = await sb.rpc('hub_day_locks', { p_studio: st, p_from: from, p_to: to }); (lk.data || []).forEach(x => { locks[String(x.day).slice(0, 10)] = x; }); } catch (e) {}
+    W = { locks, dayNotes, st, from, to, days, sessions, booked, need: need.error ? [] : (need.data || []), needErr: need.error ? need.error.message : '',
           shifts: shifts.data || [], names, gone, team, profiles, toff: toffR.data || [], unav: unavR.data || [], elsewhere: elseR.data || [], inbox: (inbox.data || []).filter(x => x.studio_id === st && x.day && String(x.day).slice(0, 10) >= from && String(x.day).slice(0, 10) <= to) };
     drawWeek();
   } catch (e) { $('main').innerHTML = `<div class="msg"><b>Couldn't load that week.</b><br>${esc(e.message || e)}</div>`; }
@@ -1401,6 +1419,7 @@ function drawWeek() {
     return `<th><button class="day" onclick="openDay('${d}')" title="Open this day's day board">${esc(dayLabel(d))}</button>
       <div class="cov" title="8am–10pm: red = short, amber = more than needed, green = right">${c.cls.map((k, i) => `<i class="${k}" title="${fmt(c.lo + i * 30)}"></i>`).join('')}</div>
       <small>${n} time${n === 1 ? '' : 's'} booked · need ${c.needH}h, scheduled ${c.haveH}h${c.drafts ? ' (drafts)' : ''}${todo ? ` · <b style="color:var(--bad)">${todo} to decide</b>` : ''}</small>${labCell(d)}
+      <button class="wk-lock${(W.locks || {})[d] ? ' on' : ''}" onclick="event.stopPropagation(); wkLock('${d}')" title="${(W.locks || {})[d] ? 'Locked: the nightly run won\u2019t add or swap workshops this day. Click to unlock' : 'Lock this day from the nightly run (no workshops added or swapped)'}">${(W.locks || {})[d] ? '🔒 Locked' : '🔓'}</button>
       ${(W.dayNotes || {})[d] ? `<div class="wk-dnote" role="button" tabindex="0" onclick="event.stopPropagation(); wkDayNote('${d}')" title="Click to change">📝 ${esc(W.dayNotes[d])}</div>`
         : `<button class="wk-dnote-add" onclick="event.stopPropagation(); wkDayNote('${d}')" title="A note for this day (boards, Hub home page, Team app)">+ note</button>`}</th>`; }).join('');
   const shiftRows = people.map(pid => `<tr${W.gone && W.gone[pid] ? ' class="gone"' : ''}><td class="lbl"><b class="who-link" role="button" tabindex="0" onclick="wkPerson('${esc(pid)}', this)" title="Hours promised, home studio and more">${esc(W.names[pid] || 'Someone')}</b>${W.gone && W.gone[pid] ? `<span class="gone-tag">${esc(W.gone[pid])}</span>` : ''}<small title="Paid hours: a shift over 5 hours less its 30-minute unpaid break">${Math.round(W.shifts.filter(x => x.staff_id === pid).reduce((t, x) => t + paidMins(x), 0) / 6) / 10}h this week</small></td>${days.map(d => {
@@ -1485,6 +1504,14 @@ function offClash(pid, d, sh) {
   return offOn(pid, d).some(o => { if (!o.times) return true; const [x, y] = o.times.split('–').map(t => parseRange(t + '-' + t) ? parseRange(t + '-' + t).start : null); return x != null && y != null ? a < y && z > x : true; });
 }
 // ---- notes on the week board: a day's note, a shift's note (shift_day_notes.sql) ----
+async function wkLock(d) {
+  const on = !(W.locks || {})[d];
+  if (on && !confirm(`Lock ${dayLabel(d)}? The nightly run won\u2019t add workshops here or swap their projects. (It still closes empty times.)`)) return;
+  const { error } = await sb.rpc('hub_day_lock_set', { p_studio: W.st, p_day: d, p_lock: on });
+  if (error) { alert(/hub_day_lock_set/.test(error.message) ? 'Run day_lock.sql in Supabase first.' : error.message); return; }
+  W.locks = W.locks || {}; if (on) W.locks[d] = { locked_by: '' }; else delete W.locks[d];
+  W.flash = on ? `${dayLabel(d)} locked.` : `${dayLabel(d)} unlocked.`; drawWeek();
+}
 async function wkDayNote(d) {
   const v = prompt(`A note for ${dayLabel(d)} (shown on the boards, the Hub\u2019s home page and in the Team app). Leave empty to remove it:`, (W.dayNotes || {})[d] || ''); if (v === null) return;
   const { error } = await sb.rpc('hub_board_day_note', { p_studio: W.st, p_day: d, p_note: v });
@@ -1718,7 +1745,7 @@ const show = () => (MODE === 'week' ? loadWeek : load)();
   $('next').onclick = () => stepTo(1);
   $('reset').onclick = () => { if (START) { D.blocks = JSON.parse(JSON.stringify(START)); D.people.forEach(p => { p.role = (D.startRoles.find(r => r[0] === p.id) || [])[1] || p.role; p.roleSet = false; }); draw(); } };
   $('wkstart').value = WEEK_MON ? 'mon' : 'sun';
-  $('save').onclick = saveDay; $('sendupd').onclick = sendUpdates; notifyBar(); $('addsh').onclick = () => D && dayShiftAdd(); $('addws').onclick = () => D && dayWorkshopAdd(); $('pub').onclick = () => D && dayPublish();
+  $('save').onclick = saveDay; $('sendupd').onclick = sendUpdates; notifyBar(); $('addsh').onclick = () => D && dayShiftAdd(); $('addws').onclick = () => D && dayWorkshopAdd(); $('lockday').onclick = () => D && dayLockToggle(); $('pub').onclick = () => D && dayPublish();
   $('plan').onclick = () => planDay('all'); $('brk').onclick = () => planDay('brk'); $('demo').onclick = () => planDay('demo');
   const { data: { session } } = await sb.auth.getSession();
   if (!session) { $('main').innerHTML = `<div class="msg"><b>Sign in to the Hub first</b> (with a home office login), then come back to this page. <a href="hub.html">Open the Hub</a></div>`; return; }
