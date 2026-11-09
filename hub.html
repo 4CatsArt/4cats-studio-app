@@ -7810,6 +7810,7 @@ function openBoPane() {
 }
 async function boLoad() {
   _bo.rows = null; boDraw();
+  try { const iv = await sb.rpc('hub_buyouts', { p_studio: null }); _bo.inv = iv.error ? null : (iv.data || []); } catch (e) { _bo.inv = null; }
   const { data, error } = await sb.rpc('hub_buyout_requests', { p_status: _bo.status });
   _bo.rows = error ? [] : (data || []); _bo.err = error ? (/hub_buyout_requests/.test(error.message) ? 'Run studio_buyouts.sql in Supabase first.' : error.message) : '';
   boDraw(); boBadge();
@@ -7847,7 +7848,7 @@ function boDraw() {
         ${r.organization || r.occasion ? `<div class="goal-note">${esc([r.organization, r.occasion].filter(Boolean).join(' · '))}</div>` : ''}
         ${r.project ? `<div class="goal-note">🎨 ${esc(r.project)}</div>` : ''}${r.notes ? `<div class="bo-notes">${esc(r.notes)}</div>` : ''}
         <div class="goal-note">Received ${esc(dl(r.created_at))}${r.source && r.source !== 'form' ? ' · by ' + esc(r.source) : ' · World form'}</div></div>
-      <div class="bo-side">${ed ? `<select onchange="boSet('${escAttr(r.id)}','status',this.value)">${BO_STATUS.map(o => `<option value="${o[0]}"${o[0] === r.status ? ' selected' : ''}>${o[1]}</option>`).join('')}</select>
+      <div class="bo-side">${boInvCell(r)}${ed ? `<select onchange="boSet('${escAttr(r.id)}','status',this.value)">${BO_STATUS.map(o => `<option value="${o[0]}"${o[0] === r.status ? ' selected' : ''}>${o[1]}</option>`).join('')}</select>
         <label class="fd-sm">Follow up <input type="date" value="${escAttr(r.follow_up || '')}" onchange="boSet('${escAttr(r.id)}','follow_up',this.value)"></label>
         <input class="bo-note" placeholder="Staff note" value="${escAttr(r.staff_note || '')}" onchange="boSet('${escAttr(r.id)}','staff_note',this.value)">` : `<span class="cust-st">${esc((BO_STATUS.find(o => o[0] === r.status) || [0, r.status])[1])}</span>`}</div></div>`).join('') + '</div>';
   el.innerHTML = h;
@@ -7867,6 +7868,82 @@ async function boAddGo() {
   if (error) { alert(error.message); return; }
   _bo.add = null; boLoad();
 }
+
+
+// ---- 🧾 a buyout's invoice (studio_buyout_invoices.sql): make it from the request (holds the studio), then its stages ----
+const BOI_ST = { sent: '⏳ Deposit invoice sent', deposit_paid: '✓ Deposit paid', balance_sent: '🧾 Balance sent', paid: '✓ Paid', closed: '✓ Paid (studio)', cancelled: 'Cancelled', released: 'Released (unpaid)' };
+function boInvOf(r) { return (_bo.inv || []).find(i => i.id === r.buyout_id) || (_bo.inv || []).filter(i => i.request_id === r.id).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null; }
+function boInvCell(r) {
+  if (_bo.inv === null) return '';
+  const i = boInvOf(r), ed = _hoCan.edit, dl = d => d ? new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '';
+  if (!i || ['cancelled', 'released'].includes(i.status)) return (i ? `<span class="cust-st">${esc(BOI_ST[i.status])}</span>` : '') + (ed ? `<button class="ho-btn primary" onclick="boInvNew('${escAttr(r.id)}')">🧾 Invoice</button>` : '');
+  const what = i.status === 'sent' ? `deposit due ${dl(i.pay_by)}` : i.status === 'balance_sent' ? `$${Number(i.balance || 0).toFixed(2)} due ${dl(i.balance_due)}` : i.status === 'deposit_paid' ? `${dl(i.day)} · balance a week before` : '';
+  const o = (a, l) => `<option value="${a}">${l}</option>`;
+  return `<div><span class="cust-st cust-${i.status === 'sent' || i.status === 'balance_sent' ? 'held' : 'booked'}" title="${escAttr(`${i.day} ${String(i.at).slice(0, 5)} · ${i.minutes} min · ${i.guests} guests${i.observers ? ' + ' + i.observers + ' observers' : ''} · total about $${Number((i.price || {}).total || 0).toFixed(2)} before tax · paid $${Number(i.paid_total || 0).toFixed(2)}${i.agreed_at ? ' · terms agreed by ' + i.agreed_name : ''}${i.closed_n ? ' · ' + i.closed_n + ' times closed' : ''}`)}">${esc(BOI_ST[i.status] || i.status)}</span> <span class="fd-sm">${esc(what)}</span></div>
+    ${ed && ['sent', 'deposit_paid', 'balance_sent'].includes(i.status) ? `<select class="fti-act" onchange="if (this.value) { const a = this.value; this.value = ''; boInvAct('${escAttr(i.id)}', a); }"><option value="">Actions…</option>${
+      i.status === 'sent' ? o('send', i.sent_at ? 'Resend the invoice' : 'Send the invoice') + o('extend', 'Extend the deposit date') + o('cancel', 'Cancel (release the studio)')
+      : i.status === 'deposit_paid' ? o('balance', 'Final numbers → send the balance') + o('paid_studio', 'Paid at the studio') + o('cancel', 'Cancel')
+      : o('send', 'Resend the balance invoice') + o('balance', 'Change the final numbers') + o('paid_studio', 'Paid at the studio')}</select>` : ''}`;
+}
+function boInvNew(reqId) {
+  const r = (_bo.rows || []).find(x => x.id === reqId) || {};
+  const firstDate = (String(r.dates || '').match(/\d{4}-\d{2}-\d{2}/) || [''])[0], pb = (() => { const d = new Date(); d.setDate(d.getDate() + 7); return localDateStr(d); })();
+  const st = Object.keys(STUDIO_NAMES).sort((a, b) => STUDIO_NAMES[a].localeCompare(STUDIO_NAMES[b]));
+  openDutySheet(`<h3>🧾 Studio buyout invoice</h3><p class="ho-intro">Holds the whole studio (everything else closes from 15 minutes before to 15 minutes after) and emails ${esc(r.email || 'the contact')} the deposit invoice: they confirm the project, agree to the terms and pay the deposit. Unpaid by the deposit date, it's released.</p>
+    <div class="me-form">
+      <label>Studio<select id="bi-studio">${st.map(x => `<option value="${x}"${x === r.studio_id ? ' selected' : ''}>${esc(STUDIO_NAMES[x])}</option>`).join('')}</select></label>
+      <label>Date<input id="bi-day" type="date" value="${escAttr(firstDate)}"></label><label>Start time<input id="bi-at" type="time" step="900" value="${escAttr(/^\d{1,2}:\d{2}/.test(r.start_time || '') ? String(r.start_time).slice(0, 5) : '')}"></label>
+      <label>Length<select id="bi-min">${[90, 120, 150, 180].map(m => `<option value="${m}"${(r.minutes || 90) === m ? ' selected' : ''}>${m === 90 ? '90 min' : m / 60 + ' hours'}</option>`).join('')}</select></label>
+      <label>Guests (making art)<input id="bi-guests" type="number" min="0" value="${escAttr(r.guests || '')}"></label><label>Observers<input id="bi-obs" type="number" min="0" value="${escAttr(r.observers || 0)}"></label>
+      <label>Contact<input id="bi-contact" value="${escAttr(r.name || '')}"></label><label>Email<input id="bi-email" type="email" value="${escAttr(r.email || '')}"></label><label>Phone<input id="bi-phone" value="${escAttr(r.phone || '')}"></label>
+      <label>Group / organization<input id="bi-org" value="${escAttr(r.organization || '')}"></label><label>Occasion<input id="bi-occ" value="${escAttr(r.occasion || '')}"></label>
+      <label>Project (they can confirm it)<input id="bi-proj" value="${escAttr(r.project || '')}"></label>
+      <label>Deposit due by<input id="bi-pay" type="date" value="${escAttr(pb)}"></label>
+      <label>Deposit (before tax; blank = the 90-minute price)<input id="bi-dep" type="number" min="0" step="0.01" placeholder="the 90-minute price"></label>
+    </div><div id="bi-msg"></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="bi-go" onclick="boInvCreate('${escAttr(reqId)}', false)">Hold the studio and email the invoice</button></div>`);
+}
+async function boInvCreate(reqId, force) {
+  const v = id => ((document.getElementById(id) || {}).value || '').trim(), msg = document.getElementById('bi-msg'), btn = document.getElementById('bi-go');
+  const p = { request_id: reqId, studio_id: v('bi-studio'), day: v('bi-day'), at: v('bi-at'), minutes: v('bi-min'), guests: v('bi-guests'), observers: v('bi-obs'), contact_name: v('bi-contact'),
+    email: v('bi-email'), phone: v('bi-phone'), organization: v('bi-org'), occasion: v('bi-occ'), project: v('bi-proj'), pay_by: v('bi-pay'), deposit: v('bi-dep'), force: !!force };
+  if (!p.day || !p.at) { msg.innerHTML = '<div class="me-msg err">Choose the date and start time.</div>'; return; }
+  btn.disabled = true; btn.textContent = 'Holding the studio…';
+  const { data, error } = await sb.rpc('hub_buyout_create', { p });
+  if (error) {
+    btn.disabled = false; btn.textContent = 'Hold the studio and email the invoice';
+    const busy = /Already booked then/.test(error.message);
+    msg.innerHTML = `<div class="me-msg err">${esc(/hub_buyout_create/.test(error.message) ? 'Run studio_buyout_invoices.sql in Supabase first.' : error.message)}</div>` +
+      (busy ? `<button class="ho-btn" onclick="boInvCreate('${escAttr(reqId)}', true)">Go ahead anyway (hold it around them)</button>` : '');
+    return;
+  }
+  const r = await boInvEmail(data.id);
+  closeDutySheet(); alert(r.ok ? `Held: ${data.closed && data.closed.length ? data.closed.length + ' other times closed. ' : ''}The invoice was emailed to ${p.email}.` : 'Held, but the invoice email didn\u2019t send: ' + r.error + ' (use Actions → Send).'); boLoad();
+}
+async function boInvEmail(id) {
+  const ses = await sb.auth.getSession(), tk = ses && ses.data && ses.data.session && ses.data.session.access_token;
+  const r = await fetch(`${SUPABASE_URL}/functions/v1/custom-party-invite`, { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + (tk || SUPABASE_ANON_KEY) }, body: JSON.stringify({ bo_id: id }) }).catch(() => null);
+  const d = r ? await r.json().catch(() => ({})) : {};
+  return r && r.ok ? { ok: true, link: d.link } : { ok: false, error: d.error || 'please try again' };
+}
+async function boInvAct(id, action) {
+  const i = (_bo.inv || []).concat((_cust && _cust.bo) || []).find(x => x.id === id) || {};
+  if (action === 'send') { const r = await boInvEmail(id); if (r.ok && r.link) { try { await navigator.clipboard.writeText(r.link); } catch (e) {} } alert(r.ok ? 'Emailed (and the link copied).' : 'The email didn\u2019t send: ' + r.error); boAfter(); return; }
+  let date = null, g = null, o = null, m = null;
+  if (action === 'extend') { date = prompt('New deposit due date (YYYY-MM-DD):', String(i.pay_by || '')); if (!date) return; }
+  if (action === 'balance') {
+    g = prompt('Final number of guests making art:', String(i.final_guests ?? i.guests ?? '')); if (g == null) return; g = parseInt(g, 10); if (!(g >= 0)) { alert('Enter a number.'); return; }
+    o = prompt('Final number of observers (not making art):', String(i.final_observers ?? i.observers ?? 0)); if (o == null) return; o = parseInt(o, 10) || 0;
+    m = prompt('Length in minutes (90, 120, 150, 180…):', String(i.final_minutes ?? i.minutes ?? 90)); if (m == null) return; m = Math.max(90, parseInt(m, 10) || 90);
+  }
+  if (action === 'paid_studio' && !confirm('Mark this buyout as paid in full at the studio?')) return;
+  if (action === 'cancel' && !confirm(i.status === 'sent' ? 'Cancel this buyout? The studio is released and its other times reopen.' : 'Cancel this buyout? (The deposit is non-refundable under the terms.)')) return;
+  const { data, error } = await sb.rpc('hub_buyout_action', { p_id: id, p_action: action, p_date: date, p_guests: g, p_observers: o, p_minutes: m });
+  if (error) { alert(error.message); return; }
+  if (action === 'balance') { const r = await boInvEmail(id); alert(r.ok ? `Balance invoice emailed: $${Number(data.balance || 0).toFixed(2)} + tax, due ${data.balance_due}.` : 'Saved, but the email didn\u2019t send: ' + r.error + ' (use Resend).'); }
+  boAfter();
+}
+function boAfter() { if (paneVisible('bo-pane')) boLoad(); if (_plan && paneVisible('plan-pane')) customLoad(true).then(() => renderPlanDay()); }
 
 function openFtPane() {
   if (!_hoCan.view) { alert('Field trips are for home office admins.'); return; }
@@ -9876,14 +9953,15 @@ async function customLoad(force) {
   if (!force && _cust.studio === st && _cust.rows && Date.now() - _cust.at < 60000) return;
   const { data, error } = await sb.rpc('hub_custom_holds', { p_studio: st });
   let ft = []; try { const f = await sb.rpc('hub_ft_invoices', { p_studio: st }); ft = f.error ? [] : (f.data || []); } catch (e) {}
-  _cust = { studio: st, rows: error ? [] : (data || []), ft, at: Date.now(), err: error ? (/hub_custom_holds/.test(error.message) ? 'Run custom_party_times.sql in Supabase first.' : error.message) : '' };
+  let bo = []; try { const b = await sb.rpc('hub_buyouts', { p_studio: st }); bo = b.error ? [] : (b.data || []); } catch (e) {}
+  _cust = { studio: st, rows: error ? [] : (data || []), ft, bo, at: Date.now(), err: error ? (/hub_custom_holds/.test(error.message) ? 'Run custom_party_times.sql in Supabase first.' : error.message) : '' };
 }
 async function customDraw(date) {
   const el = document.getElementById('plan-custom'); if (!el) return;
   if (!_sessionStudioId) { el.innerHTML = ''; return; }
   const first = !(_cust.studio === _sessionStudioId && _cust.rows);
   await customLoad(false);
-  if (first && _plan && ((_cust.rows || []).some(h => (h.status === 'held' || h.status === 'booked') && h.day === _plan.date) || (_cust.ft || []).some(h => h.status === 'sent' && h.day === _plan.date))) { renderPlanDay(); return; }
+  if (first && _plan && ((_cust.rows || []).some(h => (h.status === 'held' || h.status === 'booked') && h.day === _plan.date) || (_cust.ft || []).some(h => h.status === 'sent' && h.day === _plan.date) || (_cust.bo || []).some(h => h.status === 'sent' && h.day === _plan.date))) { renderPlanDay(); return; }
   if (!planCanEdit()) { el.innerHTML = ''; return; }   // (everyone sees a held time's line; the box and its buttons are for coordinators and home office)
   const admin = !!(_studioData && _studioData.isAdmin), live = (_cust.rows || []).filter(r => r.status === 'requested');   // (held times: their actions are on their own line in the day)
   const dl = d => new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
@@ -9906,6 +9984,13 @@ function customTag(x) {
 }
 // a held custom time's line on the Schedule: on hold, for whom, link sent when, pay by when
 function customHeldHtml(x) {
+  const bi = (_cust.bo || []).find(h => h.session_id === x.id && h.status === 'sent');
+  if (bi) {
+    const admin = !!(_studioData && _studioData.isAdmin);
+    return `<span class="cust-st cust-held" title="${escAttr(`Whole studio, ${bi.minutes} min · ${bi.guests} guests${bi.observers ? ' + ' + bi.observers + ' observers' : ''} · contact ${bi.contact_name || ''} ${bi.email || ''}${bi.phone ? ' ' + bi.phone : ''}${bi.closed_n ? ' · ' + bi.closed_n + ' times closed' : ''}`)}">⏳ On hold: studio buyout</span> for <b>${esc(bi.organization || bi.occasion || bi.contact_name || '')}</b>
+      · ${bi.sent_at ? 'invoice sent ' + esc(ftiDl(bi.sent_at)) : '<b style="color:#b45309">invoice not sent yet</b>'} · deposit due by <b>${esc(ftiDl(bi.pay_by))}</b>
+      ${admin ? `<span class="cust-acts"><button class="ho-btn sm" onclick="boInvAct('${escAttr(bi.id)}','send')">${bi.sent_at ? 'Resend' : 'Send'}</button><button class="ho-btn sm" onclick="boInvAct('${escAttr(bi.id)}','extend')">Extend</button><button class="ho-btn sm" onclick="boInvAct('${escAttr(bi.id)}','cancel')">Cancel</button></span>` : ''}`;
+  }
   const fi = (_cust.ft || []).find(h => h.session_id === x.id && h.status === 'sent');
   if (fi) {
     const admin = !!(_studioData && _studioData.isAdmin);
@@ -12738,8 +12823,8 @@ async function wuPricing() {
   return _wuPricing;
 }
 function wuKind(s) { const t = String((s && s.title) || '').toLowerCase(), w = s && s.world_party;
-  return /field\s*trip/.test(t) ? 'field_trip' : w === 'splatter' || /splatter/.test(t) ? 'splatter' : w === 'get_together' || /get.?together/.test(t) ? 'get_together' : 'kids'; }
-const WU_LABEL = { kids: 'Kids Party', splatter: 'Splatter Party', get_together: 'Adult Get-Together', field_trip: 'Field Trip' };
+  return /buyout/.test(t) ? 'buyout' : /field\s*trip/.test(t) ? 'field_trip' : w === 'splatter' || /splatter/.test(t) ? 'splatter' : w === 'get_together' || /get.?together/.test(t) ? 'get_together' : 'kids'; }
+const WU_LABEL = { kids: 'Kids Party', splatter: 'Splatter Party', get_together: 'Adult Get-Together', field_trip: 'Field Trip', buyout: 'Studio Buyout' };
 const wuMin = t => { const m = String(t || '').match(/(\d+)/); return m ? +m[1] : 0; };
 async function wuOpen(pt) {
   const id = pt.booking_id, k = wuKind(pt.session), d = pt.detail || {}, b = pt.booking || {};
@@ -12771,7 +12856,7 @@ function wuCalc(W) {
   const k = W.kind, f = W.f, P = (W.pr && W.pr.P) || {}, n = parseInt(f.actual_guests, 10) || 0, r2 = x => Math.round(x * 100) / 100;
   const member = !!(W.paid && W.paid.member) && !(W.paid.plan === 'workshops' && k !== 'get_together'), rate = +P.rate || 0;
   const after = wuMin(f.actual_party_time === 'none' ? 0 : f.actual_party_time), lines = [];
-  if (!n) return null;
+  if (!n || k === 'buyout') return null;   // (a studio buyout settles through its balance invoice: Hub → Studio buyouts)
   if (k === 'kids' || k === 'splatter') {
     const K = P[k] || {}, inc = +K.included || 8, min = W.booked.guests >= 16 ? 16 : inc, people = Math.max(n, min);
     const longArt = k === 'kids' && /90/.test(f.actual_art_time), base1 = +K.art_hours || 1, artH = longArt ? (+K.long_art_hours || 1.5) : base1;
@@ -12829,7 +12914,8 @@ function wuDraw(id) {
   // 3 · Settle up
   const c = wuCalc(W), paidBefore = Number((W.paid && W.paid.paid) || 0), paidNow = Number(d.settle_paid_now || 0), tax = wuTax(st);
   h += '<div class="wu-sec"><div class="wu-h">3 · Settle up</div>';
-  if (!c) h += '<p class="goal-note">Enter how many came to see what\u2019s owed or credited.</p>';
+  if (k === 'buyout') h += '<p class="goal-note">A studio buyout is settled through its balance invoice (home office: 🏢 Studio buyouts).</p>';
+  else if (!c) h += '<p class="goal-note">Enter how many came to see what\u2019s owed or credited.</p>';
   else {
     const diff = Math.round((c.total - paidBefore - paidNow) * 100) / 100, withTax = Math.round(Math.abs(diff) * (1 + tax) * 100) / 100;
     W.calc = Object.assign({}, c, { paidBefore, paidNow, diff, withTax });
