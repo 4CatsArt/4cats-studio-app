@@ -464,7 +464,9 @@ table.pl-staff .bad { color: var(--bad); }
           </select>
         </label>
         <label><input type="checkbox" id="to-upcoming" checked onchange="renderTimeOff()"> Today onward</label>
-        <input class="input" id="to-search" placeholder="Search name" oninput="renderTimeOff()">
+        <span class="to-search-wrap"><input class="input" id="to-search" type="search" placeholder="Search name, date, type or note" oninput="renderTimeOff()" onkeydown="if(event.key==='Escape'){this.value='';renderTimeOff()}" autocomplete="off"></span>
+        <button class="btn" id="to-clear" type="button" onclick="clearTimeOffFilters()" style="display:none">✕ Clear filters</button>
+        <span class="muted small" id="to-count"></span>
         <button class="btn spacer" onclick="toggleForm('to-form')">Add time off</button>
       </div>
       <div class="panel" id="to-form" style="display:none">
@@ -861,6 +863,49 @@ async function loadTimeOff() {
   renderTimeOff()
 }
 
+// ---- Each person's time off so far (Nov 9 2026): days off this year (allowance 10, or 15 after 5+ years) and the
+// one-weekend-off-per-quarter rule. Counts approved time off (not sick or medical leave); full days by date, partial days apart.
+const TO_COUNTED = r => r.type !== 'sick' && r.type !== 'medical'
+function toDates(r) { const out = []; const d = parseYmd(r.start_date); const end = parseYmd(r.end_date); let g = 0
+  while (d <= end && g++ < 400) { out.push(ymd(d)); d.setDate(d.getDate() + 1) } return out }
+const toPartial = r => !!(r.start_time || r.end_time)
+const toQuarter = s => s.slice(0, 4) + '-Q' + (Math.floor((+s.slice(5, 7) - 1) / 3) + 1)
+const toWeekendKey = s => { const d = parseYmd(s), w = d.getDay(); if (w !== 0 && w !== 6) return null; if (w === 0) d.setDate(d.getDate() - 1); return ymd(d) }   // (that weekend's Saturday)
+function toAllowance(staffId, year) {
+  const p = staffById[staffId]; if (!p || !p.hire_date) return 10
+  const yrs = (parseYmd(year + '-01-01') - parseYmd(p.hire_date)) / (365.25 * 86400000)
+  return yrs >= 5 ? 15 : 10
+}
+function timeOffSummary(r) {
+  if (!TO_COUNTED(r)) return '<span class="muted small">' + (r.type === 'medical' ? 'Medical leave' : 'Sick') + ': not counted</span>'
+  const year = r.start_date.slice(0, 4), allow = toAllowance(r.staff_id, year)
+  const mine = timeOffRows.filter(x => x.staff_id === r.staff_id && x.id !== r.id && TO_COUNTED(x))
+  const inYear = x => toDates(x).filter(d => d.slice(0, 4) === year)
+  const full = L => L.filter(x => !toPartial(x)).reduce((t, x) => t + inYear(x).length, 0)
+  const part = L => L.filter(x => toPartial(x) && inYear(x).length).length
+  const appr = mine.filter(x => x.status === 'approved'), wait = mine.filter(x => x.status === 'pending')
+  const used = full(appr), usedP = part(appr), waitD = full(wait)
+  const thisD = toPartial(r) ? 0 : inYear(r).length, after = used + thisD
+  const over = after > allow
+  let h = '<div class="small"><b>' + used + '</b> of ' + allow + ' days used in ' + year + (usedP ? ' <span class="muted">(+' + usedP + ' part day' + (usedP === 1 ? '' : 's') + ')</span>' : '') + '</div>'
+  if (thisD) h += '<div class="small"' + (over ? ' style="color:#b91c1c;font-weight:700"' : '') + '>' + (r.status === 'approved' ? 'With this: ' : 'This: ' + thisD + ' day' + (thisD === 1 ? '' : 's') + ' \u2192 ') + after + ' of ' + allow + (over ? ' \u26a0 over' : '') + '</div>'
+  else if (toPartial(r)) h += '<div class="muted small">This: part of a day</div>'
+  if (waitD) h += '<div class="muted small">+' + waitD + ' more day' + (waitD === 1 ? '' : 's') + ' waiting</div>'
+  // weekends: this request's weekends, and any other approved weekend off in the same quarter
+  const wk = [...new Set(toDates(r).map(toWeekendKey).filter(Boolean))]
+  if (!wk.length) return h + '<div class="muted small">No weekend days</div>'
+  const quarters = [...new Set(wk.map(toQuarter))], others = {}
+  appr.forEach(x => toDates(x).forEach(d => { const k = toWeekendKey(d); if (k && quarters.includes(toQuarter(k)) && !wk.includes(k)) others[k] = 1 }))
+  const had = Object.keys(others).sort()
+  if (had.length) h += '<div class="small" style="color:#b91c1c;font-weight:700">\u26a0 Already had a weekend off this quarter: ' + had.map(k => shortDay(k)).join(', ') + '</div>'
+  else if (wk.length > 1) h += '<div class="small" style="color:#b45309;font-weight:700">\u26a0 ' + wk.length + ' weekends in this request</div>'
+  else h += '<div class="small" style="color:#15803d;font-weight:600">\u2713 First weekend off this quarter</div>'
+  return h
+}
+function clearTimeOffFilters() {
+  document.getElementById('to-status').value = 'pending'; document.getElementById('to-upcoming').checked = true
+  document.getElementById('to-search').value = ''; renderTimeOff(); document.getElementById('to-search').focus()
+}
 function renderTimeOff() {
   const status = document.getElementById('to-status').value
   const upcoming = document.getElementById('to-upcoming').checked
@@ -874,12 +919,19 @@ function renderTimeOff() {
     if (status === 'denied' && !(r.status === 'denied' || r.status === 'cancelled')) return false
     if (status !== 'all' && status !== 'denied' && r.status !== status) return false
     if (upcoming && r.end_date < today) return false
-    if (q && !staffName(r.staff_id).toLowerCase().includes(q)) return false
+    if (q) {
+      const p = staffById[r.staff_id] || {}
+      const hay = [staffName(r.staff_id), p.preferred_name, p.nickname, fmtDate(r.start_date), fmtDate(r.end_date), r.start_date, r.end_date, r.type,
+        r.type === 'vacation' ? 'time off' : '', r.note, r.status].filter(Boolean).join(' ').toLowerCase()
+      if (!q.split(/\s+/).every(w => hay.includes(w))) return false
+    }
     return true
   })
+  const clr = document.getElementById('to-clear'); if (clr) clr.style.display = (status !== 'pending' || !upcoming || q) ? '' : 'none'
+  const cnt = document.getElementById('to-count'); if (cnt) cnt.textContent = rows.length + ' shown'
   const body = document.getElementById('to-body')
-  if (!rows.length) { body.innerHTML = '<div class="empty">No time off matches these filters.</div>'; return }
-  body.innerHTML = '<table class="list"><thead><tr><th>Person</th><th>Dates</th><th>Time</th><th>Type</th><th>Status</th><th>Source</th><th></th></tr></thead><tbody>' +
+  if (!rows.length) { body.innerHTML = '<div class="empty">No time off matches these filters. <button class="btn small" type="button" onclick="clearTimeOffFilters()">Clear filters</button></div>'; return }
+  body.innerHTML = '<table class="list"><thead><tr><th>Person</th><th>Dates</th><th>Time</th><th>Type</th><th>This year · weekends</th><th>Status</th><th>Source</th><th></th></tr></thead><tbody>' +
     rows.map(r => {
       const dates = r.start_date === r.end_date ? fmtDate(r.start_date) : fmtDate(r.start_date) + ' to ' + fmtDate(r.end_date)
       let actions = ''
@@ -892,7 +944,7 @@ function renderTimeOff() {
         (r.note ? '<div class="muted small">“' + esc(r.note) + '”</div>' : '') +
         (Array.isArray(r.rule_flags) && r.rule_flags.length ? '<div class="small" style="color:#b45309;font-weight:600">⚑ ' + r.rule_flags.map(esc).join(' · ') + '</div>' : '') +
         (timeOffFiles[String(r.id)] || []).map(x => '<div class="small"><a href="#" onclick="openMedicalNote(' + JSON.stringify(x.path).replace(/"/g, '&quot;') + ');return false">📎 ' + esc(x.file_name || 'Doctor’s note') + '</a></div>').join('') +
-        '</td><td><span class="pill ' + r.status + '">' + esc(r.status) + '</span></td><td><span class="pill source">' + esc(r.source === 'staff' ? 'staff (Hub)' : r.source) +
+        '</td><td>' + timeOffSummary(r) + '</td><td><span class="pill ' + r.status + '">' + esc(r.status) + '</span></td><td><span class="pill source">' + esc(r.source === 'staff' ? 'staff (Hub)' : r.source) +
         '</span></td><td class="actions">' + actions + '</td></tr>'
     }).join('') + '</tbody></table>'
 }
