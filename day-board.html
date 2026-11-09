@@ -139,6 +139,7 @@ main { padding: 14px 20px 40px; }
 @media (max-width: 900px) { .side { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 .why { display: block; width: 100%; box-sizing: border-box; font: inherit; font-size: 12px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 7px; margin-top: 4px; background: #fff; }
+.ptimes { margin-left: 4px; color: #9b2a5a; font-weight: 800; }
 </style>
 </head>
 <body>
@@ -230,6 +231,29 @@ async function load() {
     week2.forEach((x, i) => { if (!rosters[i].error) booked[x.id] = (rosters[i].data || []).reduce((n, b) => n + (b.qty || 0), 0); });
     const partyBk = (bk.data || []).filter(b => (sessions.find(x => x.id === b.session_id) || {}).session_type === 'party');
     const pd = partyBk.length ? await sb.from('party_details').select('*').in('booking_id', partyBk.map(b => b.id)) : { data: [] };
+    // (Nov 9 2026) the art time chosen at booking, from the order (when party_details doesn't have it): the party line's "Art time"
+    // property, or its extras option (variant names like "12 people / 90 min / …"); a later party change is in party_details
+    const art90 = {}, afterMin = {};
+    if (partyBk.length) {
+      const rw = await sb.from('bookings').select('id, raw_payload, shopify_line_item_id').in('id', partyBk.map(b => b.id));
+      (rw.data || []).forEach(r => {
+        const raw = typeof r.raw_payload === 'string' ? (() => { try { return JSON.parse(r.raw_payload); } catch (e) { return {}; } })() : (r.raw_payload || {});
+        const lines = raw.line_items || [], mine = lines.find(l => String(l.id) === String(r.shopify_line_item_id));
+        const has90 = l => (l.properties || []).some(p => /art/i.test(String(p.name || '')) && /\b90\b|1\.5\s*h|90\s*min/i.test(String(p.value || '')))
+          || /(^|\D)90\s*min|90-min|1\.5\s*h/i.test(String(l.variant_title || '') + ' ' + String(l.title || '')) && /party/i.test(String(l.title || ''));
+        if ((mine && has90(mine)) || lines.some(l => l !== mine && /party/i.test(String(l.title || '')) && has90(l))) art90[r.id] = true;
+        // party time after: the "Party time after" setting, else the extras option ("yes - add 30 minutes"); "No" = 0
+        const partyLines = lines.filter(l => /party/i.test(String(l.title || '')));
+        let after = null;
+        for (const l of [mine].concat(partyLines).filter(Boolean)) {
+          const pr = (l.properties || []).find(p => /time after|party time/i.test(String(p.name || '')));
+          if (pr) { const m = String(pr.value || '').match(/(\d+)/); after = m ? +m[1] : /^\s*no\b/i.test(String(pr.value || '')) ? 0 : after; if (after != null) break; }
+          const v = String(l.variant_title || ''); const m2 = v.match(/add\s*(\d+)\s*min/i);
+          if (m2) { after = +m2[1]; break; } if (/\/\s*no\b/i.test(v)) { after = 0; }
+        }
+        if (after != null) afterMin[r.id] = after;
+      });
+    }
     const staffBy = {}; (ss.data || []).forEach(r => { staffBy[r.session_id] = r; });
     const isKids = x => /class \d+ of \d+|week session|catch up class/i.test(x.title || '');
     const dayRow = sessions.filter(x => !isKids(x)).map(x => staffBy[x.id]).find(r => r && ROLES.some(([f]) => String(r[f] || '').trim())) || {};
@@ -279,6 +303,7 @@ async function load() {
       const h = v => { v = +v; return v < 8 ? v + 12 : v; };
       blocks.push({ id: 'b-' + p.id, kind: 'brk', title: 'Break', sub: '', start: h(m[1]) * 60 + +m[2], end: h(m[3]) * 60 + +m[4], person: p.id });
     });
+    const partyTimes = {};   // session id → ['60/45', …] (each party booking's art / party time after)
     sessions.slice().sort((a, b) => toMin(a.session_time) - toMin(b.session_time)).forEach(x => {
       const n = booked[x.id] || 0, t0 = toMin(x.session_time), title = String(x.title || '');
       if (x.show === false && !n) return;
@@ -317,7 +342,12 @@ async function load() {
           const intro = /get.?together|team\s*building/i.test(title);
           // (Nov 8 2026) the staffing rules: a field trip is 1 teacher per 30 children, for its whole time (2 hours unless set)
           const field = /field\s*trip/i.test(title);
-          const len = intro ? LEN.intro : field ? Math.max(60, +x.duration_minutes || 120) : /90/.test(String(d.actual_art_time || '')) ? 90 : 60;
+          const len = intro ? LEN.intro : field ? Math.max(60, +x.duration_minutes || 120) : d.actual_art_time ? (/90/.test(String(d.actual_art_time)) ? 90 : 60) : art90[b.id] ? 90 : 60;
+          // (Nov 9 2026) art / party time after, e.g. 60/45 or 90/0 (party_details first: a later change; else the order)
+          if (!intro && !field) { const dk = Object.keys(d).find(k => /after/i.test(k) && d[k] != null && d[k] !== '');
+            const dv = dk ? String(d[dk]) : null, dm = dv ? dv.match(/(\d+)/) : null;
+            const aft = dm ? +dm[1] : dv && /^\s*(no|none)\b/i.test(dv) ? 0 : afterMin[b.id];
+            (partyTimes[x.id] = partyTimes[x.id] || []).push(len + '/' + (aft != null ? aft : '?')); }
           let t1 = findPerson(d.party_teacher1), t2 = findPerson(d.party_teacher2), auto1 = false;
           const off1 = d.party_teacher1 === 'none', off2 = d.party_teacher2 === 'none';
           // (Nov 8 2026) no teacher set: someone free for the whole party (the Demoer, then the Director, then anyone on shift), marked auto
@@ -344,7 +374,7 @@ async function load() {
     const starts = people.map(p => p.start).concat(blocks.map(b => b.start), sesSpan.map(z => z[0])), ends = people.map(p => p.end).concat(blocks.map(b => b.runEnd || b.end), sesSpan.map(z => z[1]));
     let lo = starts.length ? Math.min(...starts) : 9 * 60, hi = ends.length ? Math.max(...ends) : 17 * 60;
     lo = Math.floor(lo / 60) * 60; hi = Math.ceil(hi / 60) * 60;
-    const PARTY_DEFAULT = 8;   // (a party with no number set counts as 8 guests, shown as an estimate)
+    const PARTY_DEFAULT = 8;   // (and partyTimes: art / after for each party, set above)   // (a party with no number set counts as 8 guests, shown as an estimate)
     const partyGuests = {}, partyUnknown = {};
     const guestsOf = b => { const d = (pd.data || []).find(z => z.booking_id === b.id) || {}; return +d.expected_guests || +b.estimated_attendance || null; };
     partyBk.forEach(b => { const g = guestsOf(b);
@@ -371,7 +401,7 @@ async function load() {
     try { const dn = await sb.from('hub_day_notes').select('note').eq('studio_id', st).eq('day', date).maybeSingle(); dayNote = (dn.data && dn.data.note) || ''; } catch (e) {}
     let inbox = [];
     try { const ib = await sb.rpc('hub_inbox_mine'); inbox = (ib.data || []).filter(x => x.studio_id === st && String(x.day || '').slice(0, 10) === date); } catch (e) {}
-    D = { st, date, people, blocks, lo, hi, sessions, booked, rolesFromPlan, startRoles: people.map(p => [p.id, p.role]), inbox, partyGuests, partyUnknown, partyBk, pd: pd.data || [], off, offNames, dayNote };
+    D = { st, date, people, blocks, lo, hi, sessions, booked, partyTimes, rolesFromPlan, startRoles: people.map(p => [p.id, p.role]), inbox, partyGuests, partyUnknown, partyBk, pd: pd.data || [], off, offNames, dayNote };
     START = JSON.parse(JSON.stringify(blocks));
     // breaks suggested straight away for anyone on a long shift without one (saved with Save the day)
     const br = suggestBreaks();
@@ -496,7 +526,7 @@ function draw() {
         })()}${closedN ? ` · <a href="#" onclick="D.showClosed=!D.showClosed;draw();return false" title="Show or hide the closed times">${closedN} closed ${D.showClosed ? '(shown, hide)' : 'not shown (show)'}</a>` : ''}</small></div>
       <div class="lane" style="width:${W}px;height:${lanes * (h + 3) + 8}px">${hourLines}${sorted.map(r => `<div class="ses-chip${r.n ? '' : ' empty'}${r.closed ? ' closed' : ''}" role="button" tabindex="0" onclick="dayTimeMenu('${r.id.slice(4)}', this)"
         style="left:${x(r.start)}px;width:${Math.max(30, (r.end - r.start) * PX - 2)}px;top:${5 + r._lane * (h + 3)}px;height:${h}px"
-        title="${esc(fmt(r.start) + '–' + fmt(r.end) + ' ' + r.title + ': ' + (r.guests ? r.guests + ' guests' : r.n + (r.cap != null ? ' of ' + r.cap : '') + ' registered') + (r.closed ? ' (closed)' : ''))}"><b>${r.guests ? (r.unknown ? '~' : '') + r.guests + ' guests' : r.n + (r.cap != null ? '/' + r.cap : '')}</b> ${esc(fmt(r.start) + ' ' + r.title)}</div>`).join('')}</div></div>`;
+        title="${esc(fmt(r.start) + '–' + fmt(r.end) + ' ' + r.title + ': ' + (r.guests ? r.guests + ' guests' : r.n + (r.cap != null ? ' of ' + r.cap : '') + ' registered') + (r.closed ? ' (closed)' : ''))}"><b>${r.guests ? (r.unknown ? '~' : '') + r.guests + ' guests' : r.n + (r.cap != null ? '/' + r.cap : '')}</b> ${esc(fmt(r.start) + ' ' + r.title)}${r.party && (D.partyTimes || {})[r.id.slice(4)] ? ` <b class="ptimes" title="Art time / party time after (minutes)">${esc(D.partyTimes[r.id.slice(4)].join(', '))}</b>` : ''}</div>`).join('')}</div></div>`;
   })();
   const nobody = D.blocks.filter(b => !b.person && !b.notNeeded);
   const rows = (nobody.length ? `<div class="row needs" data-person=""><div class="who"><b>Needs someone</b><small>${nobody.length} with nobody: drag onto a person</small></div><div class="lane" style="width:${W}px">${hourLines}${laneOut(nobody)}</div></div>` : '')
@@ -821,7 +851,8 @@ function dayTimeMenu(id, el) {
       `<label style="font-size:12.5px">${b.kind === 'demo' ? 'Who demos it' : b.kind === 'party' && b.slot === 2 ? 'Second teacher' : 'Who teaches it'}${b.notNeeded ? ' <span class="muted">(set to not needed)</span>' : ''}</label>
        <select id="tm-who-${i}" style="width:100%;margin:2px 0 6px"><option value="">Nobody (needs someone)</option><option value="__none" ${b.notNeeded ? 'selected' : ''}>No ${b.kind === 'demo' ? 'demo' : 'teacher'} (not needed)</option>${D.people.map(p => `<option value="${esc(p.id)}" ${p.id === b.person && !b.notNeeded ? 'selected' : ''}>${esc(p.show)}</option>`).join('')}</select>`).join('') +
       `<button id="tm-who-ok">Set who</button></div>` : '';
-  pop.innerHTML = `<label>${esc(fmt(t0) + ' ' + title)} · ${n ? `${n} booked` : 'nobody booked'}</label>${whoHtml}
+  const pt = (D.partyTimes || {})[id];
+  pop.innerHTML = `<label>${esc(fmt(t0) + ' ' + title)} · ${n ? `${n} booked` : 'nobody booked'}</label>${pt ? `<div style="font-size:13px;margin:2px 0 6px"><b>${esc(pt.join(', '))}</b> <span class="muted">min: art time / party time after</span></div>` : ''}${whoHtml}
     ${kids ? `<div class="muted" style="font-size:12.5px;margin:4px 0 8px">A kids class week: a class keeps its time every week, so it\u2019s moved as a whole class (home office).</div>
         <button id="tm-cclose" title="Every upcoming week closes, and the class comes off World; the families enrolled keep their spots">Close the class to new registrations</button>
         <div class="muted" style="font-size:11.5px;margin:4px 0 8px;line-height:1.45">All its weeks close and it comes off World, so you can call ${n ? 'the families' : 'anyone who asks'} about moving to another time. Undo in the nightly log reopens it.</div>`
