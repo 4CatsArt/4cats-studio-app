@@ -335,6 +335,10 @@ select:focus, input:focus { border-color: #888; }
 .infl-a { display: flex; gap: 14px; flex-wrap: wrap; border: 1px solid #ece7dc; border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; background: #fff; }
 .infl-a-main { flex: 1 1 420px; display: grid; gap: 4px; font-size: 13.5px; } .infl-a-side { flex: 0 0 150px; display: grid; gap: 6px; align-content: start; text-align: center; font-size: 13px; }
 .infl-a-shots { display: flex; gap: 6px; flex-wrap: wrap; } .infl-a-shots img { width: 90px; height: 90px; object-fit: cover; border-radius: 6px; border: 1px solid #ddd; }
+.pin-ov { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,.35); z-index: 9999; display: flex; align-items: center; justify-content: center; }
+.pin-box { background: #fff; border-radius: 12px; padding: 16px 18px; width: min(860px, 94vw); box-shadow: 0 10px 40px rgba(0,0,0,.2); }
+.pin-tbl { width: 100%; border-collapse: collapse; font-size: 13px; } .pin-tbl th { text-align: left; font-size: 11px; color: #888; text-transform: uppercase; padding: 6px; position: sticky; top: 0; background: #fff; }
+.pin-tbl td { padding: 6px; border-top: 0.5px solid #eee; }
 </style>
 </head>
 <body>
@@ -755,6 +759,7 @@ select:focus, input:focus { border-color: #888; }
     <div class="toolbar">
       <div class="toolbar-group">
         <button class="btn" onclick="bulkCreateLogins()" title="Creates logins with no password and sends no email">Create logins for staff without one</button>
+        <button class="btn" onclick="pinListOpen()" title="Everyone's PIN, and who's missing one">🔑 PINs</button>
         <button class="btn btn-primary" onclick="openStaffModal()">+ Add Staff</button>
       </div>
       <div class="toolbar-sep"></div>
@@ -5938,7 +5943,7 @@ function closeStaffModal() {
 function togglePinRow() {
   const role = document.getElementById('staff-role').value
   const pinRow = document.getElementById('staff-pin-row')
-  if (pinRow) pinRow.style.display = (role === 'manager' || role === 'admin') ? 'block' : 'none'
+  if (pinRow) pinRow.style.display = 'block'   // (Nov 9 2026) one PIN for everyone (staff_one_pin.sql)
   const adjRow = document.getElementById('staff-adjust-spaces-row')
   if (adjRow) adjRow.style.display = (role === 'manager') ? 'block' : 'none'
   const schedNote = document.getElementById('staff-manager-sched-note')
@@ -5986,6 +5991,47 @@ async function loadStaffContact(staffId) {
 }
 
 // Punch PIN for the time clock (hub_time_punch.sql). Any staff member; staff can also set their own in the Hub.
+
+// =====================================================================================================================
+// 🔑 PINs (staff_one_pin.sql): everyone's PIN (one per person), who's missing one, and setting it. People edit access.
+// "Hidden" = set before as a punch PIN only, stored scrambled: setting a new one here replaces it.
+// =====================================================================================================================
+let pinList = { rows: null, show: false, filter: 'missing' }
+async function pinListOpen() {
+  let ov = document.getElementById('pin-ov')
+  if (!ov) { ov = document.createElement('div'); ov.id = 'pin-ov'; ov.className = 'pin-ov'; ov.onclick = e => { if (e.target === ov) ov.remove() }; document.body.appendChild(ov) }
+  ov.innerHTML = '<div class="pin-box"><div class="empty">Loading…</div></div>'
+  const { data, error } = await sb.rpc('admin_staff_pin_status')
+  if (error) { ov.querySelector('.pin-box').innerHTML = `<div class="empty" style="color:#c0392b">${/admin_staff_pin_status/.test(error.message) ? 'Run staff_one_pin.sql in Supabase first.' : error.message}</div>`; return }
+  pinList.rows = data || []; pinListDraw()
+}
+function pinListDraw() {
+  const box = document.querySelector('#pin-ov .pin-box'); if (!box) return
+  const R = pinList.rows, miss = R.filter(r => r.status !== 'set')
+  const rows = pinList.filter === 'missing' ? miss : R
+  const e = x => String(x == null ? '' : x).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
+  box.innerHTML = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px"><b style="font-size:16px">🔑 Staff PINs</b>
+      <span style="color:#888;font-size:12px">${R.length - miss.length} of ${R.length} active staff have a PIN</span><span style="flex:1"></span>
+      <select onchange="pinList.filter=this.value;pinListDraw()"><option value="missing"${pinList.filter === 'missing' ? ' selected' : ''}>Missing a PIN (${miss.length})</option><option value="all"${pinList.filter === 'all' ? ' selected' : ''}>Everyone</option></select>
+      <label style="font-size:12px"><input type="checkbox" ${pinList.show ? 'checked' : ''} onchange="pinList.show=this.checked;pinListDraw()"> Show PINs</label>
+      <button class="btn" onclick="document.getElementById('pin-ov').remove()">Close</button></div>
+    <div style="font-size:12px;color:#888;margin-bottom:8px">One PIN per person: punching in, signing policies, and (managers) the coordinator view. Each must be different. <b>Hidden</b> = set before, stored scrambled: a new one replaces it.</div>
+    <div style="max-height:62vh;overflow:auto"><table class="pin-tbl"><thead><tr><th>Name</th><th>Role</th><th>Home studio</th><th>PIN</th><th>Set a new PIN</th></tr></thead><tbody>
+    ${rows.length ? rows.map(r => `<tr><td>${e(r.name)}</td><td>${e(r.role)}</td><td>${e(r.studio_id ? (typeof getStudioName === 'function' ? getStudioName(r.studio_id) : r.studio_id) : '')}</td>
+      <td>${r.status === 'set' ? `<b>${pinList.show ? e(r.pin) : '••••'}</b>` : r.status === 'hidden' ? '<span style="color:#b45309">hidden</span>' : '<span style="color:#c0392b">missing</span>'}</td>
+      <td><input id="pin-new-${r.id}" inputmode="numeric" maxlength="4" style="width:70px" placeholder="4 digits"> <button class="btn btn-sm" onclick="pinListSet('${r.id}')">Save</button> <span id="pin-msg-${r.id}" style="font-size:11px"></span></td></tr>`).join('')
+      : '<tr><td colspan="5" class="empty">Everyone has a PIN. 🎉</td></tr>'}</tbody></table></div>`
+}
+async function pinListSet(id) {
+  const el = document.getElementById('pin-new-' + id), msg = document.getElementById('pin-msg-' + id), v = (el.value || '').trim()
+  if (!/^\d{4}$/.test(v)) { msg.style.color = '#c0392b'; msg.textContent = '4 digits'; return }
+  const { error } = await sb.rpc('admin_set_staff_pin', { p_profile_id: id, p_pin: v })
+  if (error) { msg.style.color = '#c0392b'; msg.textContent = error.message; return }
+  const r = pinList.rows.find(x => x.id === id); if (r) { r.pin = v; r.status = 'set' }
+  msg.style.color = '#2e7d32'; msg.textContent = 'Saved ✓'; el.value = ''
+  setTimeout(pinListDraw, 900)
+}
+
 async function setStaffPunchPin() {
   const el = document.getElementById('staff-punch-pin'), msg = document.getElementById('staff-punch-pin-msg')
   if (!editingStaffId) { msg.textContent = 'Save the profile first.'; return }
@@ -10090,12 +10136,12 @@ function showAdminToast(msg, duration = 2500) {
 
     <!-- Manager PIN -->
     <div id="staff-pin-row" style="margin-bottom:10px;display:none">
-      <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Manager PIN <span style="font-weight:400;text-transform:none;color:#aaa">(4 digits — for training.html login and dashboard spaces adjustment)</span></label>
+      <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">PIN <span style="font-weight:400;text-transform:none;color:#aaa">(4 digits — punching in, signing policies, and for managers the coordinator view. Unique to each person; they can change it in the Hub app)</span></label>
       <input id="staff-pin" type="text" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="e.g. 1234" style="width:120px;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;letter-spacing:4px;font-weight:600">
     </div>
 
     <!-- Punch PIN (time clock) — every staff member. Set-only: it's stored scrambled. -->
-    <div id="staff-punch-pin-row" style="margin-bottom:10px">
+    <div id="staff-punch-pin-row" style="margin-bottom:10px;display:none"><!-- (Nov 9 2026) retired: one PIN for everyone, above -->
       <label style="font-size:11px;color:#888;text-transform:uppercase;display:block;margin-bottom:5px">Punch PIN <span style="font-weight:400;text-transform:none;color:#aaa">(4 digits — for punching in and out on the studio computer. Managers: their PIN above is used automatically)</span></label>
       <div style="display:flex;gap:8px;align-items:center">
         <input id="staff-punch-pin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="New PIN" style="width:120px;padding:8px 10px;border:0.5px solid #d0d0c8;border-radius:7px;font-size:13px;outline:none;letter-spacing:4px;font-weight:600">
