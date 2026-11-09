@@ -901,9 +901,60 @@ async function dayDecide(id, action, value) {
   }
   D.flash = data && data.applied ? 'Done: ' + data.applied : 'Done.'; draw();
 }
+// ---- (Nov 9 2026) Shift times: a dropdown of usual times (and ones already on the board), or type others ----
+const USUAL_SHIFTS = {
+  weekend: ['8:30a-5p', '8:45a-5p', '9a-5p', '9:30a-5p', '10a-5p', '11a-5p', '12p-5p', '1p-5p', '8:30a-1p', '9a-1p', '9a-12p'],
+  weekday: ['1p-9:30p', '12:30p-9p', '1:30p-9:30p', '4:30p-9:30p', '5:30p-9:30p', '6:30p-9:30p', '9a-5p', '10a-5p', '10a-6p', '8:30a-5p', '9a-1p']
+};
+function shiftHours(v) { const r = parseRange(v); return r ? Math.round((r.end - r.start) / 6) / 10 : null; }
+function boardShiftTimes() {   // shifts already on this board, most used first
+  const n = {};
+  ((typeof D !== 'undefined' && D && D.people) || []).forEach(p => { if (p.start != null && p.end != null) { const k = fmt(p.start) + '-' + fmt(p.end); n[k] = (n[k] || 0) + 1; } });
+  ((typeof W !== 'undefined' && W && W.shifts) || []).forEach(x => { if (x.start_time && x.end_time) { const k = fmt(toMin(x.start_time)) + '-' + fmt(toMin(x.end_time)); n[k] = (n[k] || 0) + 1; } });
+  return Object.keys(n).sort((a, b) => n[b] - n[a]).slice(0, 8);
+}
+function askShiftTimes(o) {   // o: { title, current, date, remove } → the times typed or picked ('8:30a-5p'), 'remove', or null
+  return new Promise(resolve => {
+    document.querySelectorAll('.st-ask').forEach(x => x.remove());
+    const wd = new Date(String(o.date || '') + 'T12:00:00').getDay(), weekend = wd === 0 || wd === 6;
+    const first = weekend ? 'weekend' : 'weekday', second = weekend ? 'weekday' : 'weekend';
+    const opt = v => `<option value="${esc(v)}">${esc(v.replace('-', '\u2013'))}${shiftHours(v) != null ? ' \u00b7 ' + shiftHours(v) + ' h' : ''}</option>`;
+    const used = boardShiftTimes().filter(v => !USUAL_SHIFTS[first].includes(v) && !USUAL_SHIFTS[second].includes(v));
+    const box = document.createElement('div'); box.className = 'st-ask';
+    box.style.cssText = 'position:fixed;inset:0;z-index:2000;background:rgba(20,20,20,.35);display:flex;align-items:center;justify-content:center';
+    box.innerHTML = `<div style="background:#fff;border-radius:14px;padding:16px 18px;width:min(360px,92vw);box-shadow:0 12px 40px rgba(0,0,0,.25);font:inherit">
+      <div style="font-weight:800;margin-bottom:8px">${esc(o.title)}</div>
+      <label style="font-size:12.5px;font-weight:700">Usual times</label>
+      <select id="st-pick" style="width:100%;font:inherit;padding:7px 8px;border:1px solid var(--line);border-radius:8px;margin:3px 0 10px">
+        <option value="">Choose\u2026</option>
+        ${o.current ? `<optgroup label="Now">${opt(o.current)}</optgroup>` : ''}
+        <optgroup label="${weekend ? 'Weekend' : 'Weekday'}">${USUAL_SHIFTS[first].map(opt).join('')}</optgroup>
+        ${used.length ? `<optgroup label="On the schedule">${used.map(opt).join('')}</optgroup>` : ''}
+        <optgroup label="${weekend ? 'Weekday' : 'Weekend'}">${USUAL_SHIFTS[second].map(opt).join('')}</optgroup></select>
+      <label style="font-size:12.5px;font-weight:700">Or type the times <span class="muted" style="font-weight:400">(e.g. 8:30a-5p, at least 3 hours)</span></label>
+      <input id="st-text" value="${esc(o.current || '')}" autocomplete="off" style="width:100%;box-sizing:border-box;font:inherit;padding:7px 8px;border:1px solid var(--line);border-radius:8px;margin:3px 0 4px">
+      <div id="st-err" style="color:#b91c1c;font-size:12.5px;min-height:16px"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px;flex-wrap:wrap">
+        ${o.remove ? '<button id="st-rm" style="margin-right:auto;color:#b91c1c">Remove the shift</button>' : ''}
+        <button id="st-no">Cancel</button><button id="st-ok" style="font-weight:800">OK</button></div></div>`;
+    document.body.appendChild(box);
+    const done = v => { box.remove(); resolve(v); };
+    const pick = box.querySelector('#st-pick'), text = box.querySelector('#st-text');
+    pick.onchange = () => { if (pick.value) { text.value = pick.value; box.querySelector('#st-err').textContent = ''; } };
+    const ok = () => { const v = text.value.trim(), r = parseRange(v);
+      if (!r) { box.querySelector('#st-err').textContent = 'Use times like 8:30a-5p, with a or p on both.'; return; }
+      if (r.end - r.start < 180) { box.querySelector('#st-err').textContent = 'Every shift is at least 3 hours.'; return; }
+      done(v); };
+    box.querySelector('#st-ok').onclick = ok; box.querySelector('#st-no').onclick = () => done(null);
+    if (o.remove) box.querySelector('#st-rm').onclick = () => done('remove');
+    box.addEventListener('click', e => { if (e.target === box) done(null); });
+    box.addEventListener('keydown', e => { if (e.key === 'Escape') done(null); if (e.key === 'Enter' && e.target !== pick) ok(); });
+    pick.focus();
+  });
+}
 async function dayShiftEdit(pid) {
   const p = D.people.find(z => z.id === pid); if (!p) return;
-  const v = prompt(`${p.show}'s shift: new times (e.g. 8:30a-5p, at least 3 hours)`, fmt(p.start) + '-' + fmt(p.end)); if (v === null) return;
+  const v = await askShiftTimes({ title: `${p.show}'s shift: new times`, current: fmt(p.start) + '-' + fmt(p.end), date: D.date }); if (v === null) return;
   const r = parseRange(v); if (!r) { alert('Use a time like 8:30a-5p, with a or p on both times.'); return; }
   if (!offAskDay(p.id, r.start, r.end, p.show)) return;
   const { error } = await sb.rpc('hub_board_shift_set', { p_id: p.shiftId, p_start: hhmm(r.start), p_end: hhmm(r.end), p_remove: false });
@@ -932,7 +983,10 @@ async function dayShiftAdd() {
   pop.innerHTML = `<label>Add a shift on ${esc(new Date(D.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' }))}</label>
     <select id="add-who"><option value="">Who?</option><optgroup label="${esc(STUDIO_NAMES[D.st] || D.st)}">${here.map(x => `<option value="${esc(x.id)}">${esc(x.name)}${offFor(x.id).length ? ' · ' + esc(offFor(x.id).map(offText).join(', ')) : ''}</option>`).join('')}</optgroup>
       <optgroup label="Other studios">${others.map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</optgroup></select>
-    <label style="margin-top:8px">Times (at least 3 hours)</label><input id="add-time" value="9a-5p" style="width:100%;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px">
+    <label style="margin-top:8px">Times (at least 3 hours)</label>
+    <select id="add-pick" onchange="if(this.value)document.getElementById('add-time').value=this.value" style="width:100%;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px;margin-bottom:4px"><option value="">Usual times…</option>${(function () { const wd = new Date(D.date + 'T12:00:00').getDay(), we = wd === 0 || wd === 6;
+      return [we ? 'weekend' : 'weekday', we ? 'weekday' : 'weekend'].map(k => `<optgroup label="${k === 'weekend' ? 'Weekend' : 'Weekday'}">${USUAL_SHIFTS[k].map(v => `<option value="${v}">${v.replace('-', '–')} · ${shiftHours(v)} h</option>`).join('')}</optgroup>`).join(''); })()}</select>
+    <input id="add-time" value="${(function () { const wd = new Date(D.date + 'T12:00:00').getDay(); return wd === 0 || wd === 6 ? '8:30a-5p' : '1p-9:30p'; })()}" placeholder="or type, e.g. 9a-5p" style="width:100%;box-sizing:border-box;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px">
     <label style="margin-top:8px">Studio hours <span class="muted" style="font-weight:400">(home office staff: the rest is home office labour; blank = the whole shift)</span></label>
     <input id="add-sh" type="number" min="0" step="0.25" placeholder="whole shift" style="width:100%;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px">
     <div class="row2"><button id="pop-ok">Add (as a draft)</button><button id="pop-x">Cancel</button></div>`;
@@ -1407,7 +1461,8 @@ async function wkRemove(id) {
 }
 async function wkAddFor(staff, day, nameKnown) {
   if (W.names[staff] && !offWarn(staff, day)) return;
-  const v = prompt(`${W.names[staff] || nameKnown || 'Add a shift'}, ${dayLabel(day)}: times (e.g. 9a-5p, at least 3 hours)`, '9a-5p'); if (!v) return;
+  const wdA = new Date(day + 'T12:00:00').getDay();
+  const v = await askShiftTimes({ title: `${W.names[staff] || nameKnown || 'Add a shift'}, ${dayLabel(day)}: times`, current: wdA === 0 || wdA === 6 ? '8:30a-5p' : '1p-9:30p', date: day }); if (!v) return;
   const r = parseRange(v); if (!r) { alert('Use a time like 9a-5p, with a or p on both times.'); return; }
   const { data, error } = await sb.rpc('hub_board_shift_add', { p_staff: staff, p_studio: W.st, p_date: day, p_start: hhmm(r.start), p_end: hhmm(r.end) });
   if (error) { alert(/hub_board_shift_add/.test(error.message) ? 'Run week_board.sql in Supabase first.' : niceErr(error.message)); return; }
@@ -1465,7 +1520,7 @@ async function wkClose(id, close) {
 }
 async function wkShift(id) {
   const sh = W.shifts.find(x => String(x.id) === String(id)); if (!sh) return;
-  const v = prompt(`${W.names[sh.staff_id] || 'Shift'}, ${dayLabel(sh.shift_date)}: new times (e.g. 8:30a-5p, at least 3 hours), or type "remove"`, fmt(toMin(sh.start_time)) + '-' + fmt(toMin(sh.end_time)));
+  const v = await askShiftTimes({ title: `${W.names[sh.staff_id] || 'Shift'}, ${dayLabel(sh.shift_date)}: new times`, current: fmt(toMin(sh.start_time)) + '-' + fmt(toMin(sh.end_time)), date: sh.shift_date, remove: true });
   if (v === null) return;
   let args;
   if (/^\s*remove\s*$/i.test(v)) { if (!confirm('Remove this shift?')) return; args = { p_id: String(id), p_start: null, p_end: null, p_remove: true }; }
