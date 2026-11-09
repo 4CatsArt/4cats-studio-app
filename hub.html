@@ -2388,6 +2388,11 @@ tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decorati
 .bo-row.bo-new { border-color: #f3cf7a; background: #fffbef; } .bo-main { flex: 1 1 480px; min-width: 0; display: grid; gap: 3px; font-size: 14px; } .bo-facts { font-size: 13.5px; }
 .bo-notes { font-size: 13px; background: #faf8f2; border-radius: 8px; padding: 4px 9px; white-space: pre-wrap; } .bo-side { flex: 0 0 220px; display: grid; gap: 6px; align-content: start; }
 .bo-side select, .bo-side input { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid #ddd3c2; border-radius: 8px; } .bo-side label { display: grid; gap: 2px; }
+.infl-card { background: #fff; border: 1px solid #ece7dc; border-radius: 14px; padding: 10px 14px; margin: 0 0 12px; display: grid; gap: 6px; }
+.infl-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; } .infl-head .ho-btn { margin-left: auto; }
+.infl-row { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; font-size: 13.5px; border-top: 1px solid #f2eee6; padding-top: 5px; }
+.infl-shots { display: flex; gap: 8px; flex-wrap: wrap; } .infl-shot { position: relative; } .infl-shot img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; border: 1px solid #ddd; }
+.infl-shot button { position: absolute; top: -6px; right: -6px; border: none; background: #c3090c; color: #fff; border-radius: 50%; width: 20px; height: 20px; cursor: pointer; line-height: 1; }
 </style>
 </head>
 <body>
@@ -2561,6 +2566,8 @@ tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decorati
     <!-- Flash Challenges: coordinator view only (sc-only). Hidden when
          nothing is running. community-flash-data; refreshes every 2 minutes. -->
     <div id="flash-strip" class="sc-only" style="display:none"></div>
+    <!-- (Nov 9 2026) 📣 Influencer posts: coordinator view only. influencer_reports.sql -->
+    <div id="infl-strip" class="sc-only" style="display:none"></div>
 
     <!-- 🎁 Make the Gift — coordinator view, top of the dashboard (same card
          as the one on the Fill Rates page; filled by renderMakeTheGift). -->
@@ -19023,6 +19030,74 @@ async function startStudioView(studioId) {
 
 // ---------- ⚡ Flash Challenges (studio view) ----------
 let _flashData = null, _flashTimer = null, _flashTick = null;
+
+// =====================================================================================================================
+// 📣 Influencer posts (influencer_reports.sql): the coordinator reports an influencer collaboration (who, what was agreed, the post
+// link(s) and screenshot(s)); home office approves it in admin → Points → 📣 Influencer posts (1,000 points to the coordinator).
+// =====================================================================================================================
+let _infl = { studio: null, rows: [], edit: null, shots: [] };
+const INFL_ST = { submitted: '🟡 Waiting for home office', approved: '✅ Approved', returned: '↩️ Sent back' };
+async function inflLoad(studioId) {
+  _infl.studio = studioId || _sessionStudioId;
+  try { const r = await sb.rpc('hub_influencer_reports', { p_studio: _infl.studio }); _infl.rows = r.error ? null : (r.data || []); } catch (e) { _infl.rows = null; }
+  inflDraw();
+}
+function inflDraw() {
+  const el = document.getElementById('infl-strip'); if (!el) return;
+  if (_infl.rows === null) { el.style.display = 'none'; return; }   // (influencer_reports.sql not run yet)
+  const R = _infl.rows.slice(0, 4);
+  el.style.display = '';
+  el.innerHTML = `<div class="infl-card"><div class="infl-head"><b>📣 Influencer posts</b><span class="fd-sm">1,000 points for each influencer collaboration home office approves</span>
+      <button class="ho-btn primary" onclick="inflOpen()">+ Report an influencer post</button></div>
+    ${R.length ? R.map(r => `<div class="infl-row"><span><b>@${esc(String(r.handle || '').replace(/^@/, ''))}</b>${r.influencer_name ? ' · ' + esc(r.influencer_name) : ''} <span class="fd-sm">${esc(r.platform || '')}${r.post_date ? ' · ' + esc(r.post_date) : ''}</span></span>
+        <span>${r.status === 'approved' ? `✅ +${Number(r.points_awarded || 0).toLocaleString()} points` : esc(INFL_ST[r.status] || r.status)}
+        ${r.status === 'returned' ? `<span class="fd-sm">${esc(r.review_note || '')}</span> <button class="ho-btn sm" onclick="inflOpen('${escAttr(r.id)}')">Fix and send again</button>` : ''}</span></div>`).join('') : ''}</div>`;
+}
+function inflOpen(id) {
+  const r = id ? (_infl.rows || []).find(x => x.id === id) || {} : {};
+  _infl.edit = id || null; _infl.shots = (r.screenshots || []).slice();
+  openDutySheet(`<h3>📣 Report an influencer post</h3>
+    <p class="ho-intro">For a collaboration with an influencer: what you agreed, and proof they posted. Home office checks it and approves the points.</p>
+    ${r.review_note ? `<div class="me-msg err">Home office: ${esc(r.review_note)}</div>` : ''}
+    <div class="me-form">
+      <label>Influencer's name<input id="in-name" value="${escAttr(r.influencer_name || '')}"></label>
+      <label>Their @handle<input id="in-handle" value="${escAttr(r.handle || '')}" placeholder="@name"></label>
+      <label>Platform<select id="in-plat">${['instagram', 'tiktok', 'facebook', 'youtube', 'other'].map(x => `<option value="${x}"${(r.platform || 'instagram') === x ? ' selected' : ''}>${x[0].toUpperCase() + x.slice(1)}</option>`).join('')}</select></label>
+      <label>Followers (about)<input id="in-fol" type="number" min="0" value="${escAttr(r.followers || '')}"></label>
+      <label class="me-wide">What was agreed?<textarea id="in-agree" rows="3" placeholder="e.g. Comped workshop for 2 → 1 reel and 2 stories, tagging the studio">${esc(r.agreement || '')}</textarea></label>
+      <label>Date posted<input id="in-date" type="date" value="${escAttr(r.post_date || localDateStr(new Date()))}"></label>
+      <label class="me-wide">Link(s) to the post (one per line)<textarea id="in-urls" rows="2" placeholder="https://www.instagram.com/reel/…">${esc((r.post_urls || []).join('\n'))}</textarea></label>
+      <label class="me-wide">Screenshot(s) of the post<input id="in-file" type="file" accept="image/*" multiple onchange="inflUpload(this)"></label>
+      <div class="me-wide infl-shots" id="in-shots"></div>
+      <label class="me-wide">Anything else? (optional)<textarea id="in-note" rows="2">${esc(r.note || '')}</textarea></label>
+    </div><div id="in-msg"></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="in-go" onclick="inflSend()">Send to home office</button></div>`);
+  inflShots();
+}
+function inflShots() {
+  const el = document.getElementById('in-shots'); if (!el) return;
+  el.innerHTML = _infl.shots.map((u, i) => `<span class="infl-shot"><img src="${escAttr(u)}" alt=""><button title="Remove" onclick="_infl.shots.splice(${i},1);inflShots()">×</button></span>`).join('');
+}
+async function inflUpload(input) {
+  const files = Array.from(input.files || []), msg = document.getElementById('in-msg');
+  for (const f of files) {
+    msg.innerHTML = '<div class="goal-note">Uploading…</div>';
+    try { _infl.shots.push(await uploadAttachment(f)); } catch (e) { msg.innerHTML = `<div class="me-msg err">A screenshot didn't upload: ${esc(e.message || e)}</div>`; return; }
+  }
+  msg.innerHTML = ''; input.value = ''; inflShots();
+}
+async function inflSend() {
+  const v = id => ((document.getElementById(id) || {}).value || '').trim(), msg = document.getElementById('in-msg'), btn = document.getElementById('in-go');
+  const p = { id: _infl.edit, studio_id: _infl.studio, reported_by: (_studioData && (_studioData.staffName || _studioData.coordinatorName)) || '',
+    influencer_name: v('in-name'), handle: v('in-handle'), platform: v('in-plat'), followers: v('in-fol'), agreement: v('in-agree'), post_date: v('in-date'),
+    post_urls: v('in-urls').split(/\s+/).filter(Boolean), screenshots: _infl.shots, note: v('in-note') };
+  btn.disabled = true;
+  const { error } = await sb.rpc('hub_influencer_report_save', { p });
+  btn.disabled = false;
+  if (error) { msg.innerHTML = `<div class="me-msg err">${esc(/hub_influencer_report_save/.test(error.message) ? 'Run influencer_reports.sql in Supabase first.' : error.message)}</div>`; return; }
+  closeDutySheet(); alert('Sent! Home office will check it and approve the points.'); inflLoad(_infl.studio);
+}
+
 async function loadFlashChallenges(studioId) {
   const strip = document.getElementById('flash-strip');
   if (!strip) return;
@@ -19285,6 +19360,7 @@ async function submitCoordinatorPin() {
   loadCoordinatorCards(data.studioId);
   try { labourCardLoad(); } catch (e) {}   // (Nov 9 2026) 📊 labour % for the coordinator
   loadFlashChallenges(data.studioId); // the SC can now claim
+  try { inflLoad(data.studioId); } catch (e) {}   // 📣 influencer posts
   refreshCoordBadges();
   checkAdjustPower();
   resetInactivityTimer();
