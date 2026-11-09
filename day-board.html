@@ -154,6 +154,7 @@ main { padding: 14px 20px 40px; }
   <span class="spacer"></span>
   <button id="sendupd" style="display:none" title="Changed or published shifts: let the staff know now (their usual notification)">Send updates to staff</button>
   <button id="addsh" class="day-only" title="Add a shift for someone (a draft until you publish the day)">+ Add shift</button>
+  <button id="addws" class="day-only" title="Add a World workshop or Mini Make at this studio this day (sold on World)">+ Add workshop</button>
   <button id="pub" class="day-only" title="Publish the day's draft shifts: they become approved, and staff get their usual notification" style="display:none">Publish</button>
   <button id="plan" class="primary day-only" title="Roles, then breaks, then demos (anything you've moved stays put)">Plan the day</button>
   <button id="brk" class="day-only" title="A 30-minute break for everyone on a shift over 5 hours: no more than 5 hours of work before or after it">Suggest breaks</button>
@@ -461,7 +462,7 @@ function draw() {
   }).filter(Boolean);
   const closedN = sesList.filter(r => r.closed).length;
   const sesRow = (() => {
-    const sorted = sesList.filter(r => !r.closed).sort((a, b) => a.start - b.start), ends = [];   // (closed times aren't shown)
+    const sorted = sesList.filter(r => !r.closed || D.showClosed).sort((a, b) => a.start - b.start), ends = [];   // (closed times: only when "show" is on)
     sorted.forEach(r => { let l = ends.findIndex(e => e <= r.start); if (l < 0) { l = ends.length; ends.push(0); } ends[l] = r.end; r._lane = l; });
     const lanes = Math.max(1, ends.length), h = 24;
     return `<div class="row times-row"><div class="who"><b>Times</b><small>${(() => {
@@ -479,7 +480,7 @@ function draw() {
           const L = D.labour, labHtml = !L ? '' : L.pct == null && L.exp_pct == null ? (L.hours > 0 ? '<br><span class="lab high">Labour: no bookings yet</span>' : '')
             : `<br>${L.pct != null ? `<span class="lab ${labClass(L.pct)}" title="Estimated labour: staff cost (shifts, drafts included) ÷ the revenue of this day's bookings so far">Labour ≈ ${L.pct}% now</span>` : ''}${L.exp_pct != null && L.exp_pct !== L.pct ? `<span class="lab ${labClass(L.exp_pct)}" title="${EXP_TIP}">≈ ${L.exp_pct}% expected</span>` : ''}`;
           return `<span style="font-weight:700;color:var(--ink)">${total} ${total === 1 ? 'person' : 'people'} ${dayWord}</span>${lines.length ? '<br>' + lines.join('<br>') : ''}<br>${sesList.filter(r => !r.closed).length} times open${labHtml}`;
-        })()}${closedN ? ` · ${closedN} closed not shown` : ''}</small></div>
+        })()}${closedN ? ` · <a href="#" onclick="D.showClosed=!D.showClosed;draw();return false" title="Show or hide the closed times">${closedN} closed ${D.showClosed ? '(shown, hide)' : 'not shown (show)'}</a>` : ''}</small></div>
       <div class="lane" style="width:${W}px;height:${lanes * (h + 3) + 8}px">${hourLines}${sorted.map(r => `<div class="ses-chip${r.n ? '' : ' empty'}${r.closed ? ' closed' : ''}" role="button" tabindex="0" onclick="dayTimeMenu('${r.id.slice(4)}', this)"
         style="left:${x(r.start)}px;width:${Math.max(30, (r.end - r.start) * PX - 2)}px;top:${5 + r._lane * (h + 3)}px;height:${h}px"
         title="${esc(fmt(r.start) + '–' + fmt(r.end) + ' ' + r.title + ': ' + (r.guests ? r.guests + ' guests' : r.n + (r.cap != null ? ' of ' + r.cap : '') + ' registered') + (r.closed ? ' (closed)' : ''))}"><b>${r.guests ? (r.unknown ? '~' : '') + r.guests + ' guests' : r.n + (r.cap != null ? '/' + r.cap : '')}</b> ${esc(fmt(r.start) + ' ' + r.title)}</div>`).join('')}</div></div>`;
@@ -543,7 +544,11 @@ function draw() {
     </div></div>
     <div class="side">
       <div class="panel"><h2>Problems (${list.length})</h2>${list.length ? `<ul>${list.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : '<p class="note">None: everyone is where they can be.</p>'}</div>
-      <div class="panel"><h2>Changes (${changes.length})</h2>${changes.length ? `<ul>${changes.map(t => `<li>${esc(t)}</li>`).join('')}</ul><p class="note">Not saved: the day view is a try-out.</p>` : '<p class="note">Nothing moved yet.</p>'}</div>
+      <div class="panel"><h2>Changes (${changes.length})</h2>${changes.length ? `<ul>${changes.map(t => `<li>${esc(t)}</li>`).join('')}</ul><p class="note">Not saved yet: press Save the day.</p>` : '<p class="note">Nothing moved yet.</p>'}
+        ${(function () { const cl = sesList.filter(r => r.closed).sort((a, b) => a.start - b.start); if (!cl.length) return '';
+          return `<h3 style="font-size:14px;margin:12px 0 4px">Closed (already saved)</h3><ul style="list-style:none;padding:0;margin:0">${cl.map(r => `<li style="display:flex;gap:8px;align-items:center;padding:3px 0">
+            <span style="flex:1">${esc(fmt(r.start) + ' ' + r.title)}${(D.closedNow || {})[r.id.slice(4)] ? ' <b style="color:var(--bad);font-size:12px">closed just now</b>' : ''}</span>
+            <button onclick="dayReopen('${r.id.slice(4)}')" title="Open it to bookings again">Reopen</button></li>`).join('')}</ul>`; })()}</div>
     </div>`;
   const sv = $('save'); if (sv) { sv.classList.toggle('dirty', changes.length > 0); sv.disabled = !changes.length;
     sv.title = changes.length ? 'Save the roles, breaks, teachers and demos to the Day plan' : 'Nothing to save yet: changes to roles, breaks, teachers or demos show here';
@@ -760,11 +765,11 @@ async function cokClose() {
   for (const t of c.times) {
     const { error } = await sb.rpc('hub_board_session_close', { p_id: t.id, p_close: true });
     if (error) { alert(error.message); return; }
-    const x = (D.sessions || []).find(z => z.id === t.id); if (x) x.spaces_left_cache = 0;
+    const x = (D.sessions || []).find(z => z.id === t.id); if (x) x.spaces_left_cache = 0; (D.closedNow = D.closedNow || {})[t.id] = 1;
   }
   if (c.close_hours !== 0 && c.shift_id && !(await cokShiftEnd(c.close_until_hm))) return;
   cokLog('close');
-  D.cok = null; D.flash = `Closed ${c.times.length} time${c.times.length === 1 ? '' : 's'}${c.close_hours !== 0 ? `; ${c.who} until ${c.close_until}` : ''}. Undo the closes in the Hub: 🌙 Nightly run → Last 7 days.`; draw();
+  D.cok = null; D.flash = `Closed ${c.times.length} time${c.times.length === 1 ? '' : 's'}${c.close_hours !== 0 ? `; ${c.who} until ${c.close_until}` : ''}. They're under Changes → Closed, where you can reopen them.`; draw();
 }
 async function cokKeep() {
   const c = D.cok; if (!c) return;
@@ -845,9 +850,54 @@ function dayTimeMenu(id, el) {
     if (!confirm(n ? `Close ${title} at ${fmt(t0)} to new bookings? The ${n} booked keep their spot.` : `Close ${title} at ${fmt(t0)}?`)) return;
     const { error } = await sb.rpc('hub_board_session_close', { p_id: id, p_close: true });
     if (error) { alert(/hub_board_session_close/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
-    x.spaces_left_cache = 0;
-    closePop(); D.flash = `Closed: ${title} at ${fmt(t0)}${n ? ' (no new bookings)' : ''}. Undo it in the Hub: 🌙 Nightly run → Last 7 days.`; draw();
+    x.spaces_left_cache = 0; (D.closedNow = D.closedNow || {})[id] = 1;
+    closePop(); D.flash = `Closed: ${title} at ${fmt(t0)}${n ? ' (no new bookings)' : ''}. It's under Changes → Closed, where you can reopen it.`; draw();
   };
+}
+// ---- (Nov 9 2026) + Add workshop: a World workshop or Mini Make at this studio this day (world_item_date_add, as World settings
+// → World-only workshops → + Add date). It's sold on World straight away; the day reloads to show it. ----
+let _wsItems = null;
+async function dayWorkshopAdd() {
+  closePop();
+  if (_wsItems === null) { const r = await sb.rpc('world_items_list'); _wsItems = r.error ? [] : ((r.data && r.data.items) || []).filter(i => i.active !== false);
+    if (r.error) { alert(/world_items_list/.test(r.error.message) ? 'Run world_items.sql in Supabase first.' : r.error.message); _wsItems = null; return; } }
+  if (!_wsItems.length) { alert('No World workshops yet: add them in World settings → World-only workshops.'); return; }
+  const byKind = k => _wsItems.filter(i => (i.kind || 'workshop') === k).sort((a, b) => String(a.title).localeCompare(String(b.title)));
+  const times = []; for (let m = 9 * 60; m <= 20 * 60; m += 15) times.push(m);
+  const pop = document.createElement('div'); pop.className = 'pop'; pop.id = 'pop'; pop.style.width = '320px';
+  pop.innerHTML = `<label>Add a workshop on ${esc(new Date(D.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' }))}</label>
+    <select id="ws-item" style="width:100%;margin:4px 0 8px"><option value="">Which one?</option>
+      <optgroup label="Workshops">${byKind('workshop').map(i => `<option value="${esc(i.id)}">${esc(i.title)}</option>`).join('')}</optgroup>
+      ${byKind('mini_make').length ? `<optgroup label="Mini Make">${byKind('mini_make').map(i => `<option value="${esc(i.id)}">${esc(i.title)}</option>`).join('')}</optgroup>` : ''}</select>
+    <div style="display:flex;gap:8px"><label style="flex:1">Time<select id="ws-time" style="width:100%">${times.map(m => `<option value="${m}"${m === 18 * 60 + 30 ? ' selected' : ''}>${fmt(m)}</option>`).join('')}</select></label>
+      <label style="width:90px">Spots<input id="ws-spots" type="number" min="1" max="200" value="12" style="width:100%"></label></div>
+    <div class="muted" style="font-size:12px;margin:6px 0">It goes on sale on World straight away, at this studio. Workshops not listed here are made in World settings → World-only workshops.</div>
+    <div class="row2"><button id="ws-ok">Add it</button><button id="pop-x">Cancel</button></div>`;
+  document.body.appendChild(pop);
+  const r0 = $('addws').getBoundingClientRect(); pop.style.left = Math.min(window.innerWidth - 340, r0.left) + 'px'; pop.style.top = (r0.bottom + 6) + 'px';
+  $('pop-x').onclick = closePop; $('ws-item').focus();
+  $('ws-ok').onclick = async () => {
+    const item = $('ws-item').value, m = +$('ws-time').value, spots = Math.max(1, +$('ws-spots').value || 12);
+    if (!item) { alert('Choose the workshop.'); return; }
+    const it = _wsItems.find(i => String(i.id) === item) || {};
+    const clash = (D.sessions || []).find(x => toMin(x.session_time) === m && String(x.title || '').toLowerCase().includes(String(it.title || '').toLowerCase().slice(0, 12)));
+    if (clash && !confirm(`${it.title} is already on at ${fmt(m)} this day. Add another?`)) return;
+    if (!$('save').disabled && !confirm('You have changes not saved yet (they\u2019re lost when the day reloads to show the new workshop). Add it anyway? (Cancel, then Save the day first, to keep them.)')) return;
+    $('ws-ok').disabled = true;
+    const { error } = await sb.rpc('world_item_date_add', { p_item: item, p_studio: D.st, p_date: D.date, p_time: hhmm(m), p_spots: spots });
+    if (error) { $('ws-ok').disabled = false; alert(/world_item_date_add/.test(error.message) ? 'Run world_items.sql in Supabase first.' : niceErr(error.message)); return; }
+    closePop(); await load(); D.flash = `Added: ${it.title} at ${fmt(m)} (${spots} spots), on sale on World now. Check who demos it.`; draw();
+  };
+}
+// ---- (Nov 9 2026) Reopen a closed time from the Changes box ----
+async function dayReopen(id) {
+  const x = (D.sessions || []).find(z => z.id === id); if (!x) return;
+  const title = String(x.title || '').split('|')[0].trim();
+  if (!confirm(`Reopen ${title} at ${fmt(toMin(x.session_time))} to bookings?`)) return;
+  const { error } = await sb.rpc('hub_board_session_close', { p_id: id, p_close: false });
+  if (error) { alert(/hub_board_session_close/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
+  x.spaces_left_cache = Math.max(1, (+x.capacity || 1) - (D.booked[id] || 0)); if (D.closedNow) delete D.closedNow[id];
+  D.flash = `Reopened: ${title} at ${fmt(toMin(x.session_time))}.`; draw();
 }
 // ---- shifts and decisions on the day, updated in place (no reload) ----
 // Notifications wait until you press "Send updates to staff" (changes themselves are saved as you go)
@@ -1258,9 +1308,12 @@ function weekCoverage(d) {
   use.forEach(x => { const a = Math.max(0, Math.floor((toMin(x.start_time) - lo) / 30)), z = Math.min(n, Math.ceil((toMin(x.end_time) - lo) / 30)); for (let i = a; i < z; i++) have[i]++; });
   const cls = need.map((v, i) => have[i] < v ? 'short' : have[i] > v ? (v > 0 || have[i] > 0 ? 'over' : 'idle') : v > 0 ? 'ok' : 'idle');
   const hrs = arr => Math.round(arr.reduce((t, v) => t + v, 0) * 5) / 10;
-  return { cls, needH: hrs(need), haveH: hrs(have), drafts: !approved.length && dayShifts.length > 0, lo };
+  const paidH = Math.round(use.reduce((t, x) => t + (toMin(x.end_time) - toMin(x.start_time) > 300 ? 30 : 0), 0) / 6) / 10;   // (the unpaid breaks)
+  return { cls, needH: hrs(need), haveH: Math.max(0, Math.round((hrs(have) - paidH) * 10) / 10), drafts: !approved.length && dayShifts.length > 0, lo };
 }
 
+// (Nov 9 2026) a shift's paid minutes: over 5 hours, less the 30-minute unpaid break (as the labour % counts them)
+const paidMins = sh => { const m = toMin(sh.end_time) - toMin(sh.start_time); return m > 300 ? m - 30 : m; };
 function drawWeek() {
   const { days } = W;
   const withShifts = [...new Set(W.shifts.map(x => x.staff_id))];
@@ -1284,7 +1337,7 @@ function drawWeek() {
       <small>${n} time${n === 1 ? '' : 's'} booked · need ${c.needH}h, scheduled ${c.haveH}h${c.drafts ? ' (drafts)' : ''}${todo ? ` · <b style="color:var(--bad)">${todo} to decide</b>` : ''}</small>${labCell(d)}
       ${(W.dayNotes || {})[d] ? `<div class="wk-dnote" role="button" tabindex="0" onclick="event.stopPropagation(); wkDayNote('${d}')" title="Click to change">📝 ${esc(W.dayNotes[d])}</div>`
         : `<button class="wk-dnote-add" onclick="event.stopPropagation(); wkDayNote('${d}')" title="A note for this day (boards, Hub home page, Team app)">+ note</button>`}</th>`; }).join('');
-  const shiftRows = people.map(pid => `<tr${W.gone && W.gone[pid] ? ' class="gone"' : ''}><td class="lbl"><b class="who-link" role="button" tabindex="0" onclick="wkPerson('${esc(pid)}', this)" title="Hours promised, home studio and more">${esc(W.names[pid] || 'Someone')}</b>${W.gone && W.gone[pid] ? `<span class="gone-tag">${esc(W.gone[pid])}</span>` : ''}<small>${Math.round(W.shifts.filter(x => x.staff_id === pid).reduce((t, x) => t + (toMin(x.end_time) - toMin(x.start_time)), 0) / 6) / 10}h this week</small></td>${days.map(d => {
+  const shiftRows = people.map(pid => `<tr${W.gone && W.gone[pid] ? ' class="gone"' : ''}><td class="lbl"><b class="who-link" role="button" tabindex="0" onclick="wkPerson('${esc(pid)}', this)" title="Hours promised, home studio and more">${esc(W.names[pid] || 'Someone')}</b>${W.gone && W.gone[pid] ? `<span class="gone-tag">${esc(W.gone[pid])}</span>` : ''}<small title="Paid hours: a shift over 5 hours less its 30-minute unpaid break">${Math.round(W.shifts.filter(x => x.staff_id === pid).reduce((t, x) => t + paidMins(x), 0) / 6) / 10}h this week</small></td>${days.map(d => {
       const mine = W.shifts.filter(x => x.staff_id === pid && x.shift_date === d);
       const away = (W.elsewhere || []).filter(x => x.staff_id === pid && x.shift_date === d);
       return `<td class="drop" data-staff="${esc(pid)}" data-day="${d}">${offChips(pid, d)}${away.map(x => `<div class="off else" title="A shift at another studio that day (one shift a day)">@ ${esc(STUDIO_NAMES[x.studio_id] || x.studio_id)} ${fmt(toMin(x.start_time))}–${fmt(toMin(x.end_time))}${x.status === 'draft' ? ' · draft' : ''}</div>`).join('')}${mine.map(sh => `<div class="sh${sh.status === 'draft' ? ' draft' : ''}${offClash(pid, d, sh) ? ' clash' : ''}" draggable="true" data-shift="${esc(String(sh.id))}" role="button" tabindex="0"
@@ -1598,7 +1651,7 @@ const show = () => (MODE === 'week' ? loadWeek : load)();
   $('next').onclick = () => stepTo(1);
   $('reset').onclick = () => { if (START) { D.blocks = JSON.parse(JSON.stringify(START)); D.people.forEach(p => { p.role = (D.startRoles.find(r => r[0] === p.id) || [])[1] || p.role; p.roleSet = false; }); draw(); } };
   $('wkstart').value = WEEK_MON ? 'mon' : 'sun';
-  $('save').onclick = saveDay; $('sendupd').onclick = sendUpdates; notifyBar(); $('addsh').onclick = () => D && dayShiftAdd(); $('pub').onclick = () => D && dayPublish();
+  $('save').onclick = saveDay; $('sendupd').onclick = sendUpdates; notifyBar(); $('addsh').onclick = () => D && dayShiftAdd(); $('addws').onclick = () => D && dayWorkshopAdd(); $('pub').onclick = () => D && dayPublish();
   $('plan').onclick = () => planDay('all'); $('brk').onclick = () => planDay('brk'); $('demo').onclick = () => planDay('demo');
   const { data: { session } } = await sb.auth.getSession();
   if (!session) { $('main').innerHTML = `<div class="msg"><b>Sign in to the Hub first</b> (with a home office login), then come back to this page. <a href="hub.html">Open the Hub</a></div>`; return; }
