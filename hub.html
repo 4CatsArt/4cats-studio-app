@@ -9881,11 +9881,13 @@ async function planMoveBooking(bookingId, fromSessionId, name) {
           <b>${esc(shortTime(o.session_time))}</b><span>${left === null ? '' : left <= 0 ? 'Full' : left + ' spot' + (left === 1 ? '' : 's') + ' left'}${full && left > 0 ? ' · not enough' : ''}</span></button>`;
       }).join('')}</div>` : '<div class="ho-intro">There’s no other time for this on the same day.</div>'}
     ${opts.length && people ? `<label class="f" style="margin-top:12px">Who’s moving it?<select id="mv-who"><option value="">—</option>${people}</select></label>` : ''}
+    ${opts.length ? `<label style="display:flex;gap:8px;align-items:center;margin-top:10px;font-weight:600"><input type="checkbox" id="mv-mail" ${_mv.mail === false ? '' : 'checked'}> Email them about the new time</label>` : ''}
     <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button></div>`);
 }
 async function planMoveTo(toId, allowFull) {
   const who = (document.getElementById('mv-who') || {}).value || _mv.who || '';
   _mv.who = who;
+  const mb = document.getElementById('mv-mail'); if (mb) _mv.mail = mb.checked;   // (kept through the "nearly full" step)
   const { data, error } = await sb.rpc('hub_move_booking', { p_booking_id: _mv.bookingId, p_to_session_id: toId, p_allow_full: !!allowFull, p_staff_name: who || null });
   if (error) { alert("Couldn't move it: " + error.message); return; }
   if (data && data.needs_ok) {
@@ -9898,12 +9900,21 @@ async function planMoveTo(toId, allowFull) {
     return;
   }
   closeDutySheet();
+  // (Nov 9 2026) the family: "You've been moved to a new time" (session-time-email)
+  let mailMsg = '';
+  if (_mv.mail !== false) {
+    const ses = await sb.auth.getSession(), tk = ses && ses.data && ses.data.session && ses.data.session.access_token;
+    const mr = await fetch(`${SUPABASE_URL}/functions/v1/session-time-email`, { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + (tk || SUPABASE_ANON_KEY) },
+      body: JSON.stringify({ booking_id: _mv.bookingId, from_session_id: String(data.from.id) }) }).catch(() => null);
+    const md = mr ? await mr.json().catch(() => ({})) : {};
+    mailMsg = mr && mr.ok ? (md.sent ? ' Emailed them the new time.' : ' (No email on the booking.)') : ` The email didn't send: ${md.error || 'please let them know'}.`;
+  }
   // Live Shopify spots: give the earlier time its spot(s) back, take them from the new time.
   const shopMsg = await planMoveShopify(data.from, data.to, data.qty, data.move_id);
   const fromId = String(data.from.id), toSid = String(data.to.id);
   delete _plan.classLists[fromId]; delete _plan.classLists[toSid];
   await loadPlanDay(_plan.date);
-  _plan.msg = `Moved ${_mv.name} to ${shortTime(data.to.session_time)}.${data.over_capacity ? ' (Over the limit.)' : ''}${shopMsg ? ' ' + shopMsg : ''}`;
+  _plan.msg = `Moved ${_mv.name} to ${shortTime(data.to.session_time)}.${data.over_capacity ? ' (Over the limit.)' : ''}${mailMsg}${shopMsg ? ' ' + shopMsg : ''}`;
   renderPlanDay();
   const m = document.getElementById('plan-msg');
   if (!m) alert(_plan.msg);
