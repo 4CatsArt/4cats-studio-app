@@ -2295,6 +2295,8 @@ body.ps-open { overflow: hidden; } .ps-facts { font-size: 13px; color: var(--ink
 .fam-tl-row.move .fam-tl-dot { background: #2563eb; } .fam-tl-row.credit .fam-tl-dot { background: #15803d; }
 .cl-away td { color: #9ca3af; } .cl-away td b { color: #9ca3af; font-weight: 600; } .mv-note.away { color: #b91c1c; }
 tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decoration: line-through; text-decoration-color: #9ca3af; }   /* (crossed out; the last cell, with the reason and Undo, stays readable) */
+.fam-cgrp-list { margin: 0 0 6px 18px; border-left: 3px solid #eadcc8; padding-left: 10px; }
+.fam-cgrp-item .fam-what b { font-weight: 600; }
 </style>
 </head>
 <body>
@@ -12084,6 +12086,30 @@ async function punchGo(kind) {
   clearTimeout(_punchTimer);
   _punchTimer = setTimeout(punchDone, flagged && !already ? 30000 : 3500);
   if (typeof loadTeamToday === 'function') loadTeamToday(_sessionStudioId);
+  if (kind === 'out' && data.id) punchAskStudioHours(data.id, p.staff_id);
+}
+// (Nov 8 2026) a split shift (home office staff): at punch out, how many of today's hours were for the studio (punch_studio_hours.sql)
+async function punchAskStudioHours(punchId, staffId) {
+  let info; try { const r = await sb.rpc('hub_punch_split_info', { p_staff: staffId, p_studio: _sessionStudioId }); if (r.error) return; info = r.data; } catch (e) { return; }
+  if (!info || !info.ask) return;
+  clearTimeout(_punchTimer); _punchTimer = setTimeout(punchDone, 45000);   // (time to answer)
+  const box = document.createElement('div'); box.id = 'pc-split';
+  box.innerHTML = `<div class="me-msg" style="margin-top:12px;background:#fbf5ea;border:1px solid #ead2ad;color:#6b4b00">
+      <b>How many of today's hours were for the studio?</b> The rest counts as home office.
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+        <input id="pc-split-h" type="number" min="0" max="16" step="0.25" value="${info.studio_hours != null ? info.studio_hours : info.shift_hours}" style="width:90px;font:inherit;font-size:16px;padding:8px;border:1px solid var(--border);border-radius:10px" oninput="punchIdle()"> hours
+        <span class="goal-note">${info.studio_hours != null ? `(planned: ${info.studio_hours} of ${info.shift_hours})` : `(shift: ${info.shift_hours})`}</span></div>
+      <div id="pc-split-msg"></div>
+      <div class="sheet-actions" style="margin-top:8px"><button onclick="punchDone()">Skip</button><button class="primary" onclick="punchSaveStudioHours('${escAttr(punchId)}','${escAttr(staffId)}')">Save</button></div></div>`;
+  const sheet = document.querySelector('.pc-done'); if (sheet && sheet.parentNode) sheet.parentNode.appendChild(box);
+}
+async function punchSaveStudioHours(punchId, staffId) {
+  const h = +document.getElementById('pc-split-h').value;
+  const { error } = await sb.rpc('hub_punch_studio_hours', { p_punch: punchId, p_staff: staffId, p_hours: h });
+  const m = document.getElementById('pc-split-msg');
+  if (error) { if (m) m.innerHTML = `<div class="me-msg err">${esc(error.message)}</div>`; return; }
+  if (m) m.innerHTML = `<div class="me-msg ok">Saved: ${h} h for the studio.</div>`;
+  clearTimeout(_punchTimer); _punchTimer = setTimeout(punchDone, 2000);
 }
 
 // ---------- ⏰ Break warnings (studio computer) ----------
@@ -12378,11 +12404,32 @@ function famRender() {
     h += sec('cbadges', '🏅 Customer badges', null, '<p class="fam-meta">' + famEsc(f.parent_name || 'The customer') + '\'s own badges will show here once the badge system is built. Kids\' badges are under Linked participants.</p>');
     // Upcoming
     const up = f.upcoming || [];
-    h += sec('upcoming', 'Upcoming', up.length, up.length ? '<div class="fam-rows">' + up.map(u =>
-      '<div class="fam-row2"><span class="fam-when"><b>' + famEsc(dl(u.date)) + '</b>' + (u.time ? '<span>' + famEsc(tm(u.time)) + '</span>' : '') + '</span>' +
+    // one booking's row (its date, what, and Schedule / Cancel)
+    const upRow = (u, extra) =>
+      '<div class="fam-row2' + (extra || '') + '"><span class="fam-when"><b>' + famEsc(dl(u.date)) + '</b>' + (u.time ? '<span>' + famEsc(tm(u.time)) + '</span>' : '') + '</span>' +
       '<span class="fam-what"><b>' + famEsc(famTitle(u.title)) + '</b><span class="fam-meta">' + famEsc([sn(u.studio_id), (u.kids && u.kids.length ? u.kids.join(', ') : (u.qty ? u.qty + (u.qty === 1 ? ' spot' : ' spots') : '')), u.order].filter(Boolean).join(' · ')) + '</span></span>' +
       (u.id ? '<span class="fam-acts">' + (u.session_id ? '<button class="ho-btn sm" onclick="famGoTime(\'' + famEsc(u.session_id) + '\',\'' + famEsc(u.studio_id) + '\',\'' + famEsc(String(u.date).slice(0, 10)) + '\')" title="Open this day on the Schedule">📅 Schedule</button>' : '') +
-        (_hoCan.edit ? '<button class="ho-btn sm" onclick="famBookingAdmin(\'' + famEsc(u.id) + '\',' + (u.is_class ? 'false' : 'true') + ')">' + (u.is_class ? '✏️ Cancel' : '✏️ Change / Cancel') + '</button>' : '') + '</span>' : '') + '</div>').join('') + '</div>'
+        (_hoCan.edit ? '<button class="ho-btn sm" onclick="famBookingAdmin(\'' + famEsc(u.id) + '\',' + (u.is_class ? 'false' : 'true') + ')">' + (u.is_class ? '✏️ Cancel' : '✏️ Change / Cancel') + '</button>' : '') + '</span>' : '') + '</div>';
+    // (Nov 9 2026) a kids class's weeks as one row: same class, studio, child(ren) and order; it opens to show each week
+    const clsBase = u => { const m = String(famTitle(u.title) || '').match(/^(.*?)\s*[·|\-–]?\s*Class\s+\d+\s+of\s+(\d+)\s*$/i); return m ? { name: m[1].trim(), of: +m[2] } : null; };
+    const groups = [], byKey = {};
+    up.forEach(u => {
+      const b = u.is_class !== false ? clsBase(u) : null;
+      const key = b ? [b.name, u.studio_id, (u.kids || []).join(','), u.order || ''].join('|') : null;
+      if (key && byKey[key]) { byKey[key].items.push(u); return; }
+      const g = { base: b, items: [u] }; groups.push(g); if (key) byKey[key] = g;
+    });
+    const upHtml = groups.map((g, gi) => {
+      if (g.items.length < 2) return upRow(g.items[0]);
+      const a = g.items[0], z = g.items[g.items.length - 1], n = g.items.length, gid = 'fam-cg-' + gi;
+      const nice = d => new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
+      const wd = new Date(String(a.date).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'long' });
+      return '<div class="fam-row2 fam-cgrp"><span class="fam-when"><b>' + famEsc(nice(a.date)) + ' → ' + famEsc(nice(z.date)) + '</b><span>' + famEsc(wd + 's' + (a.time ? ' · ' + tm(a.time) : '')) + '</span></span>' +
+        '<span class="fam-what"><b>' + famEsc(g.base.name) + ' · ' + n + (n === g.base.of ? '' : ' of ' + g.base.of) + ' classes</b><span class="fam-meta">' + famEsc([sn(a.studio_id), (a.kids && a.kids.length ? a.kids.join(', ') : (a.qty ? a.qty + (a.qty === 1 ? ' spot' : ' spots') : '')), a.order].filter(Boolean).join(' · ')) + '</span></span>' +
+        '<span class="fam-acts"><button class="ho-btn sm" type="button" aria-expanded="false" aria-controls="' + gid + '" onclick="var d=document.getElementById(\'' + gid + '\'),o=d.hidden;d.hidden=!o;this.setAttribute(\'aria-expanded\',o);this.textContent=(o?\'▾ Hide\':\'▸ Show\')+\' the ' + n + ' classes\'">▸ Show the ' + n + ' classes</button></span></div>' +
+        '<div id="' + gid + '" class="fam-cgrp-list" hidden>' + g.items.map(u => upRow(u, ' fam-cgrp-item')).join('') + '</div>';
+    }).join('');
+    h += sec('upcoming', 'Upcoming', up.length, up.length ? '<div class="fam-rows">' + upHtml + '</div>'
       : '<p class="fam-meta">Nothing booked coming up.</p>');
     // Timeline: orders and cancellations
     const tl = f.timeline || [];
