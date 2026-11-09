@@ -93,6 +93,7 @@ main { padding: 14px 20px 40px; }
 .sh-acts button:hover { color: var(--ink); border-color: #bbb; }
 .daynote { background: #eef3fb; border: 1px solid #c9daf3; border-radius: 10px; padding: 7px 12px; margin: 0 0 10px; font-size: 13px; color: #24467a; cursor: pointer; }
 .shnote { display: block; color: #24467a !important; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 170px; }
+.party-info { border-bottom: 1px solid var(--line); padding-bottom: 8px; margin-bottom: 8px; }
 .offline { background: #fbf5ea; border: 1px solid #ead2ad; border-radius: 10px; padding: 7px 12px; margin: 0 0 10px; font-size: 12.5px; color: #6b4b00; }
 .cok { background: var(--panel); border: 1px solid #c9daf3; border-radius: 12px; padding: 10px 14px; margin: 0 0 10px; font-size: 13px; }
 .cok h2 { font-size: 14px; margin: 0 0 4px; } .cok p { margin: 4px 0; }
@@ -217,7 +218,8 @@ async function load() {
     const ids = sessions.map(x => x.id);
     const [ss, bk] = await Promise.all([
       ids.length ? sb.from('session_staff').select('*').in('session_id', ids) : { data: [] },
-      ids.length ? sb.from('bookings').select('id, session_id, qty, customer_name').in('session_id', ids).gt('qty', 0).is('returned_at', null) : { data: [] }
+      ids.length ? sb.from('bookings').select('id, session_id, qty, customer_name, customer_email, customer_phone, shopify_order_name, estimated_attendance').in('session_id', ids).gt('qty', 0).is('returned_at', null)
+        .then(r => r.error ? sb.from('bookings').select('id, session_id, qty, customer_name').in('session_id', ids).gt('qty', 0).is('returned_at', null) : r) : { data: [] }
     ]);
     const booked = {}; (bk.data || []).forEach(b => { booked[b.session_id] = (booked[b.session_id] || 0) + (b.qty || 0); });
     // kids class weeks 2+: the week's class list (families booked the series on week 1)
@@ -320,8 +322,8 @@ async function load() {
             const order = demoers.concat(director ? [director] : []).concat(people.filter(q => q.role !== 'Demoer' && q !== director));
             t1 = order.find(q => !busyAt(q.id, t0, t0 + len)) || null; auto1 = !!t1;
           }
-          const guests = d.expected_guests || b.qty || '';
-          blocks.push({ id: 'p1-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 1, title, sub: `${guests ? guests + (field ? ' children · ' : ' guests · ') : ''}${len} min ${intro ? 'intro' : field ? 'field trip' : 'art time'}${auto1 ? ' · auto' : ''}`, start: t0, end: t0 + len, person: t1 ? t1.id : null, notNeeded: off1 });
+          const guestsSet = +d.expected_guests || +b.estimated_attendance || 0, guests = guestsSet || (field ? '' : 8);
+          blocks.push({ id: 'p1-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 1, title, sub: `${guestsSet ? guests + (field ? ' children · ' : ' guests · ') : field ? 'children not set · ' : '~8 guests (not set) · '}${len} min ${intro ? 'intro' : field ? 'field trip' : 'art time'}${auto1 ? ' · auto' : ''}`, start: t0, end: t0 + len, person: t1 ? t1.id : null, notNeeded: off1 });
           if (t2 || off2 || (field ? +guests > 30 : !intro && +guests > 15) || (intro && +guests > 20)) blocks.push({ id: 'p2-' + b.id, kind: 'party', session: x.id, booking: b.id, slot: 2, title, sub: `second teacher · ${len} min`, start: t0, end: t0 + len, person: t2 ? t2.id : null, notNeeded: off2 });
         });
       } else {
@@ -335,9 +337,11 @@ async function load() {
     });
     let lo = Math.min(8 * 60, ...people.map(p => p.start), ...blocks.map(b => b.start)), hi = Math.max(17 * 60, ...people.map(p => p.end), ...blocks.map(b => b.runEnd || b.end));
     lo = Math.floor(lo / 60) * 60; hi = Math.ceil(hi / 60) * 60;
-    const partyGuests = {};
-    partyBk.forEach(b => { const d = (pd.data || []).find(z => z.booking_id === b.id) || {};
-      partyGuests[b.session_id] = (partyGuests[b.session_id] || 0) + (+d.expected_guests || +b.qty || 0); });
+    const PARTY_DEFAULT = 8;   // (a party with no number set counts as 8 guests, shown as an estimate)
+    const partyGuests = {}, partyUnknown = {};
+    const guestsOf = b => { const d = (pd.data || []).find(z => z.booking_id === b.id) || {}; return +d.expected_guests || +b.estimated_attendance || null; };
+    partyBk.forEach(b => { const g = guestsOf(b);
+      partyGuests[b.session_id] = (partyGuests[b.session_id] || 0) + (g || PARTY_DEFAULT); if (!g) partyUnknown[b.session_id] = (partyUnknown[b.session_id] || 0) + 1; });
     // time off and unavailability this day: the studio's team and anyone with a shift (staff_time_off, staff_unavailability)
     const off = {}, offNames = {};
     try {
@@ -360,7 +364,7 @@ async function load() {
     try { const dn = await sb.from('hub_day_notes').select('note').eq('studio_id', st).eq('day', date).maybeSingle(); dayNote = (dn.data && dn.data.note) || ''; } catch (e) {}
     let inbox = [];
     try { const ib = await sb.rpc('hub_inbox_mine'); inbox = (ib.data || []).filter(x => x.studio_id === st && String(x.day || '').slice(0, 10) === date); } catch (e) {}
-    D = { st, date, people, blocks, lo, hi, sessions, booked, rolesFromPlan, startRoles: people.map(p => [p.id, p.role]), inbox, partyGuests, off, offNames, dayNote };
+    D = { st, date, people, blocks, lo, hi, sessions, booked, rolesFromPlan, startRoles: people.map(p => [p.id, p.role]), inbox, partyGuests, partyUnknown, partyBk, pd: pd.data || [], off, offNames, dayNote };
     START = JSON.parse(JSON.stringify(blocks));
     // breaks suggested straight away for anyone on a long shift without one (saved with Save the day)
     const br = suggestBreaks();
@@ -443,7 +447,8 @@ function draw() {
     const len = +x.duration_minutes || (/class \d+ of \d+|week session/i.test(title) ? LEN.kids : /mini\s*make/i.test(title) ? 90 : /party|get.?together|slot/i.test(title) ? 120 : 120);
     const closed = !n && x.spaces_left_cache !== null && +x.spaces_left_cache <= 0;
     const guests = x.session_type === 'party' && n ? (D.partyGuests || {})[x.id] || 0 : 0;
-    return { id: 'ses-' + x.id, start: t0, end: t0 + len, title: title.split('|')[0].trim(), full: title, n, cap: x.capacity, closed, party: x.session_type === 'party', guests };
+    const unknown = x.session_type === 'party' && n ? (D.partyUnknown || {})[x.id] || 0 : 0;
+    return { unknown, id: 'ses-' + x.id, start: t0, end: t0 + len, title: title.split('|')[0].trim(), full: title, n, cap: x.capacity, closed, party: x.session_type === 'party', guests };
   }).filter(Boolean);
   const closedN = sesList.filter(r => r.closed).length;
   const sesRow = (() => {
@@ -457,8 +462,10 @@ function draw() {
           const by = { kids: 0, party: 0, glaze: 0, work: 0, camp: 0 };
           sesList.forEach(r => { by[kindOf(r)] += r.party ? (r.guests || 0) : r.n; });
           const total = Object.values(by).reduce((t, v) => t + v, 0);
+          const unknownParties = sesList.reduce((t, r) => t + (r.unknown || 0), 0);
           const lines = [['kids', 'in kids classes'], ['party', 'party goers'], ['glaze', 'glazers'], ['work', 'in workshops'], ['camp', 'campers']]
-            .filter(([k]) => by[k] > 0).map(([k, l]) => `${by[k]} ${l}`);
+            .filter(([k]) => by[k] > 0).map(([k, l]) => `${by[k]} ${l}`)
+            .concat(unknownParties ? [`<span style="color:#a12a2a">(${unknownParties} part${unknownParties === 1 ? 'y' : 'ies'} counted as 8: guests not set)</span>`] : []);
           const dayWord = D.date === localDate(new Date()) ? 'today' : 'this day';
           const L = D.labour, labHtml = !L ? '' : L.pct == null && L.exp_pct == null ? (L.hours > 0 ? '<br><span class="lab high">Labour: no bookings yet</span>' : '')
             : `<br>${L.pct != null ? `<span class="lab ${labClass(L.pct)}" title="Estimated labour: staff cost (shifts, drafts included) ÷ the revenue of this day's bookings so far">Labour ≈ ${L.pct}% now</span>` : ''}${L.exp_pct != null && L.exp_pct !== L.pct ? `<span class="lab ${labClass(L.exp_pct)}" title="${EXP_TIP}">≈ ${L.exp_pct}% expected</span>` : ''}`;
@@ -466,7 +473,7 @@ function draw() {
         })()}${closedN ? ` · ${closedN} closed not shown` : ''}</small></div>
       <div class="lane" style="width:${W}px;height:${lanes * (h + 3) + 8}px">${hourLines}${sorted.map(r => `<div class="ses-chip${r.n ? '' : ' empty'}${r.closed ? ' closed' : ''}" role="button" tabindex="0" onclick="dayTimeMenu('${r.id.slice(4)}', this)"
         style="left:${x(r.start)}px;width:${Math.max(30, (r.end - r.start) * PX - 2)}px;top:${5 + r._lane * (h + 3)}px;height:${h}px"
-        title="${esc(fmt(r.start) + '–' + fmt(r.end) + ' ' + r.title + ': ' + (r.guests ? r.guests + ' guests' : r.n + (r.cap != null ? ' of ' + r.cap : '') + ' registered') + (r.closed ? ' (closed)' : ''))}"><b>${r.guests ? r.guests + ' guests' : r.n + (r.cap != null ? '/' + r.cap : '')}</b> ${esc(fmt(r.start) + ' ' + r.title)}</div>`).join('')}</div></div>`;
+        title="${esc(fmt(r.start) + '–' + fmt(r.end) + ' ' + r.title + ': ' + (r.guests ? r.guests + ' guests' : r.n + (r.cap != null ? ' of ' + r.cap : '') + ' registered') + (r.closed ? ' (closed)' : ''))}"><b>${r.guests ? (r.unknown ? '~' : '') + r.guests + ' guests' : r.n + (r.cap != null ? '/' + r.cap : '')}</b> ${esc(fmt(r.start) + ' ' + r.title)}</div>`).join('')}</div></div>`;
   })();
   const nobody = D.blocks.filter(b => !b.person && !b.notNeeded);
   const rows = (nobody.length ? `<div class="row needs" data-person=""><div class="who"><b>Needs someone</b><small>${nobody.length} with nobody: drag onto a person</small></div><div class="lane" style="width:${W}px">${hourLines}${laneOut(nobody)}</div></div>` : '')
@@ -1008,7 +1015,7 @@ function openPop(el) {
     ? `<label>Break for ${esc((D.people.find(p => p.id === b.person) || {}).show || '')}: start time</label>
        <select id="pop-sel">${Array.from({ length: Math.floor((D.hi - D.lo) / STEP) }, (_, i) => D.lo + i * STEP).map(m => `<option value="${m}" ${m === b.start ? 'selected' : ''}>${fmt(m)}</option>`).join('')}</select>
        <div class="row2"><button id="pop-ok">Move break</button><button id="pop-del">Remove break</button><button id="pop-x">Cancel</button></div>`
-    : `<label>${esc(b.title)} · ${fmt(b.start)}–${fmt(b.end)}: who?</label>
+    : `${b.kind === 'party' && b.booking ? partyInfoHtml(b) : ''}<label>${esc(b.title)} · ${fmt(b.start)}–${fmt(b.end)}: who?</label>
        <select id="pop-sel"><option value="">Nobody (needs someone)</option><option value="__none" ${b.notNeeded ? 'selected' : ''}>No ${b.kind === 'demo' ? 'demo' : 'teacher'} (not needed)</option>${D.people.map(p => `<option value="${esc(p.id)}" ${p.id === b.person ? 'selected' : ''}>${esc(p.show)}${off(p) ? ' (not on shift then)' : busy(p) ? ' (busy then)' : ''}</option>`).join('')}</select>
        <div class="row2"><button id="pop-ok">Give it to them</button><button id="pop-x">Cancel</button></div>`;
   document.body.appendChild(pop);
@@ -1016,6 +1023,7 @@ function openPop(el) {
   pop.style.left = Math.min(window.innerWidth - 280, r.left) + 'px'; pop.style.top = Math.min(window.innerHeight - 140, r.bottom + 6) + 'px';
   $('pop-sel').focus();
   $('pop-x').onclick = closePop;
+  if ($('pi-save')) $('pi-save').onclick = () => partyGuestsSave(b);
   if ($('pop-del')) $('pop-del').onclick = () => { D.blocks = D.blocks.filter(z => z !== b); closePop(); D.flash = 'Break removed (Save the day to keep it that way).'; draw(); };
   $('pop-ok').onclick = () => { const v = $('pop-sel').value;
     if (b.kind === 'brk') { const len = b.end - b.start; b.start = +v; b.end = b.start + len; }
@@ -1023,6 +1031,31 @@ function openPop(el) {
     else { b.person = v || null; b.notNeeded = false; }
     b.locked = true;
     closePop(); draw(); };
+}
+// ---- a party's details in its box: who booked, and the expected guests (set here: party_details.expected_guests) ----
+function partyInfoHtml(b) {
+  const bk = (D.partyBk || []).find(x => x.id === b.booking) || {}, d = (D.pd || []).find(x => x.booking_id === b.booking) || {};
+  const g = +d.expected_guests || +bk.estimated_attendance || '';
+  const contact = [bk.customer_email, bk.customer_phone, bk.shopify_order_name].filter(Boolean).map(esc).join(' · ');
+  return `<div class="party-info"><b>${esc(bk.customer_name || 'Booked party')}</b>${contact ? `<div class="muted" style="font-size:12px">${contact}</div>` : ''}
+      ${d.child_name ? `<div style="font-size:12.5px">🎂 ${esc(d.child_name)}${d.child_age ? ', turning ' + esc(d.child_age) : ''}</div>` : ''}
+      ${d.art_project || d.project ? `<div style="font-size:12.5px">🎨 ${esc(d.art_project || d.project)}</div>` : ''}
+      <div style="display:flex;gap:6px;align-items:center;margin-top:6px"><span style="font-size:12.5px">Expected guests</span>
+        <input id="pi-g" type="number" min="1" max="60" value="${g}" placeholder="not set" style="width:70px;font:inherit;padding:4px 6px;border:1px solid var(--line);border-radius:6px">
+        <button id="pi-save">Save</button></div>
+      ${!g ? '<div style="font-size:11.5px;color:#a12a2a;margin-top:3px">Not set yet: counted as 8 until it\u2019s set.</div>' : ''}</div>`;
+}
+async function partyGuestsSave(b) {
+  const g = Math.round(+$('pi-g').value || 0); if (g < 1) { alert('Enter how many guests are expected.'); return; }
+  const { error } = await sb.from('party_details').upsert({ booking_id: b.booking, expected_guests: g }, { onConflict: 'booking_id' });
+  if (error) { alert(error.message); return; }
+  const d = (D.pd || []).find(x => x.booking_id === b.booking); if (d) d.expected_guests = g; else (D.pd = D.pd || []).push({ booking_id: b.booking, expected_guests: g });
+  // the day's numbers again
+  D.partyGuests = {}; D.partyUnknown = {};
+  (D.partyBk || []).forEach(x => { const dd = (D.pd || []).find(z => z.booking_id === x.id) || {}; const gg = +dd.expected_guests || +x.estimated_attendance || null;
+    D.partyGuests[x.session_id] = (D.partyGuests[x.session_id] || 0) + (gg || 8); if (!gg) D.partyUnknown[x.session_id] = (D.partyUnknown[x.session_id] || 0) + 1; });
+  D.blocks.filter(z => z.booking === b.booking && z.slot === 1).forEach(z => { z.sub = z.sub.replace(/^(~8 guests \(not set\)|guests not set|\d+ guests) · /, g + ' guests · '); });
+  closePop(); D.flash = `${g} guests expected: saved.`; draw();
 }
 function closePop() { const p = $('pop'); if (p) p.remove(); }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closePop(); });
