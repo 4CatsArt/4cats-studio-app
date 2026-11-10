@@ -6594,11 +6594,48 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
         '<div class="tmeta">' + esc(d.short_title || '') + (pics ? ' \u00b7 ' + pics + (pics === 1 ? ' picture' : ' pictures') : ' \u00b7 no pictures yet') + (d.video_url ? ' \u00b7 video' : '') + '</div></td>' +
         '<td><span class="pill ' + (d.active ? 'ready' : 'notready') + '">' + (d.active ? 'Ready' : 'Not ready') + '</span></td>' +
         '<td><div class="row-actions"><button class="btn btn-plain" type="button" data-dlprev="' + esc(d.id) + '">Preview</button>' +
-        '<button class="btn btn-plain" type="button" data-dledit="' + esc(d.id) + '">' + (canEdit ? 'Edit' : 'View') + '</button></div></td></tr>';
+        '<button class="btn btn-plain" type="button" data-dledit="' + esc(d.id) + '">' + (canEdit ? 'Edit' : 'View') + '</button>' +
+        (canEdit && d.title ? '<button class="btn btn-plain" type="button" data-dlcopy="' + esc(d.id) + '" title="Copy this deal onto other days">Copy to\u2026</button>' : '') + '</div></td></tr>';
     }).join('') + '</tbody></table></section>';
     return h;
   }
 
+
+  // (Nov 9 2026) Copy a day's deal onto other days of the same campaign: title, text, pictures, video, button and perk.
+  // Each copy keeps its own day and date and is "not ready" until you check it. A day that already has a deal asks first.
+  function dealCopyOpen(id) {
+    var src = (dealsAdmin.deals || []).filter(function (d) { return d.id === id; })[0]; if (!src) return;
+    var days = (dealsAdmin.deals || []).filter(function (d) { return d.campaign_id === src.campaign_id && d.id !== id; }).sort(function (a, b) { return a.day - b.day; });
+    var ov = document.getElementById('dlCopyOv');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'dlCopyOv'; ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:9999;display:flex;align-items:center;justify-content:center'; document.body.appendChild(ov); }
+    ov.onclick = function (e) { if (e.target === ov) ov.remove(); };
+    ov.innerHTML = '<div style="background:#fff;border-radius:14px;padding:18px 20px;width:min(520px,94vw);max-height:86vh;overflow:auto">' +
+      '<h3 style="margin:0 0 4px">Copy day ' + src.day + '\u2019s deal</h3><p class="sub" style="margin:0 0 10px">\u201c' + esc(src.title) + '\u201d \u2192 tick the days to copy it onto. Each keeps its own date and is set <b>not ready</b> so you can check it.</p>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:4px 10px;max-height:46vh;overflow:auto">' + days.map(function (d) {
+        return '<label class="check" style="font-size:13px"><input type="checkbox" data-dlto="' + esc(d.id) + '"> Day ' + d.day + ' \u00b7 ' + esc(niceDate(d.deal_date)) +
+          (d.title ? ' <span style="color:#b45309" title="Already has: ' + esc(d.title) + '">(has a deal)</span>' : '') + '</label>'; }).join('') + '</div>' +
+      '<p class="msg" id="dlCopyMsg" hidden></p><div class="row-actions" style="margin-top:12px"><button class="btn btn-berry" type="button" id="dlCopyGo">Copy</button><button class="btn btn-plain" type="button" id="dlCopyCancel">Cancel</button></div></div>';
+    document.getElementById('dlCopyCancel').onclick = function () { ov.remove(); };
+    document.getElementById('dlCopyGo').onclick = async function () {
+      var to = Array.prototype.map.call(ov.querySelectorAll('[data-dlto]:checked'), function (c) { return c.dataset.dlto; });
+      var msg = document.getElementById('dlCopyMsg');
+      if (!to.length) { msg.textContent = 'Tick at least one day.'; msg.hidden = false; return; }
+      var over = days.filter(function (d) { return to.indexOf(d.id) !== -1 && d.title; });
+      if (over.length && !confirm(over.length + ' of those days already have a deal (' + over.map(function (d) { return 'day ' + d.day; }).join(', ') + '). Replace them?')) return;
+      this.disabled = true; var n = 0;
+      for (var i = 0; i < to.length; i++) {
+        var t = days.filter(function (d) { return d.id === to[i]; })[0];
+        var r = await sb.rpc('world_deal_save', { p: { id: t.id, campaign_id: t.campaign_id, day: t.day, deal_date: t.deal_date, active: false,
+          short_title: src.short_title || null, title: src.title, intro: src.intro || null, description: src.description || null, bullets: src.bullets || [], chips: src.chips || [],
+          image_urls: src.image_urls || [], video_url: src.video_url || null, cta_label: src.cta_label || 'Book this deal', cta_url: src.cta_url || null,
+          perk: src.perk || null, perk_test_only: !!src.perk_test_only } });
+        if (!r.error) n++;
+      }
+      ov.remove();
+      flash = ['ok', 'Copied day ' + src.day + '\u2019s deal onto ' + n + ' day' + (n === 1 ? '' : 's') + '. They\u2019re \u201cnot ready\u201d: open each to change it, then tick it ready.'];
+      await loadThemes();
+    };
+  }
   // (Nov 9 2026) Duplicate a deals campaign: a new campaign (switched off) on new dates with the same settings, and each day's deal
   // copied onto the same day number (title, text, pictures, video, button, perk), each "not ready" until you tick it.
   async function dealCampaignDuplicate(id, btn) {
@@ -6725,6 +6762,7 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
       $('ncErr').hidden = true; $('n_title').value = ''; $('n_start').value = ''; $('n_days').value = '12';
       document.getElementById('ncEditor').showModal();
     });
+    app.querySelectorAll('[data-dlcopy]').forEach(function (b) { b.addEventListener('click', function () { dealCopyOpen(b.dataset.dlcopy); }); });
     app.querySelectorAll('[data-dledit]').forEach(function (b) {
       b.addEventListener('click', function () { openDeal((dealsAdmin.deals || []).filter(function (d) { return d.id === b.dataset.dledit; })[0]); });
     });
