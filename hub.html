@@ -3697,16 +3697,21 @@ async function nextPaLoad(sid) {
   if (_nextPa.sid === sid && Date.now() - _nextPa.at < 10 * 60 * 1000) { if (el()) el().innerHTML = _nextPa.html; return; }
   const d0 = new Date(), ymd = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   const to = new Date(d0.getTime() + 120 * 86400000);
-  const { data, error } = await sb.from('sessions').select('session_date, session_time, title, capacity, spaces_left_cache, show')
+  const { data, error } = await sb.from('sessions').select('id, session_date, session_time, title, capacity, spaces_left_cache, show')
     .eq('studio_id', sid).gte('session_date', ymd(d0)).lte('session_date', ymd(to))
     .or('title.ilike.*pa day*,title.ilike.*pd day*,title.ilike.*pa/pd*,title.ilike.*no school*').order('session_date').limit(40);
   if (error) { console.error('next PA/PD day:', error.message); return; }
-  const list = (data || []).filter(x => x.show !== false);   // (hidden placeholder days don't count)
+  // (Nov 10 2026) only a PA/PD day that's running: spots open, or kids booked. A closed one (0 spots, nobody booked) is skipped.
+  const shown = (data || []).filter(x => x.show !== false);   // (hidden placeholder days don't count)
+  const paBk = {};
+  if (shown.length) { try { const pb = await sb.from('bookings').select('session_id, qty').in('session_id', shown.map(x => x.id)).gt('qty', 0).is('returned_at', null);
+    (pb.data || []).forEach(b => { paBk[b.session_id] = (paBk[b.session_id] || 0) + (Number(b.qty) || 0); }); } catch (e) { } }
+  const list = shown.filter(x => (Number(x.spaces_left_cache) || 0) > 0 || x.spaces_left_cache == null || paBk[x.id] > 0);
   const day = list.length ? list[0].session_date : null;
   let html = '';
   if (day) {
     const same = list.filter(x => x.session_date === day);
-    const booked = same.reduce((t, x) => t + (x.capacity != null && x.spaces_left_cache != null ? Math.max(0, x.capacity - x.spaces_left_cache) : 0), 0);
+    const booked = same.reduce((t, x) => t + (paBk[x.id] || 0), 0);   // (kids booked at the day camp itself)
     const days = Math.round((new Date(day + 'T12:00:00') - new Date(ymd(d0) + 'T12:00:00')) / 86400000);
     const when = new Date(day + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' });
     // (Nov 10 2026) kids booked but nobody on the schedule that day yet: red and glowing
@@ -3716,12 +3721,14 @@ async function nextPaLoad(sid) {
       const bk = await sb.from('bookings').select('qty, sessions!inner(studio_id, session_date)').eq('sessions.studio_id', sid).eq('sessions.session_date', day).gt('qty', 0).is('returned_at', null);
       if (bk.error) console.warn('next PA/PD day: bookings', bk.error.message); else dayBooked = Math.max(booked, (bk.data || []).reduce((t, x) => t + (Number(x.qty) || 0), 0));
     } catch (e) { }
-    try { const sh = await sb.from('staff_shifts').select('id, start_time').eq('studio_id', sid).eq('shift_date', day).not('start_time', 'is', null).limit(1);
-      if (sh.error) console.warn('next PA/PD day: shifts', sh.error.message); else noStaff = !(sh.data || []).length; } catch (e) { }
+    let drafts = 0;   // (draft shifts don't count as scheduled: staff can't see them yet)
+    try { const sh = await sb.from('staff_shifts').select('id, start_time, status').eq('studio_id', sid).eq('shift_date', day).not('start_time', 'is', null);
+      if (sh.error) console.warn('next PA/PD day: shifts', sh.error.message);
+      else { const all = sh.data || []; drafts = all.filter(x => x.status === 'draft').length; noStaff = !all.some(x => x.status !== 'draft'); } } catch (e) { }
     const glow = noStaff && dayBooked > 0;   // (red and glowing only when people are booked)
     const soon = glow || days <= 7 ? '#c0392b' : days <= 14 ? '#b45309' : '#2e7d32', bg = glow || days <= 7 ? '#fdecea' : days <= 14 ? '#fff3e0' : '#eef7ee';
     html = `<div class="${glow ? 'pa-glow' : ''}" style="display:inline-flex;align-items:center;gap:10px;margin-top:10px;padding:8px 14px;border-radius:12px;background:${bg};border:1px solid ${soon}${glow ? '' : '33'};color:#1a1a1a;font-size:14px">
-      <span style="font-size:20px">🎒</span><span><b>Next PA/PD day:</b> ${esc(when)} <b style="color:${soon}">· ${days === 0 ? 'today' : days === 1 ? 'tomorrow' : 'in ' + days + ' days'}</b> · ${dayBooked ? `<b>${dayBooked} booked that day</b>${booked && booked < dayBooked ? ` (${booked} at the day camp)` : ''}` : 'nothing booked yet'}${noStaff ? ` · <b style="color:#c0392b">${glow ? '⚠ ' : ''}nobody scheduled yet</b>` : ' · ✓ staff scheduled'}</span></div>`;
+      <span style="font-size:20px">🎒</span><span><b>Next PA/PD day:</b> ${esc(when)} <b style="color:${soon}">· ${days === 0 ? 'today' : days === 1 ? 'tomorrow' : 'in ' + days + ' days'}</b> · ${dayBooked ? `<b>${dayBooked} booked that day</b>${booked && booked < dayBooked ? ` (${booked} at the day camp)` : ''}` : 'nothing booked yet'}${noStaff ? ` · <b style="color:#c0392b">${glow ? '⚠ ' : ''}${drafts ? `shifts not published yet (${drafts} draft${drafts === 1 ? '' : 's'})` : 'nobody scheduled yet'}</b>` : ' · ✓ staff scheduled'}</span></div>`;
   }
   _nextPa = { sid, at: Date.now(), html };
   if (el()) el().innerHTML = html;
@@ -4692,6 +4699,18 @@ function rpPreview(member) {
 }
 function rpPvClose() { const el = document.getElementById('rp-pv'); if (el) el.remove(); _rpPv = null; }
 // ---------- Home office → ⭐ Memberships (hub_membership_refunds.sql + membership-checkout staff_refund) ----------
+// 💰 (Nov 10 2026) membership payments (joins, gifts, renewals) from Stripe into studio_sales_line_items, so finance.html shows them
+async function memSalesSync() {
+  const since = prompt('Copy membership payments from Stripe into finance, from this date on (YYYY-MM-DD). Ones already there are skipped.', '2026-08-01'); if (!since) return;
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    const r = await fetch(SUPABASE_URL + '/functions/v1/membership-checkout', { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + (session ? session.access_token : SUPABASE_ANON_KEY) },
+      body: JSON.stringify({ action: 'staff_member_sales_sync', since }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.error) throw new Error(d.error || 'please try again');
+    alert(`✓ ${d.found} membership payment${d.found === 1 ? '' : 's'} found in Stripe since ${since} ($${Number(d.total_before_tax || 0).toFixed(2)} before tax). ${d.added} newly added to finance; the rest were already there.`);
+  } catch (e) { alert('Not done: ' + e.message); }
+}
 // Find any membership or gift membership by name or email (bought on World: they don't always have bookings, so Families can miss
 // them). For exceptions: refund all or part to their card, and/or end it now (its auto-renew stops). Owners and "Can fix memberships".
 let _mb = { q: '', res: null, err: '', open: null, msg: '' };
@@ -4713,7 +4732,7 @@ function mbDraw() {
   const R = _mb.res, d = x => x ? new Date(String(x).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
   const today = new Date().toLocaleDateString('en-CA');
   const live = m => !['cancelled', 'ended', 'expired'].includes(m.status) && (!m.ends_on || String(m.ends_on) >= today);
-  let h = `<div class="ho-head"><div class="pts-page-title" style="margin:0">⭐ Memberships</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+  let h = `<div class="ho-head"><div class="pts-page-title" style="margin:0">⭐ Memberships</div><span class="spacer"></span><button class="ho-btn" onclick="memSalesSync()" title="Copy membership payments from Stripe into the sales records (finance.html's Membership bucket). Already copied ones are skipped.">💰 Membership sales → finance</button><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
     <div class="ho-intro">Find a membership or a gift membership by name or email: the member’s, or whoever bought the gift. For exceptions, refund it (all or part, to their card) and/or end it now.</div>
     <div class="fd-inline" style="max-width:520px"><input id="mb-q" placeholder="Name or email" value="${escAttr(_mb.q)}" onkeydown="if(event.key==='Enter')mbFind()"><button class="ho-btn primary" onclick="mbFind()">Find</button></div>
     ${_mb.err ? `<p class="fd-msg">${esc(_mb.err)}</p>` : ''}${_mb.msg ? `<p class="fd-ok">${esc(_mb.msg)}</p>` : ''}`;
