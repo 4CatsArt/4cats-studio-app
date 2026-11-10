@@ -8287,6 +8287,14 @@ async function fdWaitAgain(id) {
 }
 function fdAckCancelled(id) { sb.rpc('hub_pos_ack', { p_order: id, p_kind: 'cancelled', p_note: 'Cancelled at the desk' }).then(() => fdWaitLoad()).catch(() => {}); }
 
+// ↩ (Nov 10 2026) a cancellation's gift card swapped for a refund to how they paid (home office; only while the gift card is unused)
+async function famRefundInstead(last4, amount) {
+  const f = _fam.open; if (!f || !f.email) return;
+  if (!confirm(`Refund $${Number(amount).toFixed(2)} to how they paid, instead of the gift card ending ${last4}?\n\nThe gift card is switched off first (only if none of it has been used). They get an email. This can’t be undone.`)) return;
+  try { const d = await staffBookingCall('staff_refund_instead', { booking_ids: [], gift_last4: last4, email: f.email, by: '' });
+    alert(`✓ $${Number(d.amount).toFixed(2)} refunded${d.gift ? ` ($${Number(d.card).toFixed(2)} to their card, $${Number(d.gift).toFixed(2)} back onto their gift card)` : ' to their card'}. The gift card ending ${d.gift_last4} is switched off.`);
+  } catch (e) { alert(e.message); }
+}
 // ---------- 💳 Saved cards in a family card: loaded from Stripe when the section is opened ----------
 document.addEventListener('toggle', e => { const d = e.target; if (d && d.matches && d.matches('details.fam-sec[data-sec="cards"]') && d.open) famCardsLoad(d.querySelector('.fam-cards')); }, true);
 async function famCardsLoad(box, removeId) {
@@ -12314,6 +12322,7 @@ function baDraw() {
       ${q.qty > 1 && !whole ? `<label class="f">Cancel<select id="ba-spots" onchange="baCalc()">${Array.from({ length: q.qty }, (_, i) => q.qty - i).map(n => `<option value="${n}">${n === q.qty ? 'all ' + n + ' spots' : n + ' of ' + q.qty + ' spots'}</option>`).join('')}</select></label>` : ''}
       <label class="f">They paid${known ? '' : q.amount_zero ? ` <span class="goal-note">(came back as $0: check order ${esc((q.orders || []).join(', '))} and type in what they paid)</span>` : ' <span class="goal-note">(couldn’t be worked out: type it in)</span>'}<input id="ba-paid" type="number" step="0.01" min="0" value="${known ? amt.toFixed(2) : ''}" oninput="baCalc()"></label>
       <div class="ba-radio"><label><input type="radio" name="ba-credit" value="gift" checked onchange="baCalc()"> A 4Cats gift card</label>
+        <label><input type="radio" name="ba-credit" value="refund" onchange="baCalc()"> ↩ Refund to how they paid <span class="goal-note">(card, and any gift card part back onto their gift card)</span></label>
         <label><input type="radio" name="ba-credit" value="none" onchange="baCalc()"> No credit</label></div>
       <label class="ba-check"><input type="checkbox" id="ba-fee-on" onchange="baCalc()"> Charge the admin fee <input id="ba-fee" type="number" step="0.01" min="0" value="${BA_FEE}" oninput="baCalc()" style="width:80px"> <span id="ba-feehow">(taken off the gift card)</span></label>
       <label class="f">Gift card good for<select id="ba-days"><option value="30">30 days</option><option value="90">90 days</option><option value="365">1 year</option></select></label>
@@ -12388,25 +12397,27 @@ async function baLoadOpts() {
 }
 function baCalc() {
   const q = _ba.q, spots = +((document.getElementById('ba-spots') || {}).value || q.qty), paid = Math.max(0, +document.getElementById('ba-paid').value || 0);
-  const share = Math.round(paid * spots / q.qty * 100) / 100, gift = document.querySelector('input[name="ba-credit"]:checked').value === 'gift';
+  const how = document.querySelector('input[name="ba-credit"]:checked').value, refund = how === 'refund';
+  const share = Math.round(paid * spots / q.qty * 100) / 100, gift = how === 'gift' || refund;   // (a refund works like the gift card: the fee comes off it)
   const feeOn = document.getElementById('ba-fee-on').checked, fee = feeOn ? Math.max(0, +document.getElementById('ba-fee').value || 0) : 0;
   const credit = gift ? Math.max(0, Math.round((share - fee) * 100) / 100) : 0;
-  document.getElementById('ba-days').disabled = !gift || credit <= 0;
-  document.getElementById('ba-feehow').textContent = gift ? '(taken off the gift card)' : '(charged to their card after cancelling: 💳 here, QR or pay link)';
+  document.getElementById('ba-days').disabled = !gift || refund || credit <= 0;
+  document.getElementById('ba-feehow').textContent = refund ? '(taken off the refund)' : gift ? '(taken off the gift card)' : '(charged to their card after cancelling: 💳 here, QR or pay link)';
   const feeCard = !gift && feeOn ? Math.max(0, +document.getElementById('ba-fee').value || 0) : 0;
-  document.getElementById('ba-sum').innerHTML = gift ? `${spots < q.qty ? `${spots} of ${q.qty} spots = $${share.toFixed(2)}` : `$${share.toFixed(2)}`}${fee ? ` − $${fee.toFixed(2)} admin fee` : ''} → <b>$${credit.toFixed(2)} gift card</b>` : `<b>No credit</b> (spots go back on sale)${feeCard ? `, then <b>💳 charge the $${feeCard.toFixed(2)} admin fee</b> (+ tax)` : ''}`;
+  document.getElementById('ba-sum').innerHTML = gift ? `${spots < q.qty ? `${spots} of ${q.qty} spots = $${share.toFixed(2)}` : `$${share.toFixed(2)}`}${fee ? ` − $${fee.toFixed(2)} admin fee` : ''} → <b>$${credit.toFixed(2)} ${refund ? 'refunded to how they paid' : 'gift card'}</b>` : `<b>No credit</b> (spots go back on sale)${feeCard ? `, then <b>💳 charge the $${feeCard.toFixed(2)} admin fee</b> (+ tax)` : ''}`;
   document.getElementById('ba-go').textContent = q.class && _ba.whole ? 'Cancel the whole class' : spots < q.qty ? `Cancel ${spots} spot${spots === 1 ? '' : 's'}` : 'Cancel the booking';
 }
 async function baCancel() {
   const q = _ba.q, b = document.getElementById('ba-go'), spots = +((document.getElementById('ba-spots') || {}).value || q.qty);
-  const gift = document.querySelector('input[name="ba-credit"]:checked').value === 'gift', feeOn = document.getElementById('ba-fee-on').checked;
+  const how = document.querySelector('input[name="ba-credit"]:checked').value, gift = how === 'gift' || how === 'refund', feeOn = document.getElementById('ba-fee-on').checked;
+  const refundTxt = d => d && d.refunded ? (d.refunded.ok ? ` $${Number(d.credit).toFixed(2)} refunded${d.refunded.gift ? ` ($${Number(d.refunded.card).toFixed(2)} to their card, $${Number(d.refunded.gift).toFixed(2)} back onto their gift card)` : ' to their card'}.` : ` ⚠ The refund didn’t go through: ${d.refunded.error}`) : '';
   _ba.who = (document.getElementById('ba-who') || {}).value || '';
   const whole = !!(q.class && _ba.whole);
   if (!confirm(whole ? `Cancel ${q.class.title} for ${_ba.name} (all ${q.class.weeks} classes)? This can’t be undone.` : `Cancel ${spots < q.qty ? spots + ' of ' + q.qty + ' spots for' : ''} ${_ba.name}? This can’t be undone.`)) return;
   b.disabled = true; b.textContent = 'Cancelling…';
   try {
     if (whole) {
-      const d = await staffBookingCall('staff_class_cancel', { booking_ids: _ba.ids, amount: document.getElementById('ba-paid').value, credit: gift ? 'gift' : 'none',
+      const d = await staffBookingCall('staff_class_cancel', { booking_ids: _ba.ids, amount: document.getElementById('ba-paid').value, credit: how === 'refund' ? 'refund' : gift ? 'gift' : 'none',
         fee: gift && feeOn ? +document.getElementById('ba-fee').value || 0 : 0, gift_days: +document.getElementById('ba-days').value, email: document.getElementById('ba-email').checked,
         note: document.getElementById('ba-note').value, by: _ba.who });
       const done = `Cancelled ${q.class.title} for ${_ba.name} (${d.weeks} classes).` + (d.problem ? ` ${d.of - d.weeks} couldn’t be cancelled: ${d.problem}` : '');
@@ -12414,9 +12425,9 @@ async function baCancel() {
       if (feeCard > 0) return hubCharge({ studio: q.studio_id, name: q.name || _ba.name, email: q.email, lines: [{ name: `Cancellation admin fee: ${q.class.title}`, amount: feeCard }],
         why: `${done} Now the admin fee.`, ref: (_ba.ids || []).join(','), onDone: m => baRefresh(done + ' ' + m) });
       closeDutySheet();
-      return await baRefresh(done + (d.gift_last4 ? ` $${d.credit.toFixed(2)} gift card ending ${d.gift_last4}${d.gift_code ? ' (code ' + d.gift_code + ')' : ''}.` : d.test ? ' (Test order: no gift card.)' : ' No credit.'));
+      return await baRefresh(done + (d.refunded ? refundTxt(d) : d.gift_last4 ? ` $${d.credit.toFixed(2)} gift card ending ${d.gift_last4}${d.gift_code ? ' (code ' + d.gift_code + ')' : ''}.` : d.test ? ' (Test order: no gift card.)' : ' No credit.'));
     }
-    const d = await staffBookingCall('staff_cancel', { booking_ids: _ba.ids, spots, amount: document.getElementById('ba-paid').value, credit: gift ? 'gift' : 'none',
+    const d = await staffBookingCall('staff_cancel', { booking_ids: _ba.ids, spots, amount: document.getElementById('ba-paid').value, credit: how === 'refund' ? 'refund' : gift ? 'gift' : 'none',
       fee: gift && feeOn ? +document.getElementById('ba-fee').value || 0 : 0, gift_days: +document.getElementById('ba-days').value, email: document.getElementById('ba-email').checked,
       note: document.getElementById('ba-note').value, by: _ba.who });
     const feeCard = !gift && feeOn ? Math.max(0, +document.getElementById('ba-fee').value || 0) : 0;
@@ -12426,7 +12437,7 @@ async function baCancel() {
         why: `${done} Now the admin fee.`, ref: (_ba.ids || []).join(','), onDone: m => baRefresh(done + ' ' + m) });
     }
     closeDutySheet();
-    await baRefresh(`Cancelled ${d.spots} spot${d.spots === 1 ? '' : 's'} for ${_ba.name}.` + (d.gift_last4 ? ` $${d.credit.toFixed(2)} gift card ending ${d.gift_last4}${d.gift_code ? ' (code ' + d.gift_code + ')' : ''}.` : d.test ? ' (Test order: no gift card.)' : ' No credit.'));
+    await baRefresh(`Cancelled ${d.spots} spot${d.spots === 1 ? '' : 's'} for ${_ba.name}.` + (d.refunded ? refundTxt(d) : d.gift_last4 ? ` $${d.credit.toFixed(2)} gift card ending ${d.gift_last4}${d.gift_code ? ' (code ' + d.gift_code + ')' : ''}.` : d.test ? ' (Test order: no gift card.)' : ' No credit.'));
   } catch (e) { b.disabled = false; baCalc(); alert('Not cancelled: ' + e.message); }
 }
 async function baMove(target, allowFull) {
@@ -14955,7 +14966,8 @@ function famRender() {
     // Cancellations
     const cx = f.cancellations || [];
     h += sec('cancels', 'Cancellations', cx.length, cx.length ? cx.map(c => '<p class="fam-line">↩️ ' + famEsc(famTitle(c.title)) + (c.date ? ' (' + famEsc(dl(c.date)) + ')' : '') + ' · ' +
-      (c.gift_last4 ? '$' + Number(c.amount).toFixed(2) + ' gift card ending ' + famEsc(c.gift_last4) + (c.gift_expires ? ', expires ' + famEsc(dl(c.gift_expires)) : '') : 'no credit') + ' · by ' + famEsc(c.by || 'family') + ' on ' + famEsc(dl(c.at)) + '</p>').join('')
+      (c.gift_last4 ? '$' + Number(c.amount).toFixed(2) + ' gift card ending ' + famEsc(c.gift_last4) + (c.gift_expires ? ', expires ' + famEsc(dl(c.gift_expires)) : '') : 'no credit') + ' · by ' + famEsc(c.by || 'family') + ' on ' + famEsc(dl(c.at)) +
+      (c.gift_last4 && _studioData && _studioData.isAdmin && f.email ? ' <button class="ho-btn sm" onclick="famRefundInstead(\'' + famEsc(c.gift_last4) + '\',' + Number(c.amount) + ')" title="Switch off the gift card (if unused) and refund to how they paid">↩ Refund instead</button>' : '') + '</p>').join('')
       : '<p class="fam-meta">No cancellations.</p>');
     // Membership
     const mem = (f.memberships || [])[0];
