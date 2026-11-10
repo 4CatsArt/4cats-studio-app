@@ -11470,6 +11470,7 @@ function customNew() {
     </div><div id="cu-msg"></div>
     <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="cu-go" onclick="customCreate()">${admin ? 'Hold it and email the link' : 'Send the request'}</button></div>`);
   customSlots();   // (the regular party times open that day)
+  window._cuOverride = false;
 }
 // find a customer as you type (the same search as the Front desk); picking one fills in their name, email and phone
 let _cuT = null, _cuHits = [];
@@ -11517,23 +11518,29 @@ function customWho() {
   const b = document.getElementById('cu-go'); if (b) b.textContent = w === 'public' ? 'Open it on World' : w === 'promo' ? 'Book it and email them' : 'Hold it and email the link';
   customSlots();
 }
+// ⚠ (Nov 10 2026) home office: book a custom / promo / one-off party time even though the party room looks busy (party_override.sql)
+function customOverrideHtml(m) {
+  if (!(_studioData && _studioData.isAdmin) || !/party room|No party room/i.test(String(m || ''))) return '';
+  return `<div class="me-msg" style="background:#fff3e0;border:1px solid #f0c27a"><b>⚠ Override?</b> Book it anyway if you know both parties can run (e.g. the studio has room, or the times work).
+    <button class="ho-btn sm" style="margin-left:6px" onclick="window._cuOverride=true;customCreate()">Book it anyway</button></div>`;
+}
 async function customCreate() {
   const v = id => (document.getElementById(id) || {}).value || '', msg = document.getElementById('cu-msg'), btn = document.getElementById('cu-go');
   if (v('cu-who') === 'public') {   // 🌍 a one-off party time for anyone
     if (!v('cu-day') || !v('cu-at')) { msg.innerHTML = '<div class="me-msg err">Choose the date and start time.</div>'; return; }
     btn.disabled = true; btn.textContent = 'Saving…';
-    const { error } = await sb.rpc('hub_party_time_add', { p: { studio_id: _sessionStudioId, kind: v('cu-kind'), day: v('cu-day'), at: v('cu-at'), rooms: +v('cu-rooms') || 1 } });
-    if (error) { btn.disabled = false; btn.textContent = 'Try again'; msg.innerHTML = `<div class="me-msg err">${esc(/hub_party_time_add/.test(error.message) ? 'Run party_times_promo_public.sql in Supabase first.' : error.message)}</div>`; return; }
+    const { error } = await sb.rpc('hub_party_time_add', { p: { studio_id: _sessionStudioId, kind: v('cu-kind'), day: v('cu-day'), at: v('cu-at'), rooms: +v('cu-rooms') || 1, override: !!window._cuOverride } });
+    if (error) { btn.disabled = false; btn.textContent = 'Try again'; msg.innerHTML = `<div class="me-msg err">${esc(/hub_party_time_add/.test(error.message) ? 'Run party_times_promo_public.sql in Supabase first.' : error.message)}</div>` + customOverrideHtml(error.message); return; }
     closeDutySheet(); alert('✓ It’s live on World now, for anyone to book.'); try { if (_plan && _plan.date) await loadPlanDay(_plan.date); } catch (e) { }
     return;
   }
   const p = { studio_id: _sessionStudioId, kind: v('cu-kind'), day: v('cu-day'), at: v('cu-at'), customer_name: v('cu-name').trim(), customer_email: v('cu-email').trim(),
     customer_phone: v('cu-phone').trim(), pay_by: v('cu-who') === 'promo' ? null : (v('cu-pay') || null), note: v('cu-note').trim(),
-    promo: v('cu-who') === 'promo', promo_reason: v('cu-reason').trim(), session_id: v('cu-slot') || null };
+    promo: v('cu-who') === 'promo', promo_reason: v('cu-reason').trim(), session_id: v('cu-slot') || null, override: !!window._cuOverride };
   if (!p.day || (!p.at && !p.session_id)) { msg.innerHTML = '<div class="me-msg err">Choose the date and the party time.</div>'; return; }
   btn.disabled = true; btn.textContent = 'Saving…';
   const { data, error } = await sb.rpc('hub_custom_hold_create', { p });
-  if (error) { btn.disabled = false; btn.textContent = 'Try again'; msg.innerHTML = `<div class="me-msg err">${esc(/hub_custom_hold_create/.test(error.message) ? 'Run custom_party_times.sql in Supabase first.' : error.message)}</div>`; return; }
+  if (error) { btn.disabled = false; btn.textContent = 'Try again'; msg.innerHTML = `<div class="me-msg err">${esc(/hub_custom_hold_create/.test(error.message) ? 'Run custom_party_times.sql in Supabase first.' : error.message)}</div>` + customOverrideHtml(error.message); return; }
   let note = data.status === 'requested' ? 'Request sent to home office.' : 'Held.';
   if (data.status === 'held') { const r = await customEmail(data.id); note = r.ok ? 'Held, and the link was emailed to ' + p.customer_email + '.' : 'Held, but the email didn\u2019t send: ' + r.error + ' (use Send link).'; }
   closeDutySheet(); await customLoad(true); if (_plan) { await loadPlanDay(_plan.date); _plan.msg = note; renderPlanDay(); } else alert(note);
