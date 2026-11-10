@@ -699,6 +699,16 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .fd-expired { background: #f6f1e8; color: #6b6b63; font-weight: 700; border-radius: 14px; padding: 14px; text-align: center; }
 .fd-rec { display: flex; gap: 8px; align-items: center; border-bottom: 1px solid var(--border); padding: 8px 0; } .fd-rec > span:first-child { flex: 1; }
 .fd-st { font-size: 12px; font-weight: 800; border-radius: 999px; padding: 2px 10px; } .fd-st.ok { background: #e3f4e8; color: #1d6b39; } .fd-st.wait { background: #fdf3d8; color: #8a5a00; } .fd-st.off { background: #eee; color: #666; }
+.fd-shop-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.fd-shop-tile { position: relative; display: flex; flex-direction: column; gap: 3px; text-align: left; background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 8px; cursor: pointer; font: inherit; }
+.fd-shop-tile:active { transform: scale(.98); }
+.fd-shop-tile img, .fd-shop-nopic { width: 100%; height: 120px; object-fit: cover; border-radius: 10px; }
+.fd-shop-nopic { display: flex; align-items: center; justify-content: center; font-size: 34px; background: #f6f3ea; }
+.fd-shop-pr { font-weight: 700; } .fd-shop-pr s { color: #999; font-weight: 400; } .fd-shop-pr small { font-weight: 600; color: #6b4b00; }
+.fd-shop-in { position: absolute; top: 12px; left: 12px; background: #1f6f43; color: #fff; font-size: 12px; font-weight: 700; border-radius: 999px; padding: 2px 8px; }
+.fd-shop-h { margin: 14px 0 6px; }
+.fd-shop-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.fd-qty { display: inline-flex; align-items: center; gap: 6px; margin: 0 6px; } .fd-qty button { width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--border); background: #fff; font-size: 16px; cursor: pointer; }
 .fd-soon { max-width: 560px; background: #fff; border: 2px dashed var(--border); border-radius: 18px; padding: 26px; text-align: center; } .fd-soon-ic { font-size: 44px; } .fd-soon b { font-size: 20px; }
 @media (max-width: 1100px) { .fd-wrap { grid-template-columns: minmax(0, 1fr) 290px; } .fd-row { grid-template-columns: 64px minmax(0, 1fr) 84px 80px; } }
 @media (max-width: 820px) { .fd-wrap { grid-template-columns: 1fr; } .fd-cart { position: static; } }
@@ -6840,6 +6850,10 @@ async function fdLoadTab() {
     if (!F.ptyP) { try { const r = await sb.from('world_site_settings').select('value').eq('key', 'party_pricing').maybeSingle(); F.ptyP = r.data && r.data.value ? JSON.parse(r.data.value) : {}; } catch (e) { F.ptyP = {}; } }
     // World settings → Parties: which studios offer splatter, and each one's maximum (the same list World's Parties page uses)
     if (!F.ptyPage || F.ptyPage.__err) await fdPtyPageLoad();   // (World settings → Parties: project lists, colours, splatter studios)
+  } else if (F.tab === 'retail' && !F.shop) {
+    fdRender();
+    const { data, error } = await sb.rpc('hub_fd_retail', { p_studio: st });
+    F.shop = error ? { err: /hub_fd_retail/.test(error.message) ? 'Run fd_retail.sql in Supabase first.' : error.message } : (data || { products: [], collections: [] });
   } else if (F.tab === 'camps' && !F.camps) {
     fdRender();
     const { data, error } = await sb.from('sessions').select('id, title, session_date, session_time, capacity, spaces_left_cache, show')
@@ -6885,6 +6899,7 @@ function fdRender() {
     <div class="fd-tabs" role="tablist">${FD_TABS.map(t => `<button role="tab" class="fd-tab${F.tab === t[0] ? ' on' : ''}" onclick="_fd.tab='${t[0]}';fdRender();fdLoadTab()">${t[1]}</button>`).join('')}</div>
     <div class="fd-wrap"><div class="fd-main">${fdMainHtml()}</div><aside class="fd-cart">${fdCartHtml()}</aside></div>`;
   if (F.add) h += fdAddHtml();
+  if (F.shopPick) h += fdShopPickHtml();
   if (F.order) h += fdPayHtml();
   if (F.showRecent) h += fdRecentHtml();
   // keep typing where it was (search boxes redraw the table as you type)
@@ -6901,10 +6916,75 @@ function fdMainHtml() {
   if (F.tab === 'classes') return fdClsHtml();
   if (F.tab === 'camps') return fdCampsHtml();
   if (F.tab === 'parties') return fdPtyHtml();
+  if (F.tab === 'retail') return fdShopHtml();
   const soon = { retail: ['🛍️', 'Retail', 'Product tiles to tap, once the product list (names, prices, tax) is set up.'], snacks: ['🧃', 'Drinks & snacks', 'Drinks and snack tiles to tap, once the product list (names, prices, tax) is set up.'] }[F.tab];
   return `<div class="fd-soon"><div class="fd-soon-ic">${soon[0]}</div><b>${soon[1]}</b><p class="fd-sm">${soon[2]}</p></div>`;
 }
 const fdLoading = '<p class="fd-sm">Loading…</p>';
+// ---- 🛍️ Retail (fd_retail.sql): the kits and other shop items this studio sells, as tiles to tap ----
+// Grouped by collection (e.g. Ditto kits → 4-piece kits, 8-piece kits, more). Search by name, SKU or barcode (a scanner types the
+// barcode and Enter: an exact match goes straight in the cart). Prices show as a guide; checkout prices them again.
+function fdShopIn(p, c) {
+  const t = new Set((p.tags || []).map(x => String(x).toLowerCase()));
+  return ((c.tags || []).some(x => t.has(x)) || (c.product_ids || []).includes(p.id)) && !(c.hidden_ids || []).includes(p.id);
+}
+function fdShopPrice(p, v) {
+  const reg = Number((v && v.price) ?? p.price), mem = (v && v.member_price) ?? p.member_price, sale = p.sale_price;
+  const fam = _fd.fam && !_fd.fam.walk_in && _fd.fam.member;
+  let now = reg, lab = '';
+  if (sale != null && Number(sale) < now) { now = Number(sale); lab = 'sale'; }
+  if (fam && mem != null && Number(mem) < now) { now = Number(mem); lab = '⭐ member'; }
+  return { reg, now, lab, mem: !fam && mem != null && Number(mem) < reg ? Number(mem) : null };
+}
+function fdShopHtml() {
+  const F = _fd, S = F.shop;
+  if (!S) return fdLoading; if (S.err) return '<p class="fd-msg">' + esc(S.err) + '</p>';
+  const P = S.products || [], C = (S.collections || []).filter(c => P.some(p => fdShopIn(p, c)));
+  const q = (F.shopQ || '').trim().toLowerCase(), col = C.find(c => c.id === F.shopCol) || null;
+  let h = `<div class="fd-filters"><input id="fd-shopq" type="search" placeholder="Search, or scan a barcode" value="${esc(F.shopQ || '')}" oninput="_fd.shopQ=this.value;clearTimeout(_fd.qt);_fd.qt=setTimeout(fdRender,200)" onkeydown="if(event.key==='Enter'){event.preventDefault();fdShopScan(this.value)}">
+    <span class="fd-chips"><button class="fd-chip${!col ? ' on' : ''}" onclick="_fd.shopCol='';fdRender()">All</button>${C.map(c => `<button class="fd-chip${col && col.id === c.id ? ' on' : ''}" onclick="_fd.shopCol='${c.id}';fdRender()">${esc(c.name)}</button>`).join('')}</span></div>`;
+  if (!P.length) return h + '<div class="fd-soon"><div class="fd-soon-ic">🛍️</div><b>Nothing to sell here yet.</b><p class="fd-sm">In Home office → 🛍️ Products, tick <b>At the front desk</b> on a product (and this studio, or every studio).</p></div>';
+  const match = p => !q || (p.name + ' ' + (p.tags || []).join(' ') + ' ' + (p.variants || []).map(v => (v.sku || '') + ' ' + (v.barcode || '')).join(' ')).toLowerCase().includes(q);
+  const tile = p => { const V = p.variants || [], pr = fdShopPrice(p, V[0]), pic = (p.images || [])[0], inCart = F.cart.filter(l => l.type === 'retail' && l.product_id === p.id).reduce((t, l) => t + l.qty, 0);
+    return `<button class="fd-shop-tile" onclick="fdShopTap('${p.id}')">${pic ? `<img src="${escAttr(pic)}" alt="" loading="lazy">` : '<span class="fd-shop-nopic">🛍️</span>'}
+      <b>${esc(p.name)}</b><span class="fd-shop-pr">${pr.now < pr.reg ? `<s>${fdMoney(pr.reg)}</s> ` : ''}${fdMoney(pr.now)}${pr.lab ? ` <small>${esc(pr.lab)}</small>` : ''}${pr.mem != null ? ` <small>⭐ ${fdMoney(pr.mem)}</small>` : ''}</span>
+      ${V.length > 1 ? `<span class="fd-sm">${V.length} options</span>` : ''}${inCart ? `<span class="fd-shop-in">${inCart} in cart</span>` : ''}</button>`; };
+  const list = P.filter(match).filter(p => !col || fdShopIn(p, col));
+  if (!list.length) return h + '<p class="fd-sm">Nothing matches.</p>';
+  if (col) {   // by section, in the collection's order
+    const secOf = p => { const t = new Set((p.tags || []).map(x => String(x).toLowerCase())); return (col.sections || []).findIndex(s2 => (s2.tags || []).some(x => t.has(x))); };
+    const groups = (col.sections || []).map((s2, i) => ({ title: s2.title, list: list.filter(p => secOf(p) === i) })).concat([{ title: col.more_title || 'More', list: list.filter(p => secOf(p) < 0) }]).filter(g => g.list.length);
+    return h + groups.map(g => `<h4 class="fd-shop-h">${esc(g.title)} <span class="fd-sm">${g.list.length}</span></h4><div class="fd-shop-grid">${g.list.map(tile).join('')}</div>`).join('');
+  }
+  return h + `<div class="fd-shop-grid">${list.map(tile).join('')}</div>`;
+}
+function fdShopAdd(p, v, qty) {
+  const F = _fd, ex = F.cart.find(l => l.type === 'retail' && l.variant_id === v.id);
+  if (ex) ex.qty = Math.min(50, ex.qty + qty);
+  else F.cart.push({ type: 'retail', variant_id: v.id, product_id: p.id, qty, title: p.name + (v.name && v.name !== 'Default' ? ' · ' + v.name : ''), desc: v.sku ? 'SKU ' + v.sku : '' });
+  F.shopPick = null; F.msg = ''; fdRender();
+}
+function fdShopTap(id) {
+  const p = ((_fd.shop || {}).products || []).find(x => x.id === id); if (!p) return;
+  const V = p.variants || []; if (!V.length) { alert('This product has no options switched on.'); return; }
+  if (V.length === 1) { fdShopAdd(p, V[0], 1); return; }
+  _fd.shopPick = { id, qty: 1 }; fdRender();
+}
+function fdShopQty(i, d) { const l = _fd.cart[i]; if (!l) return; l.qty += d; if (l.qty < 1) _fd.cart.splice(i, 1); else if (l.qty > 50) l.qty = 50; fdRender(); }
+function fdShopScan(val) {   // an exact SKU or barcode: straight into the cart
+  const code = String(val || '').trim().toUpperCase(); if (!code) return;
+  for (const p of ((_fd.shop || {}).products || [])) for (const v of (p.variants || []))
+    if (String(v.sku || '').toUpperCase() === code || String(v.barcode || '').toUpperCase() === code) { _fd.shopQ = ''; fdShopAdd(p, v, 1); return; }
+}
+function fdShopPickHtml() {
+  const S = _fd.shopPick, p = ((_fd.shop || {}).products || []).find(x => x.id === S.id); if (!p) return '';
+  return `<div class="fd-sheet-back" onclick="if(event.target===this){_fd.shopPick=null;fdRender()}"><div class="fd-sheet" role="dialog" aria-modal="true"><h3>${esc(p.name)}</h3>
+    ${(p.images || [])[0] ? `<img src="${escAttr(p.images[0])}" alt="" style="max-width:180px;border-radius:12px;display:block;margin:0 0 10px">` : ''}
+    <div class="fd-shop-opts">${(p.variants || []).map(v => { const pr = fdShopPrice(p, v);
+      return `<button class="fd-book" onclick="fdShopAdd(((_fd.shop||{}).products||[]).find(x=>x.id==='${p.id}'), ((_fd.shop||{}).products||[]).find(x=>x.id==='${p.id}').variants.find(x=>x.id==='${v.id}'), _fd.shopPick.qty)">${esc(v.name || 'Default')} · ${fdMoney(pr.now)}</button>`; }).join('')}</div>
+    <p class="fd-sm" style="margin-top:10px">How many <span class="fd-qty"><button onclick="_fd.shopPick.qty=Math.max(1,_fd.shopPick.qty-1);fdRender()">−</button><b>${S.qty}</b><button onclick="_fd.shopPick.qty=Math.min(50,_fd.shopPick.qty+1);fdRender()">+</button></span></p>
+    <div class="fd-sheet-btns"><button class="ho-btn" onclick="_fd.shopPick=null;fdRender()">Cancel</button></div></div></div>`;
+}
 // ---- 📅 Today ----
 function fdTodayHtml() {
   const F = _fd, isToday = F.date === fdToday(), R = F.today;
@@ -7168,7 +7248,9 @@ function fdCartHtml() {
   let h = '<div class="fd-cart-in"><h3>Cart</h3>';
   // The family
   if (F.fam) {
-    h += `<div class="fd-fam"><div><b>${esc(F.fam.first_name + (F.fam.last_name ? ' ' + F.fam.last_name : ''))}</b>${F.fam.member ? ' <span class="fd-pill">⭐ Member</span>' : ''}${F.fam.customer_id ? '' : ' <span class="fd-pill">new</span>'}<br><span class="fd-sm">${esc(F.fam.email)}</span></div>
+    if (F.fam.walk_in) h += `<div class="fd-fam"><div><b>🛍️ Walk-in</b><br><span class="fd-sm">Shop items only · pays now · no receipt email</span></div>
+      <button class="ho-btn" onclick="_fd.fam=null;fdRender()">Change</button></div>`;
+    else h += `<div class="fd-fam"><div><b>${esc(F.fam.first_name + (F.fam.last_name ? ' ' + F.fam.last_name : ''))}</b>${F.fam.member ? ' <span class="fd-pill">⭐ Member</span>' : ''}${F.fam.customer_id ? '' : ' <span class="fd-pill">new</span>'}<br><span class="fd-sm">${esc(F.fam.email)}</span></div>
       <button class="ho-btn" onclick="fdFamClear()">Change</button></div>
       <div class="fd-people">${F.people.map((p, i) => `<span class="fd-person">${esc(p.name)}${p.dob ? ' · ' + fdAge(p.dob) : ''}${p.mine ? '' : ` <button onclick="_fd.people.splice(${i},1);fdRender()" aria-label="Remove">×</button>`}</span>`).join('')}
       <button class="fd-link" onclick="_fd.addPerson=!_fd.addPerson;fdRender()">+ person</button></div>` +
@@ -7177,18 +7259,19 @@ function fdCartHtml() {
     h += `<div class="fd-inline"><input id="fd-q" placeholder="Find family (name or email)" value="${esc(F.q)}" onkeydown="if(event.key==='Enter')fdFind()"><button class="ho-btn" onclick="fdFind()">Find</button></div>`;
     if (F.hits) h += F.hits.length ? '<div class="fd-hits">' + F.hits.map(r => `<button class="fd-hit" onclick="fdPick(${Number(r.shopify_customer_id)})"><b>${esc(r.parent_name || 'Family')}</b><span class="fd-sm">${esc(r.email || '')}</span></button>`).join('') + '</div>' : '<p class="fd-sm">No family found.</p>';
     h += F.newFam ? `<div class="fd-newfam"><input id="fd-nf" placeholder="First name"><input id="fd-nl" placeholder="Last name"><input id="fd-ne" type="email" placeholder="Email (receipt goes here)"><button class="ho-btn primary" onclick="fdNewFam()">Use this family</button></div>`
-      : '<button class="fd-link" onclick="_fd.newFam=true;fdRender()">+ New family</button>';
+      : '<button class="fd-link" onclick="_fd.newFam=true;fdRender()">+ New family</button>' + (F.cart.length && F.cart.every(l => l.type === 'retail') ? ' <button class="fd-link" onclick="_fd.fam={walk_in:true,first_name:\'Walk-in\',last_name:\'\',email:\'\'};_fd.people=[];fdRender()">🛍️ Walk-in (no account)</button>' : '');
   }
   // The items
-  h += '<div class="fd-items">' + (F.cart.length ? F.cart.map((l, i) => `<div class="fd-item"><div><b>${esc(l.title)}</b><span class="fd-sm">${esc(l.desc || '')}</span></div><button class="fd-x" onclick="_fd.cart.splice(${i},1);fdRender()" aria-label="Remove">×</button></div>`).join('') : '<p class="fd-sm">Nothing yet. Add from the tabs.</p>') + '</div>';
+  h += '<div class="fd-items">' + (F.cart.length ? F.cart.map((l, i) => `<div class="fd-item"><div><b>${esc(l.title)}</b><span class="fd-sm">${esc(l.desc || '')}</span></div>${l.type === 'retail' ? `<span class="fd-qty"><button onclick="fdShopQty(${i},-1)" aria-label="One less">−</button><b>${l.qty}</b><button onclick="fdShopQty(${i},1)" aria-label="One more">+</button></span>` : ''}<button class="fd-x" onclick="_fd.cart.splice(${i},1);fdRender()" aria-label="Remove">×</button></div>`).join('') : '<p class="fd-sm">Nothing yet. Add from the tabs.</p>') + '</div>';
   if (F.cart.length) h += fdQuoteHtml();
   if (F.cart.length) {
     const needFam = !F.fam;
     h += `<label class="fd-sm fd-giftl">Gift card <input value="${esc(F.gift)}" placeholder="Code (optional)" oninput="_fd.gift=this.value"></label>
-      ${needFam ? '<p class="fd-warn">Choose the family to pay for bookings.</p>' : ''}
+      ${needFam ? `<p class="fd-warn">${F.cart.every(l => l.type === 'retail') ? 'Choose the family (for member prices and an emailed receipt), or 🛍️ Walk-in above.' : 'Choose the family to pay for bookings.'}</p>` : ''}
+      ${F.fam && F.fam.walk_in && F.cart.some(l => l.type !== 'retail') ? '<p class="fd-warn">A walk-in can buy shop items only. Choose the family for the bookings.</p>' : ''}
       <div class="fd-paybtns"><button class="fd-pay" ${needFam || F.busy ? 'disabled' : ''} onclick="fdPay('here')">💳 Card here</button><button class="fd-pay fd-pay2" ${needFam || F.busy ? 'disabled' : ''} onclick="fdPay('qr')">📱 Pay now (QR code)</button>
-      <button class="ho-btn" ${needFam || F.busy ? 'disabled' : ''} onclick="fdPay('email')">✉️ Email pay link</button><button class="ho-btn" ${needFam || F.busy ? 'disabled' : ''} onclick="fdPay('link')">🔗 Copy pay link</button></div>
-      <div class="fd-invrow"><button class="ho-btn" ${needFam || F.busy ? 'disabled' : ''} onclick="fdPay('invoice')">🧾 Send invoice</button>
+      <button class="ho-btn" ${needFam || F.busy || (F.fam && F.fam.walk_in) ? 'disabled' : ''} onclick="fdPay('email')">✉️ Email pay link</button><button class="ho-btn" ${needFam || F.busy || (F.fam && F.fam.walk_in) ? 'disabled' : ''} onclick="fdPay('link')">🔗 Copy pay link</button></div>
+      <div class="fd-invrow"><button class="ho-btn" ${needFam || F.busy || (F.fam && F.fam.walk_in) ? 'disabled' : ''} onclick="fdPay('invoice')">🧾 Send invoice</button>
         <label class="fd-sm">Pay by <input type="date" value="${esc(F.payBy || fdAddDays(fdToday(), 2))}" min="${fdToday()}" max="${fdAddDays(fdToday(), 60)}" onchange="_fd.payBy=this.value"></label></div>
       <p class="fd-sm">Card here and QR: 10 minutes to pay. Links: 24 hours. Invoice: held until the end of its pay-by date, with a reminder the day before.</p>`;
   }
@@ -7402,7 +7485,7 @@ function fdQuoteHtml() {
   if (Q.err) return `<p class="fd-warn">${esc(Q.err)}</p>`;
   const saved = (Q.lines || []).reduce((t, l) => t + Math.max(0, (Number(l.regular) || 0) - (Number(l.amount) || 0)), 0);
   const codes = F.cart.some(l => l.prize) || (F.gift || '').trim();
-  return '<div class="fd-sub">' + (Q.lines || []).map(l => `<div class="fd-pl fd-sm"><span>${esc(l.kind === 'treat' ? l.program + (l.qty ? ' × ' + l.qty : '') : l.program)}</span><span>${Number(l.regular) > Number(l.amount) + 0.004 ? `<s>${fdMoney(l.regular)}</s> ` : ''}${fdMoney(l.amount)}</span></div>`).join('') +
+  return '<div class="fd-sub">' + (Q.lines || []).map(l => `<div class="fd-pl fd-sm"><span>${esc(l.kind === 'treat' || l.kind === 'retail' ? l.program + (l.qty ? ' × ' + l.qty : '') : l.program)}</span><span>${Number(l.regular) > Number(l.amount) + 0.004 ? `<s>${fdMoney(l.regular)}</s> ` : ''}${fdMoney(l.amount)}</span></div>`).join('') +
     `<div class="fd-pl"><span>Subtotal</span><b>${fdMoney(Q.subtotal)}</b></div>` +
     (Q.taxes || []).map(t => `<div class="fd-pl fd-sm"><span>${esc(t.type)} (${t.rate}%)</span><span>${fdMoney(t.amount)}</span></div>`).join('') +
     `<div class="fd-pl fd-ptotal"><span>Total</span><span>${fdMoney(Q.total)}</span></div>` +
@@ -7436,7 +7519,8 @@ function fdPayHtml() {
     (o.taxes || []).map(t => `<div class="fd-pl fd-sm"><span>${esc(t.type)} (${t.rate}%)</span><span>${fdMoney(t.amount)}</span></div>`).join('') +
     `<div class="fd-pl fd-ptotal"><span>Total</span><span>${fdMoney(o.total)}</span></div>` + (o.amount_due != null && o.amount_due < o.total - 0.001 ? `<div class="fd-pl"><span>After gift card</span><b>${fdMoney(o.amount_due)}</b></div>` : '');
   let h = `<div class="fd-sheet-back"><div class="fd-sheet fd-paysheet" role="dialog" aria-modal="true"><h3>${esc(o.order || '')} · ${esc(F.fam ? F.fam.first_name + ' ' + (F.fam.last_name || '') : '')}</h3><div class="fd-plines">${lines}</div>`;
-  if (o.status === 'paid') h += '<div class="fd-paid">✓ Paid. They’re booked!</div><p class="fd-sm">Their confirmation email is on its way; the booking is in My 4Cats and on the class list.</p>';
+  if (o.status === 'paid' && F.cart.length && F.cart.every(l => l.type === 'retail')) h += `<div class="fd-paid">✓ Paid. Thank you!</div><p class="fd-sm">${F.fam && F.fam.walk_in ? 'Hand them their items.' : 'Their receipt is on its way by email. Hand them their items.'}</p>`;
+  else if (o.status === 'paid') h += '<div class="fd-paid">✓ Paid. They’re booked!</div><p class="fd-sm">Their confirmation email is on its way; the booking is in My 4Cats and on the class list.</p>';
   else if (o.status === 'expired' || o.status === 'failed') h += '<div class="fd-expired">Not paid in time, so the spots went back.</div>';
   else if (o.mode === 'here') h += `<div class="fd-qrwrap"><div><p><b>💳 Stripe is open in another tab.</b> Type the card there for ${fdMoney(o.amount_due ?? o.total)}, then come back to this tab: it turns green when it’s paid.</p>
       <p class="fd-count-down" id="fd-count">${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} left</p><p class="fd-sm">If their bank asks for an extra check, they approve it on their phone.</p>
