@@ -336,8 +336,11 @@ async function load() {
         const len = Math.max(LEN.kids, +x.duration_minutes || 0);
         let p = findPerson((staffBy[x.id] || {}).teacher), auto = false;
         if ((staffBy[x.id] || {}).teacher === 'none') { blocks.push({ id: 'k-' + x.id, kind: 'kids', session: x.id, title: title.split('|')[0].trim(), sub: `${n} enrolled`, start: t0, end: t0 + len, person: null, notNeeded: true }); return; }
+        // (Nov 10 2026) the class's assigned teacher (Class teacher in the Hub / the staff schedule), shown even when they aren't on shift
+        const asg = String((staffBy[x.id] || {}).teacher || '').trim(), asgOff = asg && !p;
         if (!p) { p = demoers.find(d => !busyAt(d.id, t0, t0 + len)) || (director && !busyAt(director.id, t0, t0 + len) ? director : null); auto = !!p; }
-        blocks.push({ id: 'k-' + x.id, kind: 'kids', session: x.id, title: title.split('|')[0].trim(), sub: `${n} enrolled · ${len} min${auto ? ' · auto' : ''}`, start: t0, end: t0 + len, person: p ? p.id : null, auto });
+        const tWho = asg ? ` · 👤 ${asg}${asgOff ? ' (not on shift)' : ''}` : ' · 👤 no teacher set';
+        blocks.push({ id: 'k-' + x.id, kind: 'kids', session: x.id, title: title.split('|')[0].trim(), sub: `${n} enrolled · ${len} min${tWho}${auto ? ' · auto' : ''}`, start: t0, end: t0 + len, person: p ? p.id : null, auto });
       } else if (false) {   // (wheel times are handled above: one block, one teacher)
         const p = null;
         blocks.push({ id: 'w-' + x.id, kind: 'wheel', session: x.id, title, sub: `${n} booked · ${LEN.wheel} min`, start: t0, end: t0 + LEN.wheel, person: p ? p.id : null });
@@ -883,6 +886,7 @@ function dayTimeMenu(id, el) {
       if (v === '__none') { b.person = null; b.notNeeded = true; } else { b.person = v || null; b.notNeeded = false; }
       b.locked = true; });
     closePop(); D.flash = `${title} at ${fmt(t0)}: set. Save the day to keep it.`; draw();
+    const kb = own.find(x => x.kind === 'kids'); if (kb) askClassScope(kb);
   };
   if ($('tm-move')) $('tm-move').onclick = async () => {
     const r = parseRange($('tm-new').value + '-' + $('tm-new').value); if (!r) { alert('Use a time like 3p or 3:30p (with a or p).'); return; }
@@ -1249,7 +1253,9 @@ function startDrag(e, el) {
       const dm = Math.round((ev.clientX - x0) / PX / STEP) * STEP, len = b.end - b.start;
       b.start = Math.max(D.lo, Math.min(D.hi - len, b.start + dm)); b.end = b.start + len;
     } else if (overRow) {
+      const was = b.person;
       b.person = overRow.dataset.person || null;
+      if (b.kind === 'kids' && b.person !== was) { b.notNeeded = false; b.locked = true; draw(); askClassScope(b); return; }
     }
     b.locked = true;
     draw();
@@ -1282,7 +1288,7 @@ function openPop(el) {
     else if (v === '__none') { b.person = null; b.notNeeded = true; }
     else { b.person = v || null; b.notNeeded = false; }
     b.locked = true;
-    closePop(); draw(); };
+    closePop(); draw(); if (b.kind === 'kids') askClassScope(b); };
 }
 // ---- a party's details in its box: who booked, and the expected guests (set here: party_details.expected_guests) ----
 function partyInfoHtml(b) {
@@ -1310,6 +1316,28 @@ async function partyGuestsSave(b) {
   closePop(); D.flash = `${g} guests expected: saved.`; draw();
 }
 function closePop() { const p = $('pop'); if (p) p.remove(); }
+// (Nov 10 2026) A kids class got a new teacher: just this day (a substitute), or from this day on (the term teacher), as in
+// staff-schedule and the Hub. The term choice saves straight away (hub_set_class_teacher); the day choice saves with Save the day.
+function askClassScope(b) {
+  if (!b || b.kind !== 'kids' || !b.session) return;
+  const p = D.people.find(z => z.id === b.person), who = b.notNeeded ? 'No teacher' : p ? p.show : 'Nobody';
+  const box = document.createElement('div'); box.className = 'pop'; box.id = 'pop';
+  box.innerHTML = `<label>${esc(who)} for ${esc(b.title)} (${fmt(b.start)})…</label>
+    <div class="row2" style="flex-direction:column;align-items:stretch;gap:6px">
+      <button id="cs-day">Just ${esc(D.date)} (a substitute)</button>
+      <button id="cs-term" style="background:#16a34a;color:#fff;border-color:#16a34a">From ${esc(D.date)} on (the term teacher)</button></div>
+    <div class="muted" id="cs-msg" style="font-size:12px;margin-top:6px"></div>`;
+  document.body.appendChild(box);
+  box.style.left = Math.max(10, (window.innerWidth - 300) / 2) + 'px'; box.style.top = Math.max(10, window.innerHeight / 3) + 'px';
+  $('cs-day').onclick = () => { closePop(); D.flash = `${b.title}: ${who} for ${D.date} only. Save the day to keep it.`; draw(); };
+  $('cs-term').onclick = async () => {
+    $('cs-term').disabled = true; $('cs-msg').textContent = 'Saving…';
+    const { data, error } = await sb.rpc('hub_set_class_teacher', { p_session_id: b.session, p_staff_id: b.notNeeded ? null : (p ? p.id : null), p_scope: 'term' });
+    if (error) { $('cs-term').disabled = false; $('cs-msg').textContent = error.message; return; }
+    D.staffBy = D.staffBy || {}; closePop();
+    D.flash = `${b.title}: ${who} is the term teacher from ${D.date} on (${(data && data.weeks) || 'the rest of the'} week${data && data.weeks === 1 ? '' : 's'}). Staff schedule shows it too.`; draw();
+  };
+}
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closePop(); });
 document.addEventListener('pointerdown', e => { const p = $('pop'); if (p && !p.contains(e.target) && !e.target.closest('.blk')) closePop(); });
 
