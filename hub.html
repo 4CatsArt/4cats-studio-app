@@ -11183,7 +11183,7 @@ async function openBookingAdmin(ids, name, canMove) {
     try { const ob = await sb.from('bookings').select('shopify_order_name').in('id', ids); q.orders = [...new Set((ob.data || []).map(b => b.shopify_order_name).filter(Boolean))]; } catch (e) { q.orders = []; }
     // $0 on a paid order usually means the payment wasn't matched (e.g. a World invoice): leave it for staff to type in
     if (q.amount === 0 && q.orders.length) { q.amount_zero = true; q.amount = null; }
-    _ba = { ids, name, canMove, q, tab: 'cancel', opts: null, studio: q.studio_id }; baDraw();
+    _ba = { ids, name, canMove, q, tab: 'cancel', opts: null, studio: q.studio_id, whole: undefined }; baDraw();
   }
   catch (e) { openDutySheet(`<h3>${esc(name)}</h3><p class="ho-intro">${esc(e.message)}</p><div class="sheet-actions"><button onclick="closeDutySheet()">Close</button></div>`); }
 }
@@ -11198,10 +11198,15 @@ function baDraw() {
   let h = `<h3>${esc(_ba.name)}</h3><p class="ho-intro">${esc(q.title)} · ${esc(when)} · ${esc(STUDIO_NAMES[q.studio_id] || q.studio_id)} · ${q.qty} ${q.qty === 1 ? 'spot' : 'spots'}${q.email ? ' · ' + esc(q.email) : ''}${(q.orders || []).length ? ` · Order <b>${q.orders.map(esc).join(', ')}</b>` : ''}</p>${tabs}`;
   if (_ba.tab === 'add') { if (!_ba.add) { openDutySheet(h + '<p class="ho-intro">Loading…</p>'); baAddLoad(); return; } openDutySheet(h + baAddHtml()); return; }
   if (_ba.tab === 'cancel') {
-    const known = q.amount != null;
+    // (Nov 10 2026) a kids class: the whole class (every upcoming week, and a part bought with it as a deal) by default, one gift card
+    const K = q.class; if (_ba.whole === undefined) _ba.whole = !!K;
+    const whole = !!K && _ba.whole, amt = whole ? K.amount : q.amount, known = amt != null;
+    const kd = x => new Date(x + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' });
     h += `<div class="ba-form">
-      ${q.qty > 1 ? `<label class="f">Cancel<select id="ba-spots" onchange="baCalc()">${Array.from({ length: q.qty }, (_, i) => q.qty - i).map(n => `<option value="${n}">${n === q.qty ? 'all ' + n + ' spots' : n + ' of ' + q.qty + ' spots'}</option>`).join('')}</select></label>` : ''}
-      <label class="f">They paid${known ? '' : q.amount_zero ? ` <span class="goal-note">(came back as $0: check order ${esc((q.orders || []).join(', '))} and type in what they paid)</span>` : ' <span class="goal-note">(couldn’t be worked out: type it in)</span>'}<input id="ba-paid" type="number" step="0.01" min="0" value="${known ? q.amount.toFixed(2) : ''}" oninput="baCalc()"></label>
+      ${K ? `<label class="ba-check"><input type="checkbox" id="ba-whole" ${whole ? 'checked' : ''} onchange="_ba.whole=this.checked;baDraw()"> Cancel the whole class: <b>${esc(K.title)}</b> (${K.weeks} classes, ${esc(kd(K.first))} – ${esc(kd(K.last))})</label>
+        ${K.together ? '<p class="goal-note">Booked together as a deal, so both parts are cancelled together.</p>' : ''}${whole ? '' : '<p class="goal-note">Just this one class date.</p>'}` : ''}
+      ${q.qty > 1 && !whole ? `<label class="f">Cancel<select id="ba-spots" onchange="baCalc()">${Array.from({ length: q.qty }, (_, i) => q.qty - i).map(n => `<option value="${n}">${n === q.qty ? 'all ' + n + ' spots' : n + ' of ' + q.qty + ' spots'}</option>`).join('')}</select></label>` : ''}
+      <label class="f">They paid${known ? '' : q.amount_zero ? ` <span class="goal-note">(came back as $0: check order ${esc((q.orders || []).join(', '))} and type in what they paid)</span>` : ' <span class="goal-note">(couldn’t be worked out: type it in)</span>'}<input id="ba-paid" type="number" step="0.01" min="0" value="${known ? amt.toFixed(2) : ''}" oninput="baCalc()"></label>
       <div class="ba-radio"><label><input type="radio" name="ba-credit" value="gift" checked onchange="baCalc()"> A 4Cats gift card</label>
         <label><input type="radio" name="ba-credit" value="none" onchange="baCalc()"> No credit</label></div>
       <label class="ba-check"><input type="checkbox" id="ba-fee-on" onchange="baCalc()"> Charge the admin fee <input id="ba-fee" type="number" step="0.01" min="0" value="${BA_FEE}" oninput="baCalc()" style="width:80px"> <span id="ba-feehow">(taken off the gift card)</span></label>
@@ -11280,15 +11285,27 @@ function baCalc() {
   document.getElementById('ba-feehow').textContent = gift ? '(taken off the gift card)' : '(charged to their card after cancelling: 💳 here, QR or pay link)';
   const feeCard = !gift && feeOn ? Math.max(0, +document.getElementById('ba-fee').value || 0) : 0;
   document.getElementById('ba-sum').innerHTML = gift ? `${spots < q.qty ? `${spots} of ${q.qty} spots = $${share.toFixed(2)}` : `$${share.toFixed(2)}`}${fee ? ` − $${fee.toFixed(2)} admin fee` : ''} → <b>$${credit.toFixed(2)} gift card</b>` : `<b>No credit</b> (spots go back on sale)${feeCard ? `, then <b>💳 charge the $${feeCard.toFixed(2)} admin fee</b> (+ tax)` : ''}`;
-  document.getElementById('ba-go').textContent = spots < q.qty ? `Cancel ${spots} spot${spots === 1 ? '' : 's'}` : 'Cancel the booking';
+  document.getElementById('ba-go').textContent = q.class && _ba.whole ? 'Cancel the whole class' : spots < q.qty ? `Cancel ${spots} spot${spots === 1 ? '' : 's'}` : 'Cancel the booking';
 }
 async function baCancel() {
   const q = _ba.q, b = document.getElementById('ba-go'), spots = +((document.getElementById('ba-spots') || {}).value || q.qty);
   const gift = document.querySelector('input[name="ba-credit"]:checked').value === 'gift', feeOn = document.getElementById('ba-fee-on').checked;
   _ba.who = (document.getElementById('ba-who') || {}).value || '';
-  if (!confirm(`Cancel ${spots < q.qty ? spots + ' of ' + q.qty + ' spots for' : ''} ${_ba.name}? This can’t be undone.`)) return;
+  const whole = !!(q.class && _ba.whole);
+  if (!confirm(whole ? `Cancel ${q.class.title} for ${_ba.name} (all ${q.class.weeks} classes)? This can’t be undone.` : `Cancel ${spots < q.qty ? spots + ' of ' + q.qty + ' spots for' : ''} ${_ba.name}? This can’t be undone.`)) return;
   b.disabled = true; b.textContent = 'Cancelling…';
   try {
+    if (whole) {
+      const d = await staffBookingCall('staff_class_cancel', { booking_ids: _ba.ids, amount: document.getElementById('ba-paid').value, credit: gift ? 'gift' : 'none',
+        fee: gift && feeOn ? +document.getElementById('ba-fee').value || 0 : 0, gift_days: +document.getElementById('ba-days').value, email: document.getElementById('ba-email').checked,
+        note: document.getElementById('ba-note').value, by: _ba.who });
+      const done = `Cancelled ${q.class.title} for ${_ba.name} (${d.weeks} classes).` + (d.problem ? ` ${d.of - d.weeks} couldn’t be cancelled: ${d.problem}` : '');
+      const feeCard = !gift && feeOn ? Math.max(0, +document.getElementById('ba-fee').value || 0) : 0;
+      if (feeCard > 0) return hubCharge({ studio: q.studio_id, name: q.name || _ba.name, email: q.email, lines: [{ name: `Cancellation admin fee: ${q.class.title}`, amount: feeCard }],
+        why: `${done} Now the admin fee.`, ref: (_ba.ids || []).join(','), onDone: m => baRefresh(done + ' ' + m) });
+      closeDutySheet();
+      return await baRefresh(done + (d.gift_last4 ? ` $${d.credit.toFixed(2)} gift card ending ${d.gift_last4}${d.gift_code ? ' (code ' + d.gift_code + ')' : ''}.` : d.test ? ' (Test order: no gift card.)' : ' No credit.'));
+    }
     const d = await staffBookingCall('staff_cancel', { booking_ids: _ba.ids, spots, amount: document.getElementById('ba-paid').value, credit: gift ? 'gift' : 'none',
       fee: gift && feeOn ? +document.getElementById('ba-fee').value || 0 : 0, gift_days: +document.getElementById('ba-days').value, email: document.getElementById('ba-email').checked,
       note: document.getElementById('ba-note').value, by: _ba.who });
