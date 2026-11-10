@@ -11362,9 +11362,10 @@ function customNew() {
         <option value="hold">One customer: held for them, they pay as usual</option>
         <option value="promo">🎁 One customer: a free promotional party (they pay only for extras)</option>
         <option value="public">🌍 Anyone: a one-off party time, live on World</option></select></label>` : ''}
-      <label>What<select id="cu-kind"><option value="kids">Kids Party</option><option value="splatter">Splatter Party</option><option value="get_together">Adult Get-Together</option></select></label>
-      <label>Date<input type="date" id="cu-day" value="${escAttr(d0)}"></label>
-      <label>Start time<input type="time" id="cu-at" step="900"></label>
+      <label>What<select id="cu-kind" onchange="customSlots()"><option value="kids">Kids Party</option><option value="splatter">Splatter Party</option><option value="get_together">Adult Get-Together</option></select></label>
+      <label>Date<input type="date" id="cu-day" value="${escAttr(d0)}" onchange="customSlots()"></label>
+      <label id="cu-slotl">Party time<select id="cu-slot" onchange="customSlotPick()"><option value="">Loading…</option></select></label>
+      <label id="cu-atl">Start time<input type="time" id="cu-at" step="900"></label>
       <div id="cu-public" class="goal-note" hidden>It goes live on World’s ${'Parties'} page straight away (Adult Get-Togethers: the Get-Togethers page), for anyone to book and pay as usual, like a regular party time. <label style="display:inline-flex;gap:6px;align-items:center;margin-left:6px">Rooms <select id="cu-rooms"><option>1</option><option>2</option><option>3</option></select></label></div>
       <div id="cu-cust">
       <label>Customer <span class="goal-note" style="font-weight:400">(type a name or email to find them, or a new name)</span><input id="cu-name" autocomplete="off" oninput="customFind(this.value)" placeholder="Start typing…"></label>
@@ -11377,6 +11378,7 @@ function customNew() {
       </div>
     </div><div id="cu-msg"></div>
     <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="cu-go" onclick="customCreate()">${admin ? 'Hold it and email the link' : 'Send the request'}</button></div>`);
+  customSlots();   // (the regular party times open that day)
 }
 // find a customer as you type (the same search as the Front desk); picking one fills in their name, email and phone
 let _cuT = null, _cuHits = [];
@@ -11399,11 +11401,30 @@ function customPick(i) {
   const b = document.getElementById('cu-hits'); if (b) b.innerHTML = `<div class="goal-note" style="padding:2px 4px">✓ ${esc(r.parent_name || 'Customer')} (existing customer)</div>`;
 }
 // (Nov 10 2026) home office: who can book it — one customer (held, they pay), 🎁 a free promotional party, or 🌍 anyone (live on World)
+// (Nov 10 2026) the regular party times open that day (one of them can be reserved instead of making a new time)
+async function customSlots() {
+  const sel = document.getElementById('cu-slot'); if (!sel) return;
+  const day = (document.getElementById('cu-day') || {}).value, kind = (document.getElementById('cu-kind') || {}).value, who = (document.getElementById('cu-who') || {}).value || 'hold';
+  if (who === 'public') { customSlotPick(); return; }
+  sel.innerHTML = '<option value="">Loading…</option>';
+  let L = [];
+  try { const { data } = await sb.rpc('hub_party_open_times', { p_studio: _sessionStudioId, p_day: day }); L = (data || []).filter(x => x.kind === kind); } catch (e) { L = []; }
+  const s2 = document.getElementById('cu-slot'); if (!s2) return;
+  s2.innerHTML = L.map(x => `<option value="${escAttr(x.session_id)}">${esc(x.label)} (a regular party time)</option>`).join('') + '<option value="">A new time (type it below)</option>';
+  customSlotPick();
+}
+function customSlotPick() {
+  const who = (document.getElementById('cu-who') || {}).value || 'hold', v = (document.getElementById('cu-slot') || {}).value;
+  const at = document.getElementById('cu-atl'), sl = document.getElementById('cu-slotl');
+  if (sl) sl.hidden = who === 'public';
+  if (at) at.hidden = who !== 'public' && !!v;
+}
 function customWho() {
   const w = (document.getElementById('cu-who') || {}).value || 'hold', show = (id, on) => { const e = document.getElementById(id); if (e) e.hidden = !on; };
   show('cu-cust', w !== 'public'); show('cu-public', w === 'public'); show('cu-payl', w === 'hold'); show('cu-reasonl', w === 'promo');
   const k = document.getElementById('cu-kind'); if (k) Array.prototype.forEach.call(k.options, o => { if (o.value === 'get_together') { o.disabled = w === 'promo'; if (w === 'promo' && k.value === 'get_together') k.value = 'kids'; } });
   const b = document.getElementById('cu-go'); if (b) b.textContent = w === 'public' ? 'Open it on World' : w === 'promo' ? 'Book it and email them' : 'Hold it and email the link';
+  customSlots();
 }
 async function customCreate() {
   const v = id => (document.getElementById(id) || {}).value || '', msg = document.getElementById('cu-msg'), btn = document.getElementById('cu-go');
@@ -11417,8 +11438,8 @@ async function customCreate() {
   }
   const p = { studio_id: _sessionStudioId, kind: v('cu-kind'), day: v('cu-day'), at: v('cu-at'), customer_name: v('cu-name').trim(), customer_email: v('cu-email').trim(),
     customer_phone: v('cu-phone').trim(), pay_by: v('cu-who') === 'promo' ? null : (v('cu-pay') || null), note: v('cu-note').trim(),
-    promo: v('cu-who') === 'promo', promo_reason: v('cu-reason').trim() };
-  if (!p.day || !p.at) { msg.innerHTML = '<div class="me-msg err">Choose the date and start time.</div>'; return; }
+    promo: v('cu-who') === 'promo', promo_reason: v('cu-reason').trim(), session_id: v('cu-slot') || null };
+  if (!p.day || (!p.at && !p.session_id)) { msg.innerHTML = '<div class="me-msg err">Choose the date and the party time.</div>'; return; }
   btn.disabled = true; btn.textContent = 'Saving…';
   const { data, error } = await sb.rpc('hub_custom_hold_create', { p });
   if (error) { btn.disabled = false; btn.textContent = 'Try again'; msg.innerHTML = `<div class="me-msg err">${esc(/hub_custom_hold_create/.test(error.message) ? 'Run custom_party_times.sql in Supabase first.' : error.message)}</div>`; return; }
