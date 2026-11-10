@@ -749,6 +749,7 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .rp-sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; border: 1px solid rgba(0,0,0,.15); }
 .pm-box { margin-top: 10px; padding: 10px 14px; border-radius: 12px; background: #fff3e0; border: 1px solid #f0c27a; font-size: 14px; max-width: 760px; }
 .pm-row { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 6px 0; border-top: 1px dashed #f0c27a; } .pm-row:first-of-type { margin-top: 6px; }
+.wu-booked { background: #eef7ee; border: 1px solid #b8e0c3; border-radius: 10px; padding: 8px 12px; margin: 8px 0; font-size: 14px; }
 .rp-ck { width: 30px; text-align: center; } .rp-ck input { width: 18px; height: 18px; cursor: pointer; }
 .rp-tbl tr.rp-sel td { background: #fff8e6; }
 .rp-bulk { position: sticky; top: 0; z-index: 3; background: #fff8e6; border: 1px solid #f0c27a; border-radius: 12px; padding: 10px 12px; margin: 8px 0; }
@@ -8295,6 +8296,32 @@ async function famRefundInstead(last4, amount) {
     alert(`✓ $${Number(d.amount).toFixed(2)} refunded${d.gift ? ` ($${Number(d.card).toFixed(2)} to their card, $${Number(d.gift).toFixed(2)} back onto their gift card)` : ' to their card'}. The gift card ending ${d.gift_last4} is switched off.`);
   } catch (e) { alert(e.message); }
 }
+// ---------- ⭐ Member pricing for a group that isn't a member (partner_pricing.sql) ----------
+document.addEventListener('toggle', e => { const d = e.target; if (d && d.matches && d.matches('details.fam-sec[data-sec="partner"]') && d.open) famPartnerLoad(d.querySelector('.fam-partner')); }, true);
+async function famPartnerLoad(box) {
+  if (!box) return; const cid = box.getAttribute('data-cid'), email = box.getAttribute('data-email');
+  const { data, error } = await sb.rpc('hub_partner_pricing', { p_customer: Number(cid) || null, p_email: email || null });
+  if (error) { box.innerHTML = '<p class="fam-meta">' + famEsc(/hub_partner_pricing/.test(error.message) ? 'Run partner_pricing.sql in Supabase first.' : error.message) + '</p>'; return; }
+  const p = data, has = k => p ? (p.kinds || []).includes(k) : true;
+  box.innerHTML = (p ? `<p class="fam-line">✓ <b>${famEsc(p.label)}</b>: member prices on ${[(p.kinds || []).includes('team_building') ? 'Adult Get-Togethers' : '', (p.kinds || []).includes('kids_parties') ? 'Kids & Splatter parties' : ''].filter(Boolean).join(' and ')}, party extras included${p.until ? ', until ' + famEsc(p.until) : ''}.${p.note ? ' <span class="fam-meta">' + famEsc(p.note) + '</span>' : ''}</p>` : '<p class="fam-meta">Not set. For a group you give member prices to without a membership (e.g. a nonprofit).</p>') +
+    `<div class="fam-pp-form"><label>Who it’s for<input class="pp-label" maxlength="120" placeholder="e.g. Nonprofit: Big Sisters Victoria" value="${p ? famEsc(p.label) : ''}"></label>
+      <label class="ba-check"><input type="checkbox" class="pp-gt" ${has('team_building') ? 'checked' : ''}> Adult Get-Togethers</label>
+      <label class="ba-check"><input type="checkbox" class="pp-kp" ${has('kids_parties') ? 'checked' : ''}> Kids & Splatter parties</label>
+      <label>Until (optional)<input type="date" class="pp-until" value="${p && p.until ? famEsc(p.until) : ''}"></label>
+      <label>Note (optional)<input class="pp-note" maxlength="300" value="${p && p.note ? famEsc(p.note) : ''}"></label>
+      <div><button class="ho-btn sm primary" onclick="famPartnerSave(this.closest('.fam-partner'))">${p ? 'Update' : 'Turn on'}</button>${p ? ` <button class="ho-btn sm" onclick="famPartnerEnd(this.closest('.fam-partner'),'${famEsc(p.id)}')">End it</button>` : ''}</div>
+      <p class="fam-meta">Member prices on those bookings (World and the Front desk), party extras included: time, guests, upgrades. They aren’t members: no perks, and nothing else changes.</p></div>`;
+}
+async function famPartnerSave(box) {
+  const q = c => box.querySelector(c), kinds = [q('.pp-gt').checked ? 'team_building' : null, q('.pp-kp').checked ? 'kids_parties' : null].filter(Boolean);
+  const { error } = await sb.rpc('hub_partner_pricing_save', { p: { customer_id: box.getAttribute('data-cid') || null, email: box.getAttribute('data-email') || null,
+    label: q('.pp-label').value, kinds, until: q('.pp-until').value || null, note: q('.pp-note').value } });
+  if (error) { alert(error.message); return; } famPartnerLoad(box);
+}
+async function famPartnerEnd(box, id) {
+  if (!confirm('End member pricing for this group?')) return;
+  const { error } = await sb.rpc('hub_partner_pricing_save', { p: { action: 'end', id } }); if (error) { alert(error.message); return; } famPartnerLoad(box);
+}
 // ---------- 💳 Saved cards in a family card: loaded from Stripe when the section is opened ----------
 document.addEventListener('toggle', e => { const d = e.target; if (d && d.matches && d.matches('details.fam-sec[data-sec="cards"]') && d.open) famCardsLoad(d.querySelector('.fam-cards')); }, true);
 async function famCardsLoad(box, removeId) {
@@ -14274,7 +14301,9 @@ async function wuPricing() {
   if (_wuPricing) return _wuPricing;
   const get = v => fetch(`${SUPABASE_URL}/functions/v1/public-studio-data?view=${v}`, { headers: { Authorization: 'Bearer ' + SUPABASE_ANON_KEY, apikey: SUPABASE_ANON_KEY } }).then(r => r.json()).catch(() => ({}));
   const [pa, ev, ft] = await Promise.all([get('parties'), get('events'), get('fieldtrips')]);
-  _wuPricing = { P: Object.assign({}, (ev && ev.pricing) || {}, (pa && pa.pricing) || {}), disc: (pa && pa.member_discount) || null, FT: (ft && ft.pricing) || {} };
+  const out = { P: Object.assign({}, (ev && ev.pricing) || {}, (pa && pa.pricing) || {}), disc: (pa && pa.member_discount) || null, FT: (ft && ft.pricing) || {} };
+  if (!(out.P.kids && +out.P.kids.base > 0)) { out.missing = true; return out; }   // (Nov 10 2026) a failed load isn't kept: tried again next time
+  _wuPricing = out;
   return _wuPricing;
 }
 function wuKind(s) { const t = String((s && s.title) || '').toLowerCase(), w = s && s.world_party;
@@ -14290,9 +14319,11 @@ async function wuOpen(pt) {
     const [pr, paid] = await Promise.all([wuPricing(), sb.rpc('hub_party_paid', { p_booking: id })]);
     if (paid.error) throw new Error(/hub_party_paid/.test(paid.error.message) ? 'Run party_wrapup.sql in Supabase first.' : paid.error.message);
     W.pr = pr; W.paid = paid.data || {};
+    if (pr.missing) W.err = 'Party prices didn’t load, so the settle-up can’t be worked out. Close the form and open it again (or refresh the page).';
   } catch (e) { W.err = e.message; }
   const props = (W.paid && W.paid.props) || {};
   const bookedGuests = +(String(props['Number of guests'] || '').match(/\d+/) || [])[0] || addons.guestCount || pt.guests || (k === 'get_together' || k === 'field_trip' ? 10 : 8);
+  W.promo = /yes/i.test(String(props['Promotional party'] || '')) || /promotional/i.test(JSON.stringify(props));   // 🎁 the party itself was free
   W.booked = { guests: bookedGuests, art: addons.artTime || (/90/.test(props['Art time'] || '') ? '90 min' : k === 'get_together' || k === 'field_trip' ? '90 min' : '60 min'),
     party: addons.partyTime || (/45/.test(props['Party time after'] || '') ? '45 min' : /60/.test(props['Party time after'] || '') ? '60 min' : /30/.test(props['Party time after'] || '') ? '30 min' : 'none'),
     upgrade: !!addons.projectUpgrade || !!props['Project upgrade'], canvas: !!addons.canvasUpgrade || /yes/i.test(props['Canvas'] || ''), custom: /custom/i.test(JSON.stringify(props)) };
@@ -14319,8 +14350,8 @@ function wuCalc(W) {
       (people >= (+K.big_at || 9999) ? (+K.big_fee || 0) * (artH / base1) : 0) + (k === 'splatter' && f.canvas ? (+K.canvas || 0) * people : 0);
     const D = (W.pr && W.pr.disc) || {}, flat = member ? (+D.base_discount_flat_cents || 0) / 100 : 0;
     let pct = member ? +D.extras_discount_pct || 0 : 0; if (pct > 1) pct /= 100;
-    const base = Math.max(0, (+K.base || 0) - flat), ex = r2(extras * (1 - pct));
-    lines.push([`${WU_LABEL[k]} (${inc} guests included)${flat ? ' · member price' : ''}`, base]);
+    const base = W.promo ? 0 : Math.max(0, (+K.base || 0) - flat), ex = r2(extras * (1 - pct));
+    lines.push([`${WU_LABEL[k]} (${inc} guests included)${W.promo ? ' · 🎁 promotional: on us' : flat ? ' · member price' : ''}`, base]);
     if (ex) lines.push([`${people > n ? `${people} guests charged (minimum ${min})` : `${people} guests`}${longArt ? ', 90-min art' : ''}${after ? `, ${after} min party time` : ''}${k === 'splatter' && f.canvas ? ', canvas' : ''}${pct ? ` · member ${Math.round(pct * 100)}% off` : ''}`, ex]);
     if (k === 'kids' && f.upgrade && +K.upgrade) lines.push(['Project upgrade', +K.upgrade]);
     if (k === 'kids' && f.custom && +K.custom) lines.push(['Custom project', +K.custom]);
@@ -14353,9 +14384,14 @@ function wuDraw(id) {
   let h = `<div class="wu-card"><div class="wu-head"><b>${esc(WU_LABEL[k])}</b> · ${esc(b.customer_name || '')} <span class="goal-note">${esc(b.customer_email || '')} · ${esc(b.shopify_order_name || '')}</span>
       ${W.paid && W.paid.member ? `<span class="cust-st cust-booked" title="${escAttr('From their ' + (W.paid.member_source === 'membership' ? 'membership' : 'member tags'))}">★ Member${W.paid.plan === 'workshops' ? ' (Workshops Only)' : ''}</span>` : '<span class="cust-st">Not a member</span>'}</div>`;
   if (W.err) h += `<p class="fd-msg">${esc(W.err)}</p>`;
+  // (Nov 10 2026) what they booked and paid for, so staff can see it (Expected guests below is just for planning)
+  { const B = W.booked || {}, paidB = Number((W.paid && W.paid.paid) || 0);
+    const bits = [`<b>${B.guests} guests</b>`, k !== 'get_together' && k !== 'field_trip' ? `${B.art} art` : '', B.party && B.party !== 'none' ? `${B.party} party time after` : 'no party time after',
+      B.upgrade ? 'project upgrade' : '', B.custom ? 'custom project' : '', B.canvas ? 'canvas' : ''].filter(Boolean);
+    h += `<div class="wu-booked">🧾 <b>Booked and paid for:</b> ${bits.join(' · ')} · <b>$${paidB.toFixed(2)}</b> before tax${W.promo ? ' · 🎁 promotional party (the party was free)' : ''}${W.paid && W.paid.source ? ` <span class="goal-note">(${esc({ shopify: 'Shopify order', stripe: '4Cats checkout', world_invoice: 'World invoice', field_trip_invoice: 'field trip invoice' }[W.paid.source] || W.paid.source)})</span>` : ''}</div>`; }
   h += `<div class="wu-sec"><div class="wu-h">1 · Before</div><div class="wu-grid">${i('contact_name', 'Contact')}${sel('contacted', 'Contacted?', [['', '—'], ['Yes', 'Yes'], ['Left message', 'Left message'], ['No', 'No']])}
       ${k === 'field_trip' ? i('school_name', 'School / group') + i('grade_age_group', 'Grade / ages') : i('party_reason', k === 'get_together' ? 'Occasion' : 'Celebrating')}
-      ${k === 'splatter' ? i('colour_choice', 'Colours') : sel('medium', 'Medium', [['', '— not set —'], ['obc', '🌈 Oven-bake Clay'], ['clay', '🏺 Clay'], ['painting', '🎨 Painting']].concat(k === 'kids' ? [['besties', '💕 Besties']] : [])) + i('project', 'Project')}${i('expected_guests', k === 'field_trip' ? 'Expected children' : 'Expected guests', 'number', 'min="0"')}</div>
+      ${k === 'splatter' ? i('colour_choice', 'Colours') : sel('medium', 'Medium', [['', '— not set —'], ['obc', '🌈 Oven-bake Clay'], ['clay', '🏺 Clay'], ['painting', '🎨 Painting']].concat(k === 'kids' ? [['besties', '💕 Besties']] : [])) + i('project', 'Project')}${i('expected_guests', k === 'field_trip' ? 'Expected children' : 'Expected guests (for planning: doesn’t change the price)', 'number', 'min="0"')}</div>
       <label class="wu-f wide"><span>Notes (allergies, requests)</span><textarea data-wu="notes" rows="2">${esc(f.notes || '')}</textarea></label></div>`;
   h += `<div class="wu-sec"><div class="wu-h">2 · On the day</div><div class="wu-grid">${i('actual_guests', k === 'field_trip' ? 'Children who came' : 'Guests who came', 'number', 'min="0"')}
       ${k !== 'field_trip' && k !== 'get_together' ? sel('actual_art_time', 'Art time', [['60 min', '60 min'], ['90 min', '90 min']]) : ''}
@@ -14984,6 +15020,8 @@ function famRender() {
     h += sec('credits', 'Credits and rewards', null, '<p class="fam-line">Stamp card: ' + (st.on_card || 0) + ' of 10' + (st.cards_done ? ' · ' + st.cards_done + ' card' + (st.cards_done === 1 ? '' : 's') + ' completed' : '') + (st.prizes_waiting ? ' · 🎁 ' + st.prizes_waiting + ' prize waiting' : '') + '</p>' +
       (cx.filter(c => c.gift_last4).length ? '<p class="fam-meta">Gift cards from cancellations: ' + cx.filter(c => c.gift_last4).map(c => '$' + Number(c.amount).toFixed(2) + ' (ending ' + famEsc(c.gift_last4) + ')').join(', ') + '</p>' : ''));
     // 💳 Saved cards (Nov 10 2026): the cards they chose to save on a Stripe page (brand, last 4, expiry; read from Stripe when opened)
+    // ⭐ (Nov 10 2026) member pricing without membership (partner_pricing.sql), home office
+    if (_studioData && _studioData.isAdmin) h += sec('partner', '⭐ Member pricing (not a member)', null, '<div class="fam-partner" data-cid="' + famEsc(f.shopify_customer_id || f.customer_id || '') + '" data-email="' + famEsc(f.email || '') + '"><p class="fam-meta">Open to check…</p></div>');
     if (f.email) h += sec('cards', '💳 Saved cards', null, '<div class="fam-cards" data-email="' + famEsc(f.email) + '"><p class="fam-meta">Open to check with Stripe…</p></div>');
     // Notes
     const notes = f.notes || [];
