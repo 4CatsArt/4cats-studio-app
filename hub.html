@@ -4514,7 +4514,7 @@ function rpDraw() {
     && (!P.cat || r.category === P.cat) && (P.show === 'all' || (P.show === 'active' ? r.active : !r.active))
     && (!P.nopic || !(r.images || []).length) && (!P.col || rpInCol(r, (_rp.cols || []).find(c => c.id === P.col)))
     && (!P.where || (P.where === 'online' ? r.sell_online : P.where === 'studio' ? r.sell_in_studio : P.where === 'both' ? r.sell_online && r.sell_in_studio : !r.sell_online && !r.sell_in_studio)));
-  el.innerHTML = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🛍️ Products</div><span class="spacer"></span><button class="ho-btn" onclick="_rp.view='cols';_rp.msg='';rpDraw();rpColsLoad()">🗂️ Collections</button><button class="ho-btn" onclick="_rp.view='bulk';_rp.msg='';rpDraw()">📷 Bulk pictures</button><button class="ho-btn" onclick="_rp.view='panels';_rp.msg='';rpDraw()">📄 Info panels</button><button class="ho-btn primary" onclick="rpOpen(null)">+ New product</button><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+  el.innerHTML = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🛍️ Products</div><span class="spacer"></span><button class="ho-btn" onclick="_rp.view='cols';_rp.msg='';rpDraw();rpColsLoad()">🗂️ Collections</button><button class="ho-btn" onclick="rpCntOpen()" title="Send count tasks for kits and snacks to studios (Supplies → Counts)">🔢 Ask studios to count</button><button class="ho-btn" onclick="rpSheetOpen()" title="Type the counts for a whole shelf at once (the warehouse, or a studio)">📋 Count sheet</button><button class="ho-btn" onclick="_rp.view='bulk';_rp.msg='';rpDraw()">📷 Bulk pictures</button><button class="ho-btn" onclick="_rp.view='panels';_rp.msg='';rpDraw()">📄 Info panels</button><button class="ho-btn primary" onclick="rpOpen(null)">+ New product</button><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
     ${rpShipHtml()}
     <div class="ho-intro">Everything 4Cats sells: art kits first. Each product says where it’s sold (🌐 World’s shop, shipped from the warehouse, and/or 🏪 the front desk). Each variant’s <b>SKU</b> is the same as its inventory item, which is how sales and stock connect.</div>
     <div class="fd-filters"><input id="rp-q" type="search" placeholder="Search name, SKU or tag" value="${escAttr(P.q)}" oninput="_rp.q=this.value;clearTimeout(_rp.t);_rp.t=setTimeout(()=>{rpDraw();const i=document.getElementById('rp-q');if(i){i.focus();i.setSelectionRange(i.value.length,i.value.length)}},250)">
@@ -4867,6 +4867,85 @@ async function rpPartsSave() {
   if (error) { alert(error.message); return; }
   document.getElementById('rp-parts').remove(); await rpStockLoad();
 }
+// ---------- 🔢 Ask studios to count / 📋 Count sheet (retail_counts.sql) ----------
+let _rpCnt = null, _rpSheet = null;
+function rpOverlay(id, html) { let el = document.getElementById(id); if (!el) { el = document.createElement('div'); el.id = id; document.body.appendChild(el); } el.innerHTML = html; }
+function rpOverlayClose(id) { const el = document.getElementById(id); if (el) el.remove(); }
+const rpVarName = x => x.product + (x.variant && x.variant !== 'Default' ? ' · ' + x.variant : '');
+function rpScopeVariants(scope) {   // which product options: ticked, all kits, all snacks, or a collection
+  const L = Array.isArray(_rpStock) ? _rpStock : [];
+  if (scope === 'ticked') return L.filter(x => _rp.sel.has(x.product_id));
+  if (scope === 'kits') return L.filter(x => x.category !== 'snack');
+  if (scope === 'snacks') return L.filter(x => x.category === 'snack');
+  if (String(scope).startsWith('col:')) { const c = (_rp.cols || []).find(z => z.id === scope.slice(4)); return c ? L.filter(x => (_rp.rows || []).some(r => r.id === x.product_id && rpInCol(r, c))) : []; }
+  return L;
+}
+function rpScopeOpts(cur, withTicked) {
+  return (withTicked && _rp.sel.size ? [['ticked', `The ${_rp.sel.size} ticked`]] : []).concat([['kits', 'All kits and other shop items'], ['snacks', 'All drinks and snacks']])
+    .concat((_rp.cols || []).map(c => ['col:' + c.id, '🗂️ ' + c.name])).concat([['all', 'Everything']])
+    .map(o => `<option value="${o[0]}"${o[0] === cur ? ' selected' : ''}>${esc(o[1])}</option>`).join('');
+}
+async function rpCntOpen(scope) {
+  if (!Array.isArray(_rpStock)) await rpStockLoad();
+  if (!_rp.cols) { try { await rpColsLoad(); } catch (e) { } }
+  _rpCnt = { scope: scope || (_rp.sel.size ? 'ticked' : 'kits'), all: true, studios: new Set(), first: !(_rpStock || []).some(x => Object.keys(x.on_hand || {}).some(k => k !== 'WAREHOUSE')), due: new Date().toLocaleDateString('en-CA') };
+  rpCntDraw();
+}
+function rpCntDraw() {
+  const C = _rpCnt, V = rpScopeVariants(C.scope), ids = Object.keys(STUDIO_NAMES).sort((a, b) => (STUDIO_NAMES[a] || a).localeCompare(STUDIO_NAMES[b] || b));
+  const nSt = C.all ? ids.length : C.studios.size;
+  rpOverlay('rp-cnt', `<div class="fd-sheet-back" onclick="if(event.target===this)rpOverlayClose('rp-cnt')"><div class="fd-sheet" style="max-width:680px"><h3>🔢 Ask studios to count</h3>
+    <p class="fd-sm">Each studio gets a count task for each product, in the Hub’s <b>Supplies → Counts</b> (a coordinator or manager PIN), like their Ditto counts.</p>
+    <label class="f">What to count<select onchange="_rpCnt.scope=this.value;rpCntDraw()">${rpScopeOpts(C.scope, true)}</select></label>
+    <p class="fd-sm">${V.length} product option${V.length === 1 ? '' : 's'}${V.length ? ': ' + esc(V.slice(0, 6).map(rpVarName).join(', ')) + (V.length > 6 ? ' and ' + (V.length - 6) + ' more' : '') : ''}</p>
+    <label class="fd-chk"><input type="radio" name="cnt-st" ${C.all ? 'checked' : ''} onchange="_rpCnt.all=true;rpCntDraw()"> Every studio</label>
+    <label class="fd-chk"><input type="radio" name="cnt-st" ${C.all ? '' : 'checked'} onchange="_rpCnt.all=false;rpCntDraw()"> Only these studios</label>
+    ${C.all ? '' : `<div class="rp-studios">${ids.map(id => `<label><input type="checkbox" ${C.studios.has(id) ? 'checked' : ''} onchange="this.checked?_rpCnt.studios.add('${id}'):_rpCnt.studios.delete('${id}')"> ${esc(STUDIO_NAMES[id])}</label>`).join('')}</div>`}
+    <label class="ba-check"><input type="checkbox" ${C.first ? 'checked' : ''} onchange="_rpCnt.first=this.checked;rpCntDraw()"> <b>First count</b>: their number becomes the stock (no recount, since there’s nothing to compare yet)</label>
+    ${C.first ? '' : '<p class="fd-sm">A regular count is blind: if it doesn’t match what the system expects, they’re asked to count again.</p>'}
+    <label class="f">Count by<input type="date" value="${escAttr(C.due)}" onchange="_rpCnt.due=this.value"></label>
+    <div class="sheet-actions"><button onclick="rpOverlayClose('rp-cnt')">Cancel</button><button class="primary" onclick="rpCntGo()">Send ${V.length * nSt} count${V.length * nSt === 1 ? '' : 's'}</button></div></div></div>`);
+}
+async function rpCntGo() {
+  const C = _rpCnt, V = rpScopeVariants(C.scope);
+  if (!V.length) { alert('Nothing to count there yet (products need a SKU: save them once).'); return; }
+  if (!C.all && !C.studios.size) { alert('Tick the studios.'); return; }
+  const { data, error } = await sb.rpc('hub_retail_count_start', { p: { variant_ids: V.map(x => x.variant_id), all_studios: C.all, studios: [...C.studios], first: C.first, due: C.due } });
+  if (error) { alert(/hub_retail_count_start/.test(error.message) ? 'Run retail_counts.sql in Supabase first.' : error.message); return; }
+  rpOverlayClose('rp-cnt');
+  _rp.msg = `✓ ${data.made} count task${data.made === 1 ? '' : 's'} sent to ${data.studios} studio${data.studios === 1 ? '' : 's'}${data.skipped ? ` (${data.skipped} already waiting to be counted, left as they were)` : ''}. They’re in Supplies → Counts.`; rpDraw();
+}
+// 📋 Count sheet: one place, many products, typed in and saved together
+async function rpSheetOpen() {
+  if (!Array.isArray(_rpStock)) await rpStockLoad();
+  if (!_rp.cols) { try { await rpColsLoad(); } catch (e) { } }
+  _rpSheet = { loc: 'WAREHOUSE', scope: 'kits', q: '', vals: {}, note: '' }; rpSheetDraw();
+}
+function rpSheetDraw() {
+  const ae = document.activeElement, aeId = ae && ae.id && ae.id.startsWith('rp-s') ? ae.id : null, aePos = aeId && ae.type !== 'number' ? ae.selectionStart : null;
+  const S = _rpSheet, q = S.q.trim().toLowerCase(), V = rpScopeVariants(S.scope).filter(x => !q || (rpVarName(x) + ' ' + (x.sku || '')).toLowerCase().includes(q));
+  const ids = Object.keys(STUDIO_NAMES).sort((a, b) => (STUDIO_NAMES[a] || a).localeCompare(STUDIO_NAMES[b] || b));
+  const filled = Object.values(S.vals).filter(v => v !== '' && v != null).length;
+  rpOverlay('rp-sheet', `<div class="fd-sheet-back" onclick="if(event.target===this&&(!${filled}||confirm('Close without saving these counts?')))rpOverlayClose('rp-sheet')"><div class="fd-sheet" style="max-width:820px"><h3>📋 Count sheet</h3>
+    <div class="fd-inline" style="flex-wrap:wrap;gap:8px"><select onchange="_rpSheet.loc=this.value;rpSheetDraw()"><option value="WAREHOUSE"${S.loc === 'WAREHOUSE' ? ' selected' : ''}>🏭 Salt Spring warehouse</option>${ids.map(id => `<option value="${id}"${S.loc === id ? ' selected' : ''}>${esc(STUDIO_NAMES[id])}</option>`).join('')}</select>
+      <select onchange="_rpSheet.scope=this.value;rpSheetDraw()">${rpScopeOpts(S.scope, false)}</select>
+      <input id="rp-sheet-q" placeholder="Find a product or SKU" value="${escAttr(S.q)}" oninput="_rpSheet.q=this.value;rpSheetDraw()"></div>
+    <p class="fd-sm">Type what’s on the shelf. Leave a box empty to skip it; 0 means none. Saving changes the stock to these numbers (the differences are kept as count corrections).</p>
+    <div class="fd-tbl-wrap" style="max-height:52vh;overflow:auto"><table class="fd-tbl"><thead><tr><th>Product</th><th>SKU</th><th class="num">System says</th><th class="num">Counted</th></tr></thead><tbody>${V.map(x => { const now = rpN((x.on_hand || {})[S.loc]), v = S.vals[x.variant_id];
+      return `<tr${v !== undefined && v !== '' && +v !== now ? ' class="rp-sel"' : ''}><td>${esc(rpVarName(x))}</td><td class="fd-sm">${esc(x.sku || '')}</td><td class="num">${now}</td>
+        <td class="num"><input id="rp-sv-${x.variant_id}" type="number" min="0" step="1" style="width:84px" value="${escAttr(v ?? '')}" oninput="_rpSheet.vals['${x.variant_id}']=this.value;this.closest('tr').classList.toggle('rp-sel',this.value!==''&&+this.value!==${now});const c=document.getElementById('rp-sheet-n');if(c)c.textContent=Object.values(_rpSheet.vals).filter(v=>v!==''&&v!=null).length+' counted'"></td></tr>`; }).join('') || '<tr><td colspan="4" class="fd-sm">Nothing here.</td></tr>'}</tbody></table></div>
+    <label class="f">Note (optional)<input value="${escAttr(S.note)}" oninput="_rpSheet.note=this.value" placeholder="e.g. November stock take"></label>
+    <div class="sheet-actions"><span class="fd-sm" id="rp-sheet-n" style="margin-right:auto">${filled} counted</span><button onclick="rpOverlayClose('rp-sheet')">Cancel</button><button class="primary" onclick="rpSheetSave()">Save the counts</button></div></div></div>`);
+  if (aeId) { const i = document.getElementById(aeId); if (i) { i.focus(); try { if (aePos != null) i.setSelectionRange(aePos, aePos); } catch (e) { } } }
+}
+async function rpSheetSave() {
+  const S = _rpSheet, counts = Object.entries(S.vals).filter(([, v]) => v !== '' && v != null && !isNaN(+v) && +v >= 0).map(([variant_id, qty]) => ({ variant_id, qty: Math.floor(+qty) }));
+  if (!counts.length) { alert('Type at least one count.'); return; }
+  if (!confirm(`Save ${counts.length} count${counts.length === 1 ? '' : 's'} for ${S.loc === 'WAREHOUSE' ? 'the warehouse' : STUDIO_NAMES[S.loc]}?`)) return;
+  const { data, error } = await sb.rpc('hub_retail_count_sheet_save', { p: { loc: S.loc, counts, note: S.note } });
+  if (error) { alert(/hub_retail_count_sheet_save/.test(error.message) ? 'Run retail_counts.sql in Supabase first.' : error.message); return; }
+  rpOverlayClose('rp-sheet'); _rp.msg = `✓ Counts saved: ${data.changed} changed, ${data.same} already right.`; await rpStockLoad(); rpDraw();
+}
 function rpStudio(id, on) { const s = new Set(_rp.edit.studios || []); if (on) s.add(id); else s.delete(id); rpF('studios', [...s]); }
 function rpPic(i, dir) {
   const A = _rp.edit.images;
@@ -4964,7 +5043,7 @@ const RP_BULK = [['desk_on', '🏪 Sell at the front desk'], ['desk_add', '🏪 
   ['online_on', '🌐 Sell online'], ['online_off', '🌐 Stop selling online'], ['on', 'Turn On'], ['off', 'Turn Off (hidden everywhere)'],
   ['price_set', '💲 Set the price to…'], ['price_pct', '💲 Change the price by %…'], ['price_amt', '💲 Change the price by $…'],
   ['member_set', '⭐ Set the member price to…'], ['member_pct', '⭐ Member price: % off the price…'], ['member_clear', '⭐ Clear the member price'],
-  ['sale_pct', '🏷️ Put on sale: % off…'], ['sale_clear', '🏷️ End the sale'], ['tag_add', '🔖 Add a tag…'], ['tag_remove', '🔖 Remove a tag…']];
+  ['sale_pct', '🏷️ Put on sale: % off…'], ['sale_clear', '🏷️ End the sale'], ['tag_add', '🔖 Add a tag…'], ['tag_remove', '🔖 Remove a tag…'], ['count_ask', '🔢 Ask studios to count these…']];
 // (Nov 10 2026) ticking redraws the list: keep the page where it was (the window, the pane and the table's own scroll)
 function rpDrawKeep() {
   const pane = document.getElementById('rp-pane'), wrap = pane && pane.querySelector('.fd-tbl-wrap');
@@ -5001,6 +5080,7 @@ function rpBulkBarHtml(rows) {
       ${a === 'desk_add' || !_rp.bevery ? `<div class="rp-studios">${ids.map(id => `<label><input type="checkbox" ${_rp.bst.has(id) ? 'checked' : ''} onchange="this.checked?_rp.bst.add('${id}'):_rp.bst.delete('${id}')"> ${esc(STUDIO_NAMES[id] || id)}</label>`).join('')}</div>` : ''}</div>` : ''}</div>`;
 }
 async function rpBulkApply() {   // (named apart from 📷 Bulk pictures' rpBulkGo)
+  if (_rp.ba === 'count_ask') { rpCntOpen('ticked'); return; }
   const a = _rp.ba, ids = [..._rp.sel], lab = (RP_BULK.find(b => b[0] === a) || [, a])[1];
   const p = { action: a };
   if (['price_set', 'price_pct', 'price_amt', 'member_set', 'member_pct', 'sale_pct'].includes(a)) { if (_rp.bv === '' || isNaN(+_rp.bv)) { alert('Type the amount.'); return; } p.value = +_rp.bv; }
