@@ -699,6 +699,12 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .fd-expired { background: #f6f1e8; color: #6b6b63; font-weight: 700; border-radius: 14px; padding: 14px; text-align: center; }
 .fd-rec { display: flex; gap: 8px; align-items: center; border-bottom: 1px solid var(--border); padding: 8px 0; } .fd-rec > span:first-child { flex: 1; }
 .fd-st { font-size: 12px; font-weight: 800; border-radius: 999px; padding: 2px 10px; } .fd-st.ok { background: #e3f4e8; color: #1d6b39; } .fd-st.wait { background: #fdf3d8; color: #8a5a00; } .fd-st.off { background: #eee; color: #666; }
+.inbox-sum { overflow-x: auto; margin-top: 8px; } .inbox-sum table { border-collapse: collapse; font-size: 13px; min-width: 100%; }
+.inbox-sum th { text-align: center; font-weight: 600; color: var(--muted, #777); padding: 4px 6px; white-space: nowrap; } .inbox-sum th:first-child, .inbox-sum td:first-child { text-align: left; white-space: nowrap; padding-right: 12px; }
+.inbox-sum td { text-align: center; padding: 3px 6px; border-top: 1px solid var(--border, #eee); }
+.inbox-n { min-width: 30px; border: 1px solid var(--border, #ddd); background: #fff; border-radius: 999px; padding: 2px 8px; font-weight: 700; cursor: pointer; }
+.inbox-n.hi { background: #fff3e0; border-color: #f0c27a; } .inbox-n.tot { background: #f6f3ea; }
+.inbox-gh { margin: 18px 0 2px; font-size: 16px; } .inbox-wh { margin: 8px 0 2px; font-size: 13.5px; color: #444; }
 .fd-shop-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
 .fd-shop-tile { position: relative; display: flex; flex-direction: column; gap: 3px; text-align: left; background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 8px; cursor: pointer; font: inherit; }
 .fd-shop-tile:active { transform: scale(.98); }
@@ -3251,7 +3257,7 @@ function heroGreetingHtml(name) {
 // The inbox (hub_inbox.sql): things to decide for the responsibilities this person holds (e.g. Staff schedule approvals)
 let _inbox = [];
 const asFmt12 = v => { const [h, m] = String(v || '').split(':').map(Number); return (h % 12 || 12) + (m ? ':' + String(m).padStart(2, '0') : '') + (h >= 12 ? 'p' : 'a'); };
-const INBOX_KIND = { cut_shift: '✂️', short_day: '👤', class_problem: '📚', evening_question: '🌆', as_note: '📝' };
+const INBOX_KIND = { cut_shift: '✂️', short_day: '👤', gt_booked: '🍷', class_problem: '📚', evening_question: '🌆', as_note: '📝' };
 // the evening question's choices: the same as Auto-schedule's (asPadOpts)
 function inboxEveningOpts(P) {
   const n = Math.max(1, +P.usual || 1), pa = P.pad !== 'field';
@@ -3265,6 +3271,8 @@ function inboxItemHtml(x) {
   const now = x.shift ? `<span class="lab-sub">Now ${esc(t(x.shift.start))}–${esc(t(x.shift.end))}</span>` : '';
   const btns = x.kind === 'cut_shift'
     ? `<button class="ho-btn" onclick="inboxDecide('${x.id}','approve')">✓ Approve</button> <button class="ho-btn" onclick="inboxChange('${x.id}')">Change…</button> <button class="ho-btn" onclick="inboxDecide('${x.id}','keep')">Keep</button>`
+    : x.kind === 'gt_booked'
+    ? `<button class="ho-btn" onclick="window.open('staff-schedule.html','_blank')">Open staff schedule</button> <button class="ho-btn" onclick="inboxDecide('${x.id}','done')" title="Someone's covering it">✓ Done</button>`
     : x.kind === 'short_day'
     ? `<button class="ho-btn" onclick="window.open('staff-schedule.html','_blank')">Open staff schedule</button> <button class="ho-btn" onclick="inboxDecide('${x.id}','done')" title="I've added someone">✓ Done</button> <button class="ho-btn" onclick="inboxDecide('${x.id}','keep')" title="It's quiet: the staff we have is enough (this day isn't flagged again)">Disregard</button>`
     : x.kind === 'evening_question'
@@ -3309,7 +3317,21 @@ function inboxChange(id) {
 // ---- 📋 For you, its own page: filter by kind, studio and when; search; sort ----
 const INBOX_CARD_MAX = 3;
 const INBOX_LABEL = { cut_shift: ['shift to approve', 'shifts to approve'], evening_question: ['evening to decide', 'evenings to decide'],
-  as_note: ['note', 'notes'], short_day: ['short day', 'short days'], class_problem: ['class booking', 'class bookings'] };
+  as_note: ['note', 'notes'], short_day: ['short day', 'short days'], gt_booked: ['get-together with nobody on', 'get-togethers with nobody on'], class_problem: ['class booking', 'class bookings'] };
+// (Nov 10 2026) the week an item is in (Sunday to Saturday), for the studio-by-week summary
+const inboxWeek = x => { if (!x.day) return ''; const d = new Date(String(x.day).slice(0, 10) + 'T12:00:00'); d.setDate(d.getDate() - d.getDay()); return d.toLocaleDateString('en-CA'); };
+const inboxWeekLabel = w => w ? 'Week of ' + new Date(w + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : 'No date';
+// studios down the side, weeks across: how many to decide in each (tap a number: just those)
+function inboxSummaryHtml(list) {
+  const weeks = [...new Set(list.map(inboxWeek))].sort((a, b) => (a || '9999').localeCompare(b || '9999'));
+  const shown = weeks.slice(0, 6), later = weeks.slice(6);
+  const studios = [...new Set(list.map(x => x.studio_id || ''))].sort((a, b) => (STUDIO_NAMES[a] || a || '~').localeCompare(STUDIO_NAMES[b] || b || '~'));
+  const cell = (st, ws) => { const n = list.filter(x => (x.studio_id || '') === st && ws.includes(inboxWeek(x))).length;
+    return n ? `<button class="inbox-n${n >= 10 ? ' hi' : ''}" onclick="inboxPageOpen('', '${escAttr(st)}', '${ws.length === 1 ? escAttr(ws[0]) : 'later'}')">${n}</button>` : '<span class="lab-sub">·</span>'; };
+  return `<div class="inbox-sum"><table><thead><tr><th>Studio</th>${shown.map(w => `<th>${esc(w ? new Date(w + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : 'No date')}</th>`).join('')}${later.length ? '<th>Later</th>' : ''}<th>All</th></tr></thead><tbody>` +
+    studios.map(st => `<tr><td>${esc(STUDIO_NAMES[st] || st || 'Network')}</td>${shown.map(w => `<td>${cell(st, [w])}</td>`).join('')}${later.length ? `<td>${cell(st, later)}</td>` : ''}
+      <td><button class="inbox-n tot" onclick="inboxPageOpen('', '${escAttr(st)}', '')">${list.filter(x => (x.studio_id || '') === st).length}</button></td></tr>`).join('') + '</tbody></table></div>';
+}
 let _myNotes = [], _inboxPage = null;
 function inboxSorter(by) {
   const d = x => String(x.day || '9999');
@@ -3317,8 +3339,8 @@ function inboxSorter(by) {
     : by === 'kind' ? (a, b) => Object.keys(INBOX_LABEL).indexOf(a.kind) - Object.keys(INBOX_LABEL).indexOf(b.kind) || d(a).localeCompare(d(b))
     : (a, b) => d(a).localeCompare(d(b)) || (STUDIO_NAMES[a.studio_id] || '').localeCompare(STUDIO_NAMES[b.studio_id] || '');
 }
-function inboxPageOpen(kind) {
-  _inboxPage = { kind: kind || '', studio: '', when: '', q: '', sort: 'soon' };
+function inboxPageOpen(kind, studio, week) {
+  _inboxPage = { kind: kind || '', studio: studio === undefined ? '' : studio || '__none', week: week || '', when: '', q: '', sort: 'group' };
   let el = document.getElementById('inbox-page');
   if (!el) { el = document.createElement('div'); el.id = 'inbox-page'; el.className = 'inbox-page'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', 'For you'); document.body.appendChild(el); }
   el.style.display = ''; document.body.style.overflow = 'hidden';
@@ -3331,7 +3353,9 @@ function inboxPageDraw(keepFocus) {
   const today = new Date(); today.setHours(12, 0, 0, 0);
   const until = F.when ? new Date(today.getTime() + (+F.when) * 86400000).toISOString().slice(0, 10) : null;
   const q = F.q.trim().toLowerCase();
-  const rows = _inbox.filter(x => (!F.kind || x.kind === F.kind) && (!F.studio || x.studio_id === F.studio) && (!until || !x.day || String(x.day).slice(0, 10) <= until)
+  const shownWeeks = [...new Set(_inbox.map(inboxWeek))].sort((a, b) => (a || '9999').localeCompare(b || '9999')).slice(0, 6);
+  const rows = _inbox.filter(x => (!F.kind || x.kind === F.kind) && (!F.studio || (F.studio === '__none' ? !x.studio_id : x.studio_id === F.studio)) && (!until || !x.day || String(x.day).slice(0, 10) <= until)
+      && (!F.week || (F.week === 'later' ? !shownWeeks.includes(inboxWeek(x)) : inboxWeek(x) === F.week))
       && (!q || [x.title, x.detail, STUDIO_NAMES[x.studio_id]].join(' ').toLowerCase().includes(q))).sort(inboxSorter(F.sort));
   const studios = [...new Set(_inbox.map(x => x.studio_id).filter(Boolean))].sort((a, b) => (STUDIO_NAMES[a] || a).localeCompare(STUDIO_NAMES[b] || b));
   const opt = (v, l, cur) => `<option value="${escAttr(v)}"${v === cur ? ' selected' : ''}>${esc(l)}</option>`;
@@ -3342,10 +3366,20 @@ function inboxPageDraw(keepFocus) {
       <select onchange="inboxPageSet('kind', this.value)" aria-label="Kind">${opt('', 'Everything', F.kind)}${Object.keys(INBOX_LABEL).filter(k => _inbox.some(x => x.kind === k)).map(k => opt(k, INBOX_KIND[k] + ' ' + INBOX_LABEL[k][1][0].toUpperCase() + INBOX_LABEL[k][1].slice(1) + ' (' + _inbox.filter(x => x.kind === k).length + ')', F.kind)).join('')}</select>
       <select onchange="inboxPageSet('studio', this.value)" aria-label="Studio">${opt('', 'All studios', F.studio)}${studios.map(st => opt(st, STUDIO_NAMES[st] || st, F.studio)).join('')}</select>
       <select onchange="inboxPageSet('when', this.value)" aria-label="When">${opt('', 'Any day', F.when)}${opt('7', 'Next 7 days', F.when)}${opt('14', 'Next 14 days', F.when)}${opt('21', 'Next 3 weeks', F.when)}</select>
-      <select onchange="inboxPageSet('sort', this.value)" aria-label="Sort">${opt('soon', 'Soonest first', F.sort)}${opt('studio', 'By studio', F.sort)}${opt('kind', 'By kind', F.sort)}</select>
+      <select onchange="inboxPageSet('week', this.value)" aria-label="Week">${opt('', 'Every week', F.week)}${[...new Set(_inbox.map(inboxWeek))].sort((a, b) => (a || '9999').localeCompare(b || '9999')).map(w => opt(w, inboxWeekLabel(w), F.week)).join('')}${F.week === 'later' ? opt('later', 'Later weeks', F.week) : ''}</select>
+      <select onchange="inboxPageSet('sort', this.value)" aria-label="Sort">${opt('group', 'By studio, then week', F.sort)}${opt('soon', 'Soonest first', F.sort)}${opt('kind', 'By kind', F.sort)}</select>
       <input id="inbox-q" type="search" placeholder="Search…" value="${escAttr(F.q)}" oninput="inboxPageSet('q', this.value)" aria-label="Search">
     </div>
-    <div class="inbox-list">${rows.length ? rows.map(inboxItemHtml).join('') : '<p class="lab-sub" style="padding:14px 0">Nothing matches.</p>'}</div>
+    ${!F.studio && !F.week && !F.kind && !q ? inboxSummaryHtml(_inbox) : ''}
+    <div class="inbox-list">${!rows.length ? '<p class="lab-sub" style="padding:14px 0">Nothing matches.</p>' : F.sort !== 'group' ? rows.map(inboxItemHtml).join('')
+      : (() => { let h = '', lastS = null, lastW = null;
+          rows.slice().sort((a, b) => (STUDIO_NAMES[a.studio_id] || a.studio_id || '~').localeCompare(STUDIO_NAMES[b.studio_id] || b.studio_id || '~') || String(a.day || '9999').localeCompare(String(b.day || '9999'))).forEach(x => {
+            if (x.studio_id !== lastS) { const n = rows.filter(y => y.studio_id === x.studio_id).length; h += `<h3 class="inbox-gh">${esc(STUDIO_NAMES[x.studio_id] || x.studio_id || 'Network')} <span class="lab-sub">${n}</span></h3>`; lastS = x.studio_id; lastW = null; }
+            const w = inboxWeek(x); if (w !== lastW) { const n = rows.filter(y => y.studio_id === x.studio_id && inboxWeek(y) === w).length;
+              const kinds = Object.keys(INBOX_LABEL).map(k => { const c = rows.filter(y => y.studio_id === x.studio_id && inboxWeek(y) === w && y.kind === k).length; return c ? INBOX_KIND[k] + ' ' + c : ''; }).filter(Boolean).join(' · ');
+              h += `<h4 class="inbox-wh">${esc(inboxWeekLabel(w))} <span class="lab-sub">${n} · ${kinds}</span></h4>`; lastW = w; }
+            h += inboxItemHtml(x); });
+          return h; })()}</div>
     ${notes.length ? `<h4 style="margin:16px 0 4px">Notes from home office (${notes.length})</h4>${notes.map(n => `<div class="mn-row"><label><input type="checkbox" onchange="myNoteDone('${n.id}')"> <b>${esc(new Date(n.day + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))}</b> · ${esc(STUDIO_NAMES[n.studio_id] || n.studio_id)}</label><div>${esc(n.body)}</div></div>`).join('')}` : ''}
   </div>`;
   if (keepFocus) { const i = document.getElementById('inbox-q'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }
@@ -3368,8 +3402,7 @@ async function myNotesLoad() {
       list.length ? list.length + ' note' + (list.length === 1 ? '' : 's') + ' from home office' : ''].filter(Boolean).join(' · ')}</span>
       ${_inbox.length ? `<span style="flex:1"></span><button class="ho-btn" onclick="inboxPageOpen('')">See all (${_inbox.length}) →</button>` : ''}</div>
     ${chips ? `<div class="inbox-chips">${chips}</div>` : ''}
-    ${soon.map(inboxItemHtml).join('')}
-    ${more > 0 ? `<button class="inbox-more" onclick="inboxPageOpen('')">+ ${more} more: see all →</button>` : ''}
+    ${_inbox.length > INBOX_CARD_MAX ? inboxSummaryHtml(_inbox) + '<p class="lab-sub" style="margin:6px 0 0">Tap a number to see those, by studio and week.</p>' : soon.map(inboxItemHtml).join('')}
     ${list.slice(0, INBOX_CARD_MAX).map(n => `<div class="mn-row"><label><input type="checkbox" onchange="myNoteDone('${n.id}')"> <b>${esc(fmt(n.day))}</b> · ${esc(STUDIO_NAMES[n.studio_id] || n.studio_id)}</label><div>${esc(n.body)}</div>
       <span class="lab-sub">from ${esc(String(n.created_by || '').split('@')[0])}</span></div>`).join('')}
     ${list.length > INBOX_CARD_MAX ? `<button class="inbox-more" onclick="inboxPageOpen('')">+ ${list.length - INBOX_CARD_MAX} more notes: see all →</button>` : ''}</div>`;
