@@ -747,6 +747,8 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .rp-grid .rp-grid-k { position: sticky; left: 0; background: #fff; z-index: 2; min-width: 220px; text-align: left; } .rp-grid th.rp-grid-k { z-index: 3; background: #faf8f3; }
 .rp-grid td { padding: 3px 4px; text-align: center; } .rp-gcell { width: 46px; text-align: center; padding: 4px 2px; border: 1px solid #ddd; border-radius: 8px; } .rp-gcell.on { background: #fff3c4; border-color: #e0b84a; font-weight: 700; }
 .rp-sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; border: 1px solid rgba(0,0,0,.15); }
+.pm-box { margin-top: 10px; padding: 10px 14px; border-radius: 12px; background: #fff3e0; border: 1px solid #f0c27a; font-size: 14px; max-width: 760px; }
+.pm-row { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 6px 0; border-top: 1px dashed #f0c27a; } .pm-row:first-of-type { margin-top: 6px; }
 .rp-ck { width: 30px; text-align: center; } .rp-ck input { width: 18px; height: 18px; cursor: pointer; }
 .rp-tbl tr.rp-sel td { background: #fff8e6; }
 .rp-bulk { position: sticky; top: 0; z-index: 3; background: #fff8e6; border: 1px solid #f0c27a; border-radius: 12px; padding: 10px 12px; margin: 8px 0; }
@@ -3312,7 +3314,7 @@ function heroGreetingHtml(name) {
 // The inbox (hub_inbox.sql): things to decide for the responsibilities this person holds (e.g. Staff schedule approvals)
 let _inbox = [];
 const asFmt12 = v => { const [h, m] = String(v || '').split(':').map(Number); return (h % 12 || 12) + (m ? ':' + String(m).padStart(2, '0') : '') + (h >= 12 ? 'p' : 'a'); };
-const INBOX_KIND = { cut_shift: '✂️', short_day: '👤', gt_booked: '🎉', class_problem: '📚', evening_question: '🌆', as_note: '📝' };
+const INBOX_KIND = { promo_unfinished: '🎁', cut_shift: '✂️', short_day: '👤', gt_booked: '🎉', class_problem: '📚', evening_question: '🌆', as_note: '📝' };
 // the evening question's choices: the same as Auto-schedule's (asPadOpts)
 function inboxEveningOpts(P) {
   const n = Math.max(1, +P.usual || 1), pa = P.pad !== 'field';
@@ -3372,7 +3374,7 @@ function inboxChange(id) {
 // ---- 📋 For you, its own page: filter by kind, studio and when; search; sort ----
 const INBOX_CARD_MAX = 3;
 const INBOX_LABEL = { cut_shift: ['shift to approve', 'shifts to approve'], evening_question: ['evening to decide', 'evenings to decide'],
-  as_note: ['note', 'notes'], short_day: ['short day', 'short days'], gt_booked: ['party booked with nobody on', 'parties booked with nobody on'], class_problem: ['class booking', 'class bookings'] };
+  as_note: ['note', 'notes'], promo_unfinished: ['promo party to call about', 'promo parties to call about'], short_day: ['short day', 'short days'], gt_booked: ['party booked with nobody on', 'parties booked with nobody on'], class_problem: ['class booking', 'class bookings'] };
 // (Nov 10 2026) the week an item is in (Sunday to Saturday), for the studio-by-week summary
 const inboxWeek = x => { if (!x.day) return ''; const d = new Date(String(x.day).slice(0, 10) + 'T12:00:00'); d.setDate(d.getDate() - d.getDay()); return d.toLocaleDateString('en-CA'); };
 const inboxWeekLabel = w => w ? 'Week of ' + new Date(w + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : 'No date';
@@ -3672,9 +3674,10 @@ function renderDailyHero(data) {
   const hrs = heroHoursHtml(data.studioId);
   container.innerHTML = `
     <div class="hero-greeting">${heroGreetingHtml(data.firstName)}</div>
-    <div class="hero-sub">${sub}${hrs}</div><div id="next-pa"></div>`;
+    <div class="hero-sub">${sub}${hrs}</div><div id="next-pa"></div><div id="party-missing"></div>`;
   renderFloorToday(data);
   nextPaLoad(data.studioId);
+  partyMissingLoad(data.studioId);
 }
 
 // (Nov 10 2026) 📅 Next PA/PD day: the studio's next PA/PD day camp (in the next 4 months), so it never sneaks up on anyone.
@@ -3706,6 +3709,32 @@ async function nextPaLoad(sid) {
   if (el()) el().innerHTML = html;
 }
 
+// (Nov 10 2026) 🎉 Parties in the next 3 days still missing details (what they're celebrating, the project, how many guests), and
+// 🎁 promo parties not finished yet: on the studio's Today screen, with who to call
+async function partyMissingLoad(sid) {
+  const el = document.getElementById('party-missing'); if (!el || !sid) return;
+  let rows = [];
+  try {
+    const { list } = await fetchPartyData(sid);
+    (list || []).forEach(pt => {
+      const dd = daysUntil(pt.session.session_date); if (dd < 0 || dd > 3) return;
+      const b = pt.booking || {}, d = pt.detail || {}, miss = [];
+      if (!String(b.reason_for_gathering || '').trim()) miss.push('what they’re celebrating');
+      if (!String(b.project_preference || '').trim() || /undecided/i.test(b.project_preference || '')) miss.push('the project');
+      if (!(Number(b.estimated_attendance) > 0) && !(Number(d.guests) > 0) && !(Number(d.expected_guests) > 0)) miss.push('how many guests');
+      if (miss.length) rows.push({ day: pt.session.session_date, time: pt.session.session_time, who: b.customer_name, phone: b.customer_phone, email: b.customer_email, miss, title: pt.session.title });
+    });
+  } catch (e) { }
+  try {
+    const { data } = await sb.rpc('hub_custom_holds', { p_studio: sid });
+    (data || []).filter(h => h.status === 'held' && h.promo).forEach(h => { const dd = daysUntil(String(h.day).slice(0, 10)); if (dd >= 0 && dd <= 3)
+      rows.push({ day: String(h.day).slice(0, 10), time: h.at, who: h.customer_name, phone: h.customer_phone, email: h.customer_email, miss: ['all of it (free promo party not finished on World)'], title: '🎁 Promo party' }); });
+  } catch (e) { }
+  if (!rows.length) { el.innerHTML = ''; return; }
+  rows.sort((a, b) => (a.day + a.time).localeCompare(b.day + b.time));
+  el.innerHTML = `<div class="pm-box"><b>🎉 ${rows.length} part${rows.length === 1 ? 'y' : 'ies'} in the next 3 days missing details: please call</b>${rows.map(r => `<div class="pm-row"><span><b>${esc(ptyDayLabel(r.day))} ${esc(shortTime(r.time))}</b> · ${esc(r.who || 'Customer')}${r.title && /promo/i.test(r.title) ? ' · 🎁 promo' : ''}</span>
+    <span class="fd-sm">Missing: ${esc(r.miss.join(', '))}</span><span class="fd-sm">${r.phone ? `📞 <a href="tel:${escAttr(r.phone)}">${esc(r.phone)}</a>` : ''}${r.email ? ` · ${esc(r.email)}` : ''}</span></div>`).join('')}</div>`;
+}
 // ---------- Announcements from home office ----------
 // Unread: a full card with "Got it". Read here: tucked into "Earlier messages".
 // Urgent ones stay full-size until they expire, even once read.
@@ -10492,10 +10521,13 @@ async function loadPlanDay(date) {
         const slotsAt = {}; ps.data.forEach(r => { slotsAt[String(r.time_slot).slice(0, 5)] = Number(r.slots) || 0; });
         // Only the party ROOM products follow the slot schedule; team building, adult
         // get-togethers and field trips have their own times and show as before.
-        const isRoomParty = x => x.session_type === 'party' && /^(kids party|splatter party|party time slot|splatter party time slot)$/i.test(String(x.title || '').trim());
+        const isRoomParty = x => x.session_type === 'party' && /^(kids party|splatter party|party time slot|splatter party time slot)( · reserved \w*)?$/i.test(String(x.title || '').trim());   // (" · reserved …": a time held for one customer)
         const party = sessions.filter(isRoomParty);
         const bookedAt = {};
         party.filter(x => booked[x.id] > 0).forEach(x => { const t = String(x.session_time).slice(0, 5); bookedAt[t] = (bookedAt[t] || 0) + (Number(booked[x.id]) || 1); });
+        // (Nov 10 2026) a time held for one customer (a custom or 🎁 promo party, not booked yet) takes a room too, and shows as its own row
+        const heldParty = x => !!x.held_until && !(booked[x.id] > 0);
+        party.filter(heldParty).forEach(x => { const t = String(x.session_time).slice(0, 5); bookedAt[t] = (bookedAt[t] || 0) + 1; });
         const openRows = [];
         // every party time in the slot schedule (or with a party product): rooms there minus parties booked there.
         // (A Kids Party with 2 spots and 1 booked still has a room open, even with no unbooked product left at that time.)
@@ -10512,7 +10544,7 @@ async function loadPlanDay(date) {
             slotRooms: slotsAt[t] || 0, slotBooked: bookedAt[t] || 0,
             slotKinds: [...new Set(products.filter(x => (Number(x.spaces_left_cache) || 0) > 0).map(x => /splatter/i.test(x.title) ? 'Splatter' : 'Kids'))] });
         });
-        sessions = sessions.filter(x => !isRoomParty(x) || booked[x.id] > 0).concat(openRows)
+        sessions = sessions.filter(x => !isRoomParty(x) || booked[x.id] > 0 || heldParty(x)).concat(openRows)
           .sort((a, b) => String(a.session_time).localeCompare(String(b.session_time)));
       }
     } catch (e) { /* no slot schedule: show party products as before */ }
@@ -11349,7 +11381,7 @@ function customHeldHtml(x) {
   const tip = 'A private custom time, not on World for anyone else' + (r.created_by ? '. Made by ' + r.created_by : '') + (made ? ' on ' + made : '') + (r.requested_by ? ' (requested by ' + r.requested_by + ')' : '') +
     (r.customer_phone ? '. Phone: ' + r.customer_phone : '') + (r.closed_n ? '. ' + r.closed_n + ' workshop' + (r.closed_n === 1 ? '' : 's') + ' closed while held' : '') + (r.note ? '. Note: ' + r.note : '');
   return `<span class="cust-st cust-held" title="${escAttr(tip + (r.promo ? '. Free promotional party' + (r.promo_reason ? ': ' + r.promo_reason : '') : ''))}">${r.promo ? '🎁 Promo party' : '⏳ On hold: custom time'}</span> for <b>${esc(r.customer_name || '')}</b> <span class="goal-note">${esc(r.customer_email || '')}</span>
-    · ${sent ? 'link sent ' + esc(sent) : '<b style="color:#b45309">link not sent yet</b>'} · ${r.promo ? 'free: they finish the details on World' : `payment due by <b>${esc(dl(r.pay_by))}</b>`}
+    · ${sent ? 'link sent ' + esc(sent) : '<b style="color:#b45309">link not sent yet</b>'} · ${r.promo ? (Math.round((new Date(String(r.day).slice(0, 10) + 'T12:00:00') - new Date(new Date().toDateString())) / 86400000) <= 3 ? `<b style="color:#b45309">⚠ details not finished: please call them${r.customer_phone ? ' (' + esc(r.customer_phone) + ')' : ''}</b>` : 'free: they finish the details on World') : `payment due by <b>${esc(dl(r.pay_by))}</b>`}
     ${planCanEdit() ? `<span class="cust-acts"><button class="ho-btn sm${r.sent_at ? '' : ' primary'}" onclick="customSend('${escAttr(r.id)}')">${r.sent_at ? 'Resend link' : 'Send link'}</button>${_studioData && _studioData.isAdmin ? `<button class="ho-btn sm" onclick="customAct('${escAttr(r.id)}','extend')">Extend</button><button class="ho-btn sm" onclick="customAct('${escAttr(r.id)}','cancel')">Cancel</button>` : ''}</span>` : ''}`;
 }
 function customNew() {
