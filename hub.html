@@ -765,6 +765,9 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .sup-tbl td, .sup-tbl th { vertical-align: top; } .sup-tbl tr.sup-off td { opacity: .5; }
 .sup-form label { display: block; margin-bottom: 8px; } .sup-two { display: flex; flex-wrap: wrap; gap: 8px; } .sup-two label { flex: 1; min-width: 120px; }
 .sup-ov { margin-top: 10px; padding: 10px 12px; border: 1px solid #e6dfd2; border-radius: 10px; background: #fbf8f2; }
+.ft-dragth { cursor: grab; } .ft-dragth:active { cursor: grabbing; }
+.ft-dwrap { position: relative; display: block; min-width: 128px; cursor: pointer; } .ft-dlabel { display: block; padding: 6px 4px; white-space: nowrap; font-weight: 600; }
+.ft-dwrap .ft-dpick { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
 .wu-booked { background: #eef7ee; border: 1px solid #b8e0c3; border-radius: 10px; padding: 8px 12px; margin: 8px 0; font-size: 14px; }
 .rp-ck { width: 30px; text-align: center; } .rp-ck input { width: 18px; height: 18px; cursor: pointer; }
 .rp-tbl tr.rp-sel td { background: #fff8e6; }
@@ -9281,14 +9284,37 @@ async function newsTopicSave(id) {
 // ---------- Home office → 🏫 Field trips (world_field_trips.sql + field_trip_tracker.sql): a spreadsheet / project tracker ----------
 // World's Field Trips form adds a row (and emails events@4cats.com); + Add a request adds rows for ones by email or phone.
 // Every column is edited right in the table and saves straight away. Follow-ups due today or earlier are highlighted.
-let _ft = { status: 'open', rows: null, err: '', q: '', studio: '', sort: 'created_at', desc: true, add: null, saving: {} };
+let _ft = { status: 'open', rows: null, err: '', q: '', studio: '', sort: 'created_at', desc: true, add: null, saving: {}, from: '', to: '' };
+// (Nov 11 2026) the columns in your own order: drag a heading left or right (kept on this computer). New default: trip date, then studio.
+const FT_DEFAULT_ORDER = ['booked_date', 'studio_id'];
+function ftCols() {
+  let order = null; try { order = JSON.parse(localStorage.getItem('ft_col_order') || 'null'); } catch (e) { }
+  const byKey = {}; FT_COLS.forEach(c => { byKey[c[0]] = c; });
+  const keys = (Array.isArray(order) ? order : FT_DEFAULT_ORDER).filter(k => byKey[k]);
+  FT_COLS.forEach(c => { if (!keys.includes(c[0])) keys.push(c[0]); });
+  return keys.map(k => byKey[k]);
+}
+let _ftDrag = null;
+function ftColDrop(target) {
+  if (!_ftDrag || _ftDrag === target) return;
+  const keys = ftCols().map(c => c[0]), from = keys.indexOf(_ftDrag); keys.splice(from, 1); keys.splice(keys.indexOf(target), 0, _ftDrag);
+  try { localStorage.setItem('ft_col_order', JSON.stringify(keys)); } catch (e) { }
+  _ftDrag = null; ftDraw();
+}
+function ftColReset() { try { localStorage.removeItem('ft_col_order'); } catch (e) { } ftDraw(); }
+// "Wed, Nov 4th, 2026"
+function ftNiceDate(d) {
+  if (!d) return ''; const x = new Date(String(d).slice(0, 10) + 'T12:00:00'), n = x.getDate();
+  const th = n % 10 === 1 && n !== 11 ? 'st' : n % 10 === 2 && n !== 12 ? 'nd' : n % 10 === 3 && n !== 13 ? 'rd' : 'th';
+  return x.toLocaleDateString('en-CA', { weekday: 'short' }) + ', ' + x.toLocaleDateString('en-CA', { month: 'short' }) + ' ' + n + th + ', ' + x.getFullYear();
+}
 const FT_STATUS = [['new', 'New'], ['contacted', 'Contacted'], ['invoiced', 'Invoiced'], ['booked', 'Booked'], ['declined', 'Declined']];
 const FT_SOURCE = [['form', '🌐 Form'], ['email', '✉️ Email'], ['phone', '📞 Phone'], ['other', 'Other']];
 // [field, heading, input type, width]
 const FT_COLS = [['status', 'Status', 'status', 112], ['follow_up', 'Follow up', 'date', 128], ['school', 'School', 'text', 170], ['contact_name', 'Contact', 'text', 140],
   ['email', 'Email', 'email', 190], ['phone', 'Phone', 'tel', 120], ['studio_id', 'Studio', 'studio', 150], ['preferred_date', 'Date wanted', 'text', 120],
   ['ages', 'Ages / grade', 'text', 100], ['students', 'Students', 'num', 72], ['adults', 'Adults', 'num', 64], ['project', 'Project', 'text', 150],
-  ['booked_date', 'Booked date', 'date', 128], ['booked_time', 'Time', 'time', 104], ['quote', 'Quote $', 'money', 86], ['invoice_sent', 'Invoice sent', 'date', 128],
+  ['booked_date', 'Trip date', 'date', 150], ['booked_time', 'Time', 'time', 104], ['quote', 'Quote $', 'money', 86], ['invoice_sent', 'Invoice sent', 'date', 128],
   ['invoice_due', 'Invoice due', 'date', 128], ['paid_on', 'Paid', 'date', 128], ['assigned_to', 'Who’s on it', 'text', 110], ['staff_note', 'Staff note', 'text', 220],
   ['notes', 'Their questions', 'notes', 200], ['source', 'From', 'source', 98], ['created_at', 'Received', 'ro', 96]];
 
@@ -9543,6 +9569,8 @@ function ftCell(r, c) {
   if (type === 'source') return `<td><select class="ft-in" ${ro} ${on}>${FT_SOURCE.map(o => `<option value="${o[0]}"${o[0] === (v || 'form') ? ' selected' : ''}>${o[1]}</option>`).join('')}</select></td>`;
   if (type === 'studio') return `<td><select class="ft-in" ${ro} ${on}><option value="">—</option>${Object.keys(STUDIO_NAMES).sort((a, b) => STUDIO_NAMES[a].localeCompare(STUDIO_NAMES[b])).map(s => `<option value="${s}"${s === v ? ' selected' : ''}>${esc(STUDIO_NAMES[s])}</option>`).join('')}</select></td>`;
   if (type === 'notes') return `<td><textarea class="ft-in ft-notes-in" rows="1" ${ro} ${on} title="${escAttr(v || '')}">${esc(v || '')}</textarea></td>`;
+  if (f === 'booked_date') return `<td><label class="ft-dwrap"><span class="ft-dlabel">${v ? esc(ftNiceDate(v)) : '<span class="goal-note">Set date</span>'}</span>
+    <input class="ft-in ft-dpick" type="date" value="${escAttr(v || '')}" ${ro} ${on} onclick="try{this.showPicker()}catch(e){}"></label></td>`;
   const t = type === 'num' ? 'number' : type === 'money' ? 'number" step="0.01' : type === 'text' ? 'text' : type;
   const val = type === 'time' && v ? String(v).slice(0, 5) : v == null ? '' : v;
   return `<td><input class="ft-in" type="${t}" value="${escAttr(val)}" ${ro} ${on}${type === 'email' && v ? ` title="${escAttr(v)}"` : ''}></td>`;
@@ -9559,7 +9587,8 @@ function ftDrawPage(el) {
   const F = _ft, R = F.rows, today = new Date().toLocaleDateString('en-CA'), q = F.q.trim().toLowerCase();
   // keep the table's scroll where it was
   const w0 = el.querySelector('.ft-wrap'), keep = w0 ? [w0.scrollTop, w0.scrollLeft] : null;
-  let rows = (R || []).filter(r => (!F.studio || r.studio_id === F.studio) && (!q || [r.school, r.contact_name, r.email, r.project, r.staff_note, r.notes].some(x => String(x || '').toLowerCase().includes(q))));
+  let rows = (R || []).filter(r => (!F.from || (r.booked_date && r.booked_date >= F.from)) && (!F.to || (r.booked_date && r.booked_date <= F.to))
+    && (!F.studio || r.studio_id === F.studio) && (!q || [r.school, r.contact_name, r.email, r.project, r.staff_note, r.notes].some(x => String(x || '').toLowerCase().includes(q))));
   const key = r => { const v = r[F.sort]; return v == null || v === '' ? (F.desc ? '' : '\uffff') : typeof v === 'number' ? String(v).padStart(10, '0') : String(v).toLowerCase(); };
   rows.sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0) * (F.desc ? -1 : 1));
   const due = rows.filter(r => r.follow_up && r.follow_up <= today && !['booked', 'declined'].includes(r.status)).length;
@@ -9578,12 +9607,16 @@ function ftDrawPage(el) {
   h += `<div class="act-filters"><select onchange="_ft.status=this.value;ftLoad()">${[['open', 'Open (new, contacted, invoiced)'], ...FT_STATUS, ['all', 'All']].map(o => `<option value="${o[0]}"${o[0] === F.status ? ' selected' : ''}>${o[1]}</option>`).join('')}</select>
       <select onchange="_ft.studio=this.value;ftDraw()"><option value="">Every studio</option>${Object.keys(STUDIO_NAMES).sort((a, b) => STUDIO_NAMES[a].localeCompare(STUDIO_NAMES[b])).map(s => `<option value="${s}"${s === F.studio ? ' selected' : ''}>${esc(STUDIO_NAMES[s])}</option>`).join('')}</select>
       <input type="search" id="ft-q" placeholder="Search school, contact, project, notes" value="${escAttr(F.q)}" oninput="_ft.q=this.value;ftDraw();const i=document.getElementById('ft-q');i.focus();i.setSelectionRange(i.value.length,i.value.length)">
+      <label class="fd-sm">Trip date from <input type="date" value="${escAttr(F.from)}" onchange="_ft.from=this.value;ftDraw()"></label>
+      <label class="fd-sm">to <input type="date" value="${escAttr(F.to)}" onchange="_ft.to=this.value;ftDraw()"></label>
+      ${F.from || F.to ? `<button class="ho-btn sm" onclick="_ft.from='';_ft.to='';ftDraw()">Clear dates</button>` : ''}
+      <button class="ho-btn sm" onclick="ftColReset()" title="Put the columns back in the usual order">↺ Columns</button>
       <span class="fd-sm">${R ? `${rows.length} request${rows.length === 1 ? '' : 's'}${due ? ` · <b class="ft-due-n">${due} to follow up</b>` : ''}` : ''}</span></div>`;
   if (F.err) h += `<div class="goal-note">${esc(F.err)}</div>`;
   else if (R === null) h += '<div class="goal-note">Loading…</div>';
   else if (!rows.length) h += '<div class="goal-note">No field trip requests here.</div>';
-  else h += `<div class="ft-topscroll" id="ft-topscroll"><div></div></div><div class="fd-tbl-wrap ft-wrap"><table class="fd-tbl ft-tbl"><thead><tr><th style="min-width:200px">Invoice</th>${FT_COLS.map(c => `<th style="min-width:${c[3]}px"><button class="fd-th${F.sort === c[0] ? ' on' : ''}" onclick="ftSort('${c[0]}')">${esc(c[1])}${F.sort === c[0] ? (F.desc ? ' ▼' : ' ▲') : ''}</button></th>`).join('')}${_hoCan.edit ? '<th></th>' : ''}</tr></thead><tbody>` +
-    rows.map(r => `<tr class="${r.follow_up && r.follow_up <= today && !['booked', 'declined'].includes(r.status) ? 'ft-due' : ''} ft-r-${escAttr(r.status || 'new')}"><td class="ft-inv">${ftInvCell(r)}</td>${FT_COLS.map(c => ftCell(r, c)).join('')}` +
+  else h += `<div class="ft-topscroll" id="ft-topscroll"><div></div></div><div class="fd-tbl-wrap ft-wrap"><table class="fd-tbl ft-tbl"><thead><tr><th style="min-width:200px">Invoice</th>${ftCols().map(c => `<th style="min-width:${c[3]}px" class="ft-dragth" draggable="true" title="Drag to move this column" ondragstart="_ftDrag='${c[0]}';event.dataTransfer.effectAllowed='move'" ondragover="event.preventDefault()" ondrop="event.preventDefault();ftColDrop('${c[0]}')"><button class="fd-th${F.sort === c[0] ? ' on' : ''}" onclick="ftSort('${c[0]}')">${esc(c[1])}${F.sort === c[0] ? (F.desc ? ' ▼' : ' ▲') : ''}</button></th>`).join('')}${_hoCan.edit ? '<th></th>' : ''}</tr></thead><tbody>` +
+    rows.map(r => `<tr class="${r.follow_up && r.follow_up <= today && !['booked', 'declined'].includes(r.status) ? 'ft-due' : ''} ft-r-${escAttr(r.status || 'new')}"><td class="ft-inv">${ftInvCell(r)}</td>${ftCols().map(c => ftCell(r, c)).join('')}` +
       (_hoCan.edit ? `<td class="ft-x">${F.saving[r.id] === 1 ? '…' : F.saving[r.id] === 2 ? '✓' : `<button title="Delete this row" onclick="ftDel('${escAttr(r.id)}')">🗑</button>`}</td>` : '') + '</tr>').join('') + '</tbody></table></div>';
   el.innerHTML = h;
   const w1 = el.querySelector('.ft-wrap'); if (w1 && keep) { w1.scrollTop = keep[0]; w1.scrollLeft = keep[1]; }
@@ -9624,8 +9657,8 @@ async function ftDel(id) {
   _ft.rows = _ft.rows.filter(x => x.id !== id); ftDraw();
 }
 function ftCsv() {
-  const rows = (_ft.rows || []), cols = FT_COLS.map(c => c[0]), q = x => { const s = x == null ? '' : String(x); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-  const csv = [FT_COLS.map(c => c[1]).join(',')].concat(rows.map(r => cols.map(k => q(k === 'studio_id' ? (STUDIO_NAMES[r[k]] || r[k]) : r[k])).join(','))).join('\n');
+  const rows = (_ft.rows || []), cols = ftCols().map(c => c[0]), q = x => { const s = x == null ? '' : String(x); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const csv = [ftCols().map(c => c[1]).join(',')].concat(rows.map(r => cols.map(k => q(k === 'studio_id' ? (STUDIO_NAMES[r[k]] || r[k]) : r[k])).join(','))).join('\n');
   const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv' })); a.download = 'field-trips-' + new Date().toLocaleDateString('en-CA') + '.csv'; a.click();
 }
 
