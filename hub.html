@@ -10818,6 +10818,14 @@ function planDayStrip(sel) {
   if (on) el.scrollLeft = Math.max(0, on.offsetLeft - el.offsetLeft - 120);
 }
 const planWriteName = p => p.nickname || p.full_name || p.name;   // the way the Day view writes names
+// (Nov 11 2026) a kids class counts as running even with nobody enrolled yet, EXCEPT the fall drawing classes
+// (Lawren Harris, Drawing Class): those are hidden until someone enrols
+function planKidsRuns(x, P) {
+  P = P || _plan; if (!planIsKids(x)) return false;
+  if (((P.booked || {})[x.id] || 0) > 0) return true;
+  if (x.capacity === 0 && /week session/i.test(x.title || '')) return false;   // (empty sign-up rows)
+  return !/lawren\s*harris|drawing\s*class/i.test(x.title || '');
+}
 function planIsKids(x) { if (planIsCamp(x)) return false;   // camps and PA/PD days are camps, even when set up as type "class"
   return x.session_type === 'class' || x.session_type === 'series' || /class \d+ of \d+|week session/i.test(x.title || ''); }
 
@@ -11454,7 +11462,7 @@ function renderPlanDay() {
       ${edit ? `<div class="brk">Break <input type="text" value="${escAttr(P.roles['break_' + f])}" placeholder="e.g. 12:30–1:00" oninput="planSet('break_${f}', this.value, true)"></div>`
         : (P.roles['break_' + f] ? `<div class="brk">Break ${esc(P.roles['break_' + f])}</div>` : '')}${breakClash(f)}</div>`).join('')
     || '<div class="ho-intro">No roles set for this day yet.</div>';
-  const kids = P.sessions.filter(x => planIsKids(x) && (P.booked[x.id] || 0) > 0);   // (0 enrolled: not running, as on the day board)
+  const kids = P.sessions.filter(x => planKidsRuns(x, P));   // (0 enrolled: still shown, except Lawren Harris / Drawing Class)
   const wheels = P.sessions.filter(x => P.wheel[x.id] !== undefined && !planNotRunning(x));
   const partySessionIds = new Set(P.parties.map(pt => pt.session.id));
   // Everything else (workshops, glazing, Mini Make, camps, parties with no booking yet):
@@ -11534,11 +11542,6 @@ function renderPlanDay() {
     ${edit ? '<div id="tc-box"><div class="goal-note">Loading…</div></div>' : planStaffListHtml()}
     <div class="ho-section-head">Everything on this day</div>${sessRows || '<div class="ho-intro">Nothing running this day.</div>'}
     ${planCanShifts() ? wsDayHtml() : ''}
-    ${(() => {   // (Nov 11 2026) kids classes nobody has enrolled in yet: listed (not hidden), so a coming term's classes can be seen
-      const k0 = P.sessions.filter(x => planIsKids(x) && !((P.booked[x.id] || 0) > 0) && !(x.capacity === 0 && /week session/i.test(x.title || '')));
-      return k0.length ? `<details class="plan-closed plan-kids0" open><summary>🎨 Kids classes · nobody enrolled yet (${k0.length})</summary>
-        ${k0.map(x => `<div class="plan-sess off"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">0 enrolled${x.capacity != null ? ' · ' + (+x.capacity) + ' spots' : ''}${x.show === false ? ' · hidden' : ''}</div></span></div>`).join('')}</details>` : '';
-    })()}
     ${notRunning.length ? `<details class="plan-closed"><summary>Not running (${notRunning.length}) · 0 booked and no spots open</summary>
       ${notRunning.map(x => `<div class="plan-sess off"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}</span>
         ${planCanAdjust() ? (x.partySlot ? `<button class="ho-btn" onclick="planSlotOpenClose('${escAttr(x.id)}', true)">Reopen</button>`
@@ -11592,7 +11595,7 @@ function planBoardHtml() {
   // (Nov 9 2026) the times not booked yet, in white above the people (as on the day board): information only
   const tl0 = x => String(x.title || '').split('|')[0].trim();
   const ptIds = new Set((P.parties || []).map(pt => pt.session && pt.session.id));
-  const openTimes = P.sessions.filter(x => !planIsCamp(x) && !planNotRunning(x) && !ptIds.has(x.id) && !(planIsKids(x) && !((P.booked[x.id] || 0) > 0)))
+  const openTimes = P.sessions.filter(x => !planIsCamp(x) && !planNotRunning(x) && !ptIds.has(x.id) && !(planIsKids(x) && !planKidsRuns(x, P)))
     .map(x => { const a = hubMin(x.session_time), n = P.booked[x.id] || 0; return { id: 'o:' + x.id, kind: n > 0 ? 'open booked' : 'open', sid: x.id, title: x.partySlot ? 'Party slot' : tl0(x),
       sub: (x.held_until ? 'on hold' : x.partySlot ? (x.spaces_left_cache || 0) + ' open' : n > 0 ? n + (planIsKids(x) ? ' enrolled' : ' booked') : (x.spaces_left_cache != null ? x.spaces_left_cache + ' spots' : 'not booked'))
         + (planIsKids(x) ? (t => t && t !== 'none' ? ' · 👤 ' + t : '')(String(P.kidsTeacher[x.id] || (P.staffBy[x.id] || {}).teacher || '').trim()) : ''),
@@ -12013,7 +12016,7 @@ function mHm(min) { const h = Math.floor(min / 60), m = min % 60, ap = h >= 12 ?
 // Who teaches / demos what on the Schedule's day (kids classes, wheel, party art time, then demos)
 function planDemoPlan() {
   const P = _plan;
-  const kids = P.sessions.filter(x => planIsKids(x) && (P.booked[x.id] || 0) > 0), wheels = P.sessions.filter(x => P.wheel[x.id] !== undefined && !planNotRunning(x));
+  const kids = P.sessions.filter(x => planKidsRuns(x, P)), wheels = P.sessions.filter(x => P.wheel[x.id] !== undefined && !planNotRunning(x));
   const partyIds = new Set(P.parties.map(pt => pt.session.id));
   const others = P.sessions.filter(x => !planIsKids(x) && !planIsCamp(x) && P.wheel[x.id] === undefined && !partyIds.has(x.id) && !planNotRunning(x));   // camps have their own staff
   const partyBy = {}, partyBusy = {};
