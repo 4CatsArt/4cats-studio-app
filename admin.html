@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<!-- admin.html -->
 <html lang="en">
 <head>
 <link rel="icon" type="image/svg+xml" href="https://cdn.shopify.com/s/files/1/1451/3756/files/favicon_black_512x512_9c6dd2c0-fdcd-4575-887e-bf65538803af.png?v=1631720337">
@@ -65,13 +66,6 @@ body.ro-mode #mass-due-date-modal { display: none !important; }
 body.ro-mode td.st-edit { pointer-events: none; }
 body.ro-mode .st-ghost { display: none; }
 body.ro-mode #staff-modal input, body.ro-mode #staff-modal select, body.ro-mode #staff-modal textarea { pointer-events: none; background: #f7f7f3; }
-/* Access tab */
-.acc-table { width: 100%; border-collapse: collapse; font-size: 12px; background: white; }
-.acc-table th { background: #fafaf8; border-bottom: 0.5px solid #e0e0d8; padding: 9px 10px; text-align: left; font-size: 11px; color: #888; text-transform: uppercase; white-space: nowrap; }
-.acc-table td { padding: 8px 10px; border-bottom: 0.5px solid #f5f5f0; white-space: nowrap; }
-.acc-table select { height: 28px; font-size: 12px; padding: 0 6px; }
-.acc-table select.acc-dirty { border-color: #e0a800; background: #fffbea; }
-.acc-owner { font-size: 11px; color: #5b4fcf; background: #ecebfb; border-radius: 4px; padding: 2px 7px; }
 .tab-content.active { display: block; }
 .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 1.25rem; flex-wrap: wrap; background: white; border: 0.5px solid #e0e0d8; border-radius: 10px; padding: 10px 14px; }
 .toolbar-sep { width: 0.5px; height: 20px; background: #e0e0d8; margin: 0 2px; }
@@ -1179,8 +1173,8 @@ async function initApp() {
 }
 
 // ═══ Home office menu + per-person access (Oct 2026) ═══════════════════════
-// Sections and levels come from admin_access via my_admin_access(); owners
-// (admin_owners) get everything. Finance uses the existing has_finance_access().
+// Sections and levels come from my_admin_access(), which reads the permissions set on
+// access.html (roles + settings); owners get everything. Finance uses has_finance_access().
 // Tab ids are unchanged from the old menu so nothing else in this file breaks.
 const ADMIN_NAV = [
   { sec: 'calendar', label: 'Calendar', items: [
@@ -1241,7 +1235,7 @@ const ADMIN_NAV = [
   ]},
   { sec: 'users', label: 'Users', items: [
     { tab: 'users', label: 'User Logins' },
-    { tab: 'access', label: 'Access', ownerOnly: true },
+    { href: 'access.html', label: 'Access' },   // roles and permissions now live on access.html (Nov 2026)
   ]},
   { sec: 'finance', label: 'Finance', items: [
     { href: 'finance.html', label: 'Finance', financeOnly: true },   // finance list only
@@ -1337,92 +1331,6 @@ function setViewOnlyMode(tab) {
   } else if (!ro && banner) banner.remove()
 }
 
-// ── Access tab (owners only; the database also allows only owners to change it) ──
-let accState = { users: [], owners: new Set(), levels: {}, edits: {}, fix: {}, fixOk: false }   // fix: "Can fix memberships" (hub_member_fixers.sql)
-async function loadAccessTab() {
-  const wrap = document.getElementById('access-table-wrap')
-  if (!adminIsOwner) { wrap.innerHTML = '<div class="empty">Only owners can manage access.</div>'; return }
-  wrap.innerHTML = '<div class="loading">Loading...</div>'
-  const [usersRes, accRes, ownRes, namesRes] = await Promise.all([
-    adminUsersRequest('GET'),
-    sb.from('admin_access').select('user_id, section, level'),
-    sb.from('admin_owners').select('user_id'),
-    sb.from('studio_users').select('user_id, display_name'),
-  ])
-  if (usersRes.error || accRes.error || ownRes.error) {
-    wrap.innerHTML = `<div class="empty" style="color:#c0392b">Error: ${usersRes.error || accRes.error?.message || ownRes.error?.message}</div>`; return
-  }
-  const names = Object.fromEntries((namesRes.data || []).map(r => [r.user_id, r.display_name]))
-  accState.users = (usersRes.users || []).filter(u => u.role === 'admin')
-    .map(u => ({ ...u, display_name: names[u.user_id] || '' }))
-    .sort((a, b) => (a.display_name || a.email || '').localeCompare(b.display_name || b.email || ''))
-  accState.owners = new Set((ownRes.data || []).map(r => r.user_id))
-  accState.levels = {}
-  ;(accRes.data || []).forEach(r => { accState.levels[`${r.user_id}|${r.section}`] = r.level })
-  accState.edits = {}
-  // "Can fix memberships" (Hub → Families → Mark as member). Hidden until hub_member_fixers.sql is run.
-  const fixRes = await sb.from('studio_users').select('user_id, can_fix_memberships')
-  accState.fixOk = !fixRes.error
-  accState.fix = {}
-  ;(fixRes.data || []).forEach(r => { if (r.can_fix_memberships) accState.fix[r.user_id] = true })
-  renderAccessTable()
-}
-function renderAccessTable() {
-  const wrap = document.getElementById('access-table-wrap')
-  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
-  let html = `<div class="users-table-wrap" style="overflow-x:auto"><table class="acc-table"><thead><tr><th>Person</th>${ADMIN_SECTIONS.map(s => `<th>${s.label}</th>`).join('')}${accState.fixOk ? '<th title="Hub → Families → Mark as member: add or end a free membership to fix one that shows wrong">Fix memberships</th>' : ''}</tr></thead><tbody>`
-  accState.users.forEach(u => {
-    const who = `<div style="font-weight:500">${esc(u.display_name) || '<span style="color:#bbb;font-style:italic">No name</span>'}</div><div class="user-meta">${esc(u.email)}</div>`
-    if (accState.owners.has(u.user_id)) {
-      html += `<tr><td>${who}</td><td colspan="${ADMIN_SECTIONS.length + (accState.fixOk ? 1 : 0)}"><span class="acc-owner">Owner — full access to everything</span></td></tr>`; return
-    }
-    html += `<tr><td>${who}</td>` + ADMIN_SECTIONS.map(s => {
-      const key = `${u.user_id}|${s.key}`
-      const cur = key in accState.edits ? accState.edits[key] : (accState.levels[key] || '')
-      const dirty = key in accState.edits ? ' acc-dirty' : ''
-      return `<td><select class="${dirty}" onchange="accEdit('${key}', this.value)">
-        <option value=""${cur === '' ? ' selected' : ''}>—</option>
-        <option value="view"${cur === 'view' ? ' selected' : ''}>View</option>
-        <option value="edit"${cur === 'edit' ? ' selected' : ''}>Edit</option></select></td>`
-    }).join('') + (accState.fixOk ? (() => {
-      const key = `${u.user_id}|__fixmem`, cur = key in accState.edits ? accState.edits[key] === 'on' : !!accState.fix[u.user_id]
-      return `<td style="text-align:center"><input type="checkbox" class="${key in accState.edits ? 'acc-dirty' : ''}" ${cur ? 'checked' : ''} onchange="accEdit('${key}', this.checked ? 'on' : '')" aria-label="Can fix memberships"></td>`
-    })() : '') + '</tr>'
-  })
-  html += '</tbody></table></div>'
-  wrap.innerHTML = html
-  const n = Object.keys(accState.edits).length
-  document.getElementById('access-save-btn').disabled = !n
-  document.getElementById('access-save-btn').textContent = n ? `Save ${n} change${n === 1 ? '' : 's'}` : 'No changes'
-}
-function accEdit(key, val) {
-  const was = key.endsWith('|__fixmem') ? (accState.fix[key.split('|')[0]] ? 'on' : '') : (accState.levels[key] || '')
-  if (was === val) delete accState.edits[key]
-  else accState.edits[key] = val
-  renderAccessTable()
-}
-async function saveAccessChanges() {
-  const btn = document.getElementById('access-save-btn')
-  const status = document.getElementById('access-status')
-  const entries = Object.entries(accState.edits)
-  if (!entries.length) return
-  btn.disabled = true; status.textContent = 'Saving...'; status.style.color = '#888'
-  const upserts = [], deletes = [], fixes = []
-  entries.forEach(([key, level]) => {
-    const [user_id, section] = key.split('|')
-    if (section === '__fixmem') { fixes.push({ user_id, on: level === 'on' }); return }
-    if (level) upserts.push({ user_id, section, level, updated_at: new Date().toISOString() })
-    else deletes.push({ user_id, section })
-  })
-  let err = null
-  if (upserts.length) { const r = await sb.from('admin_access').upsert(upserts, { onConflict: 'user_id,section' }); if (r.error) err = r.error }
-  for (const d of deletes) { if (err) break; const r = await sb.from('admin_access').delete().eq('user_id', d.user_id).eq('section', d.section); if (r.error) err = r.error }
-  for (const f of fixes) { if (err) break; const r = await sb.rpc('hub_set_member_fix', { p_user: f.user_id, p_on: f.on }); if (r.error) err = r.error }
-  if (err) { status.textContent = 'Error: ' + err.message; status.style.color = '#c0392b'; btn.disabled = false; return }
-  status.textContent = 'Saved. Changes apply the next time that person loads admin.'; status.style.color = '#2e7d32'
-  await loadAccessTab()
-}
-
 function switchTab(tab) {
   if (!canOpenTab(tab)) return
   closeNavMenus()
@@ -1433,7 +1341,6 @@ function switchTab(tab) {
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'))
   document.getElementById(`tab-${tab}`).classList.add('active')
   setViewOnlyMode(tab)
-  if (tab === 'access') loadAccessTab()
   if (tab === 'curriculum') loadCurriculum()
   if (tab === 'quality') { loadQualityReport(); clearQualityBadge() }
   if (tab === 'users') loadUsers()
@@ -9120,21 +9027,6 @@ function showAdminToast(msg, duration = 2500) {
       <div style="display:flex;gap:8px"><button class="btn" onclick="closeTaskEditPopup()">Cancel</button><button class="btn btn-primary" onclick="saveTaskEdit()">Save</button></div>
     </div>
   </div>
-</div>
-
-<!-- Access Tab (owners only) -->
-<div class="tab-content" id="tab-access" style="max-width:1100px">
-  <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:1rem">
-    <div>
-      <div style="font-size:15px;font-weight:600">Home office access</div>
-      <div style="font-size:12px;color:#888;margin-top:4px;max-width:640px;line-height:1.5">Choose which menu sections each home office login can open. <b>View</b> = can look but not save changes. New logins created under User Logins start with no sections until you set them here. Finance access is managed separately (finance list).</div>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px">
-      <span id="access-status" style="font-size:12px"></span>
-      <button id="access-save-btn" class="btn btn-primary" onclick="saveAccessChanges()" disabled>No changes</button>
-    </div>
-  </div>
-  <div id="access-table-wrap"><div class="loading">Loading...</div></div>
 </div>
 
 <!-- Clay Tracker Tab -->
