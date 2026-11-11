@@ -1,6 +1,6 @@
 // hub/families.js: 👪 Families (the families table, a family's card, its people, notes, "can attend as" ages, badges).
 // Moved out of hub.html (Nov 11 2026) and opened from the studio view with the same staff PIN as Front desk.
-// Loaded by hub.html after its main script (and after hub/front-desk.js, which holds the shared PIN step).
+// Loaded by hub.html after its main script (and after hub/front-desk.js, which holds the shared PIN step). 
 
 // 🔑 (Nov 11 2026) Families in the studio view: the same "Who's at the desk?" PIN as Front desk (one unlock covers both).
 // Looking families up needs Families (View) on the Access page; changing them needs Families (Edit). The server decides.
