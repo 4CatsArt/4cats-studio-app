@@ -7,14 +7,15 @@
 // in the Store, plus per-studio overrides. The same list Supplies → Store and Counts use.
 const SUP_GROUPS = ['Clay', 'Ditto', 'Paint', 'Glaze', 'Canvases & surfaces', 'Brushes & tools', 'Craft materials', 'Camp & party', 'Cleaning & washroom', 'Studio basics', 'Snacks & Drinks', 'Other supplies'];
 const SUP_RULES = [['', 'Top up to par'], ['one_case', 'Order one case at the reorder point'], ['on_request', 'Ask when needed (never ordered automatically)']];
-let _sup = { rows: null, err: '', q: '', grp: '', show: 'active', edit: null, msg: '' };
+let _sup = { rows: null, err: '', q: '', grp: '', show: 'active', edit: null, msg: '', canEdit: false };
 async function openSupPane() {
-  if (!_hoCan.view) { alert('The supplies list needs Studio Ops access.'); return; }
+  // Who can open it and change it: “Supplies & inventory” on access.html (View to look, Edit to change). The server decides (perm_can).
   showOnlyPane('sup-pane'); setActiveNav('nav-sup'); _sup.edit = null; supDraw(); supLoad();
+  sb.rpc('perm_can', { p_area: 'supplies_inventory', p_level: 'edit' }).then(r => { _sup.canEdit = r.data === true; supDraw(); });
 }
 async function supLoad() {
   const { data, error } = await sb.rpc('hub_supplies_list');
-  _sup.err = error ? (/hub_supplies_list/.test(error.message) ? 'Run supplies_manager.sql in Supabase first.' : error.message) : '';
+  _sup.err = error ? (/hub_supplies_list/.test(error.message) ? 'Run supplies_manager.sql in Supabase first.' : /not allowed|denied/i.test(error.message) ? 'The supplies list needs “Supplies & inventory” on the Access page.' : error.message) : '';
   _sup.rows = error ? [] : (data || []); supDraw();
 }
 function supNum(v) { return v == null || v === '' ? '' : String(+v); }
@@ -26,7 +27,7 @@ function supRuleText(r) {
 }
 function supDraw() {
   const el = document.getElementById('sup-pane'); if (!el) return;
-  const can = !!_hoCan.edit;
+  const can = !!_sup.canEdit;
   let h = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🧺 Supplies list</div><span class="spacer"></span>
     ${can ? '<button class="ho-btn primary" onclick="supEdit(null)">+ Add a supply</button>' : ''}<button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
     <p class="ho-intro">Every studio supply: what staff "buy" in Supplies → Store as they open it, and count in Supplies → Counts. Retail products (kits, snacks for sale) are in 🛍️ Products.</p>`;
