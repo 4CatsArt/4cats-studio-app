@@ -770,6 +770,7 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .ft-dwrap .ft-dpick { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
 .ts-shift { font-size: 12px; font-weight: 700; color: #555; background: #f2eee6; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
 .tsg-shift { white-space: nowrap; color: #6b6b6b; font-size: 12px; }
+.plan-day.plan-day-booked { position: relative; } .plan-day.plan-day-booked::after { content: ''; position: absolute; top: 5px; right: 6px; width: 7px; height: 7px; border-radius: 50%; background: #c0392b; }
 .wu-booked { background: #eef7ee; border: 1px solid #b8e0c3; border-radius: 10px; padding: 8px 12px; margin: 8px 0; font-size: 14px; }
 .rp-ck { width: 30px; text-align: center; } .rp-ck input { width: 18px; height: 18px; cursor: pointer; }
 .rp-tbl tr.rp-sel td { background: #fff8e6; }
@@ -10626,16 +10627,23 @@ async function loadPlanRunDays(win) {
   win = win || planStripWindow(_planStripSel || localDateStr(new Date()));
   if (_planRunDays && _planRunDays.studio === st && _planRunDays.from === win.from) return;
   const from = planDateOf(win.from), to = planDateOf(win.to);
-  const { data, error } = await sb.from('sessions').select('session_date, capacity, show, session_type, title')
+  const { data, error } = await sb.from('sessions').select('session_date, capacity, show, session_type, title, held_until')
     .eq('studio_id', st).gte('session_date', localDateStr(from)).lte('session_date', localDateStr(to));
   if (error) return;
-  const days = new Set();
+  const days = new Set(), extra = new Set();
+  // (Nov 11 2026) a held time (field trip, custom or promo party) or anything booked: never shown as an idle day
+  (data || []).forEach(x => { if (x.held_until) extra.add(x.session_date); });
+  try {
+    const bk = await sb.from('bookings').select('qty, sessions!inner(studio_id, session_date)').eq('sessions.studio_id', st)
+      .gte('sessions.session_date', localDateStr(from)).lte('sessions.session_date', localDateStr(to)).gt('qty', 0).is('returned_at', null);
+    (bk.data || []).forEach(b => { if (b.sessions && b.sessions.session_date) extra.add(b.sessions.session_date); });
+  } catch (e) { }
   (data || []).forEach(x => {
     if (x.show === false) return;
     if (x.session_type === 'festival' || x.capacity === null || x.capacity > 0 ||
         /\bclass\s+\d+\s+of\s+\d+/i.test(x.title || '') || x.title === 'Catch Up Class') days.add(x.session_date);
   });
-  _planRunDays = { studio: st, days, from: win.from };
+  _planRunDays = { studio: st, days, extra, from: win.from };
   if (_planStripSel) planDayStrip(_planStripSel);
 }
 // The strip shows a week back to four weeks ahead of TODAY, or, for a date picked
@@ -10657,6 +10665,7 @@ function planDayStrip(sel) {
   const win = planStripWindow(sel);
   if (!_planRunDays || _planRunDays.studio !== _sessionStudioId || _planRunDays.from !== win.from) loadPlanRunDays(win);
   const run = _planRunDays && _planRunDays.studio === _sessionStudioId && _planRunDays.from === win.from ? _planRunDays.days : null;
+  const extra = run ? (_planRunDays.extra || new Set()) : new Set();
   const pick = document.getElementById('plan-pick'); if (pick && pick.value !== sel) pick.value = sel;
   const todayStr = localDateStr(new Date());
   const out = [];
@@ -10664,8 +10673,8 @@ function planDayStrip(sel) {
     const d = new Date(win.start); d.setDate(d.getDate() + k);
     const ds = localDateStr(d);
     const i = Math.round((planDateOf(ds) - planDateOf(todayStr)) / 86400000);   // days from today
-    const idle = run && !run.has(ds);
-    out.push(`<button class="plan-day${ds === sel ? ' on' : ''}${i === 0 ? ' today' : ''}${i < 0 ? ' past' : ''}${idle ? ' idle' : ''}" title="${idle ? 'Nothing running' : ''}" onclick="loadPlanDay('${ds}')">${k === 0 || d.getDate() === 1 ? `<div class="dm">${d.toLocaleDateString(undefined, { month: 'short' })}${d.getFullYear() !== new Date().getFullYear() ? ' ’' + String(d.getFullYear()).slice(2) : ''}</div>` : '<div class="dm">&nbsp;</div>'}<div class="dw">${i === 0 ? 'Today' : d.toLocaleDateString(undefined, { weekday: 'short' })}</div><div class="dn">${d.getDate()}</div></button>`);
+    const booked = extra.has(ds), idle = run && !run.has(ds) && !booked;
+    out.push(`<button class="plan-day${ds === sel ? ' on' : ''}${i === 0 ? ' today' : ''}${i < 0 ? ' past' : ''}${idle ? ' idle' : ''}${booked && run && !run.has(ds) ? ' plan-day-booked' : ''}" title="${idle ? 'Nothing running' : booked && run && !run.has(ds) ? 'Usually closed, but something is booked or held this day' : ''}" onclick="loadPlanDay('${ds}')">${k === 0 || d.getDate() === 1 ? `<div class="dm">${d.toLocaleDateString(undefined, { month: 'short' })}${d.getFullYear() !== new Date().getFullYear() ? ' ’' + String(d.getFullYear()).slice(2) : ''}</div>` : '<div class="dm">&nbsp;</div>'}<div class="dw">${i === 0 ? 'Today' : d.toLocaleDateString(undefined, { weekday: 'short' })}</div><div class="dn">${d.getDate()}</div></button>`);
   }
   el.innerHTML = out.join('');
   const on = el.querySelector('.plan-day.on');
