@@ -70,7 +70,7 @@ async function fdPinGo(pin, quiet) {
     if (i) { i.value = ''; i.focus(); }
     return;
   }
-  _fdSeller = { pin, name: data.name || 'Staff', last: Date.now() };
+  _fdSeller = { pin, name: data.name || 'Staff', fam: data.families || 'none', last: Date.now() };
   if (paneVisible('families-pane') && typeof openFamiliesPane === 'function') { openFamiliesPane(); return; }
   fdRender(); fdLoadTab(); fdWaitLoad(); fdWaitTick();
 }
