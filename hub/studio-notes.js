@@ -26,7 +26,7 @@ function studioNotePick(k) { document.querySelectorAll('.sn-st').forEach(c => { 
 // ---------- Home office → ✍️ Studio notes (world_studio_notes_page.sql): every studio's World note in one table ----------
 let _sns = { rows: null, photos: {}, err: '', studio: '', prov: '', status: 'current', msg: '' };
 async function openSnotesPane() {
-  if (!_hoCan.edit) { alert('Studio notes is for home office (Studio Ops edit access).'); return; }
+  // Who can open it: “World site & deals” (Edit) on access.html. The server decides (perm_can); a refusal shows on the page.
   showOnlyPane('snotes-pane'); setActiveNav('nav-snotes'); snsLoad();
 }
 async function snsLoad() {
