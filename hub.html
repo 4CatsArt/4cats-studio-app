@@ -760,6 +760,11 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .inv-cnt-jump a span { color: #8a6d3b; margin-left: 3px; }
 .inv-cnt-grp { margin-top: 12px; }
 .inv-cnt-grp > summary { cursor: pointer; font-size: 16px; padding: 2px 0 8px; list-style-position: inside; }
+.sup-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; } .sup-tools input[type=search] { min-width: 220px; }
+.sup-grp { margin-top: 12px; } .sup-grp > summary { cursor: pointer; font-size: 16px; padding-bottom: 8px; }
+.sup-tbl td, .sup-tbl th { vertical-align: top; } .sup-tbl tr.sup-off td { opacity: .5; }
+.sup-form label { display: block; margin-bottom: 8px; } .sup-two { display: flex; flex-wrap: wrap; gap: 8px; } .sup-two label { flex: 1; min-width: 120px; }
+.sup-ov { margin-top: 10px; padding: 10px 12px; border: 1px solid #e6dfd2; border-radius: 10px; background: #fbf8f2; }
 .wu-booked { background: #eef7ee; border: 1px solid #b8e0c3; border-radius: 10px; padding: 8px 12px; margin: 8px 0; font-size: 14px; }
 .rp-ck { width: 30px; text-align: center; } .rp-ck input { width: 18px; height: 18px; cursor: pointer; }
 .rp-tbl tr.rp-sel td { background: #fff8e6; }
@@ -2656,6 +2661,7 @@ tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decorati
       <button class="nav-item" id="nav-stf" onclick="openStfPane()"><span class="ic">👥</span> Studio staffing</button>
       <button class="nav-item" id="nav-wsm" onclick="openWsmPane()"><span class="ic">🖼️</span> Workshops</button>
       <button class="nav-item" id="nav-rp" onclick="openRpPane()"><span class="ic">🛍️</span> Products</button>
+      <button class="nav-item" id="nav-sup" onclick="openSupPane()" title="Studio supplies: names, groups, units, par levels, pack sizes, order rules"><span class="ic">🧺</span> Supplies list</button>
       <button class="nav-item" id="nav-memb" onclick="openMembPane()" style="display:none" title="Find a membership or gift membership; refund or end one (exceptions)"><span class="ic">⭐</span> Memberships</button>
       <button class="nav-item" id="nav-mv" onclick="openM2wPane()"><span class="ic">🔁</span> Move to World</button>
       <button class="nav-item" id="nav-camps" onclick="window.open('camps-manager.html','_blank')" title="Camp programs, camp and PA/PD days for every studio, and families' PA/PD day requests"><span class="ic">🏕️</span> Camps manager</button>
@@ -2966,6 +2972,7 @@ tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decorati
   <main class="main" id="fd-pane" style="display:none"></main>
   <main class="main" id="wsm-pane" style="display:none"></main>
   <main class="main" id="rp-pane" style="display:none"></main>
+  <main class="main" id="sup-pane" style="display:none"></main>
   <main class="main" id="memb-pane" style="display:none"></main>
   <main class="main" id="stf-pane" style="display:none"></main>
   <main class="main" id="as-pane" style="display:none"></main>
@@ -4546,6 +4553,107 @@ async function bulkRun(preview) {
   B.res = data; bulkDraw();
 }
 
+// ---------- Home office → 🧺 Supplies list (supplies_manager.sql) ----------
+// Every studio supply (not retail products): name, group, how it's counted, par, reorder at, pack size, order rule, jar count,
+// in the Store, plus per-studio overrides. The same list Supplies → Store and Counts use.
+const SUP_GROUPS = ['Clay', 'Ditto', 'Paint', 'Glaze', 'Canvases & surfaces', 'Brushes & tools', 'Craft materials', 'Camp & party', 'Cleaning & washroom', 'Studio basics', 'Snacks & Drinks', 'Other supplies'];
+const SUP_RULES = [['', 'Top up to par'], ['one_case', 'Order one case at the reorder point'], ['on_request', 'Ask when needed (never ordered automatically)']];
+let _sup = { rows: null, err: '', q: '', grp: '', show: 'active', edit: null, msg: '' };
+async function openSupPane() {
+  if (!_hoCan.view) { alert('The supplies list needs Studio Ops access.'); return; }
+  showOnlyPane('sup-pane'); setActiveNav('nav-sup'); _sup.edit = null; supDraw(); supLoad();
+}
+async function supLoad() {
+  const { data, error } = await sb.rpc('hub_supplies_list');
+  _sup.err = error ? (/hub_supplies_list/.test(error.message) ? 'Run supplies_manager.sql in Supabase first.' : error.message) : '';
+  _sup.rows = error ? [] : (data || []); supDraw();
+}
+function supNum(v) { return v == null || v === '' ? '' : String(+v); }
+function supRuleText(r) {
+  if (r.order_rule === 'on_request') return 'ask when needed';
+  if (r.order_rule === 'one_case') return `1 case${r.pack ? ' (' + r.pack + ')' : ''} at ${supNum(r.reorder_at) || '0'}`;
+  if (r.par == null) return 'no par';
+  return `par ${supNum(r.par)} · reorder at ${supNum(r.reorder_at) || '0'}${r.pack ? ' · packs of ' + r.pack : ''}`;
+}
+function supDraw() {
+  const el = document.getElementById('sup-pane'); if (!el) return;
+  const can = !!_hoCan.edit;
+  let h = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🧺 Supplies list</div><span class="spacer"></span>
+    ${can ? '<button class="ho-btn primary" onclick="supEdit(null)">+ Add a supply</button>' : ''}<button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+    <p class="ho-intro">Every studio supply: what staff "buy" in Supplies → Store as they open it, and count in Supplies → Counts. Retail products (kits, snacks for sale) are in 🛍️ Products.</p>`;
+  if (_sup.msg) h += `<p class="fd-msg">${esc(_sup.msg)}</p>`;
+  if (_sup.err) { el.innerHTML = h + `<p class="fd-msg">${esc(_sup.err)}</p>`; return; }
+  if (!_sup.rows) { el.innerHTML = h + '<p class="goal-note">Loading…</p>'; return; }
+  const q = _sup.q.toLowerCase();
+  const list = _sup.rows.filter(r => (_sup.show === 'all' || (_sup.show === 'active' ? r.active : !r.active))
+    && (!_sup.grp || (r.group || '') === _sup.grp) && (!q || (r.name + ' ' + r.sku).toLowerCase().includes(q)));
+  h += `<div class="sup-tools"><input type="search" placeholder="Search a name or SKU" value="${escAttr(_sup.q)}" oninput="_sup.q=this.value;supDraw();this.focus();this.setSelectionRange(this.value.length,this.value.length)">
+    <select onchange="_sup.grp=this.value;supDraw()"><option value="">All groups</option>${SUP_GROUPS.map(g => `<option${_sup.grp === g ? ' selected' : ''}>${esc(g)}</option>`).join('')}</select>
+    <select onchange="_sup.show=this.value;supDraw()">${[['active', 'Active'], ['off', 'Switched off'], ['all', 'All']].map(o => `<option value="${o[0]}"${_sup.show === o[0] ? ' selected' : ''}>${o[1]}</option>`).join('')}</select>
+    <span class="goal-note">${list.length} supplies</span></div>`;
+  const by = {}; list.forEach(r => { (by[r.group || '(no group)'] = by[r.group || '(no group)'] || []).push(r); });
+  const names = Object.keys(by).sort((a, b) => { const ia = SUP_GROUPS.indexOf(a), ib = SUP_GROUPS.indexOf(b); return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b); });
+  h += names.map(g => `<details class="card sup-grp" open><summary><b>${esc(g)}</b> <span class="goal-note">${by[g].length}</span></summary>
+    <table class="fd-tbl sup-tbl"><thead><tr><th>Item</th><th>SKU</th><th>Counted in</th><th>Ordering</th><th class="c">Store</th><th></th></tr></thead><tbody>
+    ${by[g].map(r => `<tr class="${r.active ? '' : 'sup-off'}"><td><b>${esc(r.name)}</b>${r.size ? `<div class="goal-note">${esc(r.size)}</div>` : ''}${(r.overrides || []).length ? `<div class="goal-note">🏷️ ${r.overrides.length} studio${r.overrides.length === 1 ? '' : 's'} differ</div>` : ''}</td>
+      <td class="goal-note">${esc(r.sku)}</td><td>${r.count_mode === 'jar' ? '🫙 jar (¼ ½ ¾)' : esc(r.count_unit || 'each')}${r.tracking === 'count' ? ' · count all' : ''}</td>
+      <td>${esc(supRuleText(r))}</td><td class="c">${r.store ? '✓' : ''}</td>
+      <td>${can ? `<button class="ho-btn sm" onclick="supEdit('${escAttr(r.sku)}')">Edit</button>` : ''}</td></tr>`).join('')}
+    </tbody></table></details>`).join('');
+  el.innerHTML = h;
+}
+function supEdit(sku) {
+  const r = sku ? (_sup.rows || []).find(x => x.sku === sku) : { sku: '', name: '', group: _sup.grp || '', tracking: 'buy', count_unit: 'each', active: true, store: true, overrides: [] };
+  if (!r) return; const isNew = !sku;
+  const v = x => x == null ? '' : escAttr(String(x)), opt = (list, cur) => list.map(o => `<option value="${escAttr(o[0])}"${String(cur || '') === o[0] ? ' selected' : ''}>${esc(o[1])}</option>`).join('');
+  openDutySheet(`<h3>🧺 ${isNew ? 'Add a supply' : esc(r.name)}</h3>
+    <div class="me-form sup-form">
+      <label>Name<input id="sp-name" value="${v(r.name)}" maxlength="120"></label>
+      <label>SKU<input id="sp-sku" value="${v(r.sku)}" ${isNew ? 'placeholder="e.g. CANVAS-MINI"' : 'disabled'}></label>
+      <label>Group<select id="sp-group">${opt([['', '(none)']].concat(SUP_GROUPS.map(g => [g, g])), r.group)}</select></label>
+      <label>Tracked by<select id="sp-track">${opt([['buy', 'Staff "buy" it as they open it (count unopened only)'], ['count', 'Count everything on hand (snacks & drinks)']], r.tracking)}</select></label>
+      <label>Counted in (unit)<input id="sp-unit" value="${v(r.count_unit || 'each')}" placeholder="box, roll, bottle, each…"></label>
+      <label>Size note<input id="sp-size" value="${v(r.size)}" placeholder="e.g. pack of 14, 1 box = 20 kg"></label>
+      <label class="ba-check"><input type="checkbox" id="sp-jar" ${r.count_mode === 'jar' ? 'checked' : ''}> 🫙 Jar count: staff estimate how full (¼ ½ ¾) instead of counting pieces</label>
+      <label>Ordering<select id="sp-rule">${opt(SUP_RULES, r.order_rule)}</select></label>
+      <div class="sup-two"><label>Par (every studio)<input id="sp-par" type="number" step="any" min="0" value="${v(r.par)}"></label>
+        <label>Reorder at<input id="sp-re" type="number" step="any" min="0" value="${v(r.reorder_at)}"></label>
+        <label>Pack / case size<input id="sp-pack" type="number" step="1" min="1" value="${v(r.pack)}"></label></div>
+      <div class="sup-two"><label>Supplier<input id="sp-supp" value="${v(r.supplier)}"></label>
+        <label>Cost per unit $<input id="sp-cost" type="number" step="0.01" min="0" value="${v(r.cost)}"></label>
+        <label>Delivery days<input id="sp-lead" type="number" step="1" min="0" value="${v(r.lead_days)}"></label></div>
+      <label>Notes<input id="sp-notes" value="${v(r.notes)}" maxlength="300"></label>
+      <label class="ba-check"><input type="checkbox" id="sp-store" ${r.store ? 'checked' : ''}> In Supplies → Store (staff can "buy" it)</label>
+      <label class="ba-check"><input type="checkbox" id="sp-active" ${r.active !== false ? 'checked' : ''}> Active (off: not counted, ordered or in the Store; history kept)</label>
+      ${isNew ? '' : `<div class="sup-ov"><b>🏷️ Different at some studios</b>
+        ${(r.overrides || []).length ? `<table class="fd-tbl"><tr><th>Studio</th><th>Par</th><th>Reorder at</th><th>Why</th><th></th></tr>${r.overrides.map(o => `<tr><td>${esc(STUDIO_NAMES[o.studio_id] || o.studio_id)}</td><td>${esc(supNum(o.par))}</td><td>${esc(supNum(o.reorder_at))}</td><td class="goal-note">${esc(o.why || '')}</td>
+          <td><button class="ho-btn sm" onclick="supOvRemove('${escAttr(r.sku)}','${escAttr(o.studio_id)}')">Remove</button></td></tr>`).join('')}</table>` : '<p class="goal-note">Same at every studio.</p>'}
+        <div class="sup-two"><label>Studio<select id="sp-ov-st">${Object.keys(STUDIO_NAMES).map(id => `<option value="${escAttr(id)}">${esc(STUDIO_NAMES[id])}</option>`).join('')}</select></label>
+          <label>Par there<input id="sp-ov-par" type="number" step="any" min="0"></label><label>Reorder at<input id="sp-ov-re" type="number" step="any" min="0"></label></div>
+        <label>Why<input id="sp-ov-why" placeholder="e.g. busiest studio, no Splatter parties"></label>
+        <button class="ho-btn sm" onclick="supOvAdd('${escAttr(r.sku)}')">+ Set for this studio</button></div>`}
+      <div id="sp-msg"></div></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="supSave(${isNew})">${isNew ? 'Add it' : 'Save'}</button></div>`);
+}
+async function supSave(isNew) {
+  const g = id => (document.getElementById(id) || {}).value || '', c = id => !!(document.getElementById(id) || {}).checked;
+  const p = { new: isNew, sku: g('sp-sku'), name: g('sp-name'), group: g('sp-group'), tracking: g('sp-track'), count_unit: g('sp-unit'), size: g('sp-size'),
+    count_mode: c('sp-jar') ? 'jar' : '', order_rule: g('sp-rule'), par: g('sp-par'), reorder_at: g('sp-re'), pack: g('sp-pack'),
+    supplier: g('sp-supp'), cost: g('sp-cost'), lead_days: g('sp-lead'), notes: g('sp-notes'), store: c('sp-store'), active: c('sp-active') };
+  const { error } = await sb.rpc('hub_supply_save', { p });
+  if (error) { document.getElementById('sp-msg').innerHTML = `<p class="fd-msg">${esc(error.message)}</p>`; return; }
+  closeDutySheet(); _sup.msg = `✓ ${isNew ? 'Added' : 'Saved'}: ${p.name}`; await supLoad();
+}
+async function supOvAdd(sku) {
+  const g = id => (document.getElementById(id) || {}).value || '';
+  const { error } = await sb.rpc('hub_supply_override_save', { p: { sku, studio_id: g('sp-ov-st'), par: g('sp-ov-par'), reorder_at: g('sp-ov-re'), why: g('sp-ov-why') } });
+  if (error) { document.getElementById('sp-msg').innerHTML = `<p class="fd-msg">${esc(error.message)}</p>`; return; }
+  await supLoad(); supEdit(sku);
+}
+async function supOvRemove(sku, studio) {
+  const { error } = await sb.rpc('hub_supply_override_save', { p: { sku, studio_id: studio, remove: true } });
+  if (error) { alert(error.message); return; } await supLoad(); supEdit(sku);
+}
 // ---------- Home office → 🛍️ Products (retail_products.sql) ----------
 // The one product list for things 4Cats sells: art kits first. Words and pictures, where it's sold (World's shop
 // and/or the front desk), prices and tax, and variants with their SKU (the same SKU as the inventory item: that's
