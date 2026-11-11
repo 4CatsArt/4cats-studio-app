@@ -772,6 +772,8 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .tsg-shift { white-space: nowrap; color: #6b6b6b; font-size: 12px; }
 .plan-day.plan-day-booked { position: relative; } .plan-day.plan-day-booked::after { content: ''; position: absolute; top: 5px; right: 6px; width: 7px; height: 7px; border-radius: 50%; background: #c0392b; }
 body:not(.admin-login) .admin-only-spots { display: none; }
+.sp-tbl .sp-swap { max-width: 280px; font: inherit; padding: 3px 6px; border: 1px solid #d8d2c4; border-radius: 8px; }
+.sp-closed { font-size: 11px; font-weight: 800; color: #fff; background: #8a8a8a; border-radius: 999px; padding: 1px 7px; margin-left: 4px; }
 .sp-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
 .sp-bulk { position: sticky; top: 0; z-index: 3; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 12px; margin-bottom: 8px; border-radius: 10px; background: #f2eee6; opacity: .6; }
 .sp-bulk.on { opacity: 1; background: #fff3cd; }
@@ -4571,7 +4573,7 @@ async function bulkRun(preview) {
 // ---------- 🎟️ Adjust spots (hub_adjust_spots.sql): a studio's times over a day / week / range, booked and spots, ----------
 // changed one at a time or in bulk, saved as you go without reloading the page. World-only times change here;
 // Shopify times are shown read-only (their spots are Shopify inventory: ✏️ Adjust on the schedule).
-let _sp = { mode: 'week', from: '', to: '', kind: '', rows: null, err: '', sel: new Set(), saving: {}, changed: false };
+let _sp = { mode: 'week', from: '', to: '', kind: '', rows: null, err: '', sel: new Set(), saving: {}, changed: false, items: null };
 function spotsRange() {
   const base = (_plan && _plan.date) || localDateStr(new Date()), d = new Date(base + 'T12:00:00');
   if (_sp.mode === 'day') return { from: base, to: base };
@@ -4584,6 +4586,7 @@ async function openSpotsPane() {
 }
 async function spotsLoad() {
   const r = spotsRange(); _sp.rows = null; spotsDraw();
+  if (!_sp.items) { try { const it = await sb.from('world_items').select('id, title, kind').eq('active', true).order('title'); _sp.items = (it.data || []).filter(i => i.kind !== 'glazing'); } catch (e) { _sp.items = []; } }
   const { data, error } = await sb.rpc('hub_spots_list', { p_studio: _sessionStudioId, p_from: r.from, p_to: r.to });
   _sp.err = error ? (/hub_spots_list/.test(error.message) ? 'Run hub_adjust_spots.sql in Supabase first.' : error.message) : '';
   _sp.rows = error ? [] : (data || []); spotsDraw();
@@ -4611,18 +4614,45 @@ function spotsDraw() {
   if (!rows.length) { el.innerHTML = h + '<p class="goal-note">Nothing on these dates.</p>'; return; }
   let last = '';
   h += `<table class="fd-tbl sp-tbl"><thead><tr><th><input type="checkbox" ${editable.length && editable.every(x => _sp.sel.has(x.id)) ? 'checked' : ''} onchange="spotsPickAll(this.checked)" title="Select all you can change"></th>
-    <th>Time</th><th>What</th><th class="c">Booked</th><th class="c">Spots</th><th class="c">Left</th><th></th></tr></thead><tbody>`;
+    <th>Time</th><th>What</th><th class="c">Booked</th><th class="c">Spots</th><th class="c">Left</th><th></th><th></th></tr></thead><tbody>`;
   rows.forEach(x => {
-    if (x.date !== last) { last = x.date; h += `<tr class="sp-day"><td colspan="7">${esc(ptyDayLabel(x.date))}</td></tr>`; }
+    if (x.date !== last) { last = x.date; h += `<tr class="sp-day"><td colspan="8">${esc(ptyDayLabel(x.date))}</td></tr>`; }
     const left = x.capacity == null ? '' : Math.max(0, (+x.capacity || 0) - (+x.booked || 0)), st = _sp.saving[x.id];
     h += `<tr id="sp-r-${escAttr(x.id)}" class="${x.show === false ? 'sp-hidden' : ''}"><td>${x.world ? `<input type="checkbox" ${_sp.sel.has(x.id) ? 'checked' : ''} onchange="spotsPick('${escAttr(x.id)}',this.checked)">` : ''}</td>
-      <td class="sp-t">${esc(shortTime(x.time))}</td><td>${esc(x.title)}${x.show === false ? ' <span class="goal-note">(hidden)</span>' : ''}</td>
+      <td class="sp-t">${esc(shortTime(x.time))}</td><td class="sp-what">${spotsWhat(x)}</td>
       <td class="c"><b>${+x.booked || 0}</b></td>
       <td class="c">${x.world ? `<input type="number" class="sp-in" min="${+x.booked || 0}" max="200" value="${x.capacity == null ? '' : +x.capacity}" onchange="spotsSave('${escAttr(x.id)}', this.value)" onkeydown="if(event.key==='Enter') this.blur()">`
         : `<span class="goal-note" title="A Shopify time: its spots are Shopify inventory (✏️ Adjust on the schedule)">${x.capacity == null ? '—' : +x.capacity} · Shopify</span>`}</td>
-      <td class="c sp-left">${left === '' ? '' : left}</td><td class="sp-st">${st === 1 ? '…' : st === 2 ? '✓' : st && st.err ? `<span class="tsg-red">${esc(st.err)}</span>` : ''}</td></tr>`;
+      <td class="c sp-left">${left === '' ? '' : left}</td>
+      <td class="sp-act">${x.item_id ? `<button class="ho-btn sm" onclick="spotsShow('${escAttr(x.id)}', ${x.show === false})" title="${x.show === false ? 'Put it back on World' : 'Take it off World (anyone booked stays booked)'}">${x.show === false ? '↺ Reopen' : '✕ Close'}</button>` : ''}</td>
+      <td class="sp-st">${st === 1 ? '…' : st === 2 ? '✓' : st && st.err ? `<span class="tsg-red">${esc(st.err)}</span>` : ''}</td></tr>`;
   });
   el.innerHTML = h + '</tbody></table>';
+}
+// the name, or (a World workshop nobody's booked yet) a box to change it to another workshop
+function spotsWhat(x) {
+  const hid = x.show === false ? ' <span class="sp-closed">closed</span>' : '';
+  if (!x.item_id || (+x.booked || 0) > 0 || !(_sp.items || []).length) return esc(x.title) + hid + (x.item_id && +x.booked ? ' <span class="goal-note" title="Families are booked, so it can’t be changed">🔒</span>' : '');
+  return `<select class="sp-swap" onchange="spotsSwap('${escAttr(x.id)}', this.value)" title="Change to another workshop (nobody's booked yet)">${(_sp.items || []).map(i => `<option value="${escAttr(i.id)}"${i.id === x.item_id ? ' selected' : ''}>${esc(i.title)}</option>`).join('')}</select>${hid}`;
+}
+async function spotsSwap(id, item) {
+  const x = (_sp.rows || []).find(z => z.id === id); if (!x) return;
+  const st = document.querySelector('#sp-r-' + id + ' .sp-st'); if (st) st.textContent = '…';
+  const { error } = await sb.rpc('hub_ws_update', { p_session: id, p_item: item });
+  if (error) { if (st) st.innerHTML = `<span class="tsg-red">${esc(error.message)}</span>`; const sel = document.querySelector('#sp-r-' + id + ' .sp-swap'); if (sel) sel.value = x.item_id; return; }
+  x.item_id = item; x.title = ((_sp.items || []).find(i => i.id === item) || {}).title || x.title; _sp.changed = true;
+  if (st) { st.textContent = '✓ Changed'; setTimeout(() => { if (st.textContent === '✓ Changed') st.textContent = ''; }, 1500); }
+}
+async function spotsShow(id, show) {
+  const x = (_sp.rows || []).find(z => z.id === id); if (!x) return;
+  if (!show && (+x.booked || 0) > 0 && !confirm(`${x.booked} booked on this one. Close it anyway? It comes off World; the booked families stay booked (cancel them separately if it isn't running).`)) return;
+  const { error } = await sb.rpc('hub_ws_update', { p_session: id, p_show: show });
+  if (error) { alert(error.message); return; }
+  x.show = show; _sp.changed = true;
+  const tr = document.getElementById('sp-r-' + id); if (!tr) return;
+  tr.classList.toggle('sp-hidden', !show);
+  tr.querySelector('.sp-what').innerHTML = spotsWhat(x);
+  tr.querySelector('.sp-act').innerHTML = `<button class="ho-btn sm" onclick="spotsShow('${escAttr(id)}', ${!show})" title="${!show ? 'Put it back on World' : 'Take it off World (anyone booked stays booked)'}">${!show ? '↺ Reopen' : '✕ Close'}</button>`;
 }
 function spotsPick(id, on) { if (on) _sp.sel.add(id); else _sp.sel.delete(id); spotsBulkBar(); }
 function spotsPickAll(on) { (_sp.rows || []).filter(x => x.world && (!_sp.kind || x.kind === _sp.kind)).forEach(x => { if (on) _sp.sel.add(x.id); else _sp.sel.delete(x.id); }); spotsDraw(); }
