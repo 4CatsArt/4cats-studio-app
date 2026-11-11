@@ -781,6 +781,9 @@ body:not(.admin-login) .admin-only-spots { display: none; }
 .sp-tbl td, .sp-tbl th { vertical-align: middle; } .sp-tbl .c { text-align: center; } .sp-tbl .sp-t { white-space: nowrap; font-weight: 700; }
 .sp-tbl .sp-in { width: 70px; text-align: center; font: inherit; padding: 4px; border: 1px solid #d8d2c4; border-radius: 8px; }
 .sp-tbl tr.sp-day td { background: #f7f4ee; font-weight: 800; font-size: 13px; } .sp-tbl tr.sp-hidden td { opacity: .55; } .sp-tbl .sp-st { min-width: 90px; font-size: 12px; }
+.sn-line { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 4px 0; border-top: 1px dashed #f0c27a; } .sn-snip { flex: 1; min-width: 160px; font-size: 13px; color: #444; }
+.sn-studios { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 2px 10px; max-height: 220px; overflow: auto; border: 1px solid #e6dfd2; border-radius: 8px; padding: 6px 8px; }
+.sn-quick { display: flex; gap: 6px; margin-bottom: 6px; }
 .wu-booked { background: #eef7ee; border: 1px solid #b8e0c3; border-radius: 10px; padding: 8px 12px; margin: 8px 0; font-size: 14px; }
 .rp-ck { width: 30px; text-align: center; } .rp-ck input { width: 18px; height: 18px; cursor: pointer; }
 .rp-tbl tr.rp-sel td { background: #fff8e6; }
@@ -3784,55 +3787,74 @@ async function pmOpenParty(day, bookingId) {
   if (!_plan.partyForms[bookingId]) togglePartyForm(i);
   setTimeout(() => { const el = document.querySelector(`.pf-wrap[data-pf="${bookingId}"]`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 300);
 }
-// ✍️ (Nov 11 2026) The studio's note on World (world_studio_note.sql): home office for any studio, coordinators (PIN) for their own;
-// the picture is home office's (this studio's own, or the one for every studio)
+// ✍️ (Nov 11 2026) Studio notes on World (world_studio_note_schedule.sql), home office only: scheduled ahead ("show from" /
+// "until"), written for one studio or several at once; the picture is this studio's own, or the one for every studio
 let _snote = null;
+const snToday = () => localDateStr(new Date());
 async function studioNoteLoad(sid) {
   const el = document.getElementById('studio-note-card'); if (!el || !sid) return;
-  let r; try { r = await sb.rpc('hub_studio_note_get', { p_studio: sid, p_pin: _sessionPin || null }); } catch (e) { return; }
+  let r; try { r = await sb.rpc('hub_studio_notes', { p_studio: sid }); } catch (e) { return; }
   if (r.error || !r.data || !r.data.can_edit) { el.innerHTML = ''; return; }
   _snote = Object.assign({ sid }, r.data);
-  const n = _snote.note || {}, on = n.body && n.show !== false;
-  el.innerHTML = `<div class="pm-box sn-card"><b>✍️ Your note on World</b> <span class="fd-sm">${on ? 'showing on ' + esc(STUDIO_NAMES[sid] || sid) + '’s World page' : n.body ? 'switched off' : 'not written yet'}</span>
-    <button class="ho-btn sm" style="margin-left:8px" onclick="studioNoteEdit()">${n.body ? 'Edit' : 'Write one'}</button>
-    ${n.body ? `<div class="fd-sm" style="margin-top:4px">${esc(String(n.body).slice(0, 140))}${String(n.body).length > 140 ? '…' : ''}</div>` : ''}</div>`;
+  const t = snToday(), N = _snote.notes || [];
+  const live = N.filter(n => n.show_from <= t && (!n.show_until || n.show_until >= t)).sort((a, b) => b.show_from.localeCompare(a.show_from))[0];
+  const ahead = N.filter(n => n.show_from > t).sort((a, b) => a.show_from.localeCompare(b.show_from));
+  const line = n => `<div class="sn-line"><span class="fd-sm"><b>${esc(ptyDayLabel(n.show_from))}</b>${n.show_until ? ' – ' + esc(ptyDayLabel(n.show_until)) : ''}${n.studios_in_group > 1 ? ` · 🏬 ${n.studios_in_group} studios` : ''}</span>
+      <span class="sn-snip">${esc(String(n.body).slice(0, 90))}${String(n.body).length > 90 ? '…' : ''}</span>
+      <button class="ho-btn sm" onclick="studioNoteEdit('${escAttr(n.id)}')">Edit</button><button class="ho-btn sm" onclick="studioNoteRemove('${escAttr(n.id)}')">Remove</button></div>`;
+  el.innerHTML = `<div class="pm-box sn-card"><b>✍️ Note on World</b>
+    <button class="ho-btn sm" style="margin-left:8px" onclick="studioNoteEdit('')">+ New note</button>
+    <div style="margin-top:6px"><b class="fd-sm">Showing today:</b> ${live ? '' : '<span class="fd-sm">nothing</span>'}</div>${live ? line(live) : ''}
+    ${ahead.length ? `<div style="margin-top:6px"><b class="fd-sm">Coming up (${ahead.length}):</b></div>${ahead.map(line).join('')}` : ''}</div>`;
 }
-function studioNoteEdit() {
-  if (!_snote) return; const n = _snote.note || {}, nm = String(STUDIO_NAMES[_snote.sid] || _snote.sid).replace(/^.*?\s-\s/, '');
-  const photo = _snote.photo_studio || _snote.photo_all;
-  openDutySheet(`<h3>✍️ Note from ${esc(nm)} on World</h3>
-    <p class="ho-intro">Shows on the studio’s World home page, under the kiln and suggestions boxes, with today’s picture.</p>
+function studioNoteEdit(id) {
+  if (!_snote) return; const n = (_snote.notes || []).find(x => x.id === id) || {}, isNew = !id;
+  const nm = String(STUDIO_NAMES[_snote.sid] || _snote.sid).replace(/^.*?\s-\s/, ''), photo = _snote.photo_studio || _snote.photo_all;
+  const prov = { BC: 'BC', AB: 'Alberta', ON: 'Ontario' };
+  const studioPick = isNew ? `<b style="display:block;margin:8px 0 4px">Which studios</b>
+      <div class="sn-quick">${['all', 'BC', 'AB', 'ON'].map(k => `<button class="ho-btn sm" type="button" onclick="studioNotePick('${k}')">${k === 'all' ? 'All' : prov[k]}</button>`).join('')}<button class="ho-btn sm" type="button" onclick="studioNotePick('none')">None</button></div>
+      <div class="sn-studios">${Object.keys(STUDIO_NAMES).map(sid => `<label class="ba-check"><input type="checkbox" class="sn-st" value="${escAttr(sid)}" ${sid === _snote.sid ? 'checked' : ''}> ${esc(STUDIO_NAMES[sid])}</label>`).join('')}</div>
+      <p class="fd-sm">Each studio gets its own copy, so one can be changed or removed later without touching the others.</p>`
+    : `<p class="fd-sm">For ${esc(STUDIO_NAMES[_snote.sid] || _snote.sid)} only${n.studios_in_group > 1 ? ` (written for ${n.studios_in_group} studios: the others keep theirs)` : ''}.</p>`;
+  openDutySheet(`<h3>✍️ ${isNew ? 'New note' : 'Edit note'} on World</h3>
+    <p class="ho-intro">Shows on each studio’s World home page from the start day (until the end day, if set). The newest started note shows; when it ends, the one before it shows again.</p>
     <div class="me-form">
-      <label>Heading<input id="sn-title" maxlength="120" value="${escAttr(n.title || '')}" placeholder="A Little Note from ${escAttr(nm)}"></label>
-      <label>Your note<textarea id="sn-body" rows="6" maxlength="2000" placeholder="e.g. We’re open and looking forward to a busy day of making! …">${esc(n.body || '')}</textarea></label>
-      <label>Signed<textarea id="sn-signed" rows="2" maxlength="200" placeholder="See you at the studio,&#10;Carmi the Chameleon, Joyful Julia &amp; Mary">${esc(n.signed || '')}</textarea></label>
-      <label class="ba-check"><input type="checkbox" id="sn-show" ${n.show === false ? '' : 'checked'}> Show it on World</label>
+      <div class="sup-two"><label>Show from<input type="date" id="sn-from" value="${escAttr(n.show_from || snToday())}"></label><label>Until (optional)<input type="date" id="sn-until" value="${escAttr(n.show_until || '')}"></label></div>
+      <label>Heading (optional)<input id="sn-title" maxlength="120" value="${escAttr(n.title || '')}" placeholder="A Little Note from ${escAttr(nm)} (each studio's own name)"></label>
+      <label>The note<textarea id="sn-body" rows="6" maxlength="2000" placeholder="e.g. We’re open and looking forward to a busy day of making! …">${esc(n.body || '')}</textarea></label>
+      <label>Signed (optional)<textarea id="sn-signed" rows="2" maxlength="200" placeholder="See you at the studio,&#10;Carmi the Chameleon, Joyful Julia &amp; Mary">${esc(n.signed || '')}</textarea></label>
+      ${studioPick}
       <div class="sn-ph"><b>Picture</b> ${photo ? `<img src="${escAttr(photo)}" alt="" style="max-width:160px;border-radius:8px;display:block;margin:6px 0">` : '<span class="fd-sm">none yet</span>'}
-        ${_snote.can_photo ? `<div class="fd-sm" style="margin:4px 0">${_snote.photo_studio ? 'This studio’s own picture.' : _snote.photo_all ? 'The picture for every studio.' : ''}</div>
-          <label class="ho-btn sm">📷 This studio’s picture<input type="file" accept="image/*" hidden onchange="studioNotePhoto(this, '${escAttr(_snote.sid)}')"></label>
-          <label class="ho-btn sm">📷 Picture for every studio<input type="file" accept="image/*" hidden onchange="studioNotePhoto(this, '*')"></label>
-          ${_snote.photo_studio ? `<button class="ho-btn sm" onclick="studioNotePhotoClear('${escAttr(_snote.sid)}')">Use the every-studio one</button>` : ''}`
-          : '<span class="fd-sm">The picture is set by home office.</span>'}</div>
+        <div class="fd-sm" style="margin:4px 0">${_snote.photo_studio ? 'This studio’s own picture (stays until changed).' : _snote.photo_all ? 'The picture for every studio (stays until changed).' : ''}</div>
+        <label class="ho-btn sm">📷 This studio’s picture<input type="file" accept="image/*" hidden onchange="studioNotePhoto(this, '${escAttr(_snote.sid)}', '${escAttr(id)}')"></label>
+        <label class="ho-btn sm">📷 Picture for every studio<input type="file" accept="image/*" hidden onchange="studioNotePhoto(this, '*', '${escAttr(id)}')"></label>
+        ${_snote.photo_studio ? `<button class="ho-btn sm" onclick="studioNotePhotoClear('${escAttr(_snote.sid)}', '${escAttr(id)}')">Use the every-studio one</button>` : ''}</div>
       <div id="sn-msg"></div></div>
-    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="studioNoteSave()">Save</button></div>`);
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="studioNoteSave('${escAttr(id)}')">${isNew ? 'Save note' : 'Save'}</button></div>`);
 }
-async function studioNoteSave() {
-  const v = id => (document.getElementById(id) || {}).value || '';
-  const { error } = await sb.rpc('hub_studio_note_save', { p_studio: _snote.sid, p_pin: _sessionPin || null,
-    p: { title: v('sn-title'), body: v('sn-body'), signed: v('sn-signed'), show: document.getElementById('sn-show').checked } });
-  if (error) { document.getElementById('sn-msg').innerHTML = `<p class="fd-msg">${esc(/hub_studio_note/.test(error.message) ? 'Run world_studio_note.sql in Supabase first.' : error.message)}</p>`; return; }
+function studioNotePick(k) { document.querySelectorAll('.sn-st').forEach(c => { c.checked = k === 'all' ? true : k === 'none' ? false : c.value.startsWith(k + '-') ? true : c.checked; }); }
+async function studioNoteSave(id) {
+  const v = x => (document.getElementById(x) || {}).value || '';
+  const studios = [...document.querySelectorAll('.sn-st:checked')].map(c => c.value);
+  const { data, error } = await sb.rpc('hub_studio_note_put', { p: { id: id || null, studios, title: v('sn-title'), body: v('sn-body'), signed: v('sn-signed'), show_from: v('sn-from'), show_until: v('sn-until') } });
+  if (error) { document.getElementById('sn-msg').innerHTML = `<p class="fd-msg">${esc(/hub_studio_note_put/.test(error.message) ? 'Run world_studio_note_schedule.sql in Supabase first.' : error.message)}</p>`; return; }
   closeDutySheet(); studioNoteLoad(_snote.sid);
+  if (!id && data && data.studios > 1) alert(`✓ Saved for ${data.studios} studios.`);
 }
-async function studioNotePhoto(inp, key) {
+async function studioNoteRemove(id) {
+  if (!confirm('Remove this note (for this studio only)?')) return;
+  const { error } = await sb.rpc('hub_studio_note_remove', { p_id: id }); if (error) { alert(error.message); return; }
+  studioNoteLoad(_snote.sid);
+}
+async function studioNotePhoto(inp, key, reopen) {
   const f = inp.files && inp.files[0]; if (!f) return;
   const urls = await rpUploadFiles([f], 'studio-notes'); if (!urls[0]) return;
-  const { error } = await sb.rpc('hub_studio_note_photo', { p_key: key, p_url: urls[0] });
-  if (error) { alert(error.message); return; }
-  await studioNoteLoad(_snote.sid); studioNoteEdit();
+  const { error } = await sb.rpc('hub_studio_note_photo', { p_key: key, p_url: urls[0] }); if (error) { alert(error.message); return; }
+  await studioNoteLoad(_snote.sid); studioNoteEdit(reopen);
 }
-async function studioNotePhotoClear(key) {
+async function studioNotePhotoClear(key, reopen) {
   const { error } = await sb.rpc('hub_studio_note_photo', { p_key: key, p_url: '' }); if (error) { alert(error.message); return; }
-  await studioNoteLoad(_snote.sid); studioNoteEdit();
+  await studioNoteLoad(_snote.sid); studioNoteEdit(reopen);
 }
 async function partyMissingLoad(sid) {
   const el = document.getElementById('party-missing'); if (!el || !sid) return;
