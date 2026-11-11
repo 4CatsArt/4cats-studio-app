@@ -14812,7 +14812,38 @@ async function punchGo(kind) {
   clearTimeout(_punchTimer);
   _punchTimer = setTimeout(punchDone, flagged && !already ? 30000 : 3500);
   if (typeof loadTeamToday === 'function') loadTeamToday(_sessionStudioId);
-  if (kind === 'out' && data.id) punchAskStudioHours(data.id, p.staff_id);
+  if (kind === 'out' && data.id) { punchAskStudioHours(data.id, p.staff_id); punchAskBreak(data.id, p.staff_id, pin); }
+}
+// (Nov 11 2026) punch out with no break punched, on a scheduled shift over the break threshold (punch_break_check.sql):
+// "Did you take one?" Forgot → a break is added in the middle of the shift; didn't → they say why
+async function punchAskBreak(outId, staffId, pin) {
+  let info; try { const r = await sb.rpc('hub_punch_break_info', { p_staff_id: staffId, p_pin: pin, p_out_id: outId, p_studio_id: _sessionStudioId }); if (r.error) return; info = r.data; } catch (e) { return; }
+  if (!info || !info.ask) return;
+  clearTimeout(_punchTimer); _punchTimer = setTimeout(punchDone, 60000);   // (time to answer)
+  window._punchBreak = { outId, staffId, pin };
+  const box = document.createElement('div'); box.id = 'pc-break';
+  box.innerHTML = `<div class="me-msg" style="margin-top:12px;background:#fdecea;border:2px solid #c0392b;color:#1a1a1a">
+      <b style="font-size:16px">☕ You didn't punch a break today. Did you take one?</b>
+      <div class="sheet-actions" style="margin-top:10px;justify-content:flex-start;flex-wrap:wrap">
+        <button class="primary" onclick="punchBreakAnswer('forgot')">Yes, I forgot to punch it</button>
+        <button onclick="document.getElementById('pc-break-why').style.display='block';punchIdleLong()">No, I didn't take a break</button></div>
+      <div id="pc-break-why" style="display:none;margin-top:8px">
+        <label class="f">Why not? (for your manager)<input id="pc-break-reason" maxlength="200" placeholder="e.g. No one to cover me, it was too busy" oninput="punchIdleLong()"
+          style="font:inherit;font-size:15px;padding:10px;border:1px solid var(--border);border-radius:10px"></label>
+        <div class="sheet-actions" style="margin-top:8px"><button class="primary" onclick="punchBreakAnswer('skipped')">Save</button></div></div>
+      <div id="pc-break-msg"></div></div>`;
+  const sheet = document.querySelector('.pc-done'); if (sheet && sheet.parentNode) sheet.parentNode.appendChild(box);
+}
+function punchIdleLong() { clearTimeout(_punchTimer); _punchTimer = setTimeout(punchDone, 60000); }
+async function punchBreakAnswer(answer) {
+  const b = window._punchBreak; if (!b) return;
+  const reason = (document.getElementById('pc-break-reason') || {}).value || '';
+  if (answer === 'skipped' && !reason.trim()) { document.getElementById('pc-break-msg').innerHTML = '<div class="me-msg err">Say why you didn’t take a break.</div>'; return; }
+  const { data, error } = await sb.rpc('hub_punch_break_answer', { p_staff_id: b.staffId, p_pin: b.pin, p_out_id: b.outId, p_answer: answer, p_reason: reason || null, p_studio_id: _sessionStudioId });
+  if (error) { document.getElementById('pc-break-msg').innerHTML = `<div class="me-msg err">${esc(error.message)}</div>`; return; }
+  const tm = iso => new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  document.getElementById('pc-break').innerHTML = `<div class="pc-done" style="font-size:16px">✓ ${answer === 'forgot' ? `Break added: ${esc(tm(data.from))}–${esc(tm(data.to))}` : 'Thanks, your manager will see why.'}</div>`;
+  window._punchBreak = null; clearTimeout(_punchTimer); _punchTimer = setTimeout(punchDone, 3000);
 }
 // (Nov 8 2026) a split shift (home office staff): at punch out, how many of today's hours were for the studio (punch_studio_hours.sql)
 async function punchAskStudioHours(punchId, staffId) {
