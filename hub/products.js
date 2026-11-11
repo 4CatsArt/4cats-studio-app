@@ -11,7 +11,7 @@ const RP_TAX = [['goods', 'Goods (GST + PST in BC, GST in AB, HST in ON)'], ['se
 let _rp = { rows: null, err: '', q: '', cat: '', where: '', show: 'active', edit: null, msg: '', ship: null, shipOpen: false, view: 'list', bulk: null, panels: null, panel: null,
   sel: new Set(), ba: '', bv: '', bends: '', bst: new Set(), bevery: true };
 async function openRpPane() { // (async: also loads the shipping setting)
-  if (!_hoCan.edit) { alert('Products needs Studio Ops edit access.'); return; }
+  // Who can open it: “Retail & products” on access.html (View to look, Edit to change). The server decides (perm_can).
   showOnlyPane('rp-pane'); setActiveNav('nav-rp'); _rp.edit = null; _rp.view = 'list'; rpDraw(); rpLoad(); rpPanelsLoad(); rpColsLoad();
   const sh = await sb.rpc('hub_retail_shipping_get'); _rp.ship = sh.error ? { err: /hub_retail_shipping/.test(sh.error.message) ? 'Run retail_shipping.sql in Supabase first.' : sh.error.message } : (sh.data || {}); rpDraw();
 }
@@ -34,7 +34,7 @@ async function rpShipSave() {
 async function rpLoad() {
   rpStockLoad();
   const { data, error } = await sb.rpc('hub_retail_list');
-  _rp.err = error ? (/hub_retail_list/.test(error.message) ? 'Run retail_products.sql in Supabase first.' : error.message) : '';
+  _rp.err = error ? (/hub_retail_list/.test(error.message) ? 'Run retail_products.sql in Supabase first.' : /not allowed/i.test(error.message) ? 'Products needs “Retail & products” on the Access page.' : error.message) : '';
   _rp.rows = error ? [] : (data || []); rpDraw();
 }
 const rpMoney = n => n == null || n === '' ? '' : '$' + Number(n).toFixed(2);
