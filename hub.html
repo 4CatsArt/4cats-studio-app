@@ -771,6 +771,13 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .ts-shift { font-size: 12px; font-weight: 700; color: #555; background: #f2eee6; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
 .tsg-shift { white-space: nowrap; color: #6b6b6b; font-size: 12px; }
 .plan-day.plan-day-booked { position: relative; } .plan-day.plan-day-booked::after { content: ''; position: absolute; top: 5px; right: 6px; width: 7px; height: 7px; border-radius: 50%; background: #c0392b; }
+body:not(.admin-login) .admin-only-spots { display: none; }
+.sp-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+.sp-bulk { position: sticky; top: 0; z-index: 3; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 12px; margin-bottom: 8px; border-radius: 10px; background: #f2eee6; opacity: .6; }
+.sp-bulk.on { opacity: 1; background: #fff3cd; }
+.sp-tbl td, .sp-tbl th { vertical-align: middle; } .sp-tbl .c { text-align: center; } .sp-tbl .sp-t { white-space: nowrap; font-weight: 700; }
+.sp-tbl .sp-in { width: 70px; text-align: center; font: inherit; padding: 4px; border: 1px solid #d8d2c4; border-radius: 8px; }
+.sp-tbl tr.sp-day td { background: #f7f4ee; font-weight: 800; font-size: 13px; } .sp-tbl tr.sp-hidden td { opacity: .55; } .sp-tbl .sp-st { min-width: 90px; font-size: 12px; }
 .wu-booked { background: #eef7ee; border: 1px solid #b8e0c3; border-radius: 10px; padding: 8px 12px; margin: 8px 0; font-size: 14px; }
 .rp-ck { width: 30px; text-align: center; } .rp-ck input { width: 18px; height: 18px; cursor: pointer; }
 .rp-tbl tr.rp-sel td { background: #fff8e6; }
@@ -2979,6 +2986,7 @@ tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decorati
   <main class="main" id="wsm-pane" style="display:none"></main>
   <main class="main" id="rp-pane" style="display:none"></main>
   <main class="main" id="sup-pane" style="display:none"></main>
+  <main class="main" id="spots-pane" style="display:none"></main>
   <main class="main" id="memb-pane" style="display:none"></main>
   <main class="main" id="stf-pane" style="display:none"></main>
   <main class="main" id="as-pane" style="display:none"></main>
@@ -2990,6 +2998,7 @@ tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decorati
       <span class="spacer"></span>
       <label class="plan-pick" title="Go to any date, ahead or in the past">Go to date <input type="date" id="plan-pick" onchange="if (this.value) loadPlanDay(this.value)"></label>
       <span class="plan-viewtgl" role="group" aria-label="View"><button class="ho-btn" id="plan-v-list" onclick="planSetView('list')">☰ List</button><button class="ho-btn" id="plan-v-board" onclick="planSetView('board')">🗂️ Board</button></span>
+      <button class="ho-btn admin-only-spots" id="plan-spots-btn" onclick="openSpotsPane()" title="One table of this studio's times: booked and spots, change one or many at once">🎟️ Adjust spots</button>
       <button class="ho-btn primary" onclick="loadPlanDay(localDateStr(new Date()))" title="Show today on the schedule">📅 Jump to today</button>
       <button class="ho-btn" onclick="goToDashboard()" title="Back to the Today screen">← Today screen</button>
     </div>
@@ -4559,6 +4568,99 @@ async function bulkRun(preview) {
   B.res = data; bulkDraw();
 }
 
+// ---------- 🎟️ Adjust spots (hub_adjust_spots.sql): a studio's times over a day / week / range, booked and spots, ----------
+// changed one at a time or in bulk, saved as you go without reloading the page. World-only times change here;
+// Shopify times are shown read-only (their spots are Shopify inventory: ✏️ Adjust on the schedule).
+let _sp = { mode: 'week', from: '', to: '', kind: '', rows: null, err: '', sel: new Set(), saving: {}, changed: false };
+function spotsRange() {
+  const base = (_plan && _plan.date) || localDateStr(new Date()), d = new Date(base + 'T12:00:00');
+  if (_sp.mode === 'day') return { from: base, to: base };
+  if (_sp.mode === 'week') { const mon = new Date(d); mon.setDate(d.getDate() - ((d.getDay() + 6) % 7)); const sun = new Date(mon); sun.setDate(mon.getDate() + 6); return { from: localDateStr(mon), to: localDateStr(sun) }; }
+  return { from: _sp.from || base, to: _sp.to || base };
+}
+async function openSpotsPane() {
+  if (!(_studioData && _studioData.isAdmin)) { alert('Adjust spots is for home office.'); return; }
+  showOnlyPane('spots-pane'); setActiveNav('nav-plan'); _sp.sel = new Set(); _sp.changed = false; spotsLoad();
+}
+async function spotsLoad() {
+  const r = spotsRange(); _sp.rows = null; spotsDraw();
+  const { data, error } = await sb.rpc('hub_spots_list', { p_studio: _sessionStudioId, p_from: r.from, p_to: r.to });
+  _sp.err = error ? (/hub_spots_list/.test(error.message) ? 'Run hub_adjust_spots.sql in Supabase first.' : error.message) : '';
+  _sp.rows = error ? [] : (data || []); spotsDraw();
+}
+function spotsBack() { const back = _sp.changed; showOnlyPane('plan-pane'); setActiveNav('nav-plan'); if (back && _plan) loadPlanDay(_plan.date); }
+function spotsDraw() {
+  const el = document.getElementById('spots-pane'); if (!el) return;
+  const r = spotsRange(), K = { workshop: 'Workshops', glazing: 'Glazing', class: 'Kids classes', camp: 'Camps & PA days' };
+  let h = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🎟️ Adjust spots · ${esc(STUDIO_NAMES[_sessionStudioId] || _sessionStudioId)}</div><span class="spacer"></span>
+      <button class="ho-btn" onclick="spotsBack()">← Back to the schedule</button></div>
+    <div class="sp-bar">${[['day', 'Day'], ['week', 'Week'], ['custom', 'Dates']].map(([k, l]) => `<button class="ho-btn sm${_sp.mode === k ? ' primary' : ''}" onclick="_sp.mode='${k}';spotsLoad()">${l}</button>`).join('')}
+      ${_sp.mode === 'custom' ? `<input type="date" value="${escAttr(r.from)}" onchange="_sp.from=this.value;spotsLoad()"> – <input type="date" value="${escAttr(r.to)}" onchange="_sp.to=this.value;spotsLoad()">`
+        : `<b>${esc(ptyDayLabel(r.from))}${r.to !== r.from ? ' – ' + esc(ptyDayLabel(r.to)) : ''}</b>`}
+      <select onchange="_sp.kind=this.value;spotsDraw()"><option value="">Everything</option>${Object.keys(K).map(k => `<option value="${k}"${_sp.kind === k ? ' selected' : ''}>${K[k]}</option>`).join('')}</select></div>`;
+  if (_sp.err) { el.innerHTML = h + `<p class="fd-msg">${esc(_sp.err)}</p>`; return; }
+  if (!_sp.rows) { el.innerHTML = h + '<p class="goal-note">Loading…</p>'; return; }
+  const rows = _sp.rows.filter(x => !_sp.kind || x.kind === _sp.kind);
+  const editable = rows.filter(x => x.world);
+  [..._sp.sel].forEach(id => { if (!editable.some(x => x.id === id)) _sp.sel.delete(id); });
+  const n = _sp.sel.size;
+  h += `<div class="sp-bulk${n ? ' on' : ''}"><b>${n}</b> selected ·
+      Set to <input type="number" id="sp-b-set" min="0" max="200" style="width:64px"> <button class="ho-btn sm" ${n ? '' : 'disabled'} onclick="spotsBulk('set')">Set</button>
+      · Add <input type="number" id="sp-b-add" min="-200" max="200" style="width:64px" placeholder="+2"> <button class="ho-btn sm" ${n ? '' : 'disabled'} onclick="spotsBulk('add')">Add</button>
+      · <button class="ho-btn sm" ${n ? '' : 'disabled'} onclick="spotsBulk('close')" title="No spots left: spots = what's booked">Close (no more spots)</button></div>`;
+  if (!rows.length) { el.innerHTML = h + '<p class="goal-note">Nothing on these dates.</p>'; return; }
+  let last = '';
+  h += `<table class="fd-tbl sp-tbl"><thead><tr><th><input type="checkbox" ${editable.length && editable.every(x => _sp.sel.has(x.id)) ? 'checked' : ''} onchange="spotsPickAll(this.checked)" title="Select all you can change"></th>
+    <th>Time</th><th>What</th><th class="c">Booked</th><th class="c">Spots</th><th class="c">Left</th><th></th></tr></thead><tbody>`;
+  rows.forEach(x => {
+    if (x.date !== last) { last = x.date; h += `<tr class="sp-day"><td colspan="7">${esc(ptyDayLabel(x.date))}</td></tr>`; }
+    const left = x.capacity == null ? '' : Math.max(0, (+x.capacity || 0) - (+x.booked || 0)), st = _sp.saving[x.id];
+    h += `<tr id="sp-r-${escAttr(x.id)}" class="${x.show === false ? 'sp-hidden' : ''}"><td>${x.world ? `<input type="checkbox" ${_sp.sel.has(x.id) ? 'checked' : ''} onchange="spotsPick('${escAttr(x.id)}',this.checked)">` : ''}</td>
+      <td class="sp-t">${esc(shortTime(x.time))}</td><td>${esc(x.title)}${x.show === false ? ' <span class="goal-note">(hidden)</span>' : ''}</td>
+      <td class="c"><b>${+x.booked || 0}</b></td>
+      <td class="c">${x.world ? `<input type="number" class="sp-in" min="${+x.booked || 0}" max="200" value="${x.capacity == null ? '' : +x.capacity}" onchange="spotsSave('${escAttr(x.id)}', this.value)" onkeydown="if(event.key==='Enter') this.blur()">`
+        : `<span class="goal-note" title="A Shopify time: its spots are Shopify inventory (✏️ Adjust on the schedule)">${x.capacity == null ? '—' : +x.capacity} · Shopify</span>`}</td>
+      <td class="c sp-left">${left === '' ? '' : left}</td><td class="sp-st">${st === 1 ? '…' : st === 2 ? '✓' : st && st.err ? `<span class="tsg-red">${esc(st.err)}</span>` : ''}</td></tr>`;
+  });
+  el.innerHTML = h + '</tbody></table>';
+}
+function spotsPick(id, on) { if (on) _sp.sel.add(id); else _sp.sel.delete(id); spotsBulkBar(); }
+function spotsPickAll(on) { (_sp.rows || []).filter(x => x.world && (!_sp.kind || x.kind === _sp.kind)).forEach(x => { if (on) _sp.sel.add(x.id); else _sp.sel.delete(x.id); }); spotsDraw(); }
+function spotsBulkBar() {   // just the bar and the boxes, not the whole table (so nothing jumps)
+  const bar = document.querySelector('.sp-bulk'); if (!bar) return;
+  const n = _sp.sel.size; bar.classList.toggle('on', !!n); bar.querySelector('b').textContent = n;
+  bar.querySelectorAll('button').forEach(b => { b.disabled = !n; });
+}
+// apply results to the rows in place (no reload)
+function spotsApply(res) {
+  (res || []).forEach(r => {
+    const x = (_sp.rows || []).find(z => z.id === r.id); if (!x) return;
+    if (r.error) { _sp.saving[r.id] = { err: r.error }; }
+    else { x.capacity = r.capacity; x.booked = r.booked; _sp.saving[r.id] = 2; _sp.changed = true; }
+    const tr = document.getElementById('sp-r-' + r.id); if (!tr) return;
+    const inp = tr.querySelector('.sp-in'); if (inp && !r.error) inp.value = r.capacity;
+    const lf = tr.querySelector('.sp-left'); if (lf && !r.error) lf.textContent = Math.max(0, r.capacity - r.booked);
+    const st = tr.querySelector('.sp-st'); if (st) st.innerHTML = r.error ? `<span class="tsg-red">${esc(r.error)}</span>` : (r.note ? `<span class="goal-note">${esc(r.note)}</span>` : '✓');
+  });
+  setTimeout(() => (res || []).forEach(r => { if (_sp.saving[r.id] === 2) { delete _sp.saving[r.id]; const st = document.querySelector('#sp-r-' + r.id + ' .sp-st'); if (st && st.textContent === '✓') st.textContent = ''; } }), 1500);
+}
+async function spotsSave(id, val) {
+  if (val === '') return;
+  const st = document.querySelector('#sp-r-' + id + ' .sp-st'); if (st) st.textContent = '…';
+  const { data, error } = await sb.rpc('hub_spots_set', { p_ids: [id], p_mode: 'set', p_value: Math.round(+val) });
+  if (error) { if (st) st.innerHTML = `<span class="tsg-red">${esc(error.message)}</span>`; return; }
+  spotsApply(data);
+}
+async function spotsBulk(mode) {
+  const ids = [..._sp.sel]; if (!ids.length) return;
+  const v = mode === 'set' ? document.getElementById('sp-b-set').value : mode === 'add' ? document.getElementById('sp-b-add').value : null;
+  if (mode !== 'close' && (v === '' || isNaN(+v))) { alert('Type a number first.'); return; }
+  if (mode === 'close' && !confirm(`Close ${ids.length} time${ids.length === 1 ? '' : 's'}? No more spots (anyone booked stays booked).`)) return;
+  ids.forEach(id => { const st = document.querySelector('#sp-r-' + id + ' .sp-st'); if (st) st.textContent = '…'; });
+  const { data, error } = await sb.rpc('hub_spots_set', { p_ids: ids, p_mode: mode, p_value: v === null ? null : Math.round(+v) });
+  if (error) { alert(error.message); return; }
+  spotsApply(data);
+}
 // ---------- Home office → 🧺 Supplies list (supplies_manager.sql) ----------
 // Every studio supply (not retail products): name, group, how it's counted, par, reorder at, pack size, order rule, jar count,
 // in the Store, plus per-studio overrides. The same list Supplies → Store and Counts use.
@@ -19133,7 +19235,7 @@ async function requestPrize(prizeId) {
 
 // The page panes: only one shows at a time. Points + Instagram are
 // coordinator-only (their sidebar buttons only appear when unlocked).
-const PANES = ['memb-pane', 'ft-pane', 'bo-pane', 'sn-pane', 'as-pane', 'stf-pane', 'rp-pane', 'sup-pane', 'wsm-pane', 'fd-pane', 'se-pane', 'mv-pane', 'news-pane', 'ct-pane', 'act-pane', 'don-pane', 'bulk-pane', 'dashboard-main', 'hist-pane', 'ann-pane', 'concern-pane', 'concerns-pane', 'swaps-pane', 'chat-pane', 'dm-pane', 'devices-pane', 'etpl-pane', 'tickets-pane', 'moments-pane', 'info-pane', 'duties-pane', 'schedule-pane', 'points-pane', 'instagram-pane', 'occupancy-pane', 'inventory-pane', 'announce-pane', 'checklist-pane', 'oc-overview-pane', 'plan-pane', 'parties-pane', 'families-pane', 'notif-pane', 'ideas-pane', 'interest-pane', 'rules-pane', 'sick-pane', 'punch-pane', 'ts-pane', 'acks-pane', 'ackc-pane'];
+const PANES = ['memb-pane', 'ft-pane', 'bo-pane', 'sn-pane', 'as-pane', 'stf-pane', 'rp-pane', 'sup-pane', 'spots-pane', 'wsm-pane', 'fd-pane', 'se-pane', 'mv-pane', 'news-pane', 'ct-pane', 'act-pane', 'don-pane', 'bulk-pane', 'dashboard-main', 'hist-pane', 'ann-pane', 'concern-pane', 'concerns-pane', 'swaps-pane', 'chat-pane', 'dm-pane', 'devices-pane', 'etpl-pane', 'tickets-pane', 'moments-pane', 'info-pane', 'duties-pane', 'schedule-pane', 'points-pane', 'instagram-pane', 'occupancy-pane', 'inventory-pane', 'announce-pane', 'checklist-pane', 'oc-overview-pane', 'plan-pane', 'parties-pane', 'families-pane', 'notif-pane', 'ideas-pane', 'interest-pane', 'rules-pane', 'sick-pane', 'punch-pane', 'ts-pane', 'acks-pane', 'ackc-pane'];
 function showOnlyPane(id) {
   if (id !== 'chat-pane' && _chat && _chat.mode !== 'staff') chatStop();   // leaving Chat: stop checking for messages
   PANES.forEach(p => {
