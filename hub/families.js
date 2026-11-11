@@ -4,6 +4,11 @@
 
 // 🔑 (Nov 11 2026) Families in the studio view: the same "Who's at the desk?" PIN as Front desk (one unlock covers both).
 // Looking families up needs Families (View) on the Access page; changing them needs Families (Edit). The server decides.
+// Can the person at the desk change families? (home office logins, or a PIN with Families: Edit on the Access page)
+function famCanEdit() {
+  if (_studioData && _studioData.isAdmin) return true;
+  return !!(_fdSeller && (_fdSeller.fam === 'edit' || _fdSeller.fam === 'manage'));
+}
 function famDeskGate() {
   const pane = document.getElementById('families-pane'); if (!pane) return false;
   let box = document.getElementById('fam-pin-gate');
@@ -145,8 +150,8 @@ function famRender() {
         (adj ? ' <span class="fam-pill warn">attends as age ' + (p.age + adj) + '</span>' : '') + (b ? ' <span class="fam-pill">🏅 ' + b.total + '</span>' : '') + (p.medical_info ? ' <span class="fam-pill med">⚕️ medical</span>' : '');
       return '<details class="fam-person-d" data-sec="p-' + p.id + '"' + open('p-' + p.id) + '><summary>' + head + '</summary><div class="fam-person-body">' +
         (p.medical_info ? '<div class="fam-med">⚕️ ' + famEsc(p.medical_info) + '</div>' : '') +
-        // Edit
-        '<h4 class="fam-h4">Details</h4><div class="fam-edit">' +
+        // Edit (only with Families: Edit)
+        (famCanEdit() ? '<h4 class="fam-h4">Details</h4><div class="fam-edit">' +
           '<label>First name <input type="text" id="fe-f-' + p.id + '" maxlength="40" value="' + famEsc(p.first_name || '') + '"></label>' +
           '<label>Last name <input type="text" id="fe-l-' + p.id + '" maxlength="40" value="' + famEsc(p.last_name || '') + '"></label>' +
           '<label>Birthdate <input type="date" id="fe-b-' + p.id + '" value="' + famEsc(p.birthdate || '') + '"></label>' +
@@ -154,11 +159,11 @@ function famRender() {
           '<label class="fam-chk"><input type="checkbox" id="fe-a-' + p.id + '"' + (p.is_16_plus ? ' checked' : '') + '> 16 or older</label>' +
           '<label class="fam-wide">Medical info and allergies <textarea id="fe-m-' + p.id + '" rows="2" maxlength="1000">' + famEsc(p.medical_info || '') + '</textarea></label>' +
         '</div><button class="ho-btn" onclick="famSavePerson(\'' + p.id + '\')">Save details</button> <span class="fam-meta" id="fe-msg-' + p.id + '"></span>' +
-        '<p class="fam-meta" style="margin:6px 0 0">Changes are logged with the old details. Bookings already made keep the name they were booked with.</p>' +
+        '<p class="fam-meta" style="margin:6px 0 0">Changes are logged with the old details. Bookings already made keep the name they were booked with.</p>' : '') +
         // Age exception
         '<h4 class="fam-h4">Age exception</h4>' +
         (adj ? '<p class="fam-line">Can attend as <b>' + famEsc(famAdjLabel(adj)) + '</b>' + (p.age != null ? ' (age ' + (p.age + adj) + ')' : '') + '. <span class="fam-meta">' + famEsc(p.age_adjust_note || '') + ' — set by ' + famEsc(p.age_adjust_by || '?') + (p.age_adjust_at ? ' on ' + famEsc(String(p.age_adjust_at).slice(0, 10)) : '') + (p.age_adjust_until ? ' · until ' + famEsc(p.age_adjust_until) : '') + '</span></p>' : '<p class="fam-meta">None. They book by their real age.</p>') +
-        (p.birthdate ? '<div class="fam-adj-row"><label>Can attend as <select id="fa-n-' + p.id + '">' + [0, 1, 2, -1].map(n => '<option value="' + n + '"' + (n === adj ? ' selected' : '') + '>' + famAdjLabel(n) + '</option>').join('') + '</select></label>' +
+        (!famCanEdit() ? '' : p.birthdate ? '<div class="fam-adj-row"><label>Can attend as <select id="fa-n-' + p.id + '">' + [0, 1, 2, -1].map(n => '<option value="' + n + '"' + (n === adj ? ' selected' : '') + '>' + famAdjLabel(n) + '</option>').join('') + '</select></label>' +
           '<label>Until (optional) <input type="date" id="fa-u-' + p.id + '" value="' + famEsc(p.age_adjust_until || '') + '"></label></div>' +
           '<label class="fam-adj-note">Reason (who approved it and why) <input type="text" id="fa-r-' + p.id + '" maxlength="300" value="' + famEsc(p.age_adjust_note || '') + '" placeholder="e.g. Kyra approved: joining her older brother\'s class"></label>' +
           '<button class="ho-btn" onclick="famSaveAdj(\'' + p.id + '\')">Save age exception</button> <span class="fam-meta" id="fa-m-' + p.id + '"></span>' : '<p class="fam-meta">Add a birthdate first.</p>') +
@@ -174,12 +179,12 @@ function famRender() {
         const parts = String(c.camper).split(' '), fn = parts.shift() || '', ln = parts.join(' ');
         return '<details class="fam-person-d loose" data-sec="loose-' + i + '"' + open('loose-' + i) + '><summary><b>' + famEsc(c.camper) + '</b> <span class="fam-meta">camper · not on World</span> <span class="fam-pill">🏅 ' + c.total + '</span></summary><div class="fam-person-body">' +
           '<p class="fam-meta" style="margin:6px 0 0">Camp badges: ' + badgeMeta(c) + '</p>' + badgeChips(c) +
-          '<h4 class="fam-h4">Add as a participant</h4><div class="fam-edit">' +
+          (famCanEdit() ? '<h4 class="fam-h4">Add as a participant</h4><div class="fam-edit">' +
             '<label>First name <input type="text" id="fn-f-' + i + '" maxlength="40" value="' + famEsc(fn) + '"></label>' +
             '<label>Last name <input type="text" id="fn-l-' + i + '" maxlength="40" value="' + famEsc(ln) + '"></label>' +
             '<label>Birthdate <input type="date" id="fn-b-' + i + '"></label>' +
             '<label>Relationship <select id="fn-r-' + i + '">' + Object.keys(REL).map(k => '<option value="' + k + '"' + (k === 'child' ? ' selected' : '') + '>' + REL[k] + '</option>').join('') + '</select></label>' +
-          '</div><button class="ho-btn" onclick="famAddPerson(' + i + ')">Add to family</button> <span class="fam-meta" id="fn-msg-' + i + '"></span></div></details>';
+          '</div><button class="ho-btn" onclick="famAddPerson(' + i + ')">Add to family</button> <span class="fam-meta" id="fn-msg-' + i + '"></span>' : '') + '</div></details>';
       }).join('') : ''));
     // Customer badges: the customer's own (none until the badge system is built)
     h += sec('cbadges', '🏅 Customer badges', null, '<p class="fam-meta">' + famEsc(f.parent_name || 'The customer') + '\'s own badges will show here once the badge system is built. Kids\' badges are under Linked participants.</p>');
@@ -264,11 +269,11 @@ function famRender() {
     // Notes
     const notes = f.notes || [];
     h += sec('notes', 'Notes', notes.length,
-      '<div class="fam-noteadd"><textarea id="fam-note" rows="2" maxlength="2000" placeholder="Add a note for every studio, e.g. Prefers texts to calls"></textarea>' +
+      (famCanEdit() ? '<div class="fam-noteadd"><textarea id="fam-note" rows="2" maxlength="2000" placeholder="Add a note for every studio, e.g. Prefers texts to calls"></textarea>' +
       '<div class="fam-adj-row"><label>Flag <select id="fam-flag"><option value="">No flag (just a note)</option>' + Object.keys(FLAGS).map(k => '<option value="' + k + '">' + FLAGS[k][0] + ' ' + FLAGS[k][1] + '</option>').join('') + '</select></label>' +
-      '<button class="ho-btn" onclick="famAddNote()">Add note</button> <span class="fam-meta" id="fam-note-msg"></span></div></div>' +
+      '<button class="ho-btn" onclick="famAddNote()">Add note</button> <span class="fam-meta" id="fam-note-msg"></span></div></div>' : '<p class="fam-meta">Ask a coordinator to add or change notes.</p>') +
       notes.map(n => '<div class="fam-note' + (n.flag ? ' f-' + n.flag : '') + '">' + (n.flag ? '<span class="fam-flag f-' + n.flag + '">' + FLAGS[n.flag][0] + ' ' + famEsc(FLAGS[n.flag][1]) + '</span> ' : '') + famEsc(n.body) +
-        '<div class="fam-meta">' + famEsc(n.author) + (n.studio_id ? ' · ' + famEsc(sn(n.studio_id)) : '') + ' · ' + famEsc(dl(n.at)) + ' · <button class="fam-x" onclick="famRemoveNote(' + Number(n.id) + ')">Remove</button></div></div>').join(''));
+        '<div class="fam-meta">' + famEsc(n.author) + (n.studio_id ? ' · ' + famEsc(sn(n.studio_id)) : '') + ' · ' + famEsc(dl(n.at)) + (famCanEdit() ? ' · <button class="fam-x" onclick="famRemoveNote(' + Number(n.id) + ')">Remove</button>' : '') + '</div></div>').join(''));
     // Staff changes
     const chg = f.changes || [];
     if (chg.length) h += sec('changes', 'Staff changes', chg.length, chg.map(c => {
