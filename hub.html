@@ -768,6 +768,7 @@ select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { 
 .ft-dragth { cursor: grab; } .ft-dragth:active { cursor: grabbing; }
 .ft-dwrap { position: relative; display: block; min-width: 128px; cursor: pointer; } .ft-dlabel { display: block; padding: 6px 4px; white-space: nowrap; font-weight: 600; }
 .ft-dwrap .ft-dpick { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
+.ts-shift { font-size: 12px; font-weight: 700; color: #555; background: #f2eee6; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
 .wu-booked { background: #eef7ee; border: 1px solid #b8e0c3; border-radius: 10px; padding: 8px 12px; margin: 8px 0; font-size: 14px; }
 .rp-ck { width: 30px; text-align: center; } .rp-ck input { width: 18px; height: 18px; cursor: pointer; }
 .rp-tbl tr.rp-sel td { background: #fff8e6; }
@@ -16488,7 +16489,9 @@ async function meSickGo(i) {
 // ---- 🕒 Timesheets (hub_timesheets.sql): staff "Hours" tab + home office approval ----
 const TS_KIND = { in: 'In', break_out: 'Break', break_in: 'Back', out: 'Out' };
 // Punch times always in the STUDIO's time zone (the database reads corrected times that way too)
-function tsTz(studioId) { const p = String(studioId || '').slice(0, 2); return p === 'BC' ? 'America/Vancouver' : p === 'AB' ? 'America/Edmonton' : p === 'ON' ? 'America/Toronto' : undefined; }
+// (Nov 11 2026) BC and Alberta are on permanent time (UTC−7 / UTC−6 all year), like the studios table; Ontario follows Toronto
+function tsTz(studioId) { const p = String(studioId || '').slice(0, 2); return p === 'BC' ? 'Etc/GMT+7' : p === 'AB' ? 'Etc/GMT+6' : p === 'ON' ? 'America/Toronto' : undefined; }
+function tsTzLabel(studioId) { const p = String(studioId || '').slice(0, 2); return p === 'BC' ? 'BC' : p === 'AB' ? 'Alberta' : p === 'ON' ? 'Ontario' : ''; }
 const tsTime = (iso, studioId) => new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: tsTz(studioId) });
 // "HH:MM" (24h) in the studio's zone, for time boxes
 function tsHHMM(iso, studioId) {
@@ -16810,6 +16813,11 @@ function tsStep(dir) {
   f.anchor = addDaysStr(f.anchor, dir * (f.mode === 'week' ? 7 : 14));
   window._tsSel = new Set(); loadTsPane();
 }
+function tsSelectClean() {
+  window._tsSel = window._tsSel || new Set(); let n = 0;
+  (window._tsPeople || []).forEach(x => (x.days || []).forEach(d => { if (window._tsClean && window._tsClean(d)) { window._tsSel.add(x.staff_id + '|' + d.date); n++; } }));
+  loadTsPane().then(() => { if (!n) alert('No clean days to approve here: everything left needs a look.'); });
+}
 function tsSetFilter(k, v) { window._tsf[k] = v; if (k !== 'show') window._tsSel = new Set(); loadTsPane(); }
 async function loadTsPane(date) {
   if (date) window._tsf.anchor = date;
@@ -16833,7 +16841,34 @@ async function loadTsPane(date) {
     return { ps, open, appr, canApprove: ps.length > 0 && !open && d.date < today,
       check: (d.notes || []).some(n => !n.answer) || ps.some(p => (p.flags || []).length || (p.comment && appr !== 'approved')) || open || appr === 'changed' };
   };
+  // (Nov 11 2026) 🍁 province filter (by where the day was worked)
+  const provOf = d => String(((d.shifts || [])[0] || {}).studio_id || ((d.punches || [])[0] || {}).studio_id || '').slice(0, 2);
+  // ✨ a "clean" day: complete punches, nothing flagged, edited or noted, in and out within 10 minutes of the schedule,
+  // no extra time, and a break if the shift is over 5 hours. Only these get picked by "Select clean days".
+  const mins = hhmm => { const [h, m] = String(hhmm || '').split(':').map(Number); return h * 60 + m; };
+  const plainNote = c => !c || /^Imported from Sling(: break without times, placed mid-shift)?$/.test(c);
+  const clean = d => {
+    const k = info(d), ps = k.ps;
+    if (!k.canApprove || k.appr) return false;
+    if (!ps.length || ps.some(p => (p.flags || []).length || p.original_at || !plainNote(p.comment))) return false;
+    if ((d.notes || []).length) return false;
+    const shs = (d.shifts || []).filter(z => z.start && z.end); if (!shs.length) return false;
+    const st = ps[0].studio_id || shs[0].studio_id;
+    const ins = ps.filter(p => p.kind === 'in'), outs = ps.filter(p => p.kind === 'out');
+    if (ins.length !== 1 || outs.length !== 1) return false;
+    if (ps.filter(p => p.kind === 'break_out').length !== ps.filter(p => p.kind === 'break_in').length) return false;
+    const sStart = Math.min(...shs.map(z => mins(String(z.start).slice(0, 5)))), sEnd = Math.max(...shs.map(z => mins(String(z.end).slice(0, 5))));
+    const pin = mins(tsHHMM(ins[0].at, st)), pout = mins(tsHHMM(outs[0].at, st));
+    if (Math.abs(pin - sStart) > 10 || pout > sEnd + 10 || pout < sEnd - 15) return false;
+    const worked = d.minutes ? Number(d.minutes.worked) || 0 : 0;
+    if (worked > (sEnd - sStart) + 10) return false;
+    if (sEnd - sStart > 300 && !ps.some(p => p.kind === 'break_out')) return false;
+    return true;
+  };
+  window._tsClean = clean;
   const show = d => { const k = info(d);
+    if (f.prov && provOf(d) !== f.prov) return false;
+    if (f.show === 'clean') return clean(d);
     if (f.show === 'pending') return k.ps.length && k.appr !== 'approved';
     if (f.show === 'approved') return k.appr === 'approved';
     if (f.show === 'check') return k.check;
@@ -16898,11 +16933,13 @@ async function loadTsPane(date) {
       ${f.mode === 'custom'
         ? `<input type="date" value="${escAttr(rg.from)}" onchange="window._tsf.from = this.value; loadTsPane()"> – <input type="date" value="${escAttr(rg.to)}" onchange="window._tsf.to = this.value; loadTsPane()">`
         : `<button class="ho-btn" onclick="tsStep(-1)">‹</button><div class="tsg-per"><b>${esc(rg.label)}</b></div><button class="ho-btn" onclick="tsStep(1)">›</button>`}
+      <select onchange="tsSetFilter('prov', this.value)">${[['', 'All provinces'], ['BC', 'BC'], ['AB', 'Alberta'], ['ON', 'Ontario']].map(([k, l]) => `<option value="${k}"${(f.prov || '') === k ? ' selected' : ''}>${l}</option>`).join('')}</select>
       <select onchange="tsSetFilter('studio', this.value)"><option value="">All studios</option>${studioOpts}</select>
       <select onchange="tsSetFilter('staff', this.value)"><option value="">All employees</option>${staffOpts}</select>
-      <select onchange="tsSetFilter('show', this.value)">${[['all', 'Show: everything'], ['pending', 'Show: pending'], ['approved', 'Show: approved'], ['check', 'Show: needs checking']].map(([k, l]) => `<option value="${k}"${f.show === k ? ' selected' : ''}>${l}</option>`).join('')}</select>
+      <select onchange="tsSetFilter('show', this.value)">${[['all', 'Show: everything'], ['pending', 'Show: pending'], ['clean', 'Show: clean (ready to approve)'], ['approved', 'Show: approved'], ['check', 'Show: needs checking']].map(([k, l]) => `<option value="${k}"${f.show === k ? ' selected' : ''}>${l}</option>`).join('')}</select>
       <span class="spacer"></span>
       <span class="goal-note">${tsByName() ? `Signed in as <b>${esc(tsByName())}</b>` : ''}</span><input type="hidden" id="ts-by" value="${escAttr(tsByName())}">
+      <button class="ho-btn" onclick="tsSelectClean()" title="Tick every pending day that matches the schedule (within 10 min), with no flags, edits or notes, and a break on shifts over 5 hours">✨ Select clean days</button>
       <button class="ho-btn" onclick="tsToggleAll()">${Object.keys(window._tsCollapsed || {}).length ? 'Expand all' : 'Collapse all'}</button>
     </div>
     <div class="tsg-selbar${sel.size ? ' on' : ''}"><b>${sel.size}</b> selected
@@ -16957,9 +16994,9 @@ function tsDaySheet(i, date) {
   const shift = shs.length ? { start: shs.map(z => String(z.start).slice(0, 5)).sort()[0], end: shs.map(z => String(z.end).slice(0, 5)).sort().slice(-1)[0] } : null;
   window._tsEdit = { shift, staff: x.staff_id, date, studio, punches: (d.punches || []).map(p => ({ id: p.id, kind: p.kind, orig: tsHHMM(p.at, p.studio_id || studio), time: tsHHMM(p.at, p.studio_id || studio), remove: false })), adds: [] };
   const appr = d.approval && d.approval.status;
-  const tz = tsTz(studio), tzName = tz ? tz.split('/')[1].replace('_', ' ') : '';
+  const tz = tsTz(studio), tzName = tsTzLabel(studio);
   openDutySheet(`<h3>${esc(x.full_name)}</h3>
-    <p>${esc(tsDayLabel(date))}${studio ? ' · ' + esc(STUDIO_NAMES[studio] || studio) : ''}${appr === 'approved' ? ` · <span class="tsg-st ok">APPROVED</span>${d.approval.by ? ' by ' + esc(d.approval.by) : ''}` : appr === 'changed' ? ' · <span class="tsg-st need">CHANGED</span>' : ''}</p>
+    <p>${esc(tsDayLabel(date))}${studio ? ' · ' + esc(STUDIO_NAMES[studio] || studio) : ''}${shift ? ` · <span class="ts-shift">🗓 Shift ${esc(shortTime(shift.start))}–${esc(shortTime(shift.end))}</span>` : ' · <span class="ts-shift">no shift scheduled</span>'}${appr === 'approved' ? ` · <span class="tsg-st ok">APPROVED</span>${d.approval.by ? ' by ' + esc(d.approval.by) : ''}` : appr === 'changed' ? ' · <span class="tsg-st need">CHANGED</span>' : ''}</p>
     <div class="tse"><div class="tse-head"><b>Punches</b><span class="goal-note">times are ${esc(tzName)} time</span></div>
       <div id="tse-list"></div>
       <div class="tse-adds"><button class="ho-btn" onclick="tsEditAdd('break')">＋ Add break</button><button class="ho-btn" onclick="tsEditAdd('punch')">＋ Add punch</button></div>
