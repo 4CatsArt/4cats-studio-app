@@ -2,6 +2,7 @@
 // staff mode, waiting to pay, returns & exchanges, who's here now) plus the family card's partner pricing and saved cards.
 // Moved out of hub.html (Nov 11 2026) and opened from the studio view with each staff member's own PIN (🔑 Who's selling).
 // Loaded by hub.html after its main script.
+// (The PIN box is a plain text box shown as dots, so browsers don't offer to save it as a password.)
 
 // ---------- 🛒 Front desk (hub_pos.sql + camp-checkout staff mode) ----------
 // One cart on the right for everything; tabs across the top are different ways to add to it. Everything here is paid
@@ -41,9 +42,9 @@ function openFrontDesk() {
   fdLoadTab(); fdWaitLoad(); fdWaitTick();
 }
 // 🔑 (Nov 11 2026) Who's selling: each staff member's own PIN (hub_fd_pin_who: a staff PIN at this studio with Front desk on the
-// Access page). Home office logins don't need one. It locks after 5 minutes with no taps here, or when Front desk is left.
+// Access page). Home office logins don't need one. It locks after 1 minute with no taps here, or when Front desk is left.
 let _fdSeller = null;   // { pin, name, last }
-const FD_IDLE_MS = 5 * 60 * 1000;
+const FD_IDLE_MS = 60 * 1000;   // (Nov 11 2026: 1 minute)
 function fdNeedsPin() { return !(_studioData && _studioData.isAdmin) && !_fdSeller; }
 function fdPin() { return _fdSeller ? _fdSeller.pin : (_sessionPin || null); }
 function fdSellerLock() { _fdSeller = null; if (paneVisible('fd-pane')) fdRender(); }
@@ -52,8 +53,8 @@ function fdPinHtml() {
     <div class="fd-pinbox" style="max-width:340px;margin:40px auto;text-align:center">
       <p style="font-size:17px;margin:0 0 6px"><b>Who’s at the desk?</b></p>
       <p class="fd-sm" style="margin:0 0 14px">Enter your PIN (the one you punch in with). Everything you sell or book is saved under your name.</p>
-      <input id="fd-pin" type="password" inputmode="numeric" autocomplete="off" maxlength="4" pattern="[0-9]*" placeholder="••••"
-        style="font-size:28px;letter-spacing:10px;text-align:center;width:180px;padding:10px;border-radius:12px;border:1px solid #ccc"
+      <input id="fd-pin" type="text" name="fd-desk-code" inputmode="numeric" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore maxlength="4" pattern="[0-9]*" placeholder="••••"
+        style="font-size:28px;letter-spacing:10px;text-align:center;width:180px;padding:10px;border-radius:12px;border:1px solid #ccc;-webkit-text-security:disc;text-security:disc"
         oninput="if(this.value.replace(/\\D/g,'').length===4)fdPinGo(this.value)" onkeydown="if(event.key==='Enter')fdPinGo(this.value)">
       <div id="fd-pin-msg" class="fd-sm" style="margin-top:10px;min-height:18px"></div></div>`;
 }
@@ -74,7 +75,11 @@ async function fdPinGo(pin, quiet) {
 }
 document.addEventListener('pointerdown', e => { if (_fdSeller && e.target && e.target.closest && e.target.closest('#fd-pane')) _fdSeller.last = Date.now(); }, true);
 document.addEventListener('keydown', e => { if (_fdSeller && e.target && e.target.closest && e.target.closest('#fd-pane')) _fdSeller.last = Date.now(); }, true);
-setInterval(() => { if (_fdSeller && (!paneVisible('fd-pane') || Date.now() - _fdSeller.last > FD_IDLE_MS)) fdSellerLock(); }, 15000);
+setInterval(() => {
+  if (!_fdSeller) return;
+  if (_fd && _fd.order && _fd.order.status === 'pending' && paneVisible('fd-pane')) { _fdSeller.last = Date.now(); return; }   // (waiting for a family to pay: never lock mid-payment)
+  if (!paneVisible('fd-pane') || Date.now() - _fdSeller.last > FD_IDLE_MS) fdSellerLock();
+}, 5000);
 const fdToday = () => new Date().toLocaleDateString('en-CA');
 const fdAddDays = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return x.toLocaleDateString('en-CA'); };
 const fdMoney = n => '$' + Number(n || 0).toFixed(2);
@@ -165,7 +170,7 @@ function fdRender() {
   if (fdNeedsPin()) { el.innerHTML = fdPinHtml(); setTimeout(() => { const i = document.getElementById('fd-pin'); if (i && document.activeElement !== i) i.focus(); }, 60); return; }
   const F = _fd;
   let h = `<div class="fd-testing">🚧 <b>Being tested.</b> Please don’t use the Front desk for real bookings yet: keep booking the usual way until home office says it’s ready.</div>
-    <div class="fd-top"><div class="pts-page-title" style="margin:0">🛒 Front desk</div><span class="fd-studio">${esc(STUDIO_NAMES[F.studio] || F.studio || '')}</span>${_fdSeller ? `<span class="fd-studio" title="Locks after 5 minutes with no taps">🔑 Selling as <b>${esc(_fdSeller.name)}</b> <button class="ho-btn sm" onclick="fdSellerLock()">Lock</button></span>` : ''}<span class="spacer"></span>
+    <div class="fd-top"><div class="pts-page-title" style="margin:0">🛒 Front desk</div><span class="fd-studio">${esc(STUDIO_NAMES[F.studio] || F.studio || '')}</span>${_fdSeller ? `<span class="fd-studio" title="Locks after 1 minute with no taps">🔑 Selling as <b>${esc(_fdSeller.name)}</b> <button class="ho-btn sm" onclick="fdSellerLock()">Lock</button></span>` : ''}<span class="spacer"></span>
     ${fdWaitChipHtml()}<button class="ho-btn" onclick="fdRetOpen()" title="A kit brought back: credit, or swap it for another">↩ Returns & exchanges</button><button class="ho-btn" onclick="fdRecentOpen()">Recent orders</button></div>
     <div class="fd-tabs" role="tablist">${FD_TABS.map(t => `<button role="tab" class="fd-tab${F.tab === t[0] ? ' on' : ''}" onclick="_fd.tab='${t[0]}';fdRender();fdLoadTab()">${t[1]}</button>`).join('')}</div>
     <div class="fd-wrap"><div class="fd-main">${fdMainHtml()}</div><aside class="fd-cart">${fdCartHtml()}</aside></div>`;
