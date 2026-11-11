@@ -32,7 +32,7 @@ function fdPtyGoWant() {
   if (pick) { _fd.ptyKind = fdPtyKind(pick); fdPtyOpen(pick.id); } else fdRender();
 }
 function openFrontDesk() {
-  const wasOpen = paneVisible('fd-pane');
+  const wasOpen = paneVisible('fd-pane') || paneVisible('families-pane');   // (Front desk and Families share one PIN unlock)
   showOnlyPane('fd-pane'); setActiveNav('nav-fd');
   if (!_fd || _fd.studio !== _sessionStudioId) { _fd = fdNew(); _fdSeller = null; }   // (another studio: a fresh cart, and a new PIN)
   if (!wasOpen) _fdSeller = null;                                                        // (opened again: whoever's at the desk enters their PIN)
@@ -47,9 +47,9 @@ let _fdSeller = null;   // { pin, name, last }
 const FD_IDLE_MS = 60 * 1000;   // (Nov 11 2026: 1 minute)
 function fdNeedsPin() { return !(_studioData && _studioData.isAdmin) && !_fdSeller; }
 function fdPin() { return _fdSeller ? _fdSeller.pin : (_sessionPin || null); }
-function fdSellerLock() { _fdSeller = null; if (paneVisible('fd-pane')) fdRender(); }
-function fdPinHtml() {
-  return `<div class="fd-top"><div class="pts-page-title" style="margin:0">🛒 Front desk</div><span class="fd-studio">${esc(STUDIO_NAMES[_sessionStudioId] || _sessionStudioId || '')}</span></div>
+function fdSellerLock() { _fdSeller = null; if (paneVisible('fd-pane')) fdRender(); if (paneVisible('families-pane') && typeof famDeskGate === 'function') famDeskGate(); }
+function fdPinHtml(title) {
+  return `<div class="fd-top"><div class="pts-page-title" style="margin:0">${title || '🛒 Front desk'}</div><span class="fd-studio">${esc(STUDIO_NAMES[_sessionStudioId] || _sessionStudioId || '')}</span></div>
     <div class="fd-pinbox" style="max-width:340px;margin:40px auto;text-align:center">
       <p style="font-size:17px;margin:0 0 6px"><b>Who’s at the desk?</b></p>
       <p class="fd-sm" style="margin:0 0 14px">Enter your PIN (the one you punch in with). Everything you sell or book is saved under your name.</p>
@@ -71,14 +71,15 @@ async function fdPinGo(pin, quiet) {
     return;
   }
   _fdSeller = { pin, name: data.name || 'Staff', last: Date.now() };
+  if (paneVisible('families-pane') && typeof openFamiliesPane === 'function') { openFamiliesPane(); return; }
   fdRender(); fdLoadTab(); fdWaitLoad(); fdWaitTick();
 }
-document.addEventListener('pointerdown', e => { if (_fdSeller && e.target && e.target.closest && e.target.closest('#fd-pane')) _fdSeller.last = Date.now(); }, true);
-document.addEventListener('keydown', e => { if (_fdSeller && e.target && e.target.closest && e.target.closest('#fd-pane')) _fdSeller.last = Date.now(); }, true);
+document.addEventListener('pointerdown', e => { if (_fdSeller && e.target && e.target.closest && e.target.closest('#fd-pane, #families-pane')) _fdSeller.last = Date.now(); }, true);
+document.addEventListener('keydown', e => { if (_fdSeller && e.target && e.target.closest && e.target.closest('#fd-pane, #families-pane')) _fdSeller.last = Date.now(); }, true);
 setInterval(() => {
   if (!_fdSeller) return;
   if (_fd && _fd.order && _fd.order.status === 'pending' && paneVisible('fd-pane')) { _fdSeller.last = Date.now(); return; }   // (waiting for a family to pay: never lock mid-payment)
-  if (!paneVisible('fd-pane') || Date.now() - _fdSeller.last > FD_IDLE_MS) fdSellerLock();
+  if (!(paneVisible('fd-pane') || paneVisible('families-pane')) || Date.now() - _fdSeller.last > FD_IDLE_MS) fdSellerLock();
 }, 5000);
 const fdToday = () => new Date().toLocaleDateString('en-CA');
 const fdAddDays = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return x.toLocaleDateString('en-CA'); };
