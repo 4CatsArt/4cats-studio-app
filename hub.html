@@ -3716,10 +3716,11 @@ function renderDailyHero(data) {
   const hrs = heroHoursHtml(data.studioId);
   container.innerHTML = `
     <div class="hero-greeting">${heroGreetingHtml(data.firstName)}</div>
-    <div class="hero-sub">${sub}${hrs}</div><div id="next-pa"></div><div id="party-missing"></div>`;
+    <div class="hero-sub">${sub}${hrs}</div><div id="next-pa"></div><div id="party-missing"></div><div id="studio-note-card"></div>`;
   renderFloorToday(data);
   nextPaLoad(data.studioId);
   partyMissingLoad(data.studioId);
+  studioNoteLoad(data.studioId);
 }
 
 // (Nov 10 2026) 📅 Next PA/PD day: the studio's next PA/PD day camp (in the next 4 months), so it never sneaks up on anyone.
@@ -3782,6 +3783,56 @@ async function pmOpenParty(day, bookingId) {
   if (i < 0) return;
   if (!_plan.partyForms[bookingId]) togglePartyForm(i);
   setTimeout(() => { const el = document.querySelector(`.pf-wrap[data-pf="${bookingId}"]`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 300);
+}
+// ✍️ (Nov 11 2026) The studio's note on World (world_studio_note.sql): home office for any studio, coordinators (PIN) for their own;
+// the picture is home office's (this studio's own, or the one for every studio)
+let _snote = null;
+async function studioNoteLoad(sid) {
+  const el = document.getElementById('studio-note-card'); if (!el || !sid) return;
+  let r; try { r = await sb.rpc('hub_studio_note_get', { p_studio: sid, p_pin: _sessionPin || null }); } catch (e) { return; }
+  if (r.error || !r.data || !r.data.can_edit) { el.innerHTML = ''; return; }
+  _snote = Object.assign({ sid }, r.data);
+  const n = _snote.note || {}, on = n.body && n.show !== false;
+  el.innerHTML = `<div class="pm-box sn-card"><b>✍️ Your note on World</b> <span class="fd-sm">${on ? 'showing on ' + esc(STUDIO_NAMES[sid] || sid) + '’s World page' : n.body ? 'switched off' : 'not written yet'}</span>
+    <button class="ho-btn sm" style="margin-left:8px" onclick="studioNoteEdit()">${n.body ? 'Edit' : 'Write one'}</button>
+    ${n.body ? `<div class="fd-sm" style="margin-top:4px">${esc(String(n.body).slice(0, 140))}${String(n.body).length > 140 ? '…' : ''}</div>` : ''}</div>`;
+}
+function studioNoteEdit() {
+  if (!_snote) return; const n = _snote.note || {}, nm = String(STUDIO_NAMES[_snote.sid] || _snote.sid).replace(/^.*?\s-\s/, '');
+  const photo = _snote.photo_studio || _snote.photo_all;
+  openDutySheet(`<h3>✍️ Note from ${esc(nm)} on World</h3>
+    <p class="ho-intro">Shows on the studio’s World home page, under the kiln and suggestions boxes, with today’s picture.</p>
+    <div class="me-form">
+      <label>Heading<input id="sn-title" maxlength="120" value="${escAttr(n.title || '')}" placeholder="A Little Note from ${escAttr(nm)}"></label>
+      <label>Your note<textarea id="sn-body" rows="6" maxlength="2000" placeholder="e.g. We’re open and looking forward to a busy day of making! …">${esc(n.body || '')}</textarea></label>
+      <label>Signed<textarea id="sn-signed" rows="2" maxlength="200" placeholder="See you at the studio,&#10;Carmi the Chameleon, Joyful Julia &amp; Mary">${esc(n.signed || '')}</textarea></label>
+      <label class="ba-check"><input type="checkbox" id="sn-show" ${n.show === false ? '' : 'checked'}> Show it on World</label>
+      <div class="sn-ph"><b>Picture</b> ${photo ? `<img src="${escAttr(photo)}" alt="" style="max-width:160px;border-radius:8px;display:block;margin:6px 0">` : '<span class="fd-sm">none yet</span>'}
+        ${_snote.can_photo ? `<div class="fd-sm" style="margin:4px 0">${_snote.photo_studio ? 'This studio’s own picture.' : _snote.photo_all ? 'The picture for every studio.' : ''}</div>
+          <label class="ho-btn sm">📷 This studio’s picture<input type="file" accept="image/*" hidden onchange="studioNotePhoto(this, '${escAttr(_snote.sid)}')"></label>
+          <label class="ho-btn sm">📷 Picture for every studio<input type="file" accept="image/*" hidden onchange="studioNotePhoto(this, '*')"></label>
+          ${_snote.photo_studio ? `<button class="ho-btn sm" onclick="studioNotePhotoClear('${escAttr(_snote.sid)}')">Use the every-studio one</button>` : ''}`
+          : '<span class="fd-sm">The picture is set by home office.</span>'}</div>
+      <div id="sn-msg"></div></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="studioNoteSave()">Save</button></div>`);
+}
+async function studioNoteSave() {
+  const v = id => (document.getElementById(id) || {}).value || '';
+  const { error } = await sb.rpc('hub_studio_note_save', { p_studio: _snote.sid, p_pin: _sessionPin || null,
+    p: { title: v('sn-title'), body: v('sn-body'), signed: v('sn-signed'), show: document.getElementById('sn-show').checked } });
+  if (error) { document.getElementById('sn-msg').innerHTML = `<p class="fd-msg">${esc(/hub_studio_note/.test(error.message) ? 'Run world_studio_note.sql in Supabase first.' : error.message)}</p>`; return; }
+  closeDutySheet(); studioNoteLoad(_snote.sid);
+}
+async function studioNotePhoto(inp, key) {
+  const f = inp.files && inp.files[0]; if (!f) return;
+  const urls = await rpUploadFiles([f], 'studio-notes'); if (!urls[0]) return;
+  const { error } = await sb.rpc('hub_studio_note_photo', { p_key: key, p_url: urls[0] });
+  if (error) { alert(error.message); return; }
+  await studioNoteLoad(_snote.sid); studioNoteEdit();
+}
+async function studioNotePhotoClear(key) {
+  const { error } = await sb.rpc('hub_studio_note_photo', { p_key: key, p_url: '' }); if (error) { alert(error.message); return; }
+  await studioNoteLoad(_snote.sid); studioNoteEdit();
 }
 async function partyMissingLoad(sid) {
   const el = document.getElementById('party-missing'); if (!el || !sid) return;
