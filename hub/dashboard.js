@@ -553,7 +553,7 @@ function dashStyles() {
 .dash-block.sz-s { grid-column: span 1; } .dash-block.sz-m { grid-column: span 2; } .dash-block.sz-l { grid-column: 1 / -1; }
 .dash-block header { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; } .dash-block header b { font-size: 15px; }
 .dash-block .spacer { flex: 1; }
-.dash-open, .dash-ref { border: 0; background: none; color: var(--accent); font-weight: 700; font-size: 13px; cursor: pointer; padding: 2px 4px; }
+.dash-open, .dash-ref { border: 0; background: none; color: var(--accent); font-weight: 700; font-size: 13px; cursor: pointer; padding: 2px 4px; white-space: nowrap; flex: none; }
 .dash-ref { color: var(--ink-soft); }
 .dash-body { max-height: 340px; overflow-y: auto; font-size: 13.5px; }
 .dash-grid.editing .dash-block { outline: 2px dashed var(--accent-soft); cursor: grab; } .dash-block.dragging { opacity: .45; }
