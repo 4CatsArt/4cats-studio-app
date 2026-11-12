@@ -84,7 +84,7 @@ function snsDraw() {
         const st = snsStatus(n, t), copies = n._copies || [n], many = copies.length > 1;
         const onToday = copies.filter(c => liveBy[c.studio_id] && liveBy[c.studio_id].id === c.id).length;
         const stTxt = st === 'live' ? (onToday === copies.length ? '<span class="sns-live">● Showing</span>' : onToday ? `<span class="sns-live">● Showing at ${onToday}</span>` : '<span class="goal-note" title="A newer note is showing">Hidden by a newer note</span>') : st === 'upcoming' ? '<span class="sns-up">Coming up</span>' : '<span class="goal-note">Ended</span>';
-        return `<tr><td>${many ? `<b>🏬 ${copies.length} studios</b><div class="goal-note">${esc(copies.map(c => String(STUDIO_NAMES[c.studio_id] || c.studio_id).replace(/^.*?\s-\s/, '')).slice(0, 6).join(', '))}${copies.length > 6 ? '…' : ''}</div>` : esc(STUDIO_NAMES[n.studio_id] || n.studio_id)}</td>
+        return `<tr><td>${many ? `<b>🏬 ${copies.length} studios</b><div class="goal-note">${copies.map(c => `<a href="#" onclick="snsEdit('${escAttr(c.id)}', null, 'one');return false" title="Edit only this studio’s copy">${esc(String(STUDIO_NAMES[c.studio_id] || c.studio_id).replace(/^.*?\s-\s/, ''))}</a>`).join(', ')}</div>` : esc(STUDIO_NAMES[n.studio_id] || n.studio_id)}</td>
           <td style="white-space:nowrap">${esc(ptyDayLabel(n.show_from))}${n.show_until ? ' – ' + esc(ptyDayLabel(n.show_until)) : ' on'}</td>
           <td>${n.title ? `<b>${esc(n.title)}</b><br>` : ''}<span class="sn-snip">${esc(snPlain(n.body).slice(0, 110))}${snPlain(n.body).length > 110 ? '…' : ''}</span></td>
           <td>${stTxt}${n.emailed_at ? `<div class="goal-note">✉️ Emailed to ${Number(n.emailed_count || 0)}</div>` : (!many && (_sns.follows || {})[n.studio_id] ? `<div class="goal-note">✉️ ${Number(_sns.follows[n.studio_id])} following</div>` : '')}</td>
@@ -101,7 +101,7 @@ function snsDraw() {
   el.innerHTML = h;
 }
 // new note (one, a province or all studios), or edit one (this studio's copy, or every copy written together)
-function snsEdit(id, forStudio) {
+function snsEdit(id, forStudio, preScope) {
   const n = id ? (_sns.rows || []).find(x => x.id === id) : null, copies = n && n.group_id ? (_sns.rows || []).filter(x => x.group_id === n.group_id) : [];
   const prov = { BC: 'BC', AB: 'Alberta', ON: 'Ontario' }, pre = forStudio || _sns.studio || '';
   openDutySheet(`<h3>✍️ ${n ? 'Edit note' : 'New note'}</h3>
@@ -111,8 +111,8 @@ function snsEdit(id, forStudio) {
       <label>The note<textarea id="sns-body" rows="6" maxlength="2000">${esc((n && n.body) || '')}</textarea></label><div class="fd-sm" style="margin:-4px 0 8px"><button class="ho-btn sm" type="button" onclick="snsAddLink()">🔗 Add a link</button> Highlight some words first to turn them into the link. A web address typed into the note becomes clickable too.</div>
       <label>Sign-off (optional)<textarea id="sns-signed" rows="2" maxlength="200" placeholder="See you at the studio,">${esc((n && n.signed) || '')}</textarea></label>
       <label class="ba-check"><input type="checkbox" id="sns-auto" ${n && n.auto_staff === false ? '' : 'checked'}> Add the studio’s coordinator and that day’s staff after it (their 4Cats names: the coordinator first, then the published schedule)</label>
-      ${n ? (copies.length > 1 ? `<label class="ba-check"><input type="radio" name="sns-scope" value="all" checked> Change all ${copies.length} studios’ copies</label>
-          <label class="ba-check"><input type="radio" name="sns-scope" value="one"> Only ${esc(STUDIO_NAMES[n.studio_id] || n.studio_id)}</label>` : `<p class="fd-sm">For ${esc(STUDIO_NAMES[n.studio_id] || n.studio_id)}.</p>`)
+      ${n ? (copies.length > 1 ? `<label class="ba-check"><input type="radio" name="sns-scope" value="all" ${preScope === 'one' ? '' : 'checked'}> Change all ${copies.length} studios’ copies</label>
+          <label class="ba-check"><input type="radio" name="sns-scope" value="one" ${preScope === 'one' ? 'checked' : ''}> Only ${esc(STUDIO_NAMES[n.studio_id] || n.studio_id)} <span class="fd-sm">(it becomes its own note, with its own text)</span></label>` : `<p class="fd-sm">For ${esc(STUDIO_NAMES[n.studio_id] || n.studio_id)}.</p>`) + snsAlsoHtml(n, copies)
         : `<b style="display:block;margin:8px 0 4px">Which studios</b>
           <div class="sn-quick">${['all', 'BC', 'AB', 'ON'].map(k => `<button class="ho-btn sm" type="button" onclick="studioNotePick('${k}')">${k === 'all' ? 'All' : prov[k]}</button>`).join('')}<button class="ho-btn sm" type="button" onclick="studioNotePick('none')">None</button></div>
           <div class="sn-studios">${Object.keys(STUDIO_NAMES).map(sid => `<label class="ba-check"><input type="checkbox" class="sn-st" value="${escAttr(sid)}" ${sid === pre ? 'checked' : ''}> ${esc(STUDIO_NAMES[sid])}</label>`).join('')}</div>`}
@@ -126,9 +126,25 @@ async function snsSave(id) {
   const scope = (document.querySelector('input[name="sns-scope"]:checked') || {}).value;
   let r;
   if (n && n.group_id && scope === 'all') r = await sb.rpc('hub_studio_note_group_put', { p_group: n.group_id, p });
-  else r = await sb.rpc('hub_studio_note_put', { p: Object.assign(p, { id: id || null, studios: id ? [] : [...document.querySelectorAll('.sn-st:checked')].map(c => c.value) }) });
+  else r = await sb.rpc('hub_studio_note_put', { p: Object.assign(p, { id: id || null, detach: !!(n && n.group_id && scope === 'one'), studios: id ? [] : [...document.querySelectorAll('.sn-st:checked')].map(c => c.value) }) });
   if (r.error) { document.getElementById('sns-msg').innerHTML = `<p class="fd-msg">${esc(r.error.message)}</p>`; return; }
-  closeDutySheet(); _sns.msg = `✓ Saved${r.data && r.data.studios > 1 ? ' for ' + r.data.studios + ' studios' : ''}.`; snsLoad();
+  let added = 0;
+  const also = [...document.querySelectorAll('.sn-also:checked')].map(c => c.value);
+  if (n && also.length) {   // 🏬 (Nov 12 2026) also post it at more studios: copies in the same group
+    const c = await sb.rpc('hub_studio_note_copy', { p_id: n.id, p_studios: also });
+    if (c.error) { document.getElementById('sns-msg').innerHTML = `<p class="fd-msg">Saved, but copying didn’t work: ${esc(c.error.message)}</p>`; snsLoad(); return; }
+    added = (c.data && c.data.added) || 0;
+  }
+  closeDutySheet(); _sns.msg = `✓ Saved${r.data && r.data.studios > 1 ? ' for ' + r.data.studios + ' studios' : ''}${added ? `, and posted at ${added} more studio${added === 1 ? '' : 's'}` : ''}.`; snsLoad();
+}
+// 🏬 (Nov 12 2026) A published note: tick more studios to post it there too (they join its group)
+function snsAlsoHtml(n, copies) {
+  if (!n) return '';
+  const have = new Set((copies.length ? copies : [n]).map(c => c.studio_id)), left = Object.keys(STUDIO_NAMES).filter(sid => !have.has(sid));
+  if (!left.length) return '';
+  return `<details style="margin:8px 0"><summary><b>🏬 Also post it at…</b> <span class="fd-sm">(${left.length} other studios)</span></summary>
+    <p class="fd-sm" style="margin:6px 0">Copies go up with this note’s text, dates and picture rules, and stay grouped with it. Each studio can still be edited on its own later.</p>
+    <div class="sn-studios">${left.map(sid => `<label class="ba-check"><input type="checkbox" class="sn-also" value="${escAttr(sid)}"> ${esc(STUDIO_NAMES[sid])}</label>`).join('')}</div></details>`;
 }
 async function snsRemove(id) {
   const n = (_sns.rows || []).find(x => x.id === id); if (!n) return;
