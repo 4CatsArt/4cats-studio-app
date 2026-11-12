@@ -694,6 +694,30 @@ function dashHeightBtn(b) {   // (show ↕ Auto once a block has a height, witho
 }
 function dashHeightAuto(id) { const b = _dash.layout.blocks[dashIdx(id)]; if (!b) return; delete b.h; dashSaveSoon(); dashDraw(); }
 
+// ---------- 📋 For you: its buttons come from today.js and refresh only the Today screen's card ----------
+// So: after any decision (they all finish with myNotesLoad), refresh For you blocks here too; and a "Why?" note typed on the
+// dashboard is saved first (the Today screen has a box with the same id, which would otherwise be the one read).
+function dashReloadType(type) { if (_dash.layout && paneVisible('mydash-pane')) _dash.layout.blocks.filter(b => b.type === type).forEach(b => dashLoadBlock(b.id, false)); }
+(function dashHookInbox() {
+  if (typeof myNotesLoad === 'function' && !myNotesLoad._dash) {
+    const load = myNotesLoad;
+    window.myNotesLoad = function () { const r = load.apply(this, arguments); try { dashReloadType('for_you'); } catch (e) { } return r; };
+    window.myNotesLoad._dash = true;
+  }
+  if (typeof inboxDecide === 'function' && !inboxDecide._dash) {
+    const decide = inboxDecide;
+    window.inboxDecide = async function (id) {
+      const mine = document.querySelector('#mydash-pane [id="why-' + id + '"]');
+      if (mine && paneVisible('mydash-pane')) {
+        const row = mine.closest('.inbox-row'); if (row) row.style.opacity = '.45';   // (feedback straight away)
+        if (mine.value.trim()) { try { await sb.rpc('hub_inbox_note', { p_id: id, p_note: mine.value.trim() }); } catch (e) { } mine.value = ''; }
+      }
+      return decide.apply(this, arguments);
+    };
+    window.inboxDecide._dash = true;
+  }
+})();
+
 // ---------- Open on start (called by hub.html once the Hub has started) ----------
 async function dashStartup(data) {
   if (!data || !data.isAdmin) return;
