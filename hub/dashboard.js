@@ -3,13 +3,14 @@
 // my_dashboard SQL step 2: hub_dash_me / hub_dash_save). Each block is a summary with "Open →" to its full Hub page.
 // The page only hides blocks a person can't open: every block loads through the same RPC or Edge Function as its full page,
 // and that call checks access itself (a refusal shows "No access" on the block). Loaded by hub.html after the other area files.
-// Design: "4Cats Hub — My dashboard design v1" doc.
+// Design: "4Cats Hub — My dashboard design v1" doc. (Nov 12 2026: heights by dragging a block's corner, and blocks stack into gaps.)
 
 // ---------- State ----------
-let _dash = { me: null, layout: null, edit: false, err: '', saving: '', saveTimer: null, refreshTimer: null, drag: null, choose: false, cache: {} };
+let _dash = { me: null, layout: null, edit: false, err: '', saving: '', saveTimer: null, refreshTimer: null, drag: null, choose: false, cache: {}, ro: null };
 const DASH_RANK = { none: 0, own: 1, view: 2, edit: 3, manage: 4 };
 const DASH_REFRESH_MS = 5 * 60 * 1000;
 const DASH_MAX_BLOCKS = 50;
+const DASH_ROW = 4, DASH_GAP = 12, DASH_HMIN = 120, DASH_HMAX = 1000;   // the stacking grid: 4px rows, 12px gaps (a block's bottom margin); heights people can drag to
 
 // ---------- Small helpers ----------
 function dashCan(area, level) {
@@ -230,7 +231,14 @@ const DASH_BLOCKS = {
     desc: 'Where each studio finishes the month at its current pace (% of breakeven goal). No dollars.',
     async load(b) {
       if (typeof fetchGoalProgressWithPin !== 'function') return '<div class="dash-empty">Not available here.</div>';
-      const d = await fetchGoalProgressWithPin(null, (typeof _sessionStudioId !== 'undefined' && _sessionStudioId) || null);
+      const pin = (typeof _sessionPin !== 'undefined' && _sessionPin) || null;
+      let d;
+      try { d = await fetchGoalProgressWithPin(pin, (typeof _sessionStudioId !== 'undefined' && _sessionStudioId) || null); }
+      catch (e) {   // (the sales function still asks for a coordinator PIN, even from home office logins)
+        if (/PIN/i.test(e.message || '') && typeof openPinModal === 'function')
+          return '<div class="dash-empty">Sales need your PIN.</div><button class="ho-btn sm" onclick="dashPinThenRefresh()">🔓 Unlock with your PIN</button>';
+        throw e;
+      }
       const lb = d && d.leaderboard, top = (lb && lb.top) || [];
       if (!top.length) return '<div class="dash-empty">No goals set this month yet.</div>';
       const pct = r => r.pacePct !== undefined ? r.pacePct : r.monthPct;
@@ -378,7 +386,7 @@ async function dashLoadMe() {
   try {
     _dash.me = await dashRpc('hub_dash_me');
     const L = _dash.me.layout;
-    if (L && Array.isArray(L.blocks)) _dash.layout = { v: 1, start: !!L.start, starter: L.starter || '', blocks: L.blocks.filter(b => b && DASH_BLOCKS[b.type]).map(b => ({ id: b.id || dashNewId(), type: b.type, size: ['s', 'm', 'l'].includes(b.size) ? b.size : 'm', opts: Object.assign({}, DASH_BLOCKS[b.type].opts || {}, b.opts || {}) })) };
+    if (L && Array.isArray(L.blocks)) _dash.layout = { v: 1, start: !!L.start, starter: L.starter || '', blocks: L.blocks.filter(b => b && DASH_BLOCKS[b.type]).map(b => Object.assign({ id: b.id || dashNewId(), type: b.type, size: ['s', 'm', 'l'].includes(b.size) ? b.size : 'm', opts: Object.assign({}, DASH_BLOCKS[b.type].opts || {}, b.opts || {}) }, dashHeightOk(b.h) ? { h: dashHeightOk(b.h) } : {})) };
     else if (dashIsOwner()) { _dash.layout = dashBuild(['owner']); dashSaveSoon(); }
     else { _dash.layout = null; _dash.choose = true; }
   } catch (e) {
@@ -413,21 +421,22 @@ function dashDraw() {
   const bar = _dash.edit ? `<div class="dash-editbar"><button class="ho-btn primary" onclick="dashAddOpen()">+ Add a block</button>
       <button class="ho-btn" onclick="dashReset()">↺ Start again from a role's layout</button>
       <label class="dash-start"><input type="checkbox" ${L.start ? 'checked' : ''} onchange="_dash.layout.start=this.checked;dashSaveSoon()"> Open My dashboard when the Hub starts</label>
-      <span class="fd-sm">Drag ⠿ to move, or use ◀ ▶. S, M and L change the width.</span></div>` : '';
+      <span class="fd-sm">Drag ⠿ to move, or use ◀ ▶. S, M and L change the width; drag a block’s bottom-right corner to change its height. Blocks stack up to fill gaps.</span></div>` : '';
   el.innerHTML = head + bar + `<div class="dash-grid${_dash.edit ? ' editing' : ''}" id="dash-grid">${L.blocks.map(dashBlockShell).join('')}</div>` +
     (!L.blocks.length ? `<div class="ho-card"><div class="goal-note">No blocks yet.</div><button class="ho-btn primary" onclick="${_dash.edit ? '' : 'dashToggleEdit();'}dashAddOpen()">+ Add a block</button></div>` : '');
   dashStatus();
+  dashPackStart();
   L.blocks.forEach(b => dashLoadBlock(b.id, false));
 }
 function dashBlockShell(b, i) {
   const t = DASH_BLOCKS[b.type], ed = _dash.edit, n = _dash.layout.blocks.length;
   const sizes = ['s', 'm', 'l'].map(s => `<button class="dash-sz${b.size === s ? ' on' : ''}" onclick="dashSize('${b.id}','${s}')" title="${s === 's' ? 'Small' : s === 'm' ? 'Medium' : 'Full width'}">${s.toUpperCase()}</button>`).join('');
-  const tools = ed ? `<div class="dash-tools"><span class="dash-grip" title="Drag to move">⠿</span>
+  const tools = ed ? `<div class="dash-tools"><span class="dash-grip" title="Drag to move" draggable="true" ondragstart="dashDragStart(event,'${b.id}')" ondragend="dashDragEnd()">⠿</span>
       <button onclick="dashMove('${b.id}',-1)" ${i === 0 ? 'disabled' : ''} title="Move back">◀</button><button onclick="dashMove('${b.id}',1)" ${i === n - 1 ? 'disabled' : ''} title="Move forward">▶</button>
-      ${sizes}${t.settings ? `<button onclick="dashSettings('${b.id}')" title="Settings">⚙</button>` : ''}<button onclick="dashRemove('${b.id}')" title="Remove">✕</button></div>` : '';
+      ${sizes}${b.h ? `<button class="dash-hauto" onclick="dashHeightAuto('${b.id}')" title="Fit the height to what's in it">↕ Auto</button>` : ''}${t.settings ? `<button onclick="dashSettings('${b.id}')" title="Settings">⚙</button>` : ''}<button onclick="dashRemove('${b.id}')" title="Remove">✕</button></div>` : '';
   const acts = !ed ? `${t.open ? `<button class="dash-open" onclick="dashOpen('${escAttr(t.open[0])}'${t.open[1] !== undefined ? `,'${escAttr(t.open[1])}'` : ''})">Open →</button>` : ''}
       <button class="dash-ref" onclick="dashLoadBlock('${b.id}', true)" title="Refresh">↻</button>` : '';
-  return `<section class="dash-block sz-${b.size}" id="dash-${b.id}" data-id="${b.id}" ${ed ? `draggable="true" ondragstart="dashDragStart(event,'${b.id}')" ondragover="dashDragOver(event)" ondrop="dashDrop(event,'${b.id}')" ondragend="dashDragEnd()"` : ''}>
+  return `<section class="dash-block sz-${b.size}${b.h ? ' fixed' : ''}" id="dash-${b.id}" data-id="${b.id}"${b.h ? ` style="height:${b.h}px"` : ''} ${ed ? `ondragover="dashDragOver(event)" ondrop="dashDrop(event,'${b.id}')"` : ''}>
     <header><b>${esc(t.name)}</b><span class="spacer"></span>${acts}</header>${tools}
     <div class="dash-body" id="dash-body-${b.id}">${_dash.cache[b.id] || '<div class="dash-empty">Loading…</div>'}</div></section>`;
 }
@@ -487,7 +496,7 @@ function dashRemove(id) {
   const i = dashIdx(id); if (i < 0) return;
   _dash.layout.blocks.splice(i, 1); delete _dash.cache[id]; dashSaveSoon(); dashDraw();
 }
-function dashDragStart(e, id) { _dash.drag = id; try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', id); } catch (x) { } e.currentTarget.classList.add('dragging'); }
+function dashDragStart(e, id) { _dash.drag = id; try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', id); } catch (x) { } const bl = e.currentTarget.closest('.dash-block'); if (bl) { bl.classList.add('dragging'); try { e.dataTransfer.setDragImage(bl, 20, 20); } catch (x) { } } }
 function dashDragOver(e) { if (_dash.drag) { e.preventDefault(); try { e.dataTransfer.dropEffect = 'move'; } catch (x) { } } }
 function dashDrop(e, target) {
   e.preventDefault(); const from = _dash.drag; _dash.drag = null;
@@ -532,6 +541,41 @@ function dashNoteInput(id, text) {
   b.opts.text = String(text).slice(0, 2000); _dash.cache[id] = DASH_BLOCKS.sticky_note.load(b); dashSaveSoon();
 }
 
+// ---------- Heights and stacking ----------
+// Each block spans as many 4px grid rows as its height needs, and the grid fills gaps (dense), so short blocks slide up
+// under shorter neighbours. In Customize, a block's own resize corner sets its height; it's saved as b.h (pixels).
+function dashHeightOk(h) { const n = Math.round(+h / 10) * 10; return n >= DASH_HMIN && n <= DASH_HMAX ? n : 0; }
+function dashSpan(el) {
+  const h = el.getBoundingClientRect().height;
+  el.style.gridRowEnd = 'span ' + Math.max(1, Math.ceil((h + DASH_GAP) / DASH_ROW));
+}
+function dashPackStart() {
+  if (_dash.ro) _dash.ro.disconnect();
+  const els = document.querySelectorAll('#dash-grid .dash-block');
+  els.forEach(dashSpan);
+  if (typeof ResizeObserver !== 'function') return;
+  _dash.ro = new ResizeObserver(entries => entries.forEach(en => {
+    const el = en.target; dashSpan(el);
+    if (!_dash.edit || !el.style.height) return;   // (only a drag of the corner, in Customize, changes the saved height)
+    const b = _dash.layout && _dash.layout.blocks.find(x => x.id === el.getAttribute('data-id')); if (!b) return;
+    const h = dashHeightOk(parseFloat(el.style.height)) || (parseFloat(el.style.height) < DASH_HMIN ? DASH_HMIN : DASH_HMAX);
+    if (h !== b.h) { b.h = h; el.classList.add('fixed'); dashSaveSoon(); dashHeightBtn(b); }
+  }));
+  els.forEach(el => _dash.ro.observe(el));
+}
+function dashHeightBtn(b) {   // (show ↕ Auto once a block has a height, without redrawing mid-drag)
+  const t = document.querySelector('#dash-' + b.id + ' .dash-tools');
+  if (t && !t.querySelector('.dash-hauto')) { const x = document.createElement('button'); x.className = 'dash-hauto'; x.textContent = '↕ Auto'; x.title = 'Fit the height to what’s in it'; x.onclick = () => dashHeightAuto(b.id); t.insertBefore(x, t.querySelector('[title="Settings"], [title="Remove"]')); }
+}
+function dashHeightAuto(id) { const b = _dash.layout.blocks[dashIdx(id)]; if (!b) return; delete b.h; dashSaveSoon(); dashDraw(); }
+function dashPinThenRefresh() {
+  if (typeof openPinModal !== 'function') return;
+  openPinModal();
+  let n = 0; const t = setInterval(() => {   // (once the PIN is in, refresh the sales block)
+    if ((typeof _sessionPin !== 'undefined' && _sessionPin) || ++n > 240) { clearInterval(t); (_dash.layout ? _dash.layout.blocks : []).filter(b => b.type === 'sales_pace').forEach(b => dashLoadBlock(b.id, true)); }
+  }, 500);
+}
+
 // ---------- Open on start (called by hub.html once the Hub has started) ----------
 async function dashStartup(data) {
   if (!data || !data.isAdmin) return;
@@ -548,15 +592,16 @@ function dashStyles() {
 .dash-status { font-size: 13px; color: var(--ink-soft); } .dash-status.bad { color: var(--red); font-weight: 700; }
 .dash-editbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: var(--accent-soft); border-radius: 14px; padding: 10px 12px; margin: 8px 0 12px; }
 .dash-start { font-size: 13px; display: flex; align-items: center; gap: 6px; }
-.dash-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; align-items: start; margin-top: 8px; }
-.dash-block { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px 14px; min-width: 0; }
+.dash-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-rows: 4px; grid-auto-flow: row dense; gap: 0 12px; align-items: start; margin-top: 8px; }
+.dash-block { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px 14px; min-width: 0; box-sizing: border-box; display: flex; flex-direction: column; margin-bottom: 12px; }
+.dash-block.fixed .dash-body { flex: 1 1 auto; min-height: 0; max-height: none; }
 .dash-block.sz-s { grid-column: span 1; } .dash-block.sz-m { grid-column: span 2; } .dash-block.sz-l { grid-column: 1 / -1; }
 .dash-block header { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; } .dash-block header b { font-size: 15px; }
 .dash-block .spacer { flex: 1; }
 .dash-open, .dash-ref { border: 0; background: none; color: var(--accent); font-weight: 700; font-size: 13px; cursor: pointer; padding: 2px 4px; white-space: nowrap; flex: none; }
 .dash-ref { color: var(--ink-soft); }
-.dash-body { max-height: 340px; overflow-y: auto; font-size: 13.5px; }
-.dash-grid.editing .dash-block { outline: 2px dashed var(--accent-soft); cursor: grab; } .dash-block.dragging { opacity: .45; }
+.dash-body { max-height: 420px; overflow-y: auto; font-size: 13.5px; }
+.dash-grid.editing .dash-block { outline: 2px dashed var(--accent-soft); resize: vertical; overflow: hidden; min-height: 120px; max-height: 1000px; } .dash-block.dragging { opacity: .45; }
 .dash-tools { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: -2px 0 8px; }
 .dash-tools button { border: 1px solid var(--border); background: #fff; border-radius: 8px; min-width: 28px; height: 28px; font-size: 12px; cursor: pointer; }
 .dash-tools button:disabled { opacity: .35; cursor: default; } .dash-tools .dash-sz.on { background: var(--accent); border-color: var(--accent); color: #fff; }
