@@ -110,6 +110,11 @@ function snsEdit(id, forStudio, preScope) {
       <label>Heading (optional)<input id="sns-title" maxlength="120" value="${escAttr((n && n.title) || '')}" placeholder="💌 A little note from 4Cats (each studio’s name), if left blank"></label>
       <label>The note<textarea id="sns-body" rows="6" maxlength="2000">${esc((n && n.body) || '')}</textarea></label><div class="fd-sm" style="margin:-4px 0 8px"><button class="ho-btn sm" type="button" onclick="snsAddLink()">🔗 Add a link</button> Highlight some words first to turn them into the link. A web address typed into the note becomes clickable too.</div>
       <label>Sign-off (optional)<textarea id="sns-signed" rows="2" maxlength="200" placeholder="See you at the studio! (if left blank)">${esc((n && n.signed) || '')}</textarea></label>
+      <div class="sns-photo-row" style="margin:6px 0 10px"><b style="display:block;margin-bottom:4px">📷 Picture for this note (optional)</b>
+        <input type="hidden" id="sns-photo" value="${escAttr((n && n.photo) || '')}">
+        <div id="sns-photo-prev">${snsPhotoPrev((n && n.photo) || '')}</div>
+        <label class="ho-btn sm">📷 ${n && n.photo ? 'Change' : 'Add a picture'}<input type="file" accept="image/*" hidden onchange="snsNotePhoto(this)"></label>
+        <span class="fd-sm">Shows only while this note shows. No picture here: the studio’s own picture, else the one for every studio.</span></div>
       <label class="ba-check"><input type="checkbox" id="sns-auto" ${n && n.auto_staff === false ? '' : 'checked'}> Add the studio’s coordinator and that day’s staff after it (their 4Cats names: the coordinator first, then the published schedule)</label>
       ${n ? (copies.length > 1 ? `<label class="ba-check"><input type="radio" name="sns-scope" value="all" ${preScope === 'one' ? '' : 'checked'}> Change all ${copies.length} studios’ copies</label>
           <label class="ba-check"><input type="radio" name="sns-scope" value="one" ${preScope === 'one' ? 'checked' : ''}> Only ${esc(STUDIO_NAMES[n.studio_id] || n.studio_id)} <span class="fd-sm">(it becomes its own note, with its own text)</span></label>` : `<p class="fd-sm">For ${esc(STUDIO_NAMES[n.studio_id] || n.studio_id)}.</p>`) + snsAlsoHtml(n, copies)
@@ -121,7 +126,8 @@ function snsEdit(id, forStudio, preScope) {
 }
 async function snsSave(id) {
   const v = x => (document.getElementById(x) || {}).value || '';
-  const p = { title: v('sns-title'), body: v('sns-body'), signed: v('sns-signed').trim() || 'See you at the studio!',   // (Nov 12 2026) the default sign-off
+  const p = { title: v('sns-title'), body: v('sns-body'), signed: v('sns-signed').trim() || 'See you at the studio!', photo: v('sns-photo'),   // 📷 (Nov 12 2026) the note's own picture ('' = none)
+      // (Nov 12 2026) the default sign-off
     show_from: v('sns-from'), show_until: v('sns-until'), auto_staff: document.getElementById('sns-auto').checked };
   const n = id ? (_sns.rows || []).find(x => x.id === id) : null;
   const scope = (document.querySelector('input[name="sns-scope"]:checked') || {}).value;
@@ -138,6 +144,19 @@ async function snsSave(id) {
   }
   closeDutySheet(); _sns.msg = `✓ Saved${r.data && r.data.studios > 1 ? ' for ' + r.data.studios + ' studios' : ''}${added ? `, and posted at ${added} more studio${added === 1 ? '' : 's'}` : ''}.`; snsLoad();
 }
+// 📷 (Nov 12 2026) A note's own picture: uploaded right away, saved with the note
+function snsPhotoPrev(url) {
+  return url ? `<div style="display:flex;gap:10px;align-items:center;margin:4px 0 6px"><img src="${escAttr(url)}" alt="" style="max-width:160px;max-height:120px;border-radius:10px;display:block">
+    <button class="ho-btn sm" type="button" onclick="snsNotePhotoClear()">Remove</button></div>` : ''
+}
+async function snsNotePhoto(inp) {
+  const f = inp.files && inp.files[0]; if (!f) return;
+  const prev = document.getElementById('sns-photo-prev'); if (prev) prev.innerHTML = '<span class="fd-sm">Uploading…</span>';
+  const urls = await rpUploadFiles([f], 'studio-notes');
+  if (!urls[0]) { if (prev) prev.innerHTML = snsPhotoPrev(document.getElementById('sns-photo').value); return; }
+  document.getElementById('sns-photo').value = urls[0]; if (prev) prev.innerHTML = snsPhotoPrev(urls[0]);
+}
+function snsNotePhotoClear() { document.getElementById('sns-photo').value = ''; const prev = document.getElementById('sns-photo-prev'); if (prev) prev.innerHTML = ''; }
 // 🏬 (Nov 12 2026) A published note: tick more studios to post it there too (they join its group)
 function snsAlsoHtml(n, copies) {
   if (!n) return '';
