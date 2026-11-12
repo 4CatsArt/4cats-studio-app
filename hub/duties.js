@@ -563,8 +563,8 @@ async function dmLoadRegular() {
   _dm.tpls = data || [];
   const groups = [['daily', 'Every day'], ['weekly', 'Certain days'], ['none', 'When needed']];
   body.innerHTML = `<div class="ho-card">
-      <div class="dm-top">${dmIsHO() ? `<select onchange="_dm.studio = this.value; dmLoadRegular()"><option value="">Every studio’s duties</option>${Object.keys(STUDIO_NAMES).sort().map(k => `<option value="${escAttr(k)}"${_dm.studio === k ? ' selected' : ''}>${esc(STUDIO_NAMES[k])}</option>`).join('')}</select>` : `<div class="goal-note">${esc(STUDIO_NAMES[_sessionStudioId] || '')}: duties for every studio come from home office; you can add your own studio’s.</div>`}
-        <span class="spacer"></span><button class="ho-btn primary" onclick="dmEdit(null)">+ Add a regular duty</button></div>
+      <div class="dm-top">${dmIsHO() ? `<select onchange="_dm.studio = this.value; dmLoadRegular()"><option value="">Every studio’s duties</option>${Object.keys(STUDIO_NAMES).sort().map(k => `<option value="${escAttr(k)}"${_dm.studio === k ? ' selected' : ''}>${esc(STUDIO_NAMES[k])}</option>`).join('')}</select>` : `<div class="goal-note">${esc(STUDIO_NAMES[_sessionStudioId] || '')}: regular duties come from home office.</div>`}
+        <span class="spacer"></span>${dmIsHO() ? '<button class="ho-btn primary" onclick="dmEdit(null)">+ Add a regular duty</button>' : ''}</div>
       ${_dm.tpls.length ? groups.map(([k, l]) => { const g = _dm.tpls.filter(t => (t.repeat || 'none') === k); return g.length ? `<div class="me-sub-title" style="margin-top:14px">${l}</div>${g.map(t => `
         <div class="dm-row"><div class="dm-main"><b>${esc(t.title)}</b>
             <div class="goal-note">${esc(dmRepeatLabel(t))} · ${t.studio_id ? esc(STUDIO_NAMES[t.studio_id] || t.studio_id) : 'All studios'}${t.notes ? ' · ' + esc(t.notes) : ''}</div>
@@ -722,4 +722,3 @@ async function saveDutyEdit(id) {
   Object.assign(t, patch);
   closeDutySheet(); renderDuties();
 }
-
