@@ -15,11 +15,25 @@ async function studioNoteLoad(sid) {
   const live = N.filter(n => n.show_from <= t && (!n.show_until || n.show_until >= t)).sort((a, b) => b.show_from.localeCompare(a.show_from))[0];
   const ahead = N.filter(n => n.show_from > t).sort((a, b) => a.show_from.localeCompare(b.show_from));
   const line = n => `<div class="sn-line"><span class="fd-sm"><b>${esc(ptyDayLabel(n.show_from))}</b>${n.show_until ? ' – ' + esc(ptyDayLabel(n.show_until)) : ''}${n.studios_in_group > 1 ? ` · 🏬 ${n.studios_in_group} studios` : ''}</span>
-      <span class="sn-snip">${esc(String(n.body).slice(0, 90))}${String(n.body).length > 90 ? '…' : ''}</span></div>`;
+      <span class="sn-snip">${esc(snPlain(n.body).slice(0, 90))}${snPlain(n.body).length > 90 ? '…' : ''}</span></div>`;
   el.innerHTML = `<div class="pm-box sn-card"><b>✍️ Note on World</b>
     <button class="ho-btn sm" style="margin-left:8px" onclick="_sns.studio='${escAttr(sid)}';openSnotesPane()" title="Add, change or remove notes on the Studio notes page">Add or change notes in Studio notes →</button>
     <div style="margin-top:6px"><b class="fd-sm">Showing today:</b> ${live ? '' : '<span class="fd-sm">nothing</span>'}</div>${live ? line(live) : ''}
     ${ahead.length ? `<div style="margin-top:6px"><b class="fd-sm">Coming up (${ahead.length}):</b></div>${ahead.map(line).join('')}` : ''}</div>`;
+}
+// 🔗 (Nov 12 2026) Links in a note: [the words](https://…) shows as a link on World (and a bare web address becomes one too)
+function snPlain(t) { return String(t || '').replace(/\[([^\]\n]{1,120})\]\((https?:\/\/[^\s)]+)\)/g, '$1'); }
+function snsAddLink() {
+  const ta = document.getElementById('sns-body'); if (!ta) return;
+  const a = ta.selectionStart, b = ta.selectionEnd, picked = ta.value.slice(a, b).trim();
+  let url = (prompt('The web address for the link (for example https://world.4cats.com/#camps):', 'https://') || '').trim();
+  if (!url || url === 'https://') return;
+  if (!/^https?:\/\//i.test(url)) url = 'https://' + url.replace(/^\/+/, '');
+  const words = picked || (prompt('The words people click on:', 'Find out more') || '').trim();
+  if (!words) return;
+  const ins = '[' + words.replace(/[\[\]]/g, '') + '](' + url.replace(/[\s)]/g, '') + ')';
+  ta.value = ta.value.slice(0, a) + ins + ta.value.slice(b);
+  ta.focus(); ta.selectionStart = ta.selectionEnd = a + ins.length;
 }
 function studioNotePick(k) { document.querySelectorAll('.sn-st').forEach(c => { c.checked = k === 'all' ? true : k === 'none' ? false : c.value.startsWith(k + '-') ? true : c.checked; }); }
 
@@ -68,7 +82,7 @@ function snsDraw() {
         const stTxt = st === 'live' ? (onToday === copies.length ? '<span class="sns-live">● Showing</span>' : onToday ? `<span class="sns-live">● Showing at ${onToday}</span>` : '<span class="goal-note" title="A newer note is showing">Hidden by a newer note</span>') : st === 'upcoming' ? '<span class="sns-up">Coming up</span>' : '<span class="goal-note">Ended</span>';
         return `<tr><td>${many ? `<b>🏬 ${copies.length} studios</b><div class="goal-note">${esc(copies.map(c => String(STUDIO_NAMES[c.studio_id] || c.studio_id).replace(/^.*?\s-\s/, '')).slice(0, 6).join(', '))}${copies.length > 6 ? '…' : ''}</div>` : esc(STUDIO_NAMES[n.studio_id] || n.studio_id)}</td>
           <td style="white-space:nowrap">${esc(ptyDayLabel(n.show_from))}${n.show_until ? ' – ' + esc(ptyDayLabel(n.show_until)) : ' on'}</td>
-          <td>${n.title ? `<b>${esc(n.title)}</b><br>` : ''}<span class="sn-snip">${esc(String(n.body).slice(0, 110))}${String(n.body).length > 110 ? '…' : ''}</span></td>
+          <td>${n.title ? `<b>${esc(n.title)}</b><br>` : ''}<span class="sn-snip">${esc(snPlain(n.body).slice(0, 110))}${snPlain(n.body).length > 110 ? '…' : ''}</span></td>
           <td>${stTxt}</td>
           <td style="white-space:nowrap"><button class="ho-btn sm" onclick="snsEdit('${escAttr(n.id)}')">Edit</button><button class="ho-btn sm" onclick="snsRemove('${escAttr(n.id)}')">Remove</button></td></tr>`; }).join('')}</tbody></table>`
       : '<p class="goal-note">No notes here.</p>';
@@ -90,7 +104,7 @@ function snsEdit(id, forStudio) {
     <div class="me-form">
       <div class="sup-two"><label>Show from<input type="date" id="sns-from" value="${escAttr((n && n.show_from) || localDateStr(new Date()))}"></label><label>Until (optional)<input type="date" id="sns-until" value="${escAttr((n && n.show_until) || '')}"></label></div>
       <label>Heading (optional)<input id="sns-title" maxlength="120" value="${escAttr((n && n.title) || '')}" placeholder="A Little Note from (each studio's own name)"></label>
-      <label>The note<textarea id="sns-body" rows="6" maxlength="2000">${esc((n && n.body) || '')}</textarea></label>
+      <label>The note<textarea id="sns-body" rows="6" maxlength="2000">${esc((n && n.body) || '')}</textarea></label><div class="fd-sm" style="margin:-4px 0 8px"><button class="ho-btn sm" type="button" onclick="snsAddLink()">🔗 Add a link</button> Highlight some words first to turn them into the link. A web address typed into the note becomes clickable too.</div>
       <label>Sign-off (optional)<textarea id="sns-signed" rows="2" maxlength="200" placeholder="See you at the studio,">${esc((n && n.signed) || '')}</textarea></label>
       <label class="ba-check"><input type="checkbox" id="sns-auto" ${n && n.auto_staff === false ? '' : 'checked'}> Add the studio’s coordinator and that day’s staff after it (their 4Cats names: the coordinator first, then the published schedule)</label>
       ${n ? (copies.length > 1 ? `<label class="ba-check"><input type="radio" name="sns-scope" value="all" checked> Change all ${copies.length} studios’ copies</label>
