@@ -23,6 +23,9 @@
 // (shown, ✎ to add or change: hub_ho_punch_note, SQL step 9); 🏬 time for studios (hub_ho_alloc_set, SQL step 10).)
 // (Nov 12 2026: contractor clocks, hours only (SQL step 11): set in 👥 Set up for…, never on Timesheets; 📄 Hours report with CSV.)
 // (Nov 12 2026: Layout blocks: 📌 Section header and ➖ Divider / space, no card around them; same size in Customize and after Done.)
+// (Nov 12 2026: 🗓️ Date suggestions lists them (hub_ideas_list): newest first or by the date asked for, new or new + seen.)
+// (Nov 12 2026: their styling: headers' style, size, colour, alignment and subtitle; dividers' line style, thickness, colour,
+// length, space and a centre mark; a live preview in ⚙. Older ones keep their look: opts.line maps to the matching style.)
 
 // ---------- State ----------
 let _dash = { me: null, layout: null, edit: false, err: '', saving: '', saveTimer: null, refreshTimer: null, drag: null, choose: false, cache: {}, ro: null };
@@ -123,18 +126,30 @@ const DASH_BLOCKS = {
   },
 
   section: {
-    name: '📌 Section header', group: 'Layout', area: null, deco: true, size: 'l', opts: { text: 'New section', line: 'yes' }, words: 'heading title label group',
-    desc: 'A title over a group of blocks (e.g. “💰 Money”), with an optional line across.',
-    settings: b => `<label>Title <input type="text" data-opt="text" maxlength="60" value="${escAttr(b.opts.text || '')}" placeholder="e.g. 💰 Money" style="flex:1;padding:6px 8px;border:1px solid #ddd;border-radius:8px;font:inherit"></label>
-      <label>Line across <select data-opt="line"><option value="yes"${b.opts.line !== 'no' ? ' selected' : ''}>Yes</option><option value="no"${b.opts.line === 'no' ? ' selected' : ''}>No</option></select></label>`,
-    load(b) { return `<div class="dash-sec${b.opts.line === 'no' ? '' : ' line'}"><span>${esc(b.opts.text || 'Section')}</span><i></i></div>`; }
+    name: '📌 Section header', group: 'Layout', area: null, deco: true, size: 'l', opts: { text: 'New section' }, words: 'heading title label group',
+    desc: 'A title over a group of blocks (e.g. “💰 Money”): line, underline, pill or band style, any colour, with an optional subtitle.',
+    settings: b => { const o = dashSecOpts(b.opts);
+      return `<div class="dash-deco-prev" id="dash-deco-prev"></div>
+      <label class="wide">Title <input type="text" data-opt="text" maxlength="60" value="${escAttr(o.text)}" placeholder="e.g. 💰 Money"></label>
+      <label class="wide">Subtitle (optional) <input type="text" data-opt="sub" maxlength="120" value="${escAttr(o.sub)}" placeholder="e.g. Check these every Monday"></label>
+      ${dashDecoSel('style', 'Style', [['line', 'Line after'], ['under', 'Underline'], ['plain', 'Plain'], ['pill', 'Pill'], ['band', 'Band']], o.style)}
+      ${dashDecoSel('size', 'Size', [['s', 'Small'], ['m', 'Medium'], ['l', 'Large']], o.size)}
+      ${dashDecoSel('align', 'Align', [['left', 'Left'], ['center', 'Centred']], o.align)}
+      ${dashDecoColourHtml(o)}`; },
+    load(b) { return dashSecHtml(dashSecOpts(b.opts)); }
   },
   divider: {
-    name: '➖ Divider / space', group: 'Layout', area: null, deco: true, size: 'l', opts: { line: 'yes', space: 'm' }, words: 'spacer line separator gap break',
-    desc: 'A thin line, or just empty space, between groups of blocks.',
-    settings: b => `<label>Show <select data-opt="line"><option value="yes"${b.opts.line !== 'no' ? ' selected' : ''}>A line</option><option value="no"${b.opts.line === 'no' ? ' selected' : ''}>Just space</option></select></label>
-      <label>Space <select data-opt="space">${[['s', 'Small'], ['m', 'Medium'], ['l', 'Large']].map(([v, l]) => `<option value="${v}"${(b.opts.space || 'm') === v ? ' selected' : ''}>${l}</option>`).join('')}</select></label>`,
-    load(b) { const h = { s: 8, m: 24, l: 56 }[b.opts.space] || 24; return `<div class="dash-div${b.opts.line === 'no' ? '' : ' line'}" style="height:${h}px"></div>`; }
+    name: '➖ Divider / space', group: 'Layout', area: null, deco: true, size: 'l', opts: {}, words: 'spacer line separator gap break',
+    desc: 'A line (solid, dashed, dotted, double or fading) or just space between groups of blocks, with an optional centre mark.',
+    settings: b => { const o = dashDivOpts(b.opts);
+      return `<div class="dash-deco-prev" id="dash-deco-prev"></div>
+      ${dashDecoSel('style', 'Line', [['solid', 'Solid'], ['dashed', 'Dashed'], ['dotted', 'Dotted'], ['double', 'Double'], ['fade', 'Fading ends'], ['none', 'None (just space)']], o.style)}
+      ${dashDecoSel('weight', 'Thickness', [['1', 'Thin'], ['2', 'Medium'], ['4', 'Thick']], o.weight)}
+      ${dashDecoSel('length', 'Length', [['full', 'Full'], ['half', 'Half'], ['short', 'Short']], o.length)}
+      ${dashDecoSel('space', 'Space', [['s', 'Small'], ['m', 'Medium'], ['l', 'Large']], o.space)}
+      <label>Centre mark <input type="text" data-opt="mark" maxlength="20" value="${escAttr(o.mark)}" placeholder="e.g. ✦ or 🎨" style="width:110px"></label>
+      ${dashDecoColourHtml(o)}`; },
+    load(b) { return dashDivHtml(dashDivOpts(b.opts)); }
   },
 
   // ---- Studio day ----
@@ -220,12 +235,32 @@ const DASH_BLOCKS = {
           esc((i.status === 'sent' ? 'deposit' : 'balance') + ' due ' + dashDay(due(i))), due(i) && String(due(i)).slice(0, 10) < t ? 'late' : ''), 'Everything sent is paid. ✓');
     }
   },
-  date_suggestions: {
-    name: '🗓️ Date suggestions', group: 'Customers', area: 'class_times', level: 'view', size: 's', tile: true, open: ['openIdeasPane'],
-    desc: 'New “Suggest a date!” requests from World, all studios.',
+  date_suggestions: {   // (Nov 12 2026: a list, newest first or by the date asked for; the count as before)
+    name: '🗓️ Date suggestions', group: 'Customers', area: 'class_times', level: 'view', size: 's', opts: { rows: 5, order: 'received', show: 'new' }, open: ['openIdeasPane'], words: 'ideas suggest a date requests',
+    desc: '“Suggest a date!” requests from World, all studios: who asked, for when and what, newest first or by the date they asked for.',
+    settings: b => DASH_ROWS_SETTING(b) +
+      `<label>Order <select data-opt="order"><option value="received"${b.opts.order !== 'date' ? ' selected' : ''}>When they came in (newest first)</option><option value="date"${b.opts.order === 'date' ? ' selected' : ''}>Date asked for (soonest first)</option></select></label>
+      <label>Show <select data-opt="show"><option value="new"${b.opts.show !== 'open' ? ' selected' : ''}>New ones</option><option value="open"${b.opts.show === 'open' ? ' selected' : ''}>New and seen (not finished)</option></select></label>`,
     async load(b) {
-      const n = +(await dashRpc('hub_ideas_new_count', { p_studio: (typeof _sessionStudioId !== 'undefined' && _sessionStudioId) || null, p_all: true })) || 0;
-      return n ? dashBig(n, n === 1 ? 'new suggestion' : 'new suggestions', 'warn') : '<div class="dash-empty">No new suggestions.</div>';
+      const L = (await dashRpc('hub_ideas_list', { p_studio: (typeof _sessionStudioId !== 'undefined' && _sessionStudioId) || null, p_all: true })) || [];
+      const isNew = x => (x.status || 'new') === 'new' || (x.auto_swap && !x.seen_at);
+      const open = x => isNew(x) || (x.status === 'seen' && !x.auto_swap);
+      const today = dashToday(), soon = x => (x.dates || []).filter(d => d >= today).sort()[0] || null;
+      const nNew = L.filter(isNew).length, list = L.filter(b.opts.show === 'open' ? open : isNew);
+      list.sort(b.opts.order === 'date'
+        ? (x, y) => (soon(x) || '9999') < (soon(y) || '9999') ? -1 : (soon(x) || '9999') > (soon(y) || '9999') ? 1 : String(y.created_at).localeCompare(String(x.created_at))
+        : (x, y) => String(y.created_at).localeCompare(String(x.created_at)));
+      dashGlanceSet(b, nNew ? dashPl(nNew, 'date suggestion', 'date suggestions') + ' to look at' : '');
+      dashStatSet(b, [[String(nNew), nNew === 1 ? 'new suggestion' : 'new suggestions', nNew ? 'mid' : 'ok']]);
+      const KIND = typeof IDEA_KIND_LABEL !== 'undefined' ? IDEA_KIND_LABEL : {};
+      const ago = iso => { const d = Math.floor((Date.now() - new Date(iso)) / 86400000); return d <= 0 ? 'today' : d === 1 ? 'yesterday' : d < 7 ? d + ' days ago' : new Date(iso).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }); };
+      const dates = x => { const D = (x.dates || []).slice().sort(); return D.length ? D.slice(0, 2).map(dashDay).join(', ') + (D.length > 2 ? ` +${D.length - 2}` : '') : 'no date given'; };
+      return `<div class="dash-chips"><span class="dash-pill ${nNew ? 'mid' : 'ok'}">${nNew} new</span>${b.opts.show === 'open' && list.length > nNew ? `<span class="dash-pill">${list.length - nNew} seen</span>` : ''}
+          <span class="dash-sub" style="margin:0 0 0 auto">${b.opts.order === 'date' ? 'Soonest date first' : 'Newest first'}</span></div>` +
+        dashRows(list, +b.opts.rows || 5, x => dashLine(
+          `${esc(KIND[x.kind] || x.kind || 'Suggestion')} · ${esc(dashStudio(x.studio_id))}${isNew(x) ? '' : ' <span class="dash-o-amt" style="font-weight:500">seen</span>'}`,
+          `📅 ${esc(dates(x))} · ${esc(x.name || 'A family')}${x.kids ? ' · ' + x.kids + ' kid' + (x.kids === 1 ? '' : 's') : ''} · came in ${esc(ago(x.created_at))}${x.auto_swap ? ' · ✨ set up by the family' : ''}`,
+          isNew(x) ? 'fresh' : ''), b.opts.show === 'open' ? 'Nothing waiting. ✓' : 'No new suggestions. ✓');
     }
   },
 
@@ -450,10 +485,15 @@ const DASH_BLOCKS = {
   },
   labour: {
     name: '💰 Labour cost', group: 'Money', area: 'finance', level: 'view', size: 's', opts: { range: 'week' }, open: ['goToDashboard'], every: 1800000, words: 'wages payroll hours percent',
-    desc: 'Labour against booked revenue for the whole network this week (or month); open it up to see every studio.',
-    settings: b => `<label>Period <select data-opt="range"><option value="week"${b.opts.range !== 'month' ? ' selected' : ''}>This week (Sun–Sat)</option><option value="month"${b.opts.range === 'month' ? ' selected' : ''}>This month</option></select></label>`,
-    async load(b) {
-      const [a, z] = dashLabourRange(b.opts.range), ids = Object.keys(STUDIO_NAMES), rows = [];
+    desc: 'Labour against booked revenue for the whole network today, this week or this month; open it up to see every studio.',
+    settings: b => `<label>Period <select data-opt="range"><option value="today"${b.opts.range === 'today' ? ' selected' : ''}>Today</option><option value="week"${!['today', 'month'].includes(b.opts.range) ? ' selected' : ''}>This week (Sun–Sat)</option><option value="month"${b.opts.range === 'month' ? ' selected' : ''}>This month</option></select></label>`,
+    load(b) {   // (a load already under way for the same dates is reused: 31 calls is a lot to start twice)
+      const [a, z] = dashLabourRange(b.opts.range), key = b.id + '|' + a + '|' + z, busy = (_dash.labBusy = _dash.labBusy || {});
+      if (!busy[key]) busy[key] = DASH_BLOCKS.labour.loadNow(b, a, z).finally(() => { delete busy[key]; });
+      return busy[key];
+    },
+    async loadNow(b, a, z) {
+      const ids = Object.keys(STUDIO_NAMES), rows = [];
       let done = 0, skipped = 0, money = false, lab = 0, rev = 0, refused = 0;
       const el = () => document.getElementById('dash-body-' + b.id);
       const tick = () => { const e = el(); if (e && !_dash.cache[b.id]) e.innerHTML = `<div class="dash-empty">Working out labour: ${done} of ${ids.length} studios…</div>`; };
@@ -664,6 +704,42 @@ async function dashAssign(id, i, sel) {
   dashLoadBlock(id, false);
 }
 
+// ---------- Layout blocks: section headers and dividers, and their styling ----------
+const DASH_DECO_COLOURS = [['accent', 'Theme colour', 'var(--accent)'], ['ink', 'Dark', 'var(--ink)'], ['soft', 'Grey', 'var(--ink-soft)'], ['red', 'Red', '#c62828'],
+  ['orange', 'Orange', '#e8710a'], ['gold', 'Gold', '#c99a06'], ['green', 'Green', '#2e7d32'], ['teal', 'Teal', '#00897b'], ['blue', 'Blue', '#1e66c9'],
+  ['purple', 'Purple', '#7b3fc4'], ['pink', 'Pink', '#d6337a'], ['custom', 'Custom…', '']];
+function dashDecoCol(o) {
+  if (o.colour === 'custom') return /^#[0-9a-f]{6}$/i.test(String(o.hex || '')) ? o.hex : 'var(--accent)';
+  const c = DASH_DECO_COLOURS.find(x => x[0] === o.colour); return c ? c[2] : 'var(--ink)';
+}
+const dashDecoSel = (k, label, list, cur) => `<label>${label} <select data-opt="${k}">${list.map(([v, l]) => `<option value="${v}"${String(cur) === v ? ' selected' : ''}>${l}</option>`).join('')}</select></label>`;
+function dashDecoColourHtml(o) {
+  return `${dashDecoSel('colour', 'Colour', DASH_DECO_COLOURS.map(x => [x[0], x[1]]), o.colour)}
+    <label>Custom <input type="color" data-opt="hex" value="${escAttr(/^#[0-9a-f]{6}$/i.test(String(o.hex || '')) ? o.hex : '#7b3fc4')}" oninput="const s=document.querySelector('#dash-set select[data-opt=colour]');if(s)s.value='custom'"></label>`;
+}
+function dashSecOpts(x) {   // (older headers: opts.line 'no' meant plain)
+  x = x || {};
+  return { text: x.text || 'Section', sub: x.sub || '', style: x.style || (x.line === 'no' ? 'plain' : 'line'), size: x.size || 'm', colour: x.colour || 'ink', hex: x.hex || '', align: x.align || 'left' };
+}
+function dashDivOpts(x) {   // (older dividers: opts.line 'no' meant just space)
+  x = x || {};
+  return { style: x.style || (x.line === 'no' ? 'none' : 'solid'), weight: String(x.weight || '1'), colour: x.colour || 'soft', hex: x.hex || '', length: x.length || 'full', space: x.space || 'm', mark: x.mark || '' };
+}
+function dashSecHtml(o) {
+  return `<div class="dash-sec st-${esc(o.style)} sz-${esc(o.size)} al-${esc(o.align)}" style="--dc:${escAttr(dashDecoCol(o))}"><div class="dash-sec-row"><i class="l"></i><span class="t">${esc(o.text)}</span><i class="r"></i></div>${o.sub ? `<div class="dash-sec-sub">${esc(o.sub)}</div>` : ''}</div>`;
+}
+function dashDivHtml(o) {
+  const col = dashDecoCol(o), w = Math.max(1, Math.min(4, +o.weight || 1)), sp = { s: 8, m: 24, l: 56 }[o.space] || 24, h = Math.max(sp, o.mark ? 28 : 0, w * 3 + 4);
+  const len = { full: '100%', half: '50%', short: '120px' }[o.length] || '100%';
+  const ln = o.style === 'none' ? '' : o.style === 'fade' ? `background:linear-gradient(90deg,transparent,${col},transparent);height:${w}px` : `border-top:${o.style === 'double' ? Math.max(3, w * 3) : w}px ${o.style} ${col}`;
+  return `<div class="dash-div" style="height:${h}px"><div class="dash-div-row" style="width:${len}">${ln ? `<i style="${escAttr(ln)}"></i>` : ''}${o.mark ? `<span style="color:${escAttr(col)}">${esc(o.mark)}</span>${ln ? `<i style="${escAttr(ln)}"></i>` : ''}` : ''}</div></div>`;
+}
+function dashDecoPreview(id) {   // (⚙: the block as it'll look, as you change it)
+  const b = _dash.layout.blocks[dashIdx(id)], box = document.getElementById('dash-set'), pv = document.getElementById('dash-deco-prev'); if (!b || !box || !pv) return;
+  const o = Object.assign({}, b.opts); box.querySelectorAll('[data-opt]').forEach(x => { o[x.getAttribute('data-opt')] = x.value; });
+  pv.innerHTML = DASH_BLOCKS[b.type].load({ id: b.id, opts: o });
+}
+
 // ---------- ▦ Stat view: a block's main numbers as a small tile ----------
 // The numbers come from what the block already shows (its big number, number grid, highlight boxes and number chips), or from
 // dashStatSet for blocks that say exactly what to show. If a block has no numbers, its normal view stays, just smaller.
@@ -705,6 +781,7 @@ async function dashPointsAll() {   // the Points page's data (community-points-a
 }
 function dashLabourRange(k) {
   const d = new Date(); d.setHours(12, 0, 0, 0);
+  if (k === 'today') return [localDateStr(d), localDateStr(d), 'Today · ' + d.toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })];   // (Nov 12 2026)
   if (k === 'month') { const a = new Date(d.getFullYear(), d.getMonth(), 1, 12), z = new Date(d.getFullYear(), d.getMonth() + 1, 0, 12); return [localDateStr(a), localDateStr(z), d.toLocaleDateString('en-CA', { month: 'long' })]; }
   const a = new Date(d); a.setDate(d.getDate() - d.getDay()); const z = new Date(a); z.setDate(a.getDate() + 6);
   const f = x => x.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' });
@@ -1023,6 +1100,7 @@ function dashSettings(id) {
   const b = _dash.layout.blocks[dashIdx(id)]; if (!b) return; const t = DASH_BLOCKS[b.type];
   openDutySheet(`<h3 style="margin:0 0 10px">⚙ ${esc(t.name)}</h3><div class="dash-set" id="dash-set">${t.settings(b)}</div>
     <div style="text-align:right;margin-top:12px"><button class="ho-btn" onclick="closeDutySheet()">Cancel</button> <button class="ho-btn primary" onclick="dashSettingsSave('${b.id}')">Save</button></div>`);
+  if (t.deco) { const box = document.getElementById('dash-set'); if (box) { box.classList.add('deco-set'); ['input', 'change'].forEach(ev => box.addEventListener(ev, () => dashDecoPreview(b.id))); } dashDecoPreview(b.id); }
 }
 function dashSettingsSave(id) {
   const b = _dash.layout.blocks[dashIdx(id)], box = document.getElementById('dash-set'); if (!b || !box) return;
@@ -1489,7 +1567,7 @@ function dashStyles() {
 .dash-grip { cursor: grab; font-size: 18px; line-height: 24px; color: var(--ink-soft); padding: 0 2px; }
 .dash-empty { color: var(--ink-soft); padding: 4px 0; } .dash-empty.bad { color: var(--red); }
 .dash-list { display: flex; flex-direction: column; gap: 6px; }
-.dash-row { border-left: 3px solid var(--border); padding: 2px 0 2px 8px; } .dash-row.late { border-left-color: var(--red); }
+.dash-row { border-left: 3px solid var(--border); padding: 2px 0 2px 8px; } .dash-row.late { border-left-color: var(--red); } .dash-row.fresh { border-left-color: var(--accent); }
 .dash-main { font-weight: 600; } .dash-sub { color: var(--ink-soft); font-size: 12.5px; margin-top: 2px; }
 .dash-more { color: var(--ink-soft); font-size: 12.5px; margin-top: 6px; }
 .dash-big { margin-bottom: 6px; } .dash-big b { font-size: 26px; } .dash-big span { color: var(--ink-soft); }
@@ -1531,10 +1609,28 @@ function dashStyles() {
 .dash-block.deco .dash-body { max-height: none; overflow: visible; }
 .dash-block.deco header { position: absolute; top: 2px; right: 2px; left: auto; height: auto; margin: 0; z-index: 3; background: var(--card-bg); border-radius: 8px; padding: 2px; box-shadow: var(--shadow); }
 .dash-block.deco header > b, .dash-block.deco header > .spacer { display: none; }
-.dash-sec { display: flex; align-items: center; gap: 12px; padding: 14px 0 2px; min-height: 30px; }
-.dash-sec span { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 20px; font-weight: 700; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
-.dash-sec i { flex: 1; height: 2px; border-radius: 2px; background: transparent; } .dash-sec.line i { background: var(--border); }
-.dash-div { display: flex; align-items: center; } .dash-div.line::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.dash-sec { padding: 12px 0 2px; --dc: var(--ink); }
+.dash-sec-row { display: flex; align-items: center; gap: 12px; min-height: 30px; }
+.dash-sec .t { font-family: 'Fredoka', 'Inter', sans-serif; font-weight: 700; color: var(--dc); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; line-height: 1.25; }
+.dash-sec.sz-s .t { font-size: 15px; } .dash-sec.sz-m .t { font-size: 20px; } .dash-sec.sz-l .t { font-size: 27px; }
+.dash-sec i { height: 2px; border-radius: 2px; display: none; }
+.dash-sec.st-line .r { display: block; flex: 1; background: color-mix(in srgb, var(--dc) 35%, transparent); }
+.dash-sec.st-line.al-center .l { display: block; flex: 1; background: color-mix(in srgb, var(--dc) 35%, transparent); }
+.dash-sec.st-under .dash-sec-row { border-bottom: 2px solid var(--dc); padding-bottom: 4px; }
+.dash-sec.st-pill .t { background: color-mix(in srgb, var(--dc) 14%, transparent); padding: 4px 16px; border-radius: 999px; }
+.dash-sec.st-band .dash-sec-row { background: color-mix(in srgb, var(--dc) 11%, transparent); border-left: 5px solid var(--dc); padding: 8px 14px; border-radius: 10px; }
+.dash-sec.al-center .dash-sec-row { justify-content: center; } .dash-sec.al-center .dash-sec-sub { text-align: center; }
+.dash-sec-sub { font-size: 13px; color: var(--ink-soft); margin-top: 3px; }
+.dash-sec.st-band .dash-sec-sub { padding-left: 19px; }
+.dash-div { display: flex; align-items: center; justify-content: center; }
+.dash-div-row { display: flex; align-items: center; gap: 10px; max-width: 100%; } .dash-div-row i { flex: 1; display: block; }
+.dash-div-row span { font-weight: 700; font-size: 15px; line-height: 1; white-space: nowrap; }
+.dash-set.deco-set { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px 12px; align-items: end; }
+.dash-set.deco-set label { display: flex; flex-direction: column; gap: 3px; font-size: 13px; font-weight: 600; }
+.dash-set.deco-set label.wide { grid-column: 1 / -1; }
+.dash-set.deco-set input[type=text], .dash-set.deco-set select { padding: 6px 8px; border: 1px solid #ddd; border-radius: 8px; font: inherit; font-weight: 400; }
+.dash-set.deco-set input[type=color] { width: 100%; height: 34px; padding: 2px; border: 1px solid #ddd; border-radius: 8px; background: #fff; }
+.dash-deco-prev { grid-column: 1 / -1; padding: 6px 12px 10px; border: 1px dashed #ddd; border-radius: 10px; background: var(--page-bg, #f6f5fa); min-height: 40px; }
 .dash-grid.editing .dash-block.deco { outline: 2px dashed var(--accent-soft); outline-offset: 2px; border-radius: 8px; min-height: 0; }
 .dash-pace { display: flex; flex-direction: column; }
 .dash-pace-row { display: grid; grid-template-columns: 30px minmax(0, 1fr) minmax(50px, 30%) 56px; gap: 8px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
