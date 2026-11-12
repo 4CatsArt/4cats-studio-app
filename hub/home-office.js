@@ -119,6 +119,7 @@ function ftAfter() { if (paneVisible('ft-pane')) ftLoad(); if (_plan && paneVisi
 // (Stage 2: 🧾 Invoice holds the studio and emails the deposit invoice.)
 // =====================================================================================================================
 let _bo = { rows: null, status: 'open', err: '', add: null };
+let _boMove = null;   // (an unpaid invoice being moved to a new date or time: released just before the new hold)
 const BO_STATUS = [['new', 'New'], ['contacted', 'Contacted'], ['invoiced', 'Invoiced'], ['booked', 'Booked'], ['declined', 'Declined']];
 function openBoPane() {
   if (!_hoCan.view) { alert('Studio buyouts are for home office.'); return; }
@@ -160,11 +161,11 @@ function boDraw() {
   else if (!R.length) h += '<div class="goal-note">No buyout requests here.</div>';
   else h += '<div class="bo-list">' + R.map(r => `<div class="bo-row bo-${escAttr(r.status)}">
       <div class="bo-main"><div><b>${esc(STUDIO_NAMES[r.studio_id] || r.studio_id || 'No studio')}</b> · ${esc(r.name || '')} <span class="goal-note">${esc(r.email || '')}${r.phone ? ' · ' + esc(r.phone) : ''}</span></div>
-        <div class="bo-facts">📅 ${esc(r.dates || 'no date yet')}${r.start_time ? ' · ' + esc(r.start_time) : ''} · ⏱ ${r.minutes === 90 ? '90 min' : (r.minutes / 60) + ' h'} · 👥 ${r.guests != null ? esc(r.guests) : '?'} guests${r.observers ? ' + ' + esc(r.observers) + ' observers' : ''}${r.estimate != null ? ` · 💲 about <b>${money(r.estimate)}</b> + tax` : ''}</div>
+        ${boHeldLine(r)}<div class="bo-facts">📅 ${boDatesHtml(r)}${r.start_time ? ' · ' + esc(r.start_time) : ''} · ⏱ ${r.minutes === 90 ? '90 min' : (r.minutes / 60) + ' h'} · 👥 ${r.guests != null ? esc(r.guests) : '?'} guests${r.observers ? ' + ' + esc(r.observers) + ' observers' : ''}${r.estimate != null ? ` · 💲 about <b>${money(r.estimate)}</b> + tax` : ''}</div>
         ${r.organization || r.occasion ? `<div class="goal-note">${esc([r.organization, r.occasion].filter(Boolean).join(' · '))}</div>` : ''}
         ${r.project ? `<div class="goal-note">🎨 ${esc(r.project)}</div>` : ''}${r.notes ? `<div class="bo-notes">${esc(r.notes)}</div>` : ''}
         <div class="goal-note">Received ${esc(dl(r.created_at))}${r.source && r.source !== 'form' ? ' · by ' + esc(r.source) : ' · World form'}</div></div>
-      <div class="bo-side">${boInvCell(r)}${ed ? `<select onchange="boSet('${escAttr(r.id)}','status',this.value)">${BO_STATUS.map(o => `<option value="${o[0]}"${o[0] === r.status ? ' selected' : ''}>${o[1]}</option>`).join('')}</select>
+      <div class="bo-side">${boInvCell(r)}${ed ? `<button class="ho-btn sm" onclick="boEditOpen('${escAttr(r.id)}')">✏️ Edit request</button><select onchange="boSet('${escAttr(r.id)}','status',this.value)">${BO_STATUS.map(o => `<option value="${o[0]}"${o[0] === r.status ? ' selected' : ''}>${o[1]}</option>`).join('')}</select>
         <label class="fd-sm">Follow up <input type="date" value="${escAttr(r.follow_up || '')}" onchange="boSet('${escAttr(r.id)}','follow_up',this.value)"></label>
         <input class="bo-note" placeholder="Staff note" value="${escAttr(r.staff_note || '')}" onchange="boSet('${escAttr(r.id)}','staff_note',this.value)">` : `<span class="cust-st">${esc((BO_STATUS.find(o => o[0] === r.status) || [0, r.status])[1])}</span>`}</div></div>`).join('') + '</div>';
   el.innerHTML = h;
@@ -197,9 +198,55 @@ function boInvCell(r) {
   const o = (a, l) => `<option value="${a}">${l}</option>`;
   return `<div><span class="cust-st cust-${i.status === 'sent' || i.status === 'balance_sent' ? 'held' : 'booked'}" title="${escAttr(`${i.day} ${String(i.at).slice(0, 5)} · ${i.minutes} min · ${i.guests} guests${i.observers ? ' + ' + i.observers + ' observers' : ''} · total about $${Number((i.price || {}).total || 0).toFixed(2)} before tax · paid $${Number(i.paid_total || 0).toFixed(2)}${i.agreed_at ? ' · terms agreed by ' + i.agreed_name : ''}${i.closed_n ? ' · ' + i.closed_n + ' times closed' : ''}`)}">${esc(BOI_ST[i.status] || i.status)}</span> <span class="fd-sm">${esc(what)}</span></div>
     ${ed && ['sent', 'deposit_paid', 'balance_sent'].includes(i.status) ? `<select class="fti-act" onchange="if (this.value) { const a = this.value; this.value = ''; boInvAct('${escAttr(i.id)}', a); }"><option value="">Actions…</option>${
-      i.status === 'sent' ? o('send', i.sent_at ? 'Resend the invoice' : 'Send the invoice') + o('extend', 'Extend the deposit date') + o('cancel', 'Cancel (release the studio)')
+      i.status === 'sent' ? o('send', i.sent_at ? 'Resend the invoice' : 'Send the invoice') + o('move', 'Change the date or time') + o('extend', 'Extend the deposit date') + o('cancel', 'Cancel (release the studio)')
       : i.status === 'deposit_paid' ? o('balance', 'Final numbers → send the balance') + o('paid_studio', 'Paid at the studio') + o('cancel', 'Cancel')
       : o('send', 'Resend the balance invoice') + o('balance', 'Change the final numbers') + o('paid_studio', 'Paid at the studio')}</select>` : ''}`;
+}
+// ✏️ (Nov 11 2026) The date and time actually invoiced (held), shown plainly on the card, and ticked among the dates wanted
+function boActiveInv(r) { const i = boInvOf(r); return i && !['cancelled', 'released'].includes(i.status) ? i : null; }
+function boHeldLine(r) {
+  const i = boActiveInv(r); if (!i) return '';
+  const d = new Date(String(i.day).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
+  const mins = i.final_minutes || i.minutes, g = i.final_guests ?? i.guests, ob = i.final_observers ?? i.observers;
+  return `<div class="bo-held" style="margin:4px 0;padding:6px 10px;border-radius:8px;background:#fff6db;display:inline-block">🧾 Invoiced for <b>${esc(d)} · ${esc(shortTime(i.at))}</b> · ${mins === 90 ? '90 min' : esc(mins / 60) + ' h'} · ${esc(g)} guests${ob ? ' + ' + esc(ob) + ' observers' : ''}${STUDIO_NAMES[i.studio_id] && i.studio_id !== r.studio_id ? ' · at ' + esc(STUDIO_NAMES[i.studio_id]) : ''}</div>`;
+}
+function boDatesHtml(r) {
+  const i = boActiveInv(r), txt = esc(r.dates || 'no date yet');
+  return i && i.day && txt.includes(String(i.day).slice(0, 10)) ? txt.replace(String(i.day).slice(0, 10), `<b>${esc(String(i.day).slice(0, 10))} ✓</b>`) : txt;
+}
+// ✏️ Edit a request's details (hub_buyout_request_set; the estimate updates itself)
+const BO_EDIT = [['studio_id', 'Studio'], ['name', 'Name'], ['email', 'Email'], ['phone', 'Phone'], ['organization', 'Group / organization'], ['occasion', 'Occasion'],
+  ['dates', 'Dates wanted'], ['start_time', 'Start time'], ['minutes', 'Length'], ['guests', 'Guests'], ['observers', 'Observers'], ['project', 'Project'], ['notes', 'Notes']];
+function boEditOpen(id) {
+  const r = (_bo.rows || []).find(x => x.id === id); if (!r) return;
+  const st = Object.keys(STUDIO_NAMES).sort((a, b) => STUDIO_NAMES[a].localeCompare(STUDIO_NAMES[b]));
+  const f = ([k, l]) => k === 'studio_id' ? `<label>${l}<select id="be-${k}">${st.map(x => `<option value="${x}"${x === r.studio_id ? ' selected' : ''}>${esc(STUDIO_NAMES[x])}</option>`).join('')}</select></label>`
+    : k === 'minutes' ? `<label>${l}<select id="be-${k}">${[90, 120, 150, 180].map(m => `<option value="${m}"${(r.minutes || 90) === m ? ' selected' : ''}>${m === 90 ? '90 min' : m / 60 + ' hours'}</option>`).join('')}</select></label>`
+    : k === 'notes' ? `<label>${l}<textarea id="be-${k}" rows="3">${esc(r.notes || '')}</textarea></label>`
+    : `<label>${l}<input id="be-${k}"${k === 'guests' || k === 'observers' ? ' type="number" min="0"' : k === 'email' ? ' type="email"' : ''} value="${escAttr(r[k] ?? '')}"${k === 'dates' ? ' placeholder="2027-03-06, 2027-03-13"' : k === 'start_time' ? ' placeholder="11:00am"' : ''}></label>`;
+  const inv = boActiveInv(r);
+  openDutySheet(`<h3>✏️ Edit the request</h3><p class="ho-intro">${esc(r.name || 'This request')}${inv ? '. <b>It already has an invoice:</b> changing the request doesn’t change the invoice. To move the invoiced date or time, use Actions → Change the date or time.' : '.'}</p>
+    <div class="me-form">${BO_EDIT.map(f).join('')}</div><div id="be-msg"></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="be-go" onclick="boEditSave('${escAttr(id)}')">Save</button></div>`);
+}
+async function boEditSave(id) {
+  const r = (_bo.rows || []).find(x => x.id === id) || {}, btn = document.getElementById('be-go'), msg = document.getElementById('be-msg');
+  const changes = BO_EDIT.map(([k]) => [k, ((document.getElementById('be-' + k) || {}).value || '').trim()]).filter(([k, v]) => String(r[k] ?? '') !== v);
+  if (!changes.length) { closeDutySheet(); return; }
+  btn.disabled = true; btn.textContent = 'Saving…';
+  for (const [k, v] of changes) {
+    const { error } = await sb.rpc('hub_buyout_request_set', { p_id: id, p_field: k, p_value: v });
+    if (error) { btn.disabled = false; btn.textContent = 'Save'; msg.innerHTML = `<div class="me-msg err">${esc(error.message)}</div>`; return; }
+  }
+  closeDutySheet(); boLoad();
+}
+// 🔁 Change an unpaid invoice's date or time: the old hold is released first (so the times it closed reopen), then the new one is
+// held and its invoice emailed, the same as making an invoice. If the new time can't be held, the old one is already released.
+function boMoveOpen(i) {
+  if (!i || i.status !== 'sent') { alert('Only an invoice whose deposit isn’t paid yet can be moved here.'); return; }
+  if (!confirm('Change the date or time of this buyout?\n\nNext you’ll choose the new date and time. The current hold is released when you press “Hold the studio and email the invoice”, and the family gets the updated invoice.')) return;
+  boInvNew(i.request_id, { day: i.day, at: i.at, minutes: i.minutes, guests: i.guests, observers: i.observers, name: i.contact_name, email: i.email, phone: i.phone,
+    organization: i.organization, occasion: i.occasion, project: i.project, studio_id: i.studio_id, pay_by: i.pay_by, __move: i.id });
 }
 // "6:15pm" (World's request form) or "18:15" → "18:15" for a time box
 function boTime24(t) {
@@ -207,14 +254,15 @@ function boTime24(t) {
   let h = +m[1]; if (m[3]) { h = h % 12 + (/pm/i.test(m[3]) ? 12 : 0); }
   return String(h).padStart(2, '0') + ':' + m[2];
 }
-function boInvNew(reqId) {
-  const r = (_bo.rows || []).find(x => x.id === reqId) || {};
-  const firstDate = (String(r.dates || '').match(/\d{4}-\d{2}-\d{2}/) || [''])[0], pb = (() => { const d = new Date(); d.setDate(d.getDate() + 7); return localDateStr(d); })();
+function boInvNew(reqId, pre) {
+  const r = Object.assign({}, (_bo.rows || []).find(x => x.id === reqId) || {}, pre || {});
+  const firstDate = r.day || (String(r.dates || '').match(/\d{4}-\d{2}-\d{2}/) || [''])[0], pb = r.pay_by || (() => { const d = new Date(); d.setDate(d.getDate() + 7); return localDateStr(d); })();
+  _boMove = (pre && pre.__move) || null;
   const st = Object.keys(STUDIO_NAMES).sort((a, b) => STUDIO_NAMES[a].localeCompare(STUDIO_NAMES[b]));
-  openDutySheet(`<h3>🧾 Studio buyout invoice</h3><p class="ho-intro">Holds the whole studio (everything else closes from 15 minutes before to 15 minutes after) and emails ${esc(r.email || 'the contact')} the deposit invoice: they confirm the project, agree to the terms and pay the deposit. Unpaid by the deposit date, it's released.</p>
+  openDutySheet(`<h3>🧾 Studio buyout invoice${_boMove ? ': new date or time' : ''}</h3><p class="ho-intro">Holds the whole studio (everything else closes from 15 minutes before to 15 minutes after) and emails ${esc(r.email || 'the contact')} the deposit invoice: they confirm the project, agree to the terms and pay the deposit. Unpaid by the deposit date, it's released.</p>
     <div class="me-form">
       <label>Studio<select id="bi-studio">${st.map(x => `<option value="${x}"${x === r.studio_id ? ' selected' : ''}>${esc(STUDIO_NAMES[x])}</option>`).join('')}</select></label>
-      <label>Date<input id="bi-day" type="date" value="${escAttr(firstDate)}"></label><label>Start time<input id="bi-at" type="time" step="900" value="${escAttr(boTime24(r.start_time))}"></label>
+      <label>Date<input id="bi-day" type="date" value="${escAttr(firstDate)}"></label><label>Start time<input id="bi-at" type="time" step="900" value="${escAttr(r.at ? String(r.at).slice(0, 5) : boTime24(r.start_time))}"></label>
       <label>Length<select id="bi-min">${[90, 120, 150, 180].map(m => `<option value="${m}"${(r.minutes || 90) === m ? ' selected' : ''}>${m === 90 ? '90 min' : m / 60 + ' hours'}</option>`).join('')}</select></label>
       <label>Guests (making art)<input id="bi-guests" type="number" min="0" value="${escAttr(r.guests || '')}"></label><label>Observers<input id="bi-obs" type="number" min="0" value="${escAttr(r.observers || 0)}"></label>
       <label>Contact<input id="bi-contact" value="${escAttr(r.name || '')}"></label><label>Email<input id="bi-email" type="email" value="${escAttr(r.email || '')}"></label><label>Phone<input id="bi-phone" value="${escAttr(r.phone || '')}"></label>
@@ -223,7 +271,7 @@ function boInvNew(reqId) {
       <label>Deposit due by<input id="bi-pay" type="date" value="${escAttr(pb)}"></label>
       <label>Deposit (before tax; blank = the 90-minute price)<input id="bi-dep" type="number" min="0" step="0.01" placeholder="the 90-minute price"></label>
     </div><div id="bi-msg"></div>
-    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="bi-go" onclick="boInvCreate('${escAttr(reqId)}', false)">Hold the studio and email the invoice</button></div>`);
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="bi-go" onclick="boInvCreate('${escAttr(reqId)}', false)">${_boMove ? 'Release the old time, hold the new one and email' : 'Hold the studio and email the invoice'}</button></div>`);
 }
 async function boInvCreate(reqId, force) {
   const v = id => ((document.getElementById(id) || {}).value || '').trim(), msg = document.getElementById('bi-msg'), btn = document.getElementById('bi-go');
@@ -231,6 +279,12 @@ async function boInvCreate(reqId, force) {
     email: v('bi-email'), phone: v('bi-phone'), organization: v('bi-org'), occasion: v('bi-occ'), project: v('bi-proj'), pay_by: v('bi-pay'), deposit: v('bi-dep'), force: !!force };
   if (!p.day || !p.at) { msg.innerHTML = '<div class="me-msg err">Choose the date and start time.</div>'; return; }
   btn.disabled = true; btn.textContent = 'Holding the studio…';
+  if (_boMove) {   // 🔁 moving: release the old hold first (its closed times reopen), then hold the new one below
+    btn.textContent = 'Releasing the old time…';
+    const c = await sb.rpc('hub_buyout_action', { p_id: _boMove, p_action: 'cancel' });
+    if (c.error) { btn.disabled = false; btn.textContent = 'Release the old time, hold the new one and email'; msg.innerHTML = `<div class="me-msg err">${esc(c.error.message)}</div>`; return; }
+    _boMove = null; btn.textContent = 'Holding the new time…';
+  }
   const { data, error } = await sb.rpc('hub_buyout_create', { p });
   if (error) {
     btn.disabled = false; btn.textContent = 'Hold the studio and email the invoice';
@@ -250,6 +304,7 @@ async function boInvEmail(id) {
 }
 async function boInvAct(id, action) {
   const i = (_bo.inv || []).concat((_cust && _cust.bo) || []).find(x => x.id === id) || {};
+  if (action === 'move') { boMoveOpen(i); return; }
   if (action === 'send') { const r = await boInvEmail(id); if (r.ok && r.link) { try { await navigator.clipboard.writeText(r.link); } catch (e) {} } alert(r.ok ? 'Emailed (and the link copied).' : 'The email didn\u2019t send: ' + r.error); boAfter(); return; }
   let date = null, g = null, o = null, m = null;
   if (action === 'extend') { date = prompt('New deposit due date (YYYY-MM-DD):', String(i.pay_by || '')); if (!date) return; }
@@ -537,4 +592,3 @@ async function donDelete(id) {
   const { error } = await sb.rpc('hub_donation_delete', { p_id: id }); if (error) { alert(error.message); return; }
   closeDutySheet(); _don.rows = null; donDraw(); donLoad();
 }
-
