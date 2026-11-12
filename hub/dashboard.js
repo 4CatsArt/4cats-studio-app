@@ -18,6 +18,7 @@
 // in + Add a block; 🕒 Timesheets, 🏆 Flash challenges, 💰 Labour cost, and ✅ Open & close rebuilt on hub_dash_oc; SQL step 8.)
 // (Nov 12 2026: the dashboard places blocks itself: each goes in the column it was dropped in (b.x, saved), stacked under what's
 // already there; blocks never placed fill the highest gap that fits. Replaces the browser's own gap-filling.)
+// (Nov 12 2026: "← My dashboard" at the top of every other Hub page for home office logins; hub.html#mydash opens it.)
 
 // ---------- State ----------
 let _dash = { me: null, layout: null, edit: false, err: '', saving: '', saveTimer: null, refreshTimer: null, drag: null, choose: false, cache: {}, ro: null };
@@ -1285,12 +1286,41 @@ async function dashSetupClock() {
   _dash.me.clock = !!st; _dash.saving = st ? 'Punch clock on ✓' : 'Punch clock off'; dashDraw(true);
 }
 
+// ---------- ← My dashboard: a way back from every other Hub page (home office logins) ----------
+// One small link, moved to the top of whichever page is showing (and put back if that page redraws itself). Not on My dashboard,
+// and not on pages laid out as one full-height piece (Schedule, Chat).
+const DASH_BACK_SKIP = { 'mydash-pane': 1, 'schedule-pane': 1, 'chat-pane': 1, 'dm-pane': 1 };
+function dashBackPlace() {
+  if (!_dash.isAdmin) return;
+  dashStyles();   // (its look lives with the dashboard's styles)
+  let a = document.getElementById('dash-back');
+  if (!a) { a = document.createElement('a'); a.id = 'dash-back'; a.className = 'dash-back'; a.href = '#mydash'; a.textContent = '← 🏠 My dashboard';
+    a.onclick = e => { e.preventDefault(); openMyDash(); }; }
+  const vis = (typeof PANES !== 'undefined' ? PANES : []).find(p => paneVisible(p));
+  if (_dash.backObs) { _dash.backObs.disconnect(); _dash.backObs = null; }
+  if (!vis || DASH_BACK_SKIP[vis]) { if (a.parentNode) a.parentNode.removeChild(a); return; }
+  const pane = document.getElementById(vis);
+  if (pane.firstChild !== a) pane.insertBefore(a, pane.firstChild);
+  if (typeof MutationObserver === 'function') {   // (the page redrew itself: put the link back on top)
+    _dash.backObs = new MutationObserver(() => { if (pane.firstChild !== a && paneVisible(vis)) { _dash.backObs.disconnect(); pane.insertBefore(a, pane.firstChild); _dash.backObs.observe(pane, { childList: true }); } });
+    _dash.backObs.observe(pane, { childList: true });
+  }
+}
+(function dashHookPanes() {
+  if (typeof showOnlyPane === 'function' && !showOnlyPane._dash) {
+    const show = showOnlyPane;
+    window.showOnlyPane = function () { const r = show.apply(this, arguments); try { dashBackPlace(); } catch (e) { } return r; };
+    window.showOnlyPane._dash = true;
+  }
+})();
+
 // ---------- Open on start (called by hub.html once the Hub has started) ----------
 async function dashStartup(data) {
   if (!data || !data.isAdmin) return;
+  _dash.isAdmin = true; dashBackPlace();
   for (let i = 0; i < 50 && typeof _hubRestoring !== 'undefined' && _hubRestoring; i++) await new Promise(r => setTimeout(r, 100));   // (after "back to last time's spot")
   try { if (!_dash.me) await dashLoadMe(); } catch (e) { return; }
-  if (_dash.layout && _dash.layout.start) openMyDash();
+  if ((_dash.layout && _dash.layout.start) || location.hash === '#mydash') openMyDash();   // (hub.html#mydash: a link straight to it)
 }
 
 // ---------- Styles (kept with the page so hub.html only gains the pane and button) ----------
@@ -1396,6 +1426,8 @@ function dashStyles() {
 #mydash-pane.themed .dash-block a, #mydash-pane.themed .dash-open { color: var(--accent); }
 #mydash-pane.dark .goal-note, #mydash-pane.dark .fd-sm, #mydash-pane.dark .lab-sub, #mydash-pane.dark .dash-sub { color: var(--ink-soft); }
 #mydash-pane.dark .dash-note { background: var(--dash-bg); color: var(--ink); } #mydash-pane.dark .dash-setup { background: #3b2f58; color: #f0eaf9; border-color: #5a4a80; }
+.dash-back { display: inline-flex; align-items: center; gap: 4px; margin: -8px 0 10px; padding: 4px 12px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 13px; text-decoration: none; }
+.dash-back:hover { filter: brightness(.96); }
 @media (max-width: 1100px) { .dash-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } .dash-block.sz-m, .dash-block.sz-l { grid-column: 1 / -1; } }
 @media (max-width: 640px) { .dash-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .dash-block.sz-s, .dash-block.sz-m, .dash-block.sz-l { grid-column: 1 / -1; } }
 .dash-block { position: relative; } .dash-block.tile { padding: 10px 12px; } .dash-block.tile header b { font-size: 13px; }
