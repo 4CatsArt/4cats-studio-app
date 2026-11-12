@@ -2,10 +2,12 @@
 // 💵 paydays and pay period ends, 🌴 approved time off and no-time-off dates, 📧 newsletter sends, 🏷️ deals of the day, and your own
 // 📌 events and 🗺️ planning items (for everyone at home office, or just you). Layers switch on and off (remembered on this computer).
 // Loaded by hub.html after dashboard.js. Weeks start on Sunday, like pay periods.
+// (Nov 12 2026: 👥 meetings and 1:1s (hub_calendar_meetings.sql): invite home office people, Yes / Maybe / No, repeats, skip a
+// date, agenda, and notes for each date: shared with the people invited; a 1:1's only the two of you.)
 
 if (typeof PANES !== 'undefined' && !PANES.includes('cal-pane')) PANES.push('cal-pane');
 const CAL_LAYERS = [
-  ['event', '📌 Events', '#6d4aeb'], ['planning', '🗺️ Planning', '#e8710a'], ['pay', '💵 Pay', '#2e7d32'],
+  ['meeting', '👥 Meetings', '#0e7490'], ['event', '📌 Events', '#6d4aeb'], ['planning', '🗺️ Planning', '#e8710a'], ['pay', '💵 Pay', '#2e7d32'],
   ['time_off', '🌴 Time off', '#00897b'], ['newsletters', '📧 Newsletters', '#1e66c9'], ['deals', '🏷️ Deals', '#d6337a']];
 const _cal = { view: 'month', day: null, items: [], from: null, to: null, err: '', loading: false, off: {} };
 try { _cal.off = JSON.parse(localStorage.getItem('hub-cal-off') || '{}') || {}; _cal.view = localStorage.getItem('hub-cal-view') || 'month'; } catch (e) { }
@@ -50,7 +52,8 @@ function calLayer(k) { _cal.off[k] = !_cal.off[k]; try { localStorage.setItem('h
 function calChip(x, i, dayIso) {
   const t = x.all_day ? '' : `<span class="cal-t">${esc(calTime(x.start_time))}</span> `;
   const cont = x.start_date < dayIso ? ' cont' : '';
-  return `<button class="cal-chip${cont}" style="--c:${escAttr(x.colour || calCol(x.layer))}" onclick="event.stopPropagation();calOpen(${i})" title="${escAttr(x.title)}">${t}${esc(x.title)}${x.visibility === 'me' ? ' 🔒' : ''}</button>`;
+  const mk = x.layer === 'meeting' ? (x.my_response === 'pending' ? '❔ ' : x.my_response === 'no' ? '' : '') + (x.kind === 'one_on_one' ? '1:1 ' : '👥 ') : '';
+  return `<button class="cal-chip${cont}${x.my_response === 'no' ? ' declined' : ''}" style="--c:${escAttr(x.colour || calCol(x.layer))}" onclick="event.stopPropagation();calOpen(${i})" title="${escAttr(x.title)}${x.my_response === 'pending' ? ' (not answered yet)' : ''}">${t}${mk}${esc(x.title)}${x.visibility === 'me' ? ' 🔒' : ''}</button>`;
 }
 function calDraw() {
   const el = document.getElementById('cal-pane'); if (!el) return;
@@ -88,7 +91,7 @@ function calDraw() {
       : '<p class="ho-intro">Nothing in the next 5 weeks on the layers you’ve switched on.</p>';
   }
   el.innerHTML = `<div class="ho-head"><div class="pts-page-title" style="margin:0">📅 Calendar</div><span class="spacer"></span>
-      <button class="ho-btn primary" onclick="calNew()">+ Add event</button></div>
+      <button class="ho-btn" onclick="calNew(null, 'one_on_one')">+ 1:1</button><button class="ho-btn" onclick="calNew(null, 'meeting')">+ Meeting</button><button class="ho-btn primary" onclick="calNew()">+ Add event</button></div>
     <div class="cal-bar"><div class="cal-nav"><button class="ho-btn" onclick="calMove(-1)" title="Back">◀</button><button class="ho-btn" onclick="calToday()">Today</button><button class="ho-btn" onclick="calMove(1)" title="Forward">▶</button>
         <b class="cal-title">${esc(title)}</b>${_cal.loading ? '<span class="fd-sm">Loading…</span>' : ''}</div>
       <div class="cal-views">${[['month', 'Month'], ['week', 'Week'], ['agenda', 'Agenda']].map(([v, l]) => `<button class="${_cal.view === v ? 'on' : ''}" onclick="calView('${v}')">${l}</button>`).join('')}</div></div>
@@ -99,6 +102,7 @@ function calDraw() {
 // ---------- an item: details (and edit, for events) ----------
 function calOpen(i) {
   const x = _cal.items[i]; if (!x) return;
+  if (x.layer === 'meeting') { calMeeting(i); return; }
   if ((x.layer === 'event' || x.layer === 'planning') && x.editable) { calForm(x); return; }
   const when = calWhen(x);
   const link = { time_off: ['openTsPane', 'Timesheets'], newsletters: ['openNewsPane', 'Newsletters'] }[x.layer];
@@ -110,26 +114,86 @@ function calOpen(i) {
 function calWhen(x) {
   const f = s => calD(s).toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
   const days = x.start_date === x.end_date ? f(x.start_date) : f(x.start_date) + ' – ' + f(x.end_date);
-  return x.all_day ? days + ' · all day' : days + ' · ' + calTime(x.start_time) + '–' + calTime(x.end_time);
+  const rp = { weekly: 'every week', biweekly: 'every 2 weeks', monthly: 'every month' }[x.repeat];
+  return (x.all_day ? days + ' · all day' : days + ' · ' + calTime(x.start_time) + '–' + calTime(x.end_time)) + (rp ? ' · repeats ' + rp + (x.repeat_until ? ' until ' + calD(x.repeat_until).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '') : '');
 }
 function calLinkify(s) { const t = esc(s); return /^https?:\/\/\S+$/.test(String(s).trim()) ? `<a href="${escAttr(String(s).trim())}" target="_blank" rel="noopener">${t}</a>` : t; }
 
+// ---------- 👥 a meeting or 1:1: who's coming, your answer, the agenda, and notes for this date ----------
+async function calMeeting(i) {
+  const x = _cal.items[i]; if (!x) return; _cal.edit = x;
+  const R = { yes: '✅ Going', maybe: '🤔 Maybe', no: '❌ Not going', pending: '❔ Not answered' };
+  const zoom = x.location && /^https?:\/\//.test(x.location.trim()) ? `<a class="ho-btn primary" href="${escAttr(x.location.trim())}" target="_blank" rel="noopener">🎥 Join</a>` : x.location ? `<p style="margin:0 0 8px">📍 ${esc(x.location)}</p>` : '';
+  openDutySheet(`<h3 style="margin:0 0 2px">${x.kind === 'one_on_one' ? '1:1 · ' : '👥 '}${esc(x.title)}</h3><p class="fd-sm" style="margin:0 0 10px">${esc(calWhen(x))}</p>
+    ${zoom ? `<div style="margin:0 0 10px">${zoom}</div>` : ''}
+    ${x.agenda ? `<div class="cal-lbl">Agenda</div><p style="white-space:pre-wrap;margin:0 0 10px">${esc(x.agenda)}</p>` : ''}
+    <div class="cal-lbl">Who’s coming</div><div class="cal-att">${(x.attendees || []).map(a => `<span class="cal-a ${esc(a.response)}">${esc(a.name)} · ${R[a.response] || a.response}</span>`).join('')}</div>
+    ${x.my_response ? `<div class="cal-lbl" style="margin-top:10px">Your answer</div><div class="cal-ans">${['yes', 'maybe', 'no'].map(r => `<button class="ho-btn${x.my_response === r ? ' primary' : ''}" onclick="calRespond('${r}')">${R[r]}</button>`).join('')}</div>` : ''}
+    <div class="cal-lbl" style="margin-top:12px">Notes for ${esc(calD(x.start_date).toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))} <span class="fd-sm" id="cm-by"></span></div>
+    <textarea id="cm-notes" rows="5" style="width:100%;box-sizing:border-box;padding:8px;border:1px solid #ddd;border-radius:8px;font:inherit" placeholder="${x.kind === 'one_on_one' ? 'Only the two of you see these.' : 'Shared with everyone invited.'}">Loading…</textarea>
+    <div class="fd-msg" id="cm-msg"></div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px">${x.mine ? `<button class="ho-btn" onclick="calForm(_cal.edit)">✏️ Change</button>${x.repeat && x.repeat !== 'none' ? '<button class="ho-btn" onclick="calSkip()">Skip this date</button>' : ''}<button class="ho-btn" style="color:#c62828" onclick="calDelete()">Delete</button>` : `<span class="fd-sm">Set up by ${esc(x.by || '')}</span>`}
+      <span style="flex:1"></span><button class="ho-btn" onclick="closeDutySheet()">Close</button><button class="ho-btn primary" onclick="calNotesSave()">Save notes</button></div>`);
+  const { data, error } = await sb.rpc('hub_cal_notes_get', { p_event: x.id, p_date: x.start_date });
+  const ta = document.getElementById('cm-notes'); if (!ta || _cal.edit !== x) return;
+  ta.value = error ? '' : ((data && data.body) || ''); _cal.notesWas = ta.value;
+  if (data && data.by) document.getElementById('cm-by').textContent = '· last saved by ' + data.by;
+}
+async function calRespond(r) {
+  const x = _cal.edit; const { error } = await sb.rpc('hub_cal_respond', { p_event: x.id, p_response: r });
+  if (error) { document.getElementById('cm-msg').textContent = error.message; return; }
+  const ta = document.getElementById('cm-notes'), keep = ta ? ta.value : null;
+  await calLoad();
+  const i = _cal.items.findIndex(y => y.id === x.id && y.start_date === x.start_date); if (i >= 0) { await calMeeting(i); const t2 = document.getElementById('cm-notes'); if (t2 && keep !== null && keep !== _cal.notesWas) t2.value = keep; }
+}
+async function calNotesSave() {
+  const x = _cal.edit, ta = document.getElementById('cm-notes'), msg = document.getElementById('cm-msg'); if (!x || !ta) return;
+  const { error } = await sb.rpc('hub_cal_notes_save', { p_event: x.id, p_date: x.start_date, p_body: ta.value });
+  if (error) { msg.textContent = error.message; return; }
+  _cal.notesWas = ta.value; msg.textContent = ''; msg.innerHTML = '<span style="color:#2e7d32">✓ Notes saved</span>';
+  const it = _cal.items.find(y => y.id === x.id && y.start_date === x.start_date); if (it) it.has_notes = !!ta.value.trim();
+}
+async function calSkip() {
+  const x = _cal.edit; if (!confirm('Skip ' + calD(x.start_date).toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' }) + ' only? The other dates stay.')) return;
+  const { error } = await sb.rpc('hub_cal_skip', { p_event: x.id, p_date: x.start_date, p_skip: true });
+  if (error) { document.getElementById('cm-msg').textContent = error.message; return; }
+  closeDutySheet(); calLoad();
+}
+
 // ---------- add or change an event ----------
-function calNew(iso) { calForm({ start_date: iso || calIso(_cal.day || new Date()), end_date: iso || calIso(_cal.day || new Date()), all_day: true, layer: 'event', visibility: 'office' }); }
-function calForm(x) {
+function calNew(iso, kind) {
+  const d = iso || calIso(_cal.day || new Date()), m = kind === 'meeting' || kind === 'one_on_one';
+  calForm({ start_date: d, end_date: d, all_day: !m, start_time: m ? '10:00' : '', end_time: m ? (kind === 'one_on_one' ? '10:30' : '11:00') : '', layer: m ? 'meeting' : 'event', kind: kind || 'event', visibility: m ? 'attendees' : 'office', attendees: [] });
+}
+async function calPeople() {   // home office people to invite (the same list as 🏢 chat's + New message)
+  if (_cal.people) return _cal.people;
+  const { data } = await sb.rpc('hub_chat_office_people'); _cal.people = data || []; return _cal.people;
+}
+async function calForm(x) {
   _cal.edit = x;
-  const v = k => escAttr(x[k] || '');
-  openDutySheet(`<h3 style="margin:0 0 10px">${x.id ? 'Change event' : '+ Add event'}</h3>
+  const v = k => escAttr(x[k] || ''), kind = x.kind || 'event', meet = kind !== 'event';
+  const P = meet ? await calPeople() : [], inv = new Set((x.attendees || []).map(a => a.user_id));
+  const people = !meet ? '' : kind === 'one_on_one'
+    ? `<label class="wide">With<select id="cf-with"><option value="">Choose someone…</option>${P.map(p => `<option value="${escAttr(p.user_id)}"${inv.has(p.user_id) ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>`
+    : `<div class="wide"><div class="cal-lbl">Invite</div><div class="cal-ppl">${P.map(p => `<label class="cal-pp"><input type="checkbox" class="cf-inv" value="${escAttr(p.user_id)}"${inv.has(p.user_id) ? ' checked' : ''}> ${esc(p.name)}</label>`).join('') || '<span class="fd-sm">No one else at home office yet.</span>'}</div></div>`;
+  const repeat = `<label>Repeats<select id="cf-rep">${[['none', 'Doesn’t repeat'], ['weekly', 'Every week'], ['biweekly', 'Every 2 weeks'], ['monthly', 'Every month']].map(([k2, l]) => `<option value="${k2}"${(x.repeat || 'none') === k2 ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label>Until (optional)<input id="cf-until" type="date" value="${v('repeat_until')}"></label>`;
+  if (x.id && x.series_start) { x = Object.assign({}, x, { start_date: x.series_start, end_date: x.series_start }); _cal.edit = x; }   // (a repeating one: change the series)
+  openDutySheet(`<h3 style="margin:0 0 10px">${x.id ? (meet ? 'Change ' + (kind === 'one_on_one' ? '1:1' : 'meeting') : 'Change event') : meet ? (kind === 'one_on_one' ? '+ 1:1' : '+ Meeting') : '+ Add event'}</h3>
     <div class="cal-form">
-      <label class="wide">Title<input id="cf-title" maxlength="200" value="${v('title')}" placeholder="e.g. Team meeting"></label>
+      <label class="wide">Title<input id="cf-title" maxlength="200" value="${v('title')}" placeholder="${kind === 'one_on_one' ? 'e.g. Weekly check-in' : 'e.g. Team meeting'}"></label>
+      ${people}
       <label>Starts<input id="cf-sd" type="date" value="${v('start_date')}" onchange="const e=document.getElementById('cf-ed');if(e.value<this.value)e.value=this.value"></label>
       <label>Ends<input id="cf-ed" type="date" value="${v('end_date')}"></label>
       <label class="wide cal-chk"><input id="cf-allday" type="checkbox" ${x.all_day !== false ? 'checked' : ''} onchange="document.getElementById('cf-times').hidden=this.checked"> All day</label>
       <div id="cf-times" class="wide cal-two" ${x.all_day !== false ? 'hidden' : ''}><label>From<input id="cf-st" type="time" step="300" value="${v('start_time')}"></label><label>To<input id="cf-et" type="time" step="300" value="${v('end_time')}"></label></div>
       <label class="wide">Where or Zoom link (optional)<input id="cf-loc" maxlength="300" value="${v('location')}" placeholder="e.g. https://zoom.us/j/… or Victoria office"></label>
-      <label class="wide">Notes (optional)<textarea id="cf-notes" rows="3" maxlength="4000">${esc(x.notes || '')}</textarea></label>
+      ${meet ? `<label class="wide">Agenda (optional)<textarea id="cf-agenda" rows="3" maxlength="4000" placeholder="What you’ll talk about">${esc(x.agenda || '')}</textarea></label>`
+        : `<label class="wide">Notes (optional)<textarea id="cf-notes" rows="3" maxlength="4000">${esc(x.notes || '')}</textarea></label>`}
+      ${repeat}
+      ${meet ? `<p class="wide fd-sm" style="margin:0">${kind === 'one_on_one' ? '🔒 Only the two of you see it and its notes.' : '👥 Only the people invited see it.'}</p>` : `
       <label>Kind<select id="cf-layer"><option value="event"${x.layer !== 'planning' ? ' selected' : ''}>📌 Event</option><option value="planning"${x.layer === 'planning' ? ' selected' : ''}>🗺️ Planning</option></select></label>
-      <label>Who sees it<select id="cf-vis" ${x.id && !x.mine ? 'disabled title="Only the person who added it can change this"' : ''}><option value="office"${x.visibility !== 'me' ? ' selected' : ''}>Everyone at home office</option><option value="me"${x.visibility === 'me' ? ' selected' : ''}>Just me 🔒</option></select></label>
+      <label>Who sees it<select id="cf-vis" ${x.id && !x.mine ? 'disabled title="Only the person who added it can change this"' : ''}><option value="office"${x.visibility !== 'me' ? ' selected' : ''}>Everyone at home office</option><option value="me"${x.visibility === 'me' ? ' selected' : ''}>Just me 🔒</option></select></label>`}
     </div>
     ${x.id && x.by ? `<p class="fd-sm" style="margin:8px 0 0">Added by ${esc(x.by)}</p>` : ''}
     <div class="fd-msg" id="cf-msg"></div>
@@ -138,16 +202,23 @@ function calForm(x) {
 }
 async function calSave() {
   const g = id => (document.getElementById(id) || {}).value || '', all = document.getElementById('cf-allday').checked, msg = document.getElementById('cf-msg');
+  const kind = (_cal.edit && _cal.edit.kind) || 'event';
   const p = { id: (_cal.edit && _cal.edit.id) || null, title: g('cf-title').trim(), start_date: g('cf-sd'), end_date: g('cf-ed') || g('cf-sd'),
-    start_time: all ? null : g('cf-st') || null, end_time: all ? null : g('cf-et') || null, location: g('cf-loc'), notes: g('cf-notes'), layer: g('cf-layer'), visibility: g('cf-vis') };
+    start_time: all ? null : g('cf-st') || null, end_time: all ? null : g('cf-et') || null, location: g('cf-loc'), notes: g('cf-notes'), layer: g('cf-layer'), visibility: g('cf-vis'),
+    kind, agenda: g('cf-agenda'), repeat: g('cf-rep') || 'none', repeat_until: g('cf-until') || null,
+    attendees: kind === 'one_on_one' ? [g('cf-with')].filter(Boolean) : kind === 'meeting' ? Array.from(document.querySelectorAll('.cf-inv:checked')).map(c => c.value) : [] };
+  if (!p.title && kind === 'one_on_one' && p.attendees[0]) p.title = '1:1 with ' + ((_cal.people || []).find(x => x.user_id === p.attendees[0]) || {}).name;
   if (!p.title) { msg.textContent = 'Give it a title.'; return; }
+  if (kind === 'one_on_one' && !p.attendees.length) { msg.textContent = 'Choose who the 1:1 is with.'; return; }
+  if (kind === 'meeting' && !p.attendees.length) { msg.textContent = 'Invite at least one person.'; return; }
+  if (p.repeat !== 'none' && p.end_date !== p.start_date) { msg.textContent = 'A repeating one has to start and end on the same day.'; return; }
   if (!all && (!p.start_time || !p.end_time)) { msg.textContent = 'Choose both times, or tick All day.'; return; }
   const { error } = await sb.rpc('hub_cal_event_save', { p });
   if (error) { msg.textContent = error.message; return; }
   closeDutySheet(); calLoad();
 }
 async function calDelete() {
-  if (!_cal.edit || !_cal.edit.id || !confirm('Delete “' + _cal.edit.title + '”?')) return;
+  if (!_cal.edit || !_cal.edit.id || !confirm('Delete “' + _cal.edit.title + '”' + (_cal.edit.repeat && _cal.edit.repeat !== 'none' ? ' and every date it repeats' : '') + '?')) return;
   const { error } = await sb.rpc('hub_cal_event_delete', { p_id: _cal.edit.id });
   if (error) { document.getElementById('cf-msg').textContent = error.message; return; }
   closeDutySheet(); calLoad();
@@ -193,6 +264,12 @@ function calStyles() {
 .cal-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; } .cal-form label { display: flex; flex-direction: column; gap: 3px; font-size: 13px; font-weight: 600; }
 .cal-form .wide { grid-column: 1 / -1; } .cal-form input:not([type=checkbox]), .cal-form select, .cal-form textarea { padding: 7px 9px; border: 1px solid #ddd; border-radius: 8px; font: inherit; font-weight: 400; }
 .cal-form .cal-chk { flex-direction: row; align-items: center; gap: 8px; } .cal-two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; } .cal-two[hidden] { display: none; }
+#cal-pane .cal-chip.declined { opacity: .5; text-decoration: line-through; }
+.cal-lbl { font-size: 12px; font-weight: 800; color: var(--ink-soft); text-transform: uppercase; letter-spacing: .03em; margin-bottom: 4px; }
+.cal-ppl { display: flex; flex-wrap: wrap; gap: 6px; } .cal-pp { display: inline-flex !important; flex-direction: row !important; align-items: center; gap: 6px !important; border: 1px solid #e6e3ee; border-radius: 999px; padding: 4px 10px; font-weight: 500 !important; cursor: pointer; }
+.cal-att { display: flex; flex-wrap: wrap; gap: 6px; } .cal-a { border-radius: 999px; padding: 3px 10px; font-size: 13px; background: #f1f0f6; }
+.cal-a.yes { background: #e7f4e8; color: #1b5e20; } .cal-a.no { background: #fde2e2; color: #b91c1c; } .cal-a.maybe { background: #fff3e0; color: #92400e; }
+.cal-ans { display: flex; gap: 6px; flex-wrap: wrap; }
 @media (max-width: 760px) { #cal-pane .cal-week { grid-template-columns: 1fr; } #cal-pane .cal-days { grid-auto-rows: minmax(64px, auto); } #cal-pane .cal-chip { font-size: 10.5px; padding: 1px 4px; } }`;
   document.head.appendChild(st);
 }
