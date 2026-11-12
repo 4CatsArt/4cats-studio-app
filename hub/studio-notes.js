@@ -182,39 +182,42 @@ async function snsSchedRemove(id) {
   const { error } = await sb.rpc('hub_note_photo_schedule_remove', { p_id: id }); if (error) { alert(error.message); return; }
   _sns.msg = '✓ Removed.'; snsLoad();
 }
-// 🖼 (Nov 12 2026) Choose a picture already in storage (the retail-media bucket, where the Hub's uploads go), newest first.
+// 🖼 (Nov 12 2026) Choose a picture already in storage: every public bucket (hub_storage_images), newest first, with a search.
 // target 'note' = the open note / schedule sheet's picture; a studio id or '*' = that studio's (every studio's) picture.
-let _lib = { folder: 'studio-notes', target: null, folders: null };
-const LIB_IMG = /\.(jpe?g|png|gif|webp|avif)$/i;
+let _lib = { bucket: '', q: '', target: null, buckets: null };
+const LIB_SKIP = { 'staff-avatars': 1, 'ticket-attachments': 1, 'qr-codes': 1 };   // (not marketing pictures)
 async function snsLibOpen(target) {
   _lib.target = target;
   let box = document.getElementById('sns-lib');
   if (!box) { box = document.createElement('div'); box.id = 'sns-lib'; document.body.appendChild(box); }
   box.setAttribute('style', 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10050;display:flex;align-items:center;justify-content:center');
   box.onclick = e => { if (e.target === box) snsLibClose(); };
-  if (!_lib.folders) {
-    const { data } = await sb.storage.from('retail-media').list('', { limit: 100 });
-    _lib.folders = (data || []).filter(x => !x.id).map(x => x.name).sort();   // (folders have no id)
-    if (_lib.folders.indexOf('studio-notes') < 0) _lib.folders.unshift('studio-notes');
-  }
+  if (!_lib.buckets) { const { data } = await sb.rpc('hub_storage_buckets'); _lib.buckets = (data || []).filter(b => !LIB_SKIP[b.id] && b.pictures > 0); }
   snsLibLoad();
 }
 function snsLibClose() { const b = document.getElementById('sns-lib'); if (b) b.remove(); }
+let _libT = null;
+function snsLibSearch(v) { _lib.q = v; clearTimeout(_libT); _libT = setTimeout(snsLibLoad, 350); }
 async function snsLibLoad() {
   const box = document.getElementById('sns-lib'); if (!box) return;
-  const shell = inner => `<div style="background:#fff;border-radius:14px;padding:16px 18px;width:min(860px,94vw);max-height:86vh;overflow:auto">
-    <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px"><b style="font-size:17px">🖼 Choose a picture</b>
-      <select onchange="_lib.folder=this.value;snsLibLoad()">${(_lib.folders || []).map(f => `<option value="${escAttr(f)}"${f === _lib.folder ? ' selected' : ''}>${esc(f)}</option>`).join('')}</select>
-      <span style="flex:1"></span><button class="ho-btn sm" onclick="snsLibClose()">Close</button></div>${inner}</div>`;
+  const shell = inner => `<div style="background:#fff;border-radius:14px;padding:16px 18px;width:min(900px,94vw);max-height:86vh;overflow:auto">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px"><b style="font-size:17px">🖼 Choose a picture</b>
+      <select onchange="_lib.bucket=this.value;snsLibLoad()"><option value="">All buckets</option>${(_lib.buckets || []).map(b => `<option value="${escAttr(b.id)}"${b.id === _lib.bucket ? ' selected' : ''}>${esc(b.id)} (${b.pictures})</option>`).join('')}</select>
+      <input type="search" id="sns-lib-q" placeholder="Search file names" value="${escAttr(_lib.q)}" oninput="snsLibSearch(this.value)" style="flex:1;min-width:160px">
+      <button class="ho-btn sm" onclick="snsLibClose()">Close</button></div>${inner}</div>`;
+  const keepFocus = document.activeElement && document.activeElement.id === 'sns-lib-q';
   box.innerHTML = shell('<p class="goal-note">Loading…</p>');
-  const { data, error } = await sb.storage.from('retail-media').list(_lib.folder, { limit: 200, sortBy: { column: 'created_at', order: 'desc' } });
-  if (error) { box.innerHTML = shell(`<p class="fd-msg">The library couldn’t be opened: ${esc(error.message)}</p>`); return; }
-  const pics = (data || []).filter(x => x.id && LIB_IMG.test(x.name));
-  box.innerHTML = shell(pics.length ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px">${pics.map(x => {
-      const url = sb.storage.from('retail-media').getPublicUrl(_lib.folder + '/' + x.name).data.publicUrl;
-      return `<button type="button" onclick="snsLibPick('${escAttr(url)}')" title="${escAttr(x.name)}" style="border:1px solid #eadfce;border-radius:10px;padding:4px;background:#fff;cursor:pointer">
-        <img src="${escAttr(url)}" alt="" loading="lazy" style="width:100%;height:110px;object-fit:cover;border-radius:7px;display:block"></button>`; }).join('')}</div>`
-    : '<p class="goal-note">No pictures in this folder yet.</p>');
+  const { data, error } = await sb.rpc('hub_storage_images', { p_bucket: _lib.bucket || null, p_search: _lib.q || null, p_limit: 240 });
+  const pics = (data || []).filter(x => !LIB_SKIP[x.bucket]);
+  box.innerHTML = shell(error ? `<p class="fd-msg">The library couldn’t be opened: ${esc(error.message)}</p>`
+    : pics.length ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px">${pics.map(x => {
+      const url = sb.storage.from(x.bucket).getPublicUrl(x.name).data.publicUrl, nm = String(x.name).split('/').pop();
+      return `<button type="button" onclick="snsLibPick('${escAttr(url)}')" title="${escAttr(x.bucket + ' / ' + x.name)}" style="border:1px solid #eadfce;border-radius:10px;padding:4px;background:#fff;cursor:pointer;text-align:left">
+        <img src="${escAttr(url)}" alt="" loading="lazy" style="width:100%;height:110px;object-fit:cover;border-radius:7px;display:block">
+        <span style="display:block;font-size:11px;color:#777;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:3px">${esc(nm)}</span></button>`; }).join('')}</div>
+      ${pics.length >= 240 ? '<p class="goal-note" style="margin-top:8px">Showing the newest 240: pick a bucket or search to find older ones.</p>' : ''}`
+    : '<p class="goal-note">No pictures found.</p>');
+  if (keepFocus) { const q = document.getElementById('sns-lib-q'); if (q) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); } }
 }
 async function snsLibPick(url) {
   const t = _lib.target; snsLibClose();
