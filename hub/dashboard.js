@@ -14,6 +14,8 @@
 // staff_punches at 🏠 Home office so they show on Timesheets. Linking is in 👥 Set up for….)
 // (Nov 12 2026: the greeting uses the login's first name from access.html (hub_dash_me.name), and 🎨 offers the staff avatar
 // library through hub_dash_avatars, with folders; SQL step 7.)
+// (Nov 12 2026: ▦ stat view for any block (a small tile of its main numbers) and an XS size on an 8-column grid; a search box
+// in + Add a block; 🕒 Timesheets, 🏆 Flash challenges, 💰 Labour cost, and ✅ Open & close rebuilt on hub_dash_oc; SQL step 8.)
 
 // ---------- State ----------
 let _dash = { me: null, layout: null, edit: false, err: '', saving: '', saveTimer: null, refreshTimer: null, drag: null, choose: false, cache: {}, ro: null };
@@ -54,7 +56,7 @@ function dashOpen(fn, arg) {
 
 // ---------- The block library ----------
 // type: { name, group, area, level, size (default), sizes, opts (defaults), settings(b) → html, open: [fn, arg], load(b) → html }
-const DASH_GROUPS = ['Mine', 'Studio day', 'Customers', 'People', 'Money', 'Comms', 'World', 'Admin'];
+const DASH_GROUPS = ['Mine', 'Studio day', 'Customers', 'People', 'Money', 'Comms', 'World', 'Community', 'Admin'];
 const DASH_ROWS_SETTING = b => `<label>Rows to show <select data-opt="rows">${[3, 5, 8, 12].map(n => `<option value="${n}"${+b.opts.rows === n ? ' selected' : ''}>${n}</option>`).join('')}</select></label>`;
 const DASH_BLOCKS = {
   // ---- Mine ----
@@ -74,7 +76,7 @@ const DASH_BLOCKS = {
     }
   },
   chat_unread: {
-    name: '💬 Unread chat', group: 'Mine', area: null, size: 's', open: ['openChatPane'],
+    name: '💬 Unread chat', group: 'Mine', area: null, size: 's', tile: true, open: ['openChatPane'],
     desc: 'How many chat messages you haven’t read.',
     async load(b) {
       const n = +(await dashRpc('hub_chat_unread')) || 0; dashGlanceSet(b, n ? n + ' unread chat' : '');
@@ -114,18 +116,21 @@ const DASH_BLOCKS = {
   },
 
   // ---- Studio day ----
-  open_close: {
-    name: '✅ Open & close today', group: 'Studio day', area: 'duties_open_close', level: 'view', size: 'm', opts: { list: 'open', rows: 5 }, open: ['openOcOverview'],
-    desc: 'Which open studios haven’t started or finished their list today.',
-    settings: b => `<label>List <select data-opt="list"><option value="open"${b.opts.list === 'open' ? ' selected' : ''}>Opening</option><option value="close"${b.opts.list === 'close' ? ' selected' : ''}>Closing</option></select></label>` + DASH_ROWS_SETTING(b),
+  open_close: {   // (rebuilt Nov 12 2026 on hub_dash_oc; the type is unchanged so dashboards that have it get this one)
+    name: '✅ Open & close', group: 'Studio day', area: 'duties_open_close', level: 'view', size: 's', opts: { rows: 8 }, settings: DASH_ROWS_SETTING, open: ['openOcOverview'], words: 'checklist opening closing duties',
+    desc: 'Open lists not started an hour into the first shift, closes missed last night, and studios missing lists 2 days in a row.',
     async load(b) {
-      const d = (await dashRpc('hub_checklist_overview', { p_list: b.opts.list === 'close' ? 'close' : 'open' })) || {};
-      const open = (d.studios || []).filter(r => r.run || !r.day || r.day.status === 'open');
-      const done = open.filter(r => r.run && r.run.finished_at), going = open.filter(r => r.run && !r.run.finished_at), not = open.filter(r => !r.run);
-      const word = b.opts.list === 'close' ? 'closing' : 'opening';
-      return dashBig(`${done.length} of ${open.length}`, `open studios finished their ${word} list`, done.length === open.length ? 'ok' : '') +
-        dashRows(not.map(r => [r, 'Not started']).concat(going.map(r => [r, 'In progress'])), +b.opts.rows || 5,
-          ([r, s]) => dashLine(esc(dashStudio(r.studio_id)), `<span class="dash-pill ${s === 'Not started' ? 'bad' : 'mid'}">${s}</span>`), 'Every open studio is done. ✓');
+      const R = (await dashRpc('hub_dash_oc')) || [];
+      const late = R.filter(r => r.open_day && !r.open_started && r.mins_into_shift != null && r.mins_into_shift >= 60);
+      const close = R.filter(r => r.last_close_done === false), streak = R.filter(r => +r.missed_streak >= 2);
+      const done = R.filter(r => r.open_day && r.open_finished).length, openNow = R.filter(r => r.open_day).length;
+      dashGlanceSet(b, late.length ? dashPl(late.length, 'studio hasn’t', 'studios haven’t') + ' started opening' : '');
+      dashStatSet(b, [[String(late.length), 'open not started (1h+)', late.length ? 'bad' : 'ok'], [String(close.length), 'closes missed last night', close.length ? 'mid' : 'ok'], [String(streak.length), '2+ days in a row', streak.length ? 'bad' : 'ok']]);
+      const why = r => [late.includes(r) ? `open not started, ${Math.floor(r.mins_into_shift / 60)}h${String(r.mins_into_shift % 60).padStart(2, '0')} into the first shift` : '', r.last_close_done === false ? 'last night’s close not done' : '', +r.missed_streak >= 2 ? (r.missed_streak >= 14 ? '14+ days' : r.missed_streak + ' days') + ' in a row with a list missed' : ''].filter(Boolean).join(' · ');
+      const L = R.filter(r => why(r)).sort((x, y) => (+y.missed_streak) - (+x.missed_streak) || (late.includes(y) - late.includes(x)));
+      return `<div class="dash-stats"><div><b class="${late.length ? 'bad' : 'ok'}">${late.length}</b>Open not started, 1h+ into the shift</div><div><b class="${close.length ? 'bad' : 'ok'}">${close.length}</b>Closes missed last night</div><div><b class="${streak.length ? 'bad' : 'ok'}">${streak.length}</b>Missed 2+ days in a row</div></div>
+        <div class="dash-sub" style="margin:6px 0">${done} of ${openNow} open studios finished opening today</div>` +
+        dashRows(L, +b.opts.rows || 8, r => dashLine(esc(dashStudio(r.studio_id)), esc(why(r)), +r.missed_streak >= 2 || late.includes(r) ? 'late' : ''), 'Every studio is on track. ✓');
     }
   },
   class_problems: {
@@ -194,7 +199,7 @@ const DASH_BLOCKS = {
     }
   },
   date_suggestions: {
-    name: '🗓️ Date suggestions', group: 'Customers', area: 'class_times', level: 'view', size: 's', open: ['openIdeasPane'],
+    name: '🗓️ Date suggestions', group: 'Customers', area: 'class_times', level: 'view', size: 's', tile: true, open: ['openIdeasPane'],
     desc: 'New “Suggest a date!” requests from World, all studios.',
     async load() {
       const n = +(await dashRpc('hub_ideas_new_count', { p_studio: (typeof _sessionStudioId !== 'undefined' && _sessionStudioId) || null, p_all: true })) || 0;
@@ -235,7 +240,7 @@ const DASH_BLOCKS = {
     }
   },
   concerns: {
-    name: '🛡️ Concerns', group: 'People', area: 'hr_policies', level: 'edit', size: 's', open: ['openConcernsAdmin'],
+    name: '🛡️ Concerns', group: 'People', area: 'hr_policies', level: 'edit', size: 's', tile: true, open: ['openConcernsAdmin'],
     desc: 'New and open concerns: counts and age only. Details stay on the Concerns page.',
     async load() {
       const L = (await dashRpc('hub_concerns_list')) || [];
@@ -381,6 +386,55 @@ const DASH_BLOCKS = {
         dashRows(N, +b.opts.rows || 6, (r, i) => `<div class="dash-row"><div class="dash-main">${esc(r.shopify_order_name)} · ${esc(r.product_title || '')}${r.variant_title ? ' · ' + esc(r.variant_title) : ''} <span class="dash-o-amt">$${(+r.net_amount || 0).toFixed(2)}</span></div>
           <div class="dash-sub">${esc(dashDay(r.sale_day))}${r.category ? ' · ' + esc(r.category) : ''}</div>
           ${can ? `<select class="dash-assign" onchange="dashAssign('${b.id}',${N.indexOf(r)},this)"><option value="">Assign to a studio…</option>${opts}</select>` : ''}</div>`, 'Every sale has a studio. ✓');
+    }
+  },
+
+  timesheets: {
+    name: '🕒 Timesheets', group: 'People', area: 'timesheets', level: 'view', size: 's', open: ['openTsPane'], words: 'payroll punches approve',
+    desc: 'This pay period: punched days to approve, missing punch-outs and staff notes waiting for an answer (and anything left from last period).',
+    async load(b) {
+      const d = (await dashRpc('hub_dash_timesheets')) || {}, C = d.current || {}, P = d.previous || {};
+      if (d.error) return `<div class="dash-empty">${esc(d.error)}</div>`;
+      const f = x => x ? new Date(x + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '';
+      const left = (+P.to_approve || 0) + (+P.missing_out || 0) + (+P.changed || 0);
+      dashGlanceSet(b, (+C.to_approve || 0) + left ? ((+C.to_approve || 0) + left) + ' timesheet days to approve' : '');
+      dashStatSet(b, [[String(+C.to_approve || 0), 'days to approve', +C.to_approve ? 'mid' : 'ok'], [String(+C.missing_out || 0), 'missing punch-out', +C.missing_out ? 'bad' : 'ok'], [String(+C.notes || 0), 'notes to answer', +C.notes ? 'mid' : 'ok']]);
+      return `<div class="dash-sub" style="margin-bottom:6px">Pay period ${esc(f(C.start))}–${esc(f(C.end))}${C.pay_date ? ' · paid ' + esc(f(C.pay_date)) : ''}</div>
+        <div class="dash-stats"><div><b class="${+C.to_approve ? 'mid' : 'ok'}">${+C.to_approve || 0}</b>Days to approve</div><div><b class="${+C.missing_out ? 'bad' : 'ok'}">${+C.missing_out || 0}</b>Missing punch-out</div><div><b class="${+C.notes ? 'mid' : 'ok'}">${+C.notes || 0}</b>Notes to answer</div></div>
+        <div class="dash-sub" style="margin-top:6px">${+C.approved || 0} of ${+C.days || 0} punched days approved · ${dashPl(+C.people || 0, 'person', 'people')} still to check${+C.changed ? ` · ${C.changed} changed after approval` : ''}</div>
+        ${left ? `<div class="dash-row late" style="margin-top:6px"><div class="dash-main">Last period (${esc(f(P.start))}–${esc(f(P.end))}) isn’t finished</div><div class="dash-sub">${[+P.to_approve ? P.to_approve + ' to approve' : '', +P.missing_out ? P.missing_out + ' missing punch-out' : '', +P.changed ? P.changed + ' changed after approval' : ''].filter(Boolean).join(' · ')}</div></div>` : ''}`;
+    }
+  },
+  flash: {
+    name: '🏆 Flash challenges', group: 'Community', area: 'community_points', level: 'view', size: 'm', opts: { rows: 5 }, settings: DASH_ROWS_SETTING, open: ['dashOpenUrl', 'admin.html'], every: 600000, words: 'points coordinators leaderboard SC',
+    desc: 'Live flash challenges and how many studios finished each, claims waiting for approval, and this month’s coordinator leaderboard.',
+    async load(b) {
+      const d = await dashPointsAll(), t = dashToday(), F = d.flash || [];
+      const live = F.filter(f => f.status === 'active' && !(f.starts_on > t) && !(f.ends_on < t));
+      const claims = []; F.forEach(f => (f.community_flash_completions || []).forEach(c => { if (c.status === 'claimed' && f.status === 'active') claims.push({ f, c }); }));
+      const staff = {}; (d.staff || []).forEach(x => { staff[x.id] = x.preferred_name || x.display_name || x.name || ''; });
+      const role = {}; (d.roles || []).forEach(r => { role[r.id] = r; });
+      const top = (d.balances || []).filter(x => x.role_active !== false && +x.this_month > 0).sort((x, y) => (+y.this_month) - (+x.this_month)).slice(0, +b.opts.rows || 5);
+      dashGlanceSet(b, claims.length ? dashPl(claims.length, 'flash claim', 'flash claims') + ' to approve' : '');
+      dashStatSet(b, [[String(claims.length), claims.length === 1 ? 'claim to approve' : 'claims to approve', claims.length ? 'bad' : 'ok'], [String(live.length), 'live challenges', '']]);
+      return `<div class="dash-chips"><span class="dash-pill ${claims.length ? 'bad' : 'ok'}">${dashPl(claims.length, 'claim', 'claims')} to approve</span><span class="dash-pill">${live.length} live</span></div>` +
+        (claims.length ? '<div class="dash-list">' + claims.slice(0, 4).map(({ f, c }) => dashLine(`⚡ ${esc(f.title)}`, esc(dashStudio(c.studio_id) + (c.claim_note ? ' · “' + c.claim_note + '”' : '')), 'late')).join('') + '</div>' : '') +
+        (live.length ? '<div class="dash-list" style="margin-top:6px">' + live.map(f => { const all = (f.studio_ids && f.studio_ids.length) || Object.keys(STUDIO_NAMES).length, n = (f.community_flash_completions || []).filter(c => c.status === 'approved').length;
+          return `<div class="dash-row"><div class="dash-main">⚡ ${esc(f.title)} <span class="dash-o-amt">${n}/${all}</span></div><div class="dash-sub">${esc(f.points != null ? f.points + ' pts · ' : '')}ends ${esc(dashDay(f.ends_on))}${f.check_type === 'pos_sales' ? ' · in-studio sales' : ''}</div>
+            <div class="dash-prog" style="margin:4px 0 0"><i><em style="width:${Math.round(n / all * 100)}%"></em></i></div></div>`; }).join('') + '</div>' : '<div class="dash-empty">No flash challenge running right now.</div>') +
+        (top.length ? `<div class="dash-sh" style="margin:10px 0 4px">🏅 This month</div>` + top.map((x, i) => { const r = role[x.coordinator_role_id] || {};
+          return `<div class="dash-pace-row" style="grid-template-columns:24px minmax(0,1fr) 70px"><span class="dash-rank">${['🥇', '🥈', '🥉'][i] || i + 1}</span><span class="dash-pace-name">${esc(staff[r.staff_profile_id] || 'Coordinator')}<small>${esc(dashStudio(r.studio_id))}</small></span><b>${(+x.this_month).toLocaleString('en-CA')}</b></div>`; }).join('') : '');
+    }
+  },
+  labour: {
+    name: '💰 Labour cost', group: 'Money', area: 'finance', level: 'view', size: 's', opts: { range: 'week' }, open: ['goToDashboard'], every: 1800000, words: 'wages payroll hours percent',
+    desc: 'Labour against booked revenue for the whole network this week (or month); open it up to see every studio.',
+    settings: b => `<label>Period <select data-opt="range"><option value="week"${b.opts.range !== 'month' ? ' selected' : ''}>This week (Sun–Sat)</option><option value="month"${b.opts.range === 'month' ? ' selected' : ''}>This month</option></select></label>`,
+    async load(b) {
+      const [a, z] = dashLabourRange(b.opts.range);
+      const d = (await dashRpc('hub_dash_labour', { p_from: a, p_to: z })) || {};
+      (_dash.labData = _dash.labData || {})[b.id] = d;
+      return dashLabourHtml(b, d);
     }
   },
 
@@ -572,11 +626,74 @@ async function dashAssign(id, i, sel) {
   dashLoadBlock(id, false);
 }
 
+// ---------- ▦ Stat view: a block's main numbers as a small tile ----------
+// The numbers come from what the block already shows (its big number, number grid, highlight boxes and number chips), or from
+// dashStatSet for blocks that say exactly what to show. If a block has no numbers, its normal view stays, just smaller.
+function dashStatSet(b, items) { if (b && b.id) (_dash.stats = _dash.stats || {})[b.id] = items; }
+function dashStatsFrom(html) {
+  const box = document.createElement('div'); box.innerHTML = html; const out = [];
+  const tone = el => /\b(bad|warn|late|dash-red)\b/.test(el.className) ? 'bad' : /\bmid\b/.test(el.className) ? 'mid' : /\bok\b/.test(el.className) ? 'ok' : '';
+  box.querySelectorAll('.dash-big').forEach(e => { const n = e.querySelector('b'); if (n) out.push([n.textContent.trim(), (e.querySelector('span') || {}).textContent || '', tone(n)]); });
+  box.querySelectorAll('.dash-stats > div').forEach(e => { const n = e.querySelector('b'); if (n) out.push([n.textContent.trim(), e.textContent.replace(n.textContent, '').trim(), tone(n)]); });
+  box.querySelectorAll('.dash-pill').forEach(e => { const m = e.textContent.trim().match(/^(⚠\s*)?([$]?\d[\d,.]*%?)\s*(.*)$/);
+    if (m) out.push([m[2], m[3], tone(e) || (m[1] ? 'bad' : '')]); else if (/^✓/.test(e.textContent.trim())) out.push(['✓', e.textContent.trim().replace(/^✓\s*/, ''), 'ok']); });
+  return out;
+}
+function dashTileHtml(b, html) {
+  const S = ((_dash.stats || {})[b.id]) || dashStatsFrom(html);
+  if (!S.length) return `<div class="dash-tile-full">${html}</div>`;
+  return `<div class="dash-tile">${S.slice(0, b.size === 'xs' ? 2 : 3).map(([n, l, t]) => `<div class="dash-tn"><b class="${t || ''}">${esc(n)}</b><span>${esc(l)}</span></div>`).join('')}</div>`;
+}
+function dashToggleView(id) {
+  const b = _dash.layout.blocks[dashIdx(id)]; if (!b) return;
+  if (b.view === 'stat') { delete b.view; if (b.size === 'xs') b.size = 's'; } else { b.view = 'stat'; if (b.size === 'm' || b.size === 'l') b.size = 'xs'; }
+  delete b.h; dashSaveSoon(); dashDraw();
+}
+function dashAddFilter(q) {
+  q = String(q || '').toLowerCase().trim(); let any = false;
+  document.querySelectorAll('.duty-sheet .dash-addgrp').forEach(g => { let n = 0;
+    g.querySelectorAll('.dash-addrow').forEach(r => { const on = !q || q.split(/\s+/).every(w => r.getAttribute('data-q').includes(w)); r.style.display = on ? '' : 'none'; if (on) n++; });
+    g.style.display = n ? '' : 'none'; if (n) any = true; });
+  const none = document.getElementById('dash-add-none'); if (none) none.style.display = any ? 'none' : '';
+}
+
+// ---------- 🏆 Flash challenges, 💰 Labour cost: helpers ----------
+async function dashPointsAll() {   // the Points page's data (community-points-admin, "get_all"), shared by flash blocks for 2 minutes
+  if (_dash.points && Date.now() - _dash.points.at < 120000) return _dash.points.d;
+  const r = await fetch(`${SUPABASE_URL}/functions/v1/community-points-admin`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify({ action: 'get_all' }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || d.error) { const e = new Error(d.error || d.message || ('HTTP ' + r.status)); if (r.status === 401 || r.status === 403) e.code = '42501'; throw e; }
+  _dash.points = { at: Date.now(), d }; return d;
+}
+function dashLabourRange(k) {
+  const d = new Date(); d.setHours(12, 0, 0, 0);
+  if (k === 'month') { const a = new Date(d.getFullYear(), d.getMonth(), 1, 12), z = new Date(d.getFullYear(), d.getMonth() + 1, 0, 12); return [localDateStr(a), localDateStr(z), d.toLocaleDateString('en-CA', { month: 'long' })]; }
+  const a = new Date(d); a.setDate(d.getDate() - d.getDay()); const z = new Date(a); z.setDate(a.getDate() + 6);
+  const f = x => x.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' });
+  return [localDateStr(a), localDateStr(z), 'This week · ' + f(a) + '–' + f(z)];
+}
+function dashLabourToggle(id) { _dash.labOpen = _dash.labOpen || {}; _dash.labOpen[id] = !_dash.labOpen[id]; const b = _dash.layout.blocks.find(x => x.id === id); if (b && _dash.labData && _dash.labData[id]) { const h = dashLabourHtml(b, _dash.labData[id]); _dash.cache[id] = h; const el = document.getElementById('dash-body-' + id); if (el) el.innerHTML = h; } }
+function dashLabourHtml(b, d) {
+  const L = (d.studios || []).slice().sort((x, y) => (+y.pct || -1) - (+x.pct || -1)), open = (_dash.labOpen || {})[b.id], m = v => '$' + Math.round(+v || 0).toLocaleString('en-CA');
+  const pct = d.money ? d.pct : d.avg_pct, tone = p => p == null ? '' : p > 40 ? 'bad' : p > 30 ? 'mid' : 'ok';
+  dashStatSet(b, [[pct == null ? '—' : pct + '%', d.money ? 'labour, network' : 'average studio', tone(pct)]].concat(d.money ? [[m(d.labour), 'labour cost', ''], [m(d.revenue), 'booked', '']] : []));
+  return `<div class="dash-sub" style="margin-bottom:6px">${esc(dashLabourRange(b.opts.range)[2])}</div>
+    <div class="dash-stats"><div><b class="${tone(pct)}">${pct == null ? '—' : esc(pct) + '%'}</b>${d.money ? 'Labour, whole network' : 'Average studio labour'}</div>
+      ${d.money ? `<div><b>${esc(m(d.labour))}</b>Labour cost</div><div><b>${esc(m(d.revenue))}</b>Booked revenue</div>` : ''}</div>
+    <button class="ho-btn sm" style="margin-top:8px" onclick="dashLabourToggle('${b.id}')">${open ? '▲ Hide studios' : '▼ By studio'}</button>
+    ${open ? '<div class="dash-pace" style="margin-top:6px">' + L.map(r => `<div class="dash-pace-row" style="grid-template-columns:minmax(0,1fr) minmax(50px,30%) ${d.money ? '64px ' : ''}52px">
+        <span class="dash-pace-name">${esc(dashStudio(r.studio_id))}<small>${r.hours != null ? esc(r.hours) + ' h' : ''}</small></span>
+        <i><em style="width:${Math.min(100, (+r.pct || 0) * 1.6)}%;background:${r.pct > 40 ? 'var(--red)' : r.pct > 30 ? 'var(--amber)' : 'var(--green)'}"></em></i>
+        ${d.money ? `<span class="dash-sub" style="text-align:right;margin:0">${r.labour != null ? esc(m(r.labour)) : ''}</span>` : ''}<b>${r.pct == null ? '—' : esc(r.pct) + '%'}</b></div>`).join('') + '</div>' : ''}
+    ${+d.skipped ? `<div class="dash-sub">${esc(dashPl(+d.skipped, 'studio', 'studios'))} couldn’t be worked out.</div>` : ''}
+    <div class="dash-sub" style="margin-top:6px">Labour ÷ booked revenue: worked hours for past days, planned shifts for the rest.${d.money ? '' : ' Dollar amounts show for finance logins only.'}</div>`;
+}
+
 // ---------- Role starter layouts (blocks not in the library yet, or not allowed, are skipped) ----------
 const DASH_STARTERS = [
-  { key: 'owner', name: 'Owner', blocks: [['for_you', 'm'], ['health', 'm'], ['sales_pace', 'm'], ['orders', 'm'], ['sched_check', 'm'], ['unattributed', 'm'], ['month_glance', 'm'], ['fill_rates', 'm'], ['open_close', 's'], ['sick_calls', 's'], ['concerns', 's'], ['unpaid_invoices', 's'], ['activity', 'm'], ['quick_links', 'm']] },
-  { key: 'home_office_ops', name: 'Home office ops', blocks: [['for_you', 'm'], ['orders', 'm'], ['paylinks', 's'], ['party_owing', 's'], ['open_close', 'm'], ['class_problems', 'm'], ['sick_calls', 's'], ['swaps', 's'], ['field_trips', 's'], ['buyouts', 's'], ['devices', 's'], ['retail_stock', 's'], ['announcements', 'm']] },
-  { key: 'hr', name: 'HR', blocks: [['for_you', 'm'], ['sched_check', 'm'], ['sick_calls', 'm'], ['swaps', 's'], ['time_off', 's'], ['timesheets', 'm'], ['sign_offs', 'm'], ['concerns', 's'], ['missing_pins', 's'], ['staff_news', 'm']] },
+  { key: 'owner', name: 'Owner', blocks: [['for_you', 'm'], ['health', 'm'], ['labour', 's'], ['timesheets', 's'], ['sales_pace', 'm'], ['orders', 'm'], ['sched_check', 'm'], ['unattributed', 'm'], ['month_glance', 'm'], ['fill_rates', 'm'], ['open_close', 's'], ['sick_calls', 's'], ['concerns', 's'], ['unpaid_invoices', 's'], ['activity', 'm'], ['quick_links', 'm']] },
+  { key: 'home_office_ops', name: 'Home office ops', blocks: [['for_you', 'm'], ['flash', 'm'], ['orders', 'm'], ['paylinks', 's'], ['party_owing', 's'], ['open_close', 'm'], ['class_problems', 'm'], ['sick_calls', 's'], ['swaps', 's'], ['field_trips', 's'], ['buyouts', 's'], ['devices', 's'], ['retail_stock', 's'], ['announcements', 'm']] },
+  { key: 'hr', name: 'HR', blocks: [['for_you', 'm'], ['timesheets', 's'], ['sched_check', 'm'], ['sick_calls', 'm'], ['swaps', 's'], ['time_off', 's'], ['timesheets', 'm'], ['sign_offs', 'm'], ['concerns', 's'], ['missing_pins', 's'], ['staff_news', 'm']] },
   { key: 'registration', name: 'Registration', blocks: [['for_you', 'm'], ['find_family', 'm'], ['party_owing', 's'], ['paylinks', 's'], ['find_membership', 's'], ['family_changes', 's'], ['date_suggestions', 's'], ['parties_chase', 's'], ['field_trips', 's'], ['unpaid_invoices', 's'], ['class_problems', 'm'], ['chat_unread', 's']] },
   { key: 'marketing', name: 'Marketing', blocks: [['for_you', 'm'], ['newsletters', 'm'], ['studio_notes', 'm'], ['project_interest', 's'], ['donations', 's'], ['points', 's'], ['sales_pace', 's'], ['fill_rates', 'l']] }
 ];
@@ -608,7 +725,7 @@ async function openMyDash() {
 const DASH_PERSONAL = ['theme', 'avatar', 'name', 'greet', 'start'];   // (a person's own choices: a starting dashboard never overwrites them)
 function dashNormalize(L) {
   if (!L || !Array.isArray(L.blocks)) return null;
-  const out = { v: 1, start: !!L.start, starter: L.starter || '', blocks: L.blocks.filter(b => b && DASH_BLOCKS[b.type]).map(b => Object.assign({ id: b.id || dashNewId(), type: b.type, size: ['s', 'm', 'l'].includes(b.size) ? b.size : 'm', opts: Object.assign({}, DASH_BLOCKS[b.type].opts || {}, b.opts || {}) }, dashHeightOk(b.h) ? { h: dashHeightOk(b.h) } : {})) };
+  const out = { v: 1, start: !!L.start, starter: L.starter || '', blocks: L.blocks.filter(b => b && DASH_BLOCKS[b.type]).map(b => Object.assign({ id: b.id || dashNewId(), type: b.type, size: ['xs', 's', 'm', 'l'].includes(b.size) ? b.size : 'm', opts: Object.assign({}, DASH_BLOCKS[b.type].opts || {}, b.opts || {}) }, dashHeightOk(b.h) ? { h: dashHeightOk(b.h) } : {}, b.view === 'stat' ? { view: 'stat' } : {})) };
   if (L.theme && DASH_THEMES.some(t => t.key === L.theme)) out.theme = L.theme;
   if (L.avatar && typeof L.avatar === 'object' && (L.avatar.key || L.avatar.emoji)) out.avatar = { key: L.avatar.key ? String(L.avatar.key).slice(0, 300) : undefined, emoji: L.avatar.emoji ? String(L.avatar.emoji).slice(0, 16) : undefined };
   if (L.name) out.name = String(L.name).slice(0, 40);
@@ -697,16 +814,19 @@ function dashDraw(noLoad) {   // noLoad: redraw from blocks already loaded, with
   L.blocks.forEach(b => { if (!noLoad || _dash.cache[b.id] === undefined) dashLoadBlock(b.id, false); });
 }
 function dashBlockShell(b, i) {
-  const t = DASH_BLOCKS[b.type], ed = _dash.edit, n = _dash.layout.blocks.length;
-  const sizes = ['s', 'm', 'l'].map(s => `<button class="dash-sz${b.size === s ? ' on' : ''}" onclick="dashSize('${b.id}','${s}')" title="${s === 's' ? 'Small' : s === 'm' ? 'Medium' : 'Full width'}">${s.toUpperCase()}</button>`).join('');
+  const t = DASH_BLOCKS[b.type], ed = _dash.edit, n = _dash.layout.blocks.length, tile = b.view === 'stat';
+  const SZ = { xs: 'Extra small', s: 'Small', m: 'Medium', l: 'Full width' };
+  const sizes = (tile ? ['xs', 's', 'm'] : ['s', 'm', 'l']).map(z => `<button class="dash-sz${b.size === z ? ' on' : ''}" onclick="dashSize('${b.id}','${z}')" title="${SZ[z]}">${z.toUpperCase()}</button>`).join('');
   const tools = ed ? `<div class="dash-tools"><span class="dash-grip" title="Drag to move" draggable="true" ondragstart="dashDragStart(event,'${b.id}')" ondragend="dashDragEnd()">⠿</span>
       <button onclick="dashMove('${b.id}',-1)" ${i === 0 ? 'disabled' : ''} title="Move back">◀</button><button onclick="dashMove('${b.id}',1)" ${i === n - 1 ? 'disabled' : ''} title="Move forward">▶</button>
+      <button class="dash-view" onclick="dashToggleView('${b.id}')" title="${tile ? 'Show the full block' : 'Show only its main numbers, as a small tile'}">${tile ? '▤' : '▦'}</button>
       ${sizes}${b.h ? `<button class="dash-hauto" onclick="dashHeightAuto('${b.id}')" title="Height: fit to what's in it">↕</button>` : ''}${t.settings ? `<button onclick="dashSettings('${b.id}')" title="Settings">⚙</button>` : ''}<button onclick="dashRemove('${b.id}')" title="Remove">✕</button></div>` : '';
-  const acts = !ed ? `${t.open ? `<button class="dash-open" onclick="dashOpen('${escAttr(t.open[0])}'${t.open[1] !== undefined ? `,'${escAttr(t.open[1])}'` : ''})">Open →</button>` : ''}
+  const acts = !ed && !tile ? `${t.open ? `<button class="dash-open" onclick="dashOpen('${escAttr(t.open[0])}'${t.open[1] !== undefined ? `,'${escAttr(t.open[1])}'` : ''})">Open →</button>` : ''}
       <button class="dash-ref" onclick="dashLoadBlock('${b.id}', true)" title="Refresh">↻</button>` : '';
-  return `<section class="dash-block sz-${b.size}${b.h ? ' fixed' : ''}" id="dash-${b.id}" data-id="${b.id}"${b.h ? ` style="height:${b.h}px"` : ''} ${ed ? `ondragover="dashDragOver(event,'${b.id}')" ondrop="dashDrop(event)"` : ''}>
+  const size = !tile && b.size === 'xs' ? 's' : b.size;
+  return `<section class="dash-block sz-${size}${tile ? ' tile' : ''}${b.h ? ' fixed' : ''}" id="dash-${b.id}" data-id="${b.id}"${b.h ? ` style="height:${b.h}px"` : ''} ${ed ? `ondragover="dashDragOver(event,'${b.id}')" ondrop="dashDrop(event)"` : ''}>
     <header><b title="${escAttr(t.name)}">${esc(t.name)}</b><span class="spacer"></span>${ed ? tools : acts}</header>
-    <div class="dash-body" id="dash-body-${b.id}">${_dash.cache[b.id] || '<div class="dash-empty">Loading…</div>'}</div></section>`;
+    <div class="dash-body" id="dash-body-${b.id}"${tile && !ed && t.open ? ` onclick="dashOpen('${escAttr(t.open[0])}'${t.open[1] !== undefined ? `,'${escAttr(t.open[1])}'` : ''})" title="Open"` : ''}>${_dash.cache[b.id] || '<div class="dash-empty">Loading…</div>'}</div></section>`;
 }
 async function dashLoadBlock(id, fresh) {
   const b = _dash.layout && _dash.layout.blocks.find(x => x.id === id); if (!b) return;
@@ -720,6 +840,8 @@ async function dashLoadBlock(id, fresh) {
       ? '<div class="dash-empty">No access. Ask an owner on the Access page.</div>'
       : `<div class="dash-empty bad">Couldn’t load: ${esc(m)}</div>`;
   }
+  (_dash.loadedAt = _dash.loadedAt || {})[id] = Date.now();
+  if (b.view === 'stat') html = dashTileHtml(b, html);
   _dash.cache[id] = html;
   const el2 = document.getElementById('dash-body-' + id);
   if (el2 && !(b.type === 'sticky_note' && el2.querySelector('textarea:focus'))) el2.innerHTML = html;   // (never wipe a note while it's being typed)
@@ -736,7 +858,8 @@ function dashStartRefresh() {
   }, 10000);
   _dash.refreshTimer = setInterval(() => {
     if (!paneVisible('mydash-pane') || document.hidden) { if (!paneVisible('mydash-pane')) clearInterval(_dash.refreshTimer); return; }
-    if (!_dash.edit) (_dash.layout ? _dash.layout.blocks : []).forEach(b => { if (b.type !== 'sticky_note') dashLoadBlock(b.id, false); });
+    if (!_dash.edit) (_dash.layout ? _dash.layout.blocks : []).forEach(b => { const t = DASH_BLOCKS[b.type];
+      if (b.type !== 'sticky_note' && !(t.every && Date.now() - ((_dash.loadedAt || {})[b.id] || 0) < t.every)) dashLoadBlock(b.id, false); });
   }, DASH_REFRESH_MS);
 }
 
@@ -824,18 +947,20 @@ function dashDragEnd() {
 }
 function dashAddOpen() {
   const have = new Set(_dash.layout.blocks.map(b => b.type));
-  const html = `<h3 style="margin:0 0 4px">+ Add a block</h3><p class="fd-sm" style="margin:0 0 10px">Only blocks your access allows are listed.</p>` +
+  const html = `<h3 style="margin:0 0 4px">+ Add a block</h3><p class="fd-sm" style="margin:0 0 8px">Only blocks ${_dash.target ? esc(_dash.target.name) + '’s' : 'your'} access allows are listed.</p>
+    <input type="search" class="dash-search" placeholder="🔎 Search blocks (e.g. orders, labour, schedule)" oninput="dashAddFilter(this.value)" autofocus>` +
     DASH_GROUPS.map(g => { const T = Object.keys(DASH_BLOCKS).filter(k => DASH_BLOCKS[k].group === g && dashAllowed(k)); if (!T.length) return '';
-      return `<div class="dash-addgrp"><b>${esc(g)}</b>${T.map(k => `<div class="dash-addrow"><div><div>${esc(DASH_BLOCKS[k].name)}${have.has(k) ? ' <span class="dash-pill">on your page</span>' : ''}</div><div class="dash-sub">${esc(DASH_BLOCKS[k].desc || '')}</div></div>
+      return `<div class="dash-addgrp"><b>${esc(g)}</b>${T.map(k => `<div class="dash-addrow" data-q="${escAttr((DASH_BLOCKS[k].name + ' ' + (DASH_BLOCKS[k].desc || '') + ' ' + g + ' ' + (DASH_BLOCKS[k].words || '')).toLowerCase())}"><div><div>${esc(DASH_BLOCKS[k].name)}${have.has(k) ? ' <span class="dash-pill">on your page</span>' : ''}</div><div class="dash-sub">${esc(DASH_BLOCKS[k].desc || '')}</div></div>
         <button class="ho-btn sm${have.has(k) ? '' : ' primary'}" onclick="dashAdd('${k}')">${have.has(k) ? 'Add another' : 'Add'}</button></div>`).join('')}</div>`; }).join('') +
-    '<div style="text-align:right;margin-top:10px"><button class="ho-btn" onclick="closeDutySheet()">Close</button></div>';
+    '<p class="fd-sm" id="dash-add-none" style="display:none">No blocks match that.</p><div style="text-align:right;margin-top:10px"><button class="ho-btn" onclick="closeDutySheet()">Close</button></div>';
   openDutySheet(html);
+  setTimeout(() => { const i = document.querySelector('.dash-search'); if (i) i.focus(); }, 50);
 }
 function dashAdd(type) {
   if (!dashAllowed(type)) return;
   if (_dash.layout.blocks.length >= DASH_MAX_BLOCKS) { alert('That’s the most blocks one page can hold (' + DASH_MAX_BLOCKS + ').'); return; }
   const t = DASH_BLOCKS[type];
-  _dash.layout.blocks.push({ id: dashNewId(), type, size: t.size || 'm', opts: Object.assign({}, t.opts || {}) });
+  _dash.layout.blocks.push(Object.assign({ id: dashNewId(), type, size: t.tile ? 'xs' : (t.size || 'm'), opts: Object.assign({}, t.opts || {}) }, t.tile ? { view: 'stat' } : {}));
   closeDutySheet(); dashSaveSoon(); dashDraw();
   const last = _dash.layout.blocks[_dash.layout.blocks.length - 1], el = document.getElementById('dash-' + last.id);
   if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -1093,6 +1218,7 @@ function dashClockHtml(b, S) {
   const status = S.state === 'in' ? `<b class="ok">On the clock</b> since ${esc(dashTime((P.filter(p => p.kind === 'in').pop() || {}).at))}`
     : S.state === 'break' ? `<b class="mid">On a break</b> since ${esc(dashTime(last && last.at))}` : `<b>Not punched in</b>${last ? ' · out at ' + esc(dashTime(last.at)) : ''}`;
   dashGlanceSet(b, S.state === 'in' ? '⏱ on the clock' : S.state === 'break' ? '⏱ on a break' : '');
+  dashStatSet(b, [[S.state === 'in' ? 'In' : S.state === 'break' ? 'Break' : 'Out', S.state === 'out' ? 'not punched in' : 'since ' + dashTime((P.filter(p => p.kind === (S.state === 'in' ? 'in' : 'break_out')).pop() || {}).at), S.state === 'in' ? 'ok' : S.state === 'break' ? 'mid' : ''], [hm, 'today', '']]);
   return `<div class="dash-clock ${S.state}"><div class="dash-clock-st">${status}</div><div class="dash-sub">${P.length ? esc(hm) + ' worked today' : 'No punches today yet'} · ${esc(S.name || '')} · 🏠 Home office</div></div>
     <div class="dash-clock-btns">${(S.can || []).map(k => `<button class="ho-btn${k === 'in' || k === 'break_in' ? ' primary' : ''}" onclick="dashPunch('${b.id}','${k}')">${DASH_PUNCH[k]}</button>`).join('')}</div>
     <input type="text" class="dash-clock-note" id="dash-cn-${b.id}" maxlength="500" placeholder="Note with this punch (optional)">
@@ -1141,10 +1267,10 @@ function dashStyles() {
 .dash-status { font-size: 13px; color: var(--ink-soft); } .dash-status.bad { color: var(--red); font-weight: 700; }
 .dash-editbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: var(--accent-soft); border-radius: 14px; padding: 10px 12px; margin: 8px 0 12px; }
 .dash-start { font-size: 13px; display: flex; align-items: center; gap: 6px; }
-.dash-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-rows: 4px; grid-auto-flow: row dense; gap: 0 12px; align-items: start; margin-top: 8px; }
+.dash-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); grid-auto-rows: 4px; grid-auto-flow: row dense; gap: 0 12px; align-items: start; margin-top: 8px; }
 .dash-block { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px 14px; min-width: 0; box-sizing: border-box; display: flex; flex-direction: column; margin-bottom: 12px; }
 .dash-block.fixed .dash-body { flex: 1 1 auto; min-height: 0; max-height: none; }
-.dash-block.sz-s { grid-column: span 1; } .dash-block.sz-m { grid-column: span 2; } .dash-block.sz-l { grid-column: 1 / -1; }
+.dash-block.sz-xs { grid-column: span 1; } .dash-block.sz-s { grid-column: span 2; } .dash-block.sz-m { grid-column: span 4; } .dash-block.sz-l { grid-column: 1 / -1; }
 .dash-block header { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; height: 28px; flex: none; min-width: 0; }
 .dash-block header b { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .dash-block .spacer { flex: 1; }
@@ -1236,7 +1362,15 @@ function dashStyles() {
 #mydash-pane.themed .dash-block a, #mydash-pane.themed .dash-open { color: var(--accent); }
 #mydash-pane.dark .goal-note, #mydash-pane.dark .fd-sm, #mydash-pane.dark .lab-sub, #mydash-pane.dark .dash-sub { color: var(--ink-soft); }
 #mydash-pane.dark .dash-note { background: var(--dash-bg); color: var(--ink); } #mydash-pane.dark .dash-setup { background: #3b2f58; color: #f0eaf9; border-color: #5a4a80; }
-@media (max-width: 1100px) { .dash-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .dash-block.sz-l { grid-column: 1 / -1; } }
-@media (max-width: 640px) { .dash-grid { grid-template-columns: 1fr; } .dash-block.sz-s, .dash-block.sz-m, .dash-block.sz-l { grid-column: 1 / -1; } }`;
+@media (max-width: 1100px) { .dash-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } .dash-block.sz-m, .dash-block.sz-l { grid-column: 1 / -1; } }
+@media (max-width: 640px) { .dash-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .dash-block.sz-s, .dash-block.sz-m, .dash-block.sz-l { grid-column: 1 / -1; } }
+.dash-block { position: relative; } .dash-block.tile { padding: 10px 12px; } .dash-block.tile header b { font-size: 13px; }
+.dash-block.tile .dash-body { cursor: pointer; } .dash-grid.editing .dash-block.tile .dash-body { cursor: default; }
+.dash-tile { display: flex; flex-wrap: wrap; gap: 4px 14px; } .dash-tn { display: flex; flex-direction: column; min-width: 0; }
+.dash-tn b { font-size: 26px; line-height: 1.1; color: var(--ink); } .dash-tn b.bad { color: var(--red); } .dash-tn b.mid { color: var(--amber); } .dash-tn b.ok { color: var(--green); }
+.dash-tn span { font-size: 11.5px; color: var(--ink-soft); line-height: 1.25; } .dash-tile-full { font-size: 12.5px; }
+.dash-grid.editing .dash-block.sz-xs .dash-tools { position: absolute; top: 4px; left: 4px; right: 4px; flex-wrap: wrap; background: var(--card-bg); padding: 2px; border-radius: 8px; box-shadow: var(--shadow); z-index: 3; }
+.dash-grid.editing .dash-block.sz-xs header b { visibility: hidden; }
+.dash-search { width: 100%; box-sizing: border-box; padding: 9px 12px; border: 1px solid #ddd; border-radius: 10px; font: inherit; margin-bottom: 6px; }`;
   document.head.appendChild(s);
 }
