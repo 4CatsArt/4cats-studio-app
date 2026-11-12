@@ -5,6 +5,8 @@
 // and that call checks access itself (a refusal shows "No access" on the block). Loaded by hub.html after the other area files.
 // Design: "4Cats Hub — My dashboard design v1" doc. (Nov 12 2026: heights by dragging a block's corner, blocks stack into gaps,
 // live reordering while dragging; Customize buttons sit in each block's header so blocks are the same size in both modes.)
+// (Nov 12 2026: 🏁 Studio pace from pace.html's numbers, 🗓️ Weekly schedule check shared between people, 🧾 New orders feed
+// with per-person ✓; my_dashboard SQL step 3.)
 
 // ---------- State ----------
 let _dash = { me: null, layout: null, edit: false, err: '', saving: '', saveTimer: null, refreshTimer: null, drag: null, choose: false, cache: {}, ro: null };
@@ -227,25 +229,57 @@ const DASH_BLOCKS = {
   },
 
   // ---- Money ----
-  sales_pace: {
-    name: '📈 Sales pace this month', group: 'Money', area: 'sales_stats', level: 'view', size: 'm', opts: { rows: 8 }, settings: DASH_ROWS_SETTING, open: ['goToDashboard'],
-    desc: 'Where each studio finishes the month at its current pace (% of breakeven goal). No dollars.',
+  sales_pace: {   // (the type is still "sales_pace" so dashboards that already have it get the new version)
+    name: '🏁 Studio pace', group: 'Money', area: 'sales_stats', level: 'view', size: 'm', opts: { order: 'best' }, open: ['dashOpenUrl', 'pace.html'],
+    desc: 'Every studio’s month-to-date pace toward its goal, like the Studio Pace page. Scroll to see them all.',
+    settings: b => `<label>Order <select data-opt="order"><option value="best"${b.opts.order !== 'worst' ? ' selected' : ''}>Best first</option><option value="worst"${b.opts.order === 'worst' ? ' selected' : ''}>Needs help first</option></select></label>`,
     async load(b) {
-      if (typeof fetchGoalProgressWithPin !== 'function') return '<div class="dash-empty">Not available here.</div>';
-      const pin = (typeof _sessionPin !== 'undefined' && _sessionPin) || null;
-      let d;
-      try { d = await fetchGoalProgressWithPin(pin, (typeof _sessionStudioId !== 'undefined' && _sessionStudioId) || null); }
-      catch (e) {   // (the sales function still asks for a coordinator PIN, even from home office logins)
-        if (/PIN/i.test(e.message || '') && typeof openPinModal === 'function')
-          return '<div class="dash-empty">Sales need your PIN.</div><button class="ho-btn sm" onclick="dashPinThenRefresh()">🔓 Unlock with your PIN</button>';
-        throw e;
-      }
-      const lb = d && d.leaderboard, top = (lb && lb.top) || [];
-      if (!top.length) return '<div class="dash-empty">No goals set this month yet.</div>';
-      const pct = r => r.pacePct !== undefined ? r.pacePct : r.monthPct;
-      return '<div class="dash-bars">' + top.slice(0, +b.opts.rows || 8).map(r => { const p = Math.round(+pct(r) || 0);
-        return `<div class="dash-bar"><span>${esc(dashStudio(r.studioId))}</span><i><em class="${p >= 100 ? 'ok' : ''}" style="width:${Math.max(0, Math.min(p, 100))}%"></em></i><b>${p}%</b></div>`; }).join('') +
-        `</div><div class="dash-sub">${esc(lb.totalRanked || top.length)} studios ranked${lb.notRanked ? ` · ${esc(lb.notRanked)} without a goal` : ''}</div>`;
+      const day = new Date().toLocaleDateString('en-CA', { timeZone: 'Etc/GMT+7' });   // (as pace.html: BC time)
+      const R = (await dashRpc('get_pace_leaderboard', { p_day: day })) || [], by = {};
+      R.forEach(r => { by[r.studio_id] = r; });
+      const num = v => v == null || isNaN(Number(v)) ? null : Number(v);
+      const L = Object.keys(STUDIO_NAMES).map(id => ({ id, pace: num(by[id] && by[id].month_pace_pct), goal: num(by[id] && by[id].month_goal_pct) }));
+      const ranked = L.filter(r => r.pace != null).sort((x, y) => y.pace - x.pace), rank = {};
+      ranked.forEach((r, i) => { rank[r.id] = i && ranked[i - 1].pace === r.pace ? rank[ranked[i - 1].id] : i + 1; });
+      const dir = b.opts.order === 'worst' ? 1 : -1;
+      L.sort((x, y) => x.pace == null ? (y.pace == null ? dashStudio(x.id).localeCompare(dashStudio(y.id)) : 1) : y.pace == null ? -1 : (x.pace - y.pace) * dir);
+      const counts = {}; ranked.forEach(r => { const t = dashPaceTier(r.pace); counts[t.label] = (counts[t.label] || 0) + 1; });
+      return `<div class="dash-chips">${DASH_PACE_TIERS.slice().reverse().filter(t => counts[t.label]).map(t => `<span class="dash-pill" style="background:${t.bg};color:${t.fg}">${counts[t.label]} ${esc(t.label)}</span>`).join('')}</div>` +
+        '<div class="dash-pace">' + L.map(r => { const t = dashPaceTier(r.pace), k = rank[r.id];
+          return `<div class="dash-pace-row"><span class="dash-rank">${k === 1 ? '🥇' : k === 2 ? '🥈' : k === 3 ? '🥉' : (k || '—')}</span>
+            <span class="dash-pace-name">${esc(dashStudio(r.id))}${r.goal != null ? `<small>${esc(r.goal)}% of the month’s goal</small>` : ''}</span>
+            <i><em style="width:${r.pace == null ? 0 : Math.max(2, Math.min(100, r.pace / 1.5))}%;background:${t ? t.bg : 'transparent'}"></em></i>
+            <b style="${t ? `background:${t.bg};color:${t.fg}` : 'color:var(--ink-soft)'}">${r.pace == null ? '—' : esc(r.pace) + '%'}</b></div>`; }).join('') +
+        `</div><div class="dash-sub">Month to date compared with where each studio needs to be today. 100% = on track.</div>`;
+    }
+  },
+  sched_check: {
+    name: '🗓️ Weekly schedule check', group: 'People', area: 'staff_scheduling', level: 'view', size: 'm', opts: { show: 'all' }, poll: 30000, open: ['dashOpenUrl', 'day-board.html?view=week'],
+    desc: 'Tick each studio once its week (Monday to Sunday) has been looked over. Shared: everyone sees who ticked what.',
+    settings: b => `<label>Show <select data-opt="show"><option value="all"${b.opts.show !== 'todo' ? ' selected' : ''}>Every studio</option><option value="todo"${b.opts.show === 'todo' ? ' selected' : ''}>Only studios not ticked yet</option></select></label>`,
+    async load(b) {
+      const off = (_dash.week && _dash.week[b.id]) || 0, wk = dashMonday(off);
+      const d = (await dashRpc('hub_sched_check_list', { p_week: wk })) || {}, C = {};
+      (d.checks || []).forEach(c => { C[c.studio_id] = c; });
+      return dashSchedHtml(b, wk, off, C);
+    }
+  },
+  orders: {
+    name: '🧾 New orders', group: 'Money', area: 'sales_stats', level: 'view', size: 'm', opts: { days: '3' }, poll: 60000,
+    desc: 'Shopify and World orders as they come in. ✓ hides one from your list (only yours).',
+    settings: b => `<label>Go back <select data-opt="days">${[['1', '1 day'], ['3', '3 days'], ['7', 'A week'], ['14', '2 weeks']].map(([v, l]) => `<option value="${v}"${String(b.opts.days) === v ? ' selected' : ''}>${l}</option>`).join('')}</select></label>`,
+    async load(b) {
+      const d = (await dashRpc('hub_dash_orders', { p_days: +b.opts.days || 3, p_limit: 40 })) || {}, O = d.orders || [];
+      (_dash.orders = _dash.orders || {})[b.id] = O;
+      if (!O.length) return '<div class="dash-empty">No new orders. ✓</div>';
+      const money = v => v == null ? '' : '$' + Number(v).toFixed(2);
+      return `<div class="dash-head-row"><span class="dash-big"><b>${esc(d.waiting)}</b> <span>new</span></span><button class="ho-btn sm" onclick="dashOrdersAckAll('${b.id}')">✓ All shown</button></div>` +
+        '<div class="dash-list">' + O.map((o, i) => `<div class="dash-order" id="dash-o-${b.id}-${i}">
+          <button class="dash-tick" title="Seen it: hide from my list" onclick="dashOrderAck('${b.id}', ${i})">✓</button>
+          <div class="dash-order-main"><div class="dash-main">${esc(o.name || '')} <span class="dash-o-amt">${esc(money(o.total))}</span></div>
+            <div class="dash-sub">${esc([o.customer, dashStudio(o.studio_id), o.channel, relTime(o.at)].filter(Boolean).join(' · '))}</div>
+            ${o.items ? `<div class="dash-o-items">${esc(o.items)}</div>` : ''}</div></div>`).join('') + '</div>' +
+        (+d.waiting > O.length ? `<div class="dash-more">+ ${esc(+d.waiting - O.length)} older, after these</div>` : '');
     }
   },
 
@@ -349,11 +383,64 @@ function dashLinkGo(key) {
   if (b) b.click(); else alert('That page isn’t on this login.');
 }
 
+// ---------- Studio pace, weekly schedule check, orders: helpers ----------
+const DASH_PACE_TIERS = [   // (the same five bands as pace.html)
+  { label: 'Closed', bg: '#d32f2f', fg: '#fff' }, { label: 'SOS', bg: '#f57c00', fg: '#fff' }, { label: 'Action plan', bg: '#75fcfd', fg: '#000' },
+  { label: 'Planned growth', bg: '#75fc4c', fg: '#000' }, { label: 'All good', bg: '#e0218a', fg: '#fff' }];
+function dashPaceTier(v) { if (v == null) return null; return DASH_PACE_TIERS[v > 100 ? 4 : v >= 80 ? 3 : v >= 50 ? 2 : v >= 10 ? 1 : 0]; }
+function dashOpenUrl(u) { window.open(u, '_blank'); }
+function dashMonday(off) {   // this week's Monday (local), moved by whole weeks
+  const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7) + 7 * (off || 0));
+  return localDateStr(d);
+}
+function dashSchedHtml(b, wk, off, C) {
+  const ids = Object.keys(STUDIO_NAMES), done = ids.filter(id => C[id]).length;
+  const end = new Date(wk + 'T12:00:00'); end.setDate(end.getDate() + 6);
+  const f = d => d.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' });
+  const label = (off === 0 ? 'This week' : off === 1 ? 'Next week' : off === -1 ? 'Last week' : '') + ` · ${f(new Date(wk + 'T12:00:00'))} – ${f(end)}`;
+  const list = ids.filter(id => b.opts.show !== 'todo' || !C[id]);
+  return `<div class="dash-wk"><button class="ho-btn sm" onclick="dashSchedWeek('${b.id}',-1)" title="Week before">◀</button><b>${esc(label)}</b><button class="ho-btn sm" onclick="dashSchedWeek('${b.id}',1)" title="Week after">▶</button>
+      ${off ? `<button class="ho-btn sm" onclick="dashSchedWeek('${b.id}',0)">This week</button>` : ''}</div>
+    <div class="dash-prog"><i><em style="width:${Math.round(done / ids.length * 100)}%"></em></i><span><b>${done} of ${ids.length}</b> studios checked</span></div>` +
+    (list.length ? '<div class="dash-list">' + list.map(id => { const c = C[id];
+      return `<label class="dash-check${c ? ' on' : ''}"><input type="checkbox" ${c ? 'checked' : ''} onchange="dashSchedTick('${b.id}','${wk}','${id}',this.checked)">
+        <span class="dash-main">${esc(dashStudio(id))}</span>
+        <span class="dash-sub">${c ? '✓ ' + esc(c.by || 'Someone') + ' · ' + esc(dashWhen(c.at)) : 'Not checked yet'}</span>
+        <a href="day-board.html?view=week&studio=${encodeURIComponent(id)}&date=${wk}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="Open this studio's week board">📅</a></label>`; }).join('') + '</div>'
+      : '<div class="dash-empty">Every studio is checked for this week. ✓</div>');
+}
+function dashWhen(t) { const d = new Date(t); return isNaN(d) ? '' : d.toLocaleDateString('en-CA', { weekday: 'short' }) + ' ' + d.toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' }).replace(/\s?([ap])\.?m\.?/i, (m, x) => x.toLowerCase() + 'm'); }
+function dashSchedWeek(id, step) { _dash.week = _dash.week || {}; _dash.week[id] = step === 0 ? 0 : (_dash.week[id] || 0) + step; dashLoadBlock(id, true); }
+async function dashSchedTick(id, wk, studio, on) {
+  const b = _dash.layout.blocks[dashIdx(id)]; if (!b) return;
+  try {
+    const d = await dashRpc('hub_sched_check_set', { p_week: wk, p_studio: studio, p_on: !!on }), C = {};
+    (d.checks || []).forEach(c => { C[c.studio_id] = c; });
+    const off = (_dash.week && _dash.week[id]) || 0, html = dashSchedHtml(b, wk, off, C);
+    _dash.cache[id] = html; const el = document.getElementById('dash-body-' + id); if (el) el.innerHTML = html;
+  } catch (e) { alert('Couldn’t save that tick: ' + (e.message || e)); dashLoadBlock(id, true); }
+}
+async function dashOrderAck(id, i) {
+  const o = ((_dash.orders || {})[id] || [])[i]; if (!o) return;
+  const row = document.getElementById('dash-o-' + id + '-' + i); if (row) row.classList.add('gone');
+  try { await dashRpc('hub_dash_order_ack', { p_orders: [{ source: o.source, ref: o.ref }] }); }
+  catch (e) { if (row) row.classList.remove('gone'); alert('Couldn’t mark that one: ' + (e.message || e)); return; }
+  setTimeout(() => dashLoadBlock(id, false), 250);
+}
+async function dashOrdersAckAll(id) {
+  const O = (_dash.orders || {})[id] || []; if (!O.length) return;
+  if (O.length > 5 && !confirm('Mark all ' + O.length + ' orders shown as seen?')) return;
+  document.querySelectorAll('[id^="dash-o-' + id + '-"]').forEach(r => r.classList.add('gone'));
+  try { await dashRpc('hub_dash_order_ack', { p_orders: O.map(o => ({ source: o.source, ref: o.ref })) }); }
+  catch (e) { alert('Couldn’t mark them: ' + (e.message || e)); }
+  dashLoadBlock(id, false);
+}
+
 // ---------- Role starter layouts (blocks not in the library yet, or not allowed, are skipped) ----------
 const DASH_STARTERS = [
-  { key: 'owner', name: 'Owner', blocks: [['for_you', 'm'], ['sales_pace', 'm'], ['month_glance', 'm'], ['fill_rates', 'm'], ['open_close', 's'], ['sick_calls', 's'], ['concerns', 's'], ['unpaid_invoices', 's'], ['activity', 'm'], ['quick_links', 'm']] },
-  { key: 'home_office_ops', name: 'Home office ops', blocks: [['for_you', 'm'], ['open_close', 'm'], ['class_problems', 'm'], ['sick_calls', 's'], ['swaps', 's'], ['field_trips', 's'], ['buyouts', 's'], ['devices', 's'], ['retail_stock', 's'], ['announcements', 'm']] },
-  { key: 'hr', name: 'HR', blocks: [['for_you', 'm'], ['sick_calls', 'm'], ['swaps', 's'], ['time_off', 's'], ['timesheets', 'm'], ['sign_offs', 'm'], ['concerns', 's'], ['missing_pins', 's'], ['staff_news', 'm']] },
+  { key: 'owner', name: 'Owner', blocks: [['for_you', 'm'], ['sales_pace', 'm'], ['orders', 'm'], ['sched_check', 'm'], ['month_glance', 'm'], ['fill_rates', 'm'], ['open_close', 's'], ['sick_calls', 's'], ['concerns', 's'], ['unpaid_invoices', 's'], ['activity', 'm'], ['quick_links', 'm']] },
+  { key: 'home_office_ops', name: 'Home office ops', blocks: [['for_you', 'm'], ['orders', 'm'], ['open_close', 'm'], ['class_problems', 'm'], ['sick_calls', 's'], ['swaps', 's'], ['field_trips', 's'], ['buyouts', 's'], ['devices', 's'], ['retail_stock', 's'], ['announcements', 'm']] },
+  { key: 'hr', name: 'HR', blocks: [['for_you', 'm'], ['sched_check', 'm'], ['sick_calls', 'm'], ['swaps', 's'], ['time_off', 's'], ['timesheets', 'm'], ['sign_offs', 'm'], ['concerns', 's'], ['missing_pins', 's'], ['staff_news', 'm']] },
   { key: 'registration', name: 'Registration', blocks: [['for_you', 'm'], ['find_family', 'm'], ['find_membership', 's'], ['family_changes', 's'], ['date_suggestions', 's'], ['parties_chase', 's'], ['field_trips', 's'], ['unpaid_invoices', 's'], ['class_problems', 'm'], ['chat_unread', 's']] },
   { key: 'marketing', name: 'Marketing', blocks: [['for_you', 'm'], ['newsletters', 'm'], ['studio_notes', 'm'], ['project_interest', 's'], ['donations', 's'], ['points', 's'], ['sales_pace', 's'], ['fill_rates', 'l']] }
 ];
@@ -459,7 +546,14 @@ async function dashLoadBlock(id, fresh) {
 }
 function dashRefreshAll() { (_dash.layout ? _dash.layout.blocks : []).forEach(b => { if (b.type !== 'sticky_note') dashLoadBlock(b.id, true); }); }
 function dashStartRefresh() {
-  clearInterval(_dash.refreshTimer);
+  clearInterval(_dash.refreshTimer); clearInterval(_dash.pollTimer);
+  _dash.pollTimer = setInterval(() => {   // (shared blocks, like the schedule check and new orders, check back more often)
+    if (!paneVisible('mydash-pane')) { clearInterval(_dash.pollTimer); return; }
+    if (document.hidden || _dash.edit || _dash.drag) return;
+    const now = Date.now(); _dash.polled = _dash.polled || {};
+    (_dash.layout ? _dash.layout.blocks : []).forEach(b => { const t = DASH_BLOCKS[b.type];
+      if (t.poll && now - (_dash.polled[b.id] || 0) >= t.poll) { _dash.polled[b.id] = now; if (!document.querySelector('#dash-body-' + b.id + ' input:focus')) dashLoadBlock(b.id, false); } });
+  }, 10000);
   _dash.refreshTimer = setInterval(() => {
     if (!paneVisible('mydash-pane') || document.hidden) { if (!paneVisible('mydash-pane')) clearInterval(_dash.refreshTimer); return; }
     if (!_dash.edit) (_dash.layout ? _dash.layout.blocks : []).forEach(b => { if (b.type !== 'sticky_note') dashLoadBlock(b.id, false); });
@@ -599,13 +693,6 @@ function dashHeightBtn(b) {   // (show ↕ Auto once a block has a height, witho
   if (t && !t.querySelector('.dash-hauto')) { const x = document.createElement('button'); x.className = 'dash-hauto'; x.textContent = '↕'; x.title = 'Height: fit to what’s in it'; x.onclick = () => dashHeightAuto(b.id); t.insertBefore(x, t.querySelector('[title="Settings"], [title="Remove"]')); }
 }
 function dashHeightAuto(id) { const b = _dash.layout.blocks[dashIdx(id)]; if (!b) return; delete b.h; dashSaveSoon(); dashDraw(); }
-function dashPinThenRefresh() {
-  if (typeof openPinModal !== 'function') return;
-  openPinModal();
-  let n = 0; const t = setInterval(() => {   // (once the PIN is in, refresh the sales block)
-    if ((typeof _sessionPin !== 'undefined' && _sessionPin) || ++n > 240) { clearInterval(t); (_dash.layout ? _dash.layout.blocks : []).filter(b => b.type === 'sales_pace').forEach(b => dashLoadBlock(b.id, true)); }
-  }, 500);
-}
 
 // ---------- Open on start (called by hub.html once the Hub has started) ----------
 async function dashStartup(data) {
@@ -662,6 +749,23 @@ function dashStyles() {
 .dash-addgrp { margin-bottom: 10px; } .dash-addgrp > b { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-soft); margin: 8px 0 4px; }
 .dash-addrow { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); }
 .dash-set label { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; } .dash-ticks { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 4px; }
+.dash-pace { display: flex; flex-direction: column; }
+.dash-pace-row { display: grid; grid-template-columns: 30px minmax(0, 1fr) minmax(50px, 30%) 56px; gap: 8px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.dash-pace-row:last-child { border-bottom: 0; } .dash-rank { text-align: center; font-weight: 700; color: var(--ink-soft); }
+.dash-pace-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .dash-pace-name small { display: block; font-weight: 400; color: var(--ink-soft); font-size: 11.5px; }
+.dash-pace-row i { display: block; height: 8px; background: var(--border); border-radius: 99px; overflow: hidden; } .dash-pace-row em { display: block; height: 100%; }
+.dash-pace-row b { text-align: center; border-radius: 8px; padding: 2px 0; font-size: 12.5px; }
+.dash-wk { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; } .dash-wk b { font-size: 13.5px; }
+.dash-prog { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 13px; } .dash-prog i { flex: 1; height: 8px; background: var(--border); border-radius: 99px; overflow: hidden; } .dash-prog em { display: block; height: 100%; background: var(--green); }
+.dash-check { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto 24px; gap: 8px; align-items: center; padding: 6px 4px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.dash-check input { width: 18px; height: 18px; margin: 0; accent-color: var(--green); } .dash-check.on .dash-main { color: var(--ink-soft); font-weight: 500; }
+.dash-check .dash-sub { margin: 0; text-align: right; } .dash-check.on .dash-sub { color: var(--green); font-weight: 600; } .dash-check a { text-decoration: none; text-align: center; }
+.dash-head-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; } .dash-head-row .dash-big { margin: 0; }
+.dash-order { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; border-bottom: 1px solid var(--border); transition: opacity .2s, transform .2s; }
+.dash-order.gone { opacity: 0; transform: translateX(20px); pointer-events: none; }
+.dash-tick { flex: none; width: 30px; height: 30px; border-radius: 999px; border: 1.5px solid var(--green); background: #fff; color: var(--green); font-weight: 800; cursor: pointer; }
+.dash-tick:hover { background: var(--green); color: #fff; } .dash-order-main { min-width: 0; flex: 1; }
+.dash-o-amt { float: right; font-weight: 800; } .dash-o-items { font-size: 12.5px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 1100px) { .dash-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .dash-block.sz-l { grid-column: 1 / -1; } }
 @media (max-width: 640px) { .dash-grid { grid-template-columns: 1fr; } .dash-block.sz-s, .dash-block.sz-m, .dash-block.sz-l { grid-column: 1 / -1; } }`;
   document.head.appendChild(s);
