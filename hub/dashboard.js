@@ -1646,6 +1646,7 @@ async function dashStartup(data) {
   for (let i = 0; i < 50 && typeof _hubRestoring !== 'undefined' && _hubRestoring; i++) await new Promise(r => setTimeout(r, 100));   // (after "back to last time's spot")
   try { if (!_dash.me) await dashLoadMe(); } catch (e) { return; }
   if ((_dash.layout && _dash.layout.start) || location.hash === '#mydash') openMyDash();   // (hub.html#mydash: a link straight to it)
+  if (/^#cal-[0-9a-f-]{36}$/i.test(location.hash) && typeof calOpenById === 'function') calOpenById(location.hash.slice(5));   // (an invite's "Answer in the Hub")
 }
 
 // ---------- Styles (kept with the page so hub.html only gains the pane and button) ----------
