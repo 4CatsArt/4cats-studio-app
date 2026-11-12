@@ -664,6 +664,7 @@ const DASH_LINKS = [
   { key: 'n_ts', name: '🕒 Timesheets', nav: 'nav-ts', area: 'timesheets', level: 'view' },
   { key: 'n_stf', name: '👥 Staffing', nav: 'nav-stf', area: 'staff_scheduling', level: 'view' },
   { key: 'n_news', name: '📧 Newsletters', nav: 'nav-news', area: 'newsletters', level: 'view' },
+  { key: 'n_cal', name: '📅 Calendar', nav: 'nav-cal', area: null },
   { key: 'n_rp', name: '🛍️ Products', nav: 'nav-rp', area: 'retail_products', level: 'view' },
   { key: 'n_sup', name: '🧺 Supplies list', nav: 'nav-sup', area: 'supplies_inventory', level: 'view' },
   { key: 'shipstation', name: '📮 ShipStation', url: 'https://ship.shipstation.com', area: 'retail_products', level: 'view' }
