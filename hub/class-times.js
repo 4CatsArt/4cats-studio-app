@@ -5,8 +5,8 @@
 // World class timeslots across classes: filter by class, studio and dates; bulk edit spots, ages and on sale;
 // change a timeslot's dates (its bookings move with it) and email the families.
 let _ct = { f: { page: '', studio: '', from: '', to: '' }, rows: null, pages: null, sel: new Set(), err: '', cf: {}, sort: null };
-function openCtPane() {
-  if (!_hoCan.view) { alert('Class times is for home office admins.'); return; }
+async function openCtPane() {
+  await hoAreaLoad('class_times'); if (!hoA('class_times', 'view')) { alert('Class times needs “Class times” on the Access page.'); return; }   // (Nov 11 2026: access.html)
   showOnlyPane('ct-pane'); setActiveNav('nav-ct');
   if (!_ct.f.from) { const d = new Date(); _ct.f.from = localDateStr(new Date(d.getFullYear(), d.getMonth(), 1)); const e = new Date(d); e.setDate(e.getDate() + 180); _ct.f.to = localDateStr(e); }
   sb.rpc('world_class_pages_list').then(r => { if (!r.error) _ct.pages = r.data || []; else if (!_ct.pages) _ct.pages = []; ctDraw(); });   // fresh each time (class settings may have changed)
@@ -29,15 +29,15 @@ function ctDraw() {
   el.innerHTML = `<div class="ho-head"><div class="pts-page-title" style="margin:0">📚 Class times</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
     <div class="ho-intro">Kids class timeslots sold on World, across all classes. Class pages (pictures, prices, blocks) stay in World settings → Kids classes.</div>
     <div class="ct-modes"><button class="ho-btn ${_ct.mode !== 'week' ? 'primary' : ''}" onclick="_ct.mode='list';ctDraw()">☰ List</button><button class="ho-btn ${_ct.mode === 'week' ? 'primary' : ''}" onclick="ctWeekOpen()">📅 Week view</button>
-      ${_hoCan.edit ? '<button class="ho-btn" onclick="ctAddOpen()">+ Add class times</button>' : ''}
-      ${_hoCan.edit && ctPart2Pages().length ? `<button class="ho-btn primary" onclick="ctPart2Pick()">⚡ Make Part 2…</button>` : ''}</div>
-    ${_hoCan.edit && !ctPart2Pages().length ? '<div class="goal-note" style="margin:-2px 0 8px">Part 2 classes (e.g. Ringgold after Hokusai) get a “Make Part 2” button here once “This class is Part 2 of…” is set in World settings.</div>' : ''}
+      ${hoA('class_times', 'edit') ? '<button class="ho-btn" onclick="ctAddOpen()">+ Add class times</button>' : ''}
+      ${hoA('class_times', 'edit') && ctPart2Pages().length ? `<button class="ho-btn primary" onclick="ctPart2Pick()">⚡ Make Part 2…</button>` : ''}</div>
+    ${hoA('class_times', 'edit') && !ctPart2Pages().length ? '<div class="goal-note" style="margin:-2px 0 8px">Part 2 classes (e.g. Ringgold after Hokusai) get a “Make Part 2” button here once “This class is Part 2 of…” is set in World settings.</div>' : ''}
     ${_ct.mode === 'week' ? ctWeekHtml() : ''}
     <div class="act-filters"><select id="ct-page" onchange="ctFilter()"><option value="">All classes</option>${(_ct.pages || []).map(c => `<option value="${escAttr(c.id)}"${c.id === F.page ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
       <select id="ct-studio" onchange="ctFilter()"><option value="">All studios</option>${studios.map(x => `<option value="${escAttr(x)}"${x === F.studio ? ' selected' : ''}>${esc(STUDIO_NAMES[x] || x)}</option>`).join('')}</select>
       <label>Starting from <input type="date" id="ct-from" value="${escAttr(F.from)}" onchange="ctFilter()"></label><label>to <input type="date" id="ct-to" value="${escAttr(F.to)}" onchange="ctFilter()"></label></div>
     ${_ct.err ? `<div class="goal-note" style="color:#b91c1c">${esc(_ct.err)}</div>` : ''}
-    ${_hoCan.edit && n ? `<div class="ct-bulk"><b>${n} selected</b>
+    ${hoA('class_times', 'edit') && n ? `<div class="ct-bulk"><b>${n} selected</b>
       <span>Spots <input type="number" id="ct-b-spots" min="1" max="200" style="width:70px"> <button class="ho-btn sm" onclick="ctBulk('spots')">Set</button></span>
       <span>Ages <input type="number" id="ct-b-min" min="2" max="99" style="width:56px">–<input type="number" id="ct-b-max" min="2" max="99" style="width:56px"> <button class="ho-btn sm" onclick="ctBulk('ages')">Set</button></span>
       <span>Time <input type="time" id="ct-b-time" step="300" style="width:120px"> <button class="ho-btn sm" onclick="ctBulk('time')">Set</button></span>
@@ -66,7 +66,7 @@ function ctRowsHtml() {
         <td>${esc(STUDIO_NAMES[r.studio_id] || r.studio_id)}</td><td>${esc(wd)} ${esc(shortTime(r.start_time))}<br><small>${r.minutes} min · ${r.weeks} weeks</small></td>
         <td><small>${esc(ctDatesLine(r.dates))}</small>${(r.skip_dates || []).length ? `<br><small class="goal-note">no class ${esc(r.skip_dates.map(d => new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })).join(', '))}</small>` : ''}</td>
         <td>${r.min_age ?? ''}–${r.max_age ?? ''}</td><td>${r.spots}</td><td>${r.booked}</td><td>${r.active ? '✓' : '—'}</td>
-        <td style="white-space:nowrap">${_hoCan.edit ? `<button class="ho-btn sm" onclick="ctRedate('${escAttr(r.id)}')" title="Change the first date, time, weeks or skipped dates">Edit</button>
+        <td style="white-space:nowrap">${hoA('class_times', 'edit') ? `<button class="ho-btn sm" onclick="ctRedate('${escAttr(r.id)}')" title="Change the first date, time, weeks or skipped dates">Edit</button>
           <button class="ho-btn sm ct-del" onclick="ctDelete(['${escAttr(r.id)}'])"${r.booked ? ' disabled title="Families are booked: use Off sale instead"' : ''}>Delete</button>` : ''}</td></tr>`; }).join('');
 }
 // The list's column filters and sorting (in the page, on what's loaded)
@@ -91,7 +91,7 @@ function ctRedrawRows() { const tb = document.getElementById('ct-tbody'); if (tb
   const sa = document.getElementById('ct-selall'); if (sa) sa.innerHTML = ctSelAllHtml(); }
 // "Select all N shown": every timeslot the filters show (the same as the header checkbox), and Clear
 function ctSelAllHtml() {
-  if (!_hoCan.edit) return '';
+  if (!hoA('class_times', 'edit')) return '';
   const L = ctShown(), all = L.length && L.every(r => _ct.sel.has(r.id));
   return (L.length && !all ? `<button class="ho-btn sm" onclick="ctAll(true)">Select all ${L.length} shown</button>` : '') + (_ct.sel.size ? `<button class="ho-btn sm" onclick="ctAll(false)">Clear selection</button>` : '');
 }
@@ -369,7 +369,7 @@ function ctWeekHtml() {
     <label class="ctw-jump" title="Go to the week of a date">📅 <input type="date" value="${escAttr(_ctw.week)}" onchange="if(this.value){_ctw.week=ctWeekSunday(this.value);ctWeekLoad()}"></label>
     <label class="ctw-jump" title="The day each week starts on">Week starts <select onchange="_ctw.startMon=this.value==='mon';try{localStorage.setItem('hub.ctwStartMon',_ctw.startMon?'1':'0')}catch(e){};_ctw.week=ctWeekSunday(_ctw.week);ctWeekLoad()"><option value="sun"${_ctw.startMon ? '' : ' selected'}>Sun</option><option value="mon"${_ctw.startMon ? ' selected' : ''}>Mon</option></select></label>
     <button class="ho-btn sm" onclick="_ctw.week=ctWeekSunday(localDateStr(new Date()));ctWeekLoad()">This week</button>
-    ${_hoCan.edit && _ctw.pending.length ? `<button class="ho-btn primary" onclick="ctWeekCreate()">Create ${_ctw.pending.length} class time${_ctw.pending.length === 1 ? '' : 's'}</button>` : ''}</div>`;
+    ${hoA('class_times', 'edit') && _ctw.pending.length ? `<button class="ho-btn primary" onclick="ctWeekCreate()">Create ${_ctw.pending.length} class time${_ctw.pending.length === 1 ? '' : 's'}</button>` : ''}</div>`;
   if (!_ctw.studio) return h + '<div class="ho-intro">Choose a studio to see its week.</div>';
   if (_ctw.sess === null) return h + '<div class="goal-note">Loading…</div>';
   h += `<div class="goal-note" style="margin:2px 0 6px">${pg ? 'Click a free spot to place <b>' + esc(pg.name) + '</b> there (it starts that day and runs its weeks).' : 'Choose a class to add, then click a free spot.'} Grey = parties, workshops, camps and other things on.</div>
@@ -440,7 +440,7 @@ function ctWeekHtml() {
 }
 function ctWeekClick(e, d) {
   const pg = ctWeekPage(); if (!pg) { alert('Choose the class to add first (at the top).'); return; }
-  if (!_hoCan.edit) return;
+  if (!hoA('class_times', 'edit')) return;
   if (d < localDateStr(new Date())) { alert('That day has passed.'); return; }
   const rect = e.currentTarget.getBoundingClientRect(), y = e.clientY - rect.top;
   const m = CTW_START + Math.floor(y / CTW_ROW) * 15, time = String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
@@ -539,8 +539,8 @@ async function ctRedateGo() {
 // ---------- Home office → Bulk add (admins: world_bulk_times.sql) ----------
 // Make many World-only times at once (no Shopify products): glazing now; party time slots next.
 let _bulk = { kind: 'glazing', studios: [], days: [], times: [], skip: [], res: null, item: '', items: null, kidsOnly: false };
-function openBulkPane() {
-  if (!_hoCan.edit) { alert('Bulk add is for home office admins (Studio Ops edit access).'); return; }
+async function openBulkPane() {
+  await hoAreaLoad('class_times'); if (!hoA('class_times', 'edit')) { alert('Bulk add needs “Class times” (Edit) on the Access page.'); return; }
   showOnlyPane('bulk-pane'); setActiveNav('nav-bulk'); bulkDraw();
 }
 function bulkVal(id) { const e = document.getElementById(id); return e ? e.value : ''; }
