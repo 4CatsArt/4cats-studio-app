@@ -9,6 +9,7 @@
 // with per-person ✓; my_dashboard SQL step 3.)
 // (Nov 12 2026: a personal header (greeting, picture, today at a glance), 🎨 colour themes, and owners' 👥 Set up for…: a starting
 // dashboard per person (hub_dash_templates, SQL step 4) that ↺ always goes back to; step 4 also adds can_set_up to hub_dash_me.)
+// (Nov 12 2026: 🚨 System health, 🎉 Party balances owing, 💳 Pay links not paid, ❓ Sales with no studio; SQL step 5.)
 
 // ---------- State ----------
 let _dash = { me: null, layout: null, edit: false, err: '', saving: '', saveTimer: null, refreshTimer: null, drag: null, choose: false, cache: {}, ro: null };
@@ -287,6 +288,88 @@ const DASH_BLOCKS = {
     }
   },
 
+  health: {
+    name: '🚨 System health', group: 'Admin', area: 'users_access', level: 'view', size: 'm', opts: { show: 'problems' }, poll: 300000,
+    desc: 'Are orders still coming in, did the scheduled jobs run, are web calls failing. Turns red when something goes quiet.',
+    settings: b => `<label>Show jobs <select data-opt="show"><option value="problems"${b.opts.show !== 'all' ? ' selected' : ''}>Only ones with a problem</option><option value="all"${b.opts.show === 'all' ? ' selected' : ''}>Every job</option></select></label>`,
+    async load(b) {
+      const d = (await dashRpc('hub_dash_health')) || {}, now = Date.now(), J = d.jobs || [];
+      const mins = t => t ? Math.round((now - new Date(t)) / 60000) : null;
+      const hr = new Date().getHours(), open = hr >= 8 && hr < 21;   // (studio hours, the viewer's clock)
+      const sm = mins(d.shopify && d.shopify.last), wm = mins(d.world && d.world.last);
+      const shopTone = sm == null ? 'bad' : open ? (sm > 120 ? 'bad' : sm > 60 ? 'mid' : 'ok') : (sm > 720 ? 'mid' : 'ok');
+      const worldTone = wm == null ? 'mid' : wm > 2880 ? 'mid' : 'ok';
+      const probs = J.map(j => ({ j, p: dashJobProblem(j, now) })).filter(x => x.p);
+      const web = d.web, webBad = web ? +web.bad || 0 : 0;
+      const issues = (shopTone === 'bad' ? 1 : 0) + probs.length + (webBad > 5 ? 1 : 0);
+      dashGlanceSet(b, issues ? '⚠ ' + issues + (issues === 1 ? ' system problem' : ' system problems') : '');
+      const feed = (lbl, tone, m, n) => `<div class="dash-hl ${tone}"><b>${lbl}</b><span>${m == null ? 'No orders on record' : 'Last one ' + esc(dashAgo(m))}</span><small>${esc(n || 0)} in the last 24 hours</small></div>`;
+      const shown = b.opts.show === 'all' ? J.map(j => ({ j, p: dashJobProblem(j, now) })) : probs;
+      return `<div class="dash-chips"><span class="dash-pill ${issues ? 'bad' : 'ok'}">${issues ? '⚠ ' + issues + ' to look at' : '✓ All good'}</span><span class="dash-pill">${J.length} scheduled jobs</span></div>
+        <div class="dash-hls">${feed('🛒 Shopify orders', shopTone, sm, d.shopify && d.shopify.day)}${feed('🌍 World orders', worldTone, wm, d.world && d.world.day)}</div>` +
+        (shown.length ? '<div class="dash-list">' + shown.map(({ j, p }) => dashLine(`${p ? '⚠️' : '✓'} ${esc(j.name)}`,
+          esc([p || (j.last_start ? 'ran ' + dashAgo(mins(j.last_start)) : 'not run yet'), j.last_msg].filter(Boolean).join(' · ')), p ? 'late' : '')).join('') + '</div>'
+          : '<div class="dash-empty">Every scheduled job ran on time. ✓</div>') +
+        (web ? `<div class="dash-sub" style="margin-top:8px">Web calls from scheduled jobs (last 24h): ${esc(web.total)} made, <b class="${webBad ? 'dash-red' : ''}">${esc(webBad)} failed</b>${webBad && web.latest_bad ? ' · latest: ' + esc(web.latest_bad.slice(0, 2).map(x => (x.code ? 'HTTP ' + x.code : x.msg || 'no answer') + ' ' + dashAgo(mins(x.at))).join(', ')) : ''}</div>` : '');
+    }
+  },
+  party_owing: {
+    name: '🎉 Party balances owing', group: 'Customers', area: 'parties_events', level: 'view', size: 's', opts: { rows: 6 }, settings: DASH_ROWS_SETTING, open: ['openPbPane'],
+    desc: 'Parties in the last 45 days with the after-party form not filled in, or money still owing.',
+    async load(b) {
+      const t = dashToday(), f = new Date(); f.setDate(f.getDate() - 45);
+      const R = (await dashRpc('hub_party_balances', { p_from: localDateStr(f), p_to: t, p_studio: null })) || [];
+      const st = r => typeof pbState === 'function' ? pbState(r, t) : (r.date > t ? 'upcoming' : !r.filled ? 'missing' : (r.owing != null && +r.owing > 0.004 ? 'owing' : 'ok'));
+      const miss = R.filter(r => st(r) === 'missing'), owe = R.filter(r => st(r) === 'owing'), sum = owe.reduce((x, r) => x + (+r.owing || 0), 0);
+      dashGlanceSet(b, miss.length + owe.length ? dashPl(miss.length + owe.length, 'party balance', 'party balances') + ' to sort' : '');
+      const K = typeof PB_KIND !== 'undefined' ? PB_KIND : {};
+      const list = miss.concat(owe).sort((x, y) => String(x.date).localeCompare(String(y.date)));
+      return `<div class="dash-chips"><span class="dash-pill ${miss.length ? 'bad' : 'ok'}">${dashPl(miss.length, 'form', 'forms')} not filled in</span><span class="dash-pill ${owe.length ? 'mid' : 'ok'}">${owe.length} owing · $${sum.toFixed(2)}</span></div>` +
+        dashRows(list, +b.opts.rows || 6, r => `<div class="dash-row${st(r) === 'missing' ? ' late' : ''}"><div class="dash-main">${esc(K[r.kind] || 'Party')} · ${esc(r.customer || '')}${st(r) === 'owing' ? ` <span class="dash-o-amt">$${(+r.owing).toFixed(2)}</span>` : ''}</div>
+          <div class="dash-sub">${esc(dashStudio(r.studio_id))} · ${esc(dashDay(r.date))} · ${st(r) === 'missing' ? 'form not filled in' : 'owing'}${typeof pbOpen === 'function' && r.session_id ? ` · <a href="#" onclick="pbOpen('${escAttr(r.session_id)}','${escAttr(r.studio_id)}','${escAttr(r.date)}');return false">Open</a>` : ''}</div></div>`, 'Every party is settled. ✓');
+    }
+  },
+  paylinks: {
+    name: '💳 Pay links not paid', group: 'Customers', area: 'front_desk', level: 'view', size: 's', opts: { rows: 6 }, settings: DASH_ROWS_SETTING, poll: 120000,
+    desc: 'Front desk pay links, QR checkouts and invoices across every studio: not paid, paid but not acknowledged, and still waiting.',
+    async load(b) {
+      const d = (await dashRpc('hub_dash_paylinks')) || {}, L = d.list || [];
+      const k = o => o.status === 'paid' ? 'paid' : o.status === 'pending' && (!o.expires || new Date(o.expires) > new Date()) ? 'wait' : 'unpaid';
+      const un = L.filter(o => k(o) === 'unpaid'), pd = L.filter(o => k(o) === 'paid'), wt = L.filter(o => k(o) === 'wait');
+      (_dash.pay = _dash.pay || {})[b.id] = L;
+      dashGlanceSet(b, un.length ? dashPl(un.length, 'pay link', 'pay links') + ' not paid' : '');
+      const money = v => '$' + (Number(v) || 0).toFixed(2);
+      const row = o => { const s = k(o), i = L.indexOf(o);
+        const acts = s === 'paid' ? `<button class="ho-btn sm primary" onclick="dashPayAck('${b.id}',${i},'paid')">Acknowledge</button>`
+          : s === 'unpaid' && o.status !== 'pending' ? `<button class="ho-btn sm" onclick="dashPayAck('${b.id}',${i},'paid_other')">Paid another way</button><button class="ho-btn sm" onclick="dashPayAck('${b.id}',${i},'written_off')">Write off</button>` : '';
+        return `<div class="dash-row${s === 'unpaid' ? ' late' : ''}"><div class="dash-main">${esc(o.name || o.order || 'Order')} <span class="dash-o-amt">${money(o.total)}</span></div>
+          <div class="dash-sub">${esc([dashStudio(o.studio_id), s === 'paid' ? '✓ paid' : s === 'wait' ? 'waiting' : '⚠ not paid', o.mode === 'invoice' ? 'invoice' : o.mode === 'link' ? 'link' : o.mode ? o.mode : '', o.at ? relTime(o.at) : '', o.by ? 'by ' + String(o.by).split('@')[0] : ''].filter(Boolean).join(' · '))}</div>
+          ${o.what ? `<div class="dash-o-items">${esc(o.what)}</div>` : ''}${acts ? `<div class="dash-acts">${acts}</div>` : ''}</div>`; };
+      return `<div class="dash-chips"><span class="dash-pill ${un.length ? 'bad' : 'ok'}">${un.length} not paid</span><span class="dash-pill ${pd.length ? 'mid' : ''}">${pd.length} paid, to acknowledge</span><span class="dash-pill">${wt.length} waiting</span></div>` +
+        dashRows(un.concat(pd, wt), +b.opts.rows || 6, row, 'Nothing sent to pay right now. 🎉') +
+        (+d.skipped ? `<div class="dash-sub">${esc(d.skipped)} studios couldn’t be read.</div>` : '');
+    }
+  },
+  unattributed: {
+    name: '❓ Sales with no studio', group: 'Money', area: 'finance', level: 'view', size: 'm', opts: { rows: 6, month: 'this' }, open: ['dashOpenUrl', 'finance.html'],
+    desc: 'Sales this month that couldn’t be matched to a studio (assign one right here), and how much store credit was used.',
+    settings: b => `<label>Month <select data-opt="month"><option value="this"${b.opts.month !== 'last' ? ' selected' : ''}>This month</option><option value="last"${b.opts.month === 'last' ? ' selected' : ''}>Last month</option></select></label>` + DASH_ROWS_SETTING(b),
+    async load(b) {
+      const d = new Date(); d.setDate(1); if (b.opts.month === 'last') d.setMonth(d.getMonth() - 1);
+      const m = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+      const [R, C] = await Promise.all([dashRpc('get_unattributed_sales', { p_month: m }), dashRpc('hub_dash_store_credit', { p_month: m }).catch(() => null)]);
+      const N = (R || []).filter(r => r.item_type === 'NEEDS A STUDIO'), sum = N.reduce((t, r) => t + (+r.net_amount || 0), 0);
+      (_dash.unat = _dash.unat || {})[b.id] = N;
+      dashGlanceSet(b, N.length ? (N.length === 1 ? '1 sale needs a studio' : N.length + ' sales need a studio') : '');
+      const can = dashCan('finance', 'edit'), opts = Object.keys(STUDIO_NAMES).sort((x, y) => STUDIO_NAMES[x].localeCompare(STUDIO_NAMES[y])).map(id => `<option value="${id}">${esc(STUDIO_NAMES[id])}</option>`).join('');
+      return `<div class="dash-chips"><span class="dash-pill ${N.length ? 'mid' : 'ok'}">${N.length === 1 ? '1 sale needs' : N.length + ' sales need'} a studio · $${sum.toFixed(2)}</span>` +
+          (C ? `<span class="dash-pill" title="Shopify orders paid partly with store credit">🎟 Store credit: ${esc(C.orders)} orders · $${(+C.credit || 0).toFixed(2)}${+C.unknown ? ` (+${esc(C.unknown)} lines, amount unknown)` : ''}</span>` : '') + '</div>' +
+        dashRows(N, +b.opts.rows || 6, (r, i) => `<div class="dash-row"><div class="dash-main">${esc(r.shopify_order_name)} · ${esc(r.product_title || '')}${r.variant_title ? ' · ' + esc(r.variant_title) : ''} <span class="dash-o-amt">$${(+r.net_amount || 0).toFixed(2)}</span></div>
+          <div class="dash-sub">${esc(dashDay(r.sale_day))}${r.category ? ' · ' + esc(r.category) : ''}</div>
+          ${can ? `<select class="dash-assign" onchange="dashAssign('${b.id}',${N.indexOf(r)},this)"><option value="">Assign to a studio…</option>${opts}</select>` : ''}</div>`, 'Every sale has a studio. ✓');
+    }
+  },
+
   // ---- Comms ----
   newsletters: {
     name: '📧 Newsletters', group: 'Comms', area: 'newsletters', level: 'view', size: 's', open: ['openNewsPane'],
@@ -440,12 +523,47 @@ async function dashOrdersAckAll(id) {
   dashLoadBlock(id, false);
 }
 
+// ---------- System health, pay links, sales with no studio: helpers ----------
+function dashPl(n, one, many) { return n + ' ' + (+n === 1 ? one : many); }
+function dashAgo(m) { if (m == null) return ''; if (m < 1) return 'just now'; if (m < 60) return m + ' min ago'; if (m < 1440) return Math.round(m / 60) + ' h ago'; return Math.round(m / 1440) + ' days ago'; }
+function dashJobProblem(j, now) {   // a scheduled job that failed, or hasn't run when its schedule says it should have
+  if (j.error) return j.error;
+  if (j.active === false) return '';
+  if (j.last_status === 'failed') return 'last run failed';
+  if (+j.fails_24h > 0) return j.fails_24h + ' failed runs in the last day';
+  const sc = String(j.schedule || '').trim().split(/\s+/), age = j.last_start ? (now - new Date(j.last_start)) / 60000 : null;
+  let every = null;   // minutes between runs, for the common shapes
+  if (sc.length === 5 && sc.slice(1).every(x => x === '*')) every = sc[0] === '*' ? 1 : /^\*\/\d+$/.test(sc[0]) ? +sc[0].slice(2) : 60;
+  else if (sc.length === 5 && /^\d+$/.test(sc[0]) && sc[1] === '*' && sc.slice(2).every(x => x === '*')) every = 60;
+  else if (sc.length === 5 && /^\d+$/.test(sc[0]) && /^\d+$/.test(sc[1]) && sc.slice(2).every(x => x === '*')) every = 1440;
+  else if (sc.length === 5 && /^\d+$/.test(sc[0]) && /^\d+$/.test(sc[1]) && sc[2] === '*' && sc[3] === '*' && /^\d$/.test(sc[4])) every = 10080;
+  if (age == null) return every && every <= 1440 ? 'hasn’t run yet' : '';
+  if (every && age > Math.max(every * 3, every + 120)) return 'late: last ran ' + dashAgo(Math.round(age));
+  return '';
+}
+async function dashPayAck(id, i, kind) {
+  const o = ((_dash.pay || {})[id] || [])[i]; if (!o) return;
+  let note = null;
+  if (kind === 'paid_other') { note = prompt(`How did ${o.name || 'they'} pay $${(+o.total || 0).toFixed(2)}? (e.g. cash, paid at the counter)`, ''); if (note === null) return; note = note || 'Paid another way'; }
+  if (kind === 'written_off') { note = prompt(`Not paid: ${o.what || ''}. Why? (kept with the order)`, ''); if (!note || !note.trim()) return; note = note.trim(); }
+  try { await dashRpc('hub_pos_ack', { p_order: o.id, p_kind: kind, p_note: note }); } catch (e) { alert('Couldn’t save that: ' + (e.message || e)); return; }
+  dashLoadBlock(id, false);
+}
+async function dashAssign(id, i, sel) {
+  const r = ((_dash.unat || {})[id] || [])[i], st = sel.value; if (!r || !st) return;
+  if (!confirm(`Assign ${r.shopify_order_name} to ${STUDIO_NAMES[st]}? It will count toward that studio's sales.`)) { sel.value = ''; return; }
+  sel.disabled = true;
+  try { const n = await dashRpc('set_sales_line_studio', { p_order_name: r.shopify_order_name, p_line_item_id: r.shopify_line_item_id || null, p_studio_id: st }); if (!n) throw new Error('Nothing was updated (already assigned?)'); }
+  catch (e) { alert(e.message || e); sel.disabled = false; sel.value = ''; return; }
+  dashLoadBlock(id, false);
+}
+
 // ---------- Role starter layouts (blocks not in the library yet, or not allowed, are skipped) ----------
 const DASH_STARTERS = [
-  { key: 'owner', name: 'Owner', blocks: [['for_you', 'm'], ['sales_pace', 'm'], ['orders', 'm'], ['sched_check', 'm'], ['month_glance', 'm'], ['fill_rates', 'm'], ['open_close', 's'], ['sick_calls', 's'], ['concerns', 's'], ['unpaid_invoices', 's'], ['activity', 'm'], ['quick_links', 'm']] },
-  { key: 'home_office_ops', name: 'Home office ops', blocks: [['for_you', 'm'], ['orders', 'm'], ['open_close', 'm'], ['class_problems', 'm'], ['sick_calls', 's'], ['swaps', 's'], ['field_trips', 's'], ['buyouts', 's'], ['devices', 's'], ['retail_stock', 's'], ['announcements', 'm']] },
+  { key: 'owner', name: 'Owner', blocks: [['for_you', 'm'], ['health', 'm'], ['sales_pace', 'm'], ['orders', 'm'], ['sched_check', 'm'], ['unattributed', 'm'], ['month_glance', 'm'], ['fill_rates', 'm'], ['open_close', 's'], ['sick_calls', 's'], ['concerns', 's'], ['unpaid_invoices', 's'], ['activity', 'm'], ['quick_links', 'm']] },
+  { key: 'home_office_ops', name: 'Home office ops', blocks: [['for_you', 'm'], ['orders', 'm'], ['paylinks', 's'], ['party_owing', 's'], ['open_close', 'm'], ['class_problems', 'm'], ['sick_calls', 's'], ['swaps', 's'], ['field_trips', 's'], ['buyouts', 's'], ['devices', 's'], ['retail_stock', 's'], ['announcements', 'm']] },
   { key: 'hr', name: 'HR', blocks: [['for_you', 'm'], ['sched_check', 'm'], ['sick_calls', 'm'], ['swaps', 's'], ['time_off', 's'], ['timesheets', 'm'], ['sign_offs', 'm'], ['concerns', 's'], ['missing_pins', 's'], ['staff_news', 'm']] },
-  { key: 'registration', name: 'Registration', blocks: [['for_you', 'm'], ['find_family', 'm'], ['find_membership', 's'], ['family_changes', 's'], ['date_suggestions', 's'], ['parties_chase', 's'], ['field_trips', 's'], ['unpaid_invoices', 's'], ['class_problems', 'm'], ['chat_unread', 's']] },
+  { key: 'registration', name: 'Registration', blocks: [['for_you', 'm'], ['find_family', 'm'], ['party_owing', 's'], ['paylinks', 's'], ['find_membership', 's'], ['family_changes', 's'], ['date_suggestions', 's'], ['parties_chase', 's'], ['field_trips', 's'], ['unpaid_invoices', 's'], ['class_problems', 'm'], ['chat_unread', 's']] },
   { key: 'marketing', name: 'Marketing', blocks: [['for_you', 'm'], ['newsletters', 'm'], ['studio_notes', 'm'], ['project_interest', 's'], ['donations', 's'], ['points', 's'], ['sales_pace', 's'], ['fill_rates', 'l']] }
 ];
 function dashAllowed(type) { const t = DASH_BLOCKS[type]; return !!t && dashCan(t.area, t.level); }
@@ -975,6 +1093,11 @@ function dashStyles() {
 .dash-addgrp { margin-bottom: 10px; } .dash-addgrp > b { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-soft); margin: 8px 0 4px; }
 .dash-addrow { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); }
 .dash-set label { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; } .dash-ticks { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 4px; }
+.dash-hls { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-bottom: 8px; }
+.dash-hl { border-radius: 12px; padding: 8px 10px; background: var(--border); display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.dash-hl small { color: var(--ink-soft); } .dash-hl.ok { background: var(--green-bg); color: #14532d; } .dash-hl.mid { background: var(--amber-bg); color: #78350f; } .dash-hl.bad { background: var(--red-bg); color: #7f1d1d; }
+.dash-hl.ok small, .dash-hl.mid small, .dash-hl.bad small { color: inherit; opacity: .75; } .dash-red { color: var(--red); }
+.dash-acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; } .dash-assign { margin-top: 4px; font: inherit; font-size: 12.5px; padding: 3px 6px; border-radius: 8px; border: 1px solid var(--border); max-width: 100%; }
 .dash-pace { display: flex; flex-direction: column; }
 .dash-pace-row { display: grid; grid-template-columns: 30px minmax(0, 1fr) minmax(50px, 30%) 56px; gap: 8px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
 .dash-pace-row:last-child { border-bottom: 0; } .dash-rank { text-align: center; font-weight: 700; color: var(--ink-soft); }
