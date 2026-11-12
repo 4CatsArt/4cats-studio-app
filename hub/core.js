@@ -119,3 +119,16 @@ function setActiveNav(id) {
   document.querySelectorAll('.sidebar .nav-item').forEach(b => b.classList.toggle('active', b.id === id));
   hubRemember({ nav: id });
 }
+
+// (moved here Nov 11 2026: used all over the Hub) is the coordinator view unlocked, or a home office login? · "Sat, Dec 5" · "5 min ago"
+function coordOrAdmin() { return !!_sessionPin || !!(_studioData && _studioData.isAdmin); }
+function ptyDayLabel(date) {
+  const [y, m, d] = String(date).split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+}
+function relTime(iso) {
+  const mins = Math.round((Date.now() - new Date(iso)) / 60000);
+  if (mins < 60) return mins <= 1 ? 'just now' : mins + ' min ago';
+  const h = Math.round(mins / 60); if (h < 24) return h + ' h ago';
+  const d = Math.round(h / 24); return d === 1 ? 'yesterday' : d + ' days ago';
+}
