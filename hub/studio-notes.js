@@ -97,9 +97,9 @@ function snsDraw() {
   const P = _sns.photos || {};
   h += `<details class="card" style="margin-top:14px"><summary><b>📷 Note pictures</b> <span class="goal-note">${P['*'] ? 'every-studio picture set' : 'no every-studio picture'} · ${Object.keys(P).filter(k => k !== '*').length} studios with their own</span></summary>
     <div class="sn-line"><b>Every studio</b>${P['*'] ? `<img src="${escAttr(P['*'])}" alt="" class="sns-ph">` : '<span class="goal-note">none</span>'}<span class="spacer" style="flex:1"></span>
-      <label class="ho-btn sm">📷 Change<input type="file" accept="image/*" hidden onchange="snsPhoto(this, '*')"></label>${P['*'] ? `<button class="ho-btn sm" onclick="snsPhotoClear('*')">Remove</button>` : ''}</div>
+      <label class="ho-btn sm">📷 Change<input type="file" accept="image/*" hidden onchange="snsPhoto(this, '*')"></label><button class="ho-btn sm" onclick="snsLibOpen('*')">🖼 Library</button>${P['*'] ? `<button class="ho-btn sm" onclick="snsPhotoLink('*')">🔗 Link</button>` : ''}${P['*'] ? `<button class="ho-btn sm" onclick="snsPhotoClear('*')">Remove</button>` : ''}</div>
     ${ids.filter(inScope).map(id => `<div class="sn-line"><span>${esc(STUDIO_NAMES[id])}</span>${P[id] ? `<img src="${escAttr(P[id])}" alt="" class="sns-ph">` : '<span class="goal-note">uses the every-studio picture</span>'}<span class="spacer" style="flex:1"></span>
-      <label class="ho-btn sm">📷 Own picture<input type="file" accept="image/*" hidden onchange="snsPhoto(this, '${escAttr(id)}')"></label>${P[id] ? `<button class="ho-btn sm" onclick="snsPhotoClear('${escAttr(id)}')">Use the every-studio one</button>` : ''}</div>`).join('')}</details>`;
+      <label class="ho-btn sm">📷 Own picture<input type="file" accept="image/*" hidden onchange="snsPhoto(this, '${escAttr(id)}')"></label><button class="ho-btn sm" onclick="snsLibOpen('${escAttr(id)}')">🖼 Library</button>${P[id] ? `<button class="ho-btn sm" onclick="snsPhotoLink('${escAttr(id)}')">🔗 Link</button>` : ''}${P[id] ? `<button class="ho-btn sm" onclick="snsPhotoClear('${escAttr(id)}')">Use the every-studio one</button>` : ''}</div>`).join('')}</details>`;
   el.innerHTML = h;
 }
 // new note (one, a province or all studios), or edit one (this studio's copy, or every copy written together)
@@ -115,7 +115,8 @@ function snsEdit(id, forStudio, preScope) {
       <div class="sns-photo-row" style="margin:6px 0 10px"><b style="display:block;margin-bottom:4px">📷 Picture for this note (optional)</b>
         <input type="hidden" id="sns-photo" value="${escAttr((n && n.photo) || '')}">
         <div id="sns-photo-prev">${snsPhotoPrev((n && n.photo) || '')}</div>
-        <label class="ho-btn sm">📷 ${n && n.photo ? 'Change' : 'Add a picture'}<input type="file" accept="image/*" hidden onchange="snsNotePhoto(this)"></label>
+        <label class="ho-btn sm">📷 ${n && n.photo ? 'Change' : 'Add a picture'}<input type="file" accept="image/*" hidden onchange="snsNotePhoto(this)"></label> <button class="ho-btn sm" type="button" onclick="snsLibOpen('note')">🖼 Choose from library</button>
+        <label style="display:block;margin:6px 0 2px">🔗 Link when the picture is tapped (optional)<input id="sns-photo-link" type="url" placeholder="https://world.4cats.com/#classes" value="${escAttr((n && n.photo_link) || '')}"></label>
         <span class="fd-sm">Shows only while this note shows. No picture here: a scheduled default picture for the day, else the studio’s own, else the one for every studio.</span></div>
       <label class="ba-check"><input type="checkbox" id="sns-auto" ${n && n.auto_staff === false ? '' : 'checked'}> Add the studio’s coordinator and that day’s staff after it (their 4Cats names: the coordinator first, then the published schedule)</label>
       ${n ? (copies.length > 1 ? `<label class="ba-check"><input type="radio" name="sns-scope" value="all" ${preScope === 'one' ? '' : 'checked'}> Change all ${copies.length} studios’ copies</label>
@@ -128,7 +129,7 @@ function snsEdit(id, forStudio, preScope) {
 }
 async function snsSave(id) {
   const v = x => (document.getElementById(x) || {}).value || '';
-  const p = { title: v('sns-title'), body: v('sns-body'), signed: v('sns-signed').trim() || 'See you at the studio!', photo: v('sns-photo'),   // 📷 (Nov 12 2026) the note's own picture ('' = none)
+  const p = { title: v('sns-title'), body: v('sns-body'), signed: v('sns-signed').trim() || 'See you at the studio!', photo: v('sns-photo'), photo_link: snsLink(v('sns-photo-link')),   // 📷 (Nov 12 2026) the note's own picture ('' = none) and its link
       // (Nov 12 2026) the default sign-off
     show_from: v('sns-from'), show_until: v('sns-until'), auto_staff: document.getElementById('sns-auto').checked };
   const n = id ? (_sns.rows || []).find(x => x.id === id) : null;
@@ -153,7 +154,7 @@ function snsSchedHtml() {
   const t = localDateStr(new Date()), nm = x => (x.studio_ids && x.studio_ids.length) ? x.studio_ids.map(id => String(STUDIO_NAMES[id] || id).replace(/^.*?\s-\s/, '')).join(', ') : 'Every studio';
   return `<details class="card" style="margin-top:14px"${S.length ? ' open' : ''}><summary><b>🗓 Scheduled default pictures</b> <span class="goal-note">${S.filter(x => x.starts_on <= t && x.ends_on >= t).length} showing today · ${S.length} in all</span></summary>
     <p class="goal-note" style="margin:6px 0">A note without its own picture uses one of these while its dates last: a studio’s own schedule first, then one for every studio. Outside these dates, the pictures below are used.</p>
-    ${S.length ? S.map(x => `<div class="sn-line"><img src="${escAttr(x.url)}" alt="" class="sns-ph"><span><b>${esc(x.label || 'Picture')}</b><br><span class="goal-note">${esc(ptyDayLabel(x.starts_on))} – ${esc(ptyDayLabel(x.ends_on))} · ${esc(nm(x))}${x.starts_on <= t && x.ends_on >= t ? ' · <b>showing now</b>' : ''}</span></span>
+    ${S.length ? S.map(x => `<div class="sn-line"><img src="${escAttr(x.url)}" alt="" class="sns-ph"><span><b>${esc(x.label || 'Picture')}</b><br><span class="goal-note">${esc(ptyDayLabel(x.starts_on))} – ${esc(ptyDayLabel(x.ends_on))} · ${esc(nm(x))}${x.link ? ' · 🔗 ' + esc(String(x.link).replace(/^https?:\/\//, '').slice(0, 40)) : ''}${x.starts_on <= t && x.ends_on >= t ? ' · <b>showing now</b>' : ''}</span></span>
       <span class="spacer" style="flex:1"></span><button class="ho-btn sm" onclick="snsSchedRemove('${escAttr(x.id)}')">Remove</button></div>`).join('') : '<p class="goal-note">None yet.</p>'}
     <button class="ho-btn sm" style="margin-top:8px" onclick="snsSchedAdd()">+ Schedule a picture</button></details>`;
 }
@@ -162,7 +163,8 @@ function snsSchedAdd() {
     <label>Name (for you)<input id="sps-label" maxlength="80" placeholder="Holidays"></label>
     <div class="sup-two"><label>From<input type="date" id="sps-from" value="${escAttr(localDateStr(new Date()))}"></label><label>Until<input type="date" id="sps-until"></label></div>
     <input type="hidden" id="sns-photo" value=""><b style="display:block;margin:6px 0 4px">The picture</b><div id="sns-photo-prev"></div>
-    <label class="ho-btn sm">📷 Choose a picture<input type="file" accept="image/*" hidden onchange="snsNotePhoto(this)"></label>
+    <label class="ho-btn sm">📷 Choose a picture<input type="file" accept="image/*" hidden onchange="snsNotePhoto(this)"></label> <button class="ho-btn sm" type="button" onclick="snsLibOpen('note')">🖼 Choose from library</button>
+    <label style="display:block;margin:8px 0 2px">🔗 Link when the picture is tapped (optional)<input id="sps-link" type="url" placeholder="https://world.4cats.com/#workshops"></label>
     <details style="margin:10px 0"><summary><b>Studios</b> <span class="fd-sm">(none ticked = every studio)</span></summary>
       <div class="sn-studios">${Object.keys(STUDIO_NAMES).map(sid => `<label class="ba-check"><input type="checkbox" class="sps-st" value="${escAttr(sid)}"> ${esc(STUDIO_NAMES[sid])}</label>`).join('')}</div></details>
     <div id="sps-msg"></div></div>
@@ -170,7 +172,7 @@ function snsSchedAdd() {
 }
 async function snsSchedSave() {
   const v = id => (document.getElementById(id) || {}).value || '';
-  const { error } = await sb.rpc('hub_note_photo_schedule_put', { p: { url: v('sns-photo'), label: v('sps-label'), starts_on: v('sps-from'), ends_on: v('sps-until'),
+  const { error } = await sb.rpc('hub_note_photo_schedule_put', { p: { url: v('sns-photo'), link: snsLink(v('sps-link')), label: v('sps-label'), starts_on: v('sps-from'), ends_on: v('sps-until'),
     studios: [...document.querySelectorAll('.sps-st:checked')].map(c => c.value) } });
   if (error) { document.getElementById('sps-msg').innerHTML = `<p class="fd-msg">${esc(error.message)}</p>`; return; }
   closeDutySheet(); _sns.msg = '✓ Picture scheduled.'; snsLoad();
@@ -179,6 +181,60 @@ async function snsSchedRemove(id) {
   if (!confirm('Remove this scheduled picture?')) return;
   const { error } = await sb.rpc('hub_note_photo_schedule_remove', { p_id: id }); if (error) { alert(error.message); return; }
   _sns.msg = '✓ Removed.'; snsLoad();
+}
+// 🖼 (Nov 12 2026) Choose a picture already in storage (the retail-media bucket, where the Hub's uploads go), newest first.
+// target 'note' = the open note / schedule sheet's picture; a studio id or '*' = that studio's (every studio's) picture.
+let _lib = { folder: 'studio-notes', target: null, folders: null };
+const LIB_IMG = /\.(jpe?g|png|gif|webp|avif)$/i;
+async function snsLibOpen(target) {
+  _lib.target = target;
+  let box = document.getElementById('sns-lib');
+  if (!box) { box = document.createElement('div'); box.id = 'sns-lib'; document.body.appendChild(box); }
+  box.setAttribute('style', 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10050;display:flex;align-items:center;justify-content:center');
+  box.onclick = e => { if (e.target === box) snsLibClose(); };
+  if (!_lib.folders) {
+    const { data } = await sb.storage.from('retail-media').list('', { limit: 100 });
+    _lib.folders = (data || []).filter(x => !x.id).map(x => x.name).sort();   // (folders have no id)
+    if (_lib.folders.indexOf('studio-notes') < 0) _lib.folders.unshift('studio-notes');
+  }
+  snsLibLoad();
+}
+function snsLibClose() { const b = document.getElementById('sns-lib'); if (b) b.remove(); }
+async function snsLibLoad() {
+  const box = document.getElementById('sns-lib'); if (!box) return;
+  const shell = inner => `<div style="background:#fff;border-radius:14px;padding:16px 18px;width:min(860px,94vw);max-height:86vh;overflow:auto">
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px"><b style="font-size:17px">🖼 Choose a picture</b>
+      <select onchange="_lib.folder=this.value;snsLibLoad()">${(_lib.folders || []).map(f => `<option value="${escAttr(f)}"${f === _lib.folder ? ' selected' : ''}>${esc(f)}</option>`).join('')}</select>
+      <span style="flex:1"></span><button class="ho-btn sm" onclick="snsLibClose()">Close</button></div>${inner}</div>`;
+  box.innerHTML = shell('<p class="goal-note">Loading…</p>');
+  const { data, error } = await sb.storage.from('retail-media').list(_lib.folder, { limit: 200, sortBy: { column: 'created_at', order: 'desc' } });
+  if (error) { box.innerHTML = shell(`<p class="fd-msg">The library couldn’t be opened: ${esc(error.message)}</p>`); return; }
+  const pics = (data || []).filter(x => x.id && LIB_IMG.test(x.name));
+  box.innerHTML = shell(pics.length ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px">${pics.map(x => {
+      const url = sb.storage.from('retail-media').getPublicUrl(_lib.folder + '/' + x.name).data.publicUrl;
+      return `<button type="button" onclick="snsLibPick('${escAttr(url)}')" title="${escAttr(x.name)}" style="border:1px solid #eadfce;border-radius:10px;padding:4px;background:#fff;cursor:pointer">
+        <img src="${escAttr(url)}" alt="" loading="lazy" style="width:100%;height:110px;object-fit:cover;border-radius:7px;display:block"></button>`; }).join('')}</div>`
+    : '<p class="goal-note">No pictures in this folder yet.</p>');
+}
+async function snsLibPick(url) {
+  const t = _lib.target; snsLibClose();
+  if (t === 'note') {   // the note (or schedule) sheet that's open
+    const inp = document.getElementById('sns-photo'); if (!inp) return;
+    inp.value = url; const prev = document.getElementById('sns-photo-prev'); if (prev) prev.innerHTML = snsPhotoPrev(url);
+    return;
+  }
+  const { error } = await sb.rpc('hub_studio_note_photo', { p_key: t, p_url: url });   // a studio's (or every studio's) picture
+  if (error) { alert(error.message); return; }
+  _sns.msg = '✓ Picture set.'; snsLoad();
+}
+// 🔗 (Nov 12 2026) A picture's link: a web address ('' = none); "world.4cats.com/…" gets https:// added
+function snsLink(v) { v = String(v || '').trim(); return !v ? '' : /^https?:\/\//i.test(v) ? v : 'https://' + v.replace(/^\/+/, ''); }
+async function snsPhotoLink(key) {
+  const v = prompt(`Link when ${key === '*' ? 'the every-studio picture' : (STUDIO_NAMES[key] || key) + '’s picture'} is tapped (a web address; leave empty for no link):`, 'https://');
+  if (v === null) return;
+  const { error } = await sb.rpc('hub_studio_note_photo_link', { p_key: key, p_link: v.trim() === 'https://' ? '' : snsLink(v) });
+  if (error) { alert(error.message); return; }
+  _sns.msg = '✓ Link saved.'; snsLoad();
 }
 // 📷 (Nov 12 2026) A note's own picture: uploaded right away, saved with the note
 function snsPhotoPrev(url) {
