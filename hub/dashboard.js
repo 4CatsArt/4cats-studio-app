@@ -16,6 +16,8 @@
 // library through hub_dash_avatars, with folders; SQL step 7.)
 // (Nov 12 2026: ▦ stat view for any block (a small tile of its main numbers) and an XS size on an 8-column grid; a search box
 // in + Add a block; 🕒 Timesheets, 🏆 Flash challenges, 💰 Labour cost, and ✅ Open & close rebuilt on hub_dash_oc; SQL step 8.)
+// (Nov 12 2026: the dashboard places blocks itself: each goes in the column it was dropped in (b.x, saved), stacked under what's
+// already there; blocks never placed fill the highest gap that fits. Replaces the browser's own gap-filling.)
 
 // ---------- State ----------
 let _dash = { me: null, layout: null, edit: false, err: '', saving: '', saveTimer: null, refreshTimer: null, drag: null, choose: false, cache: {}, ro: null };
@@ -156,7 +158,7 @@ const DASH_BLOCKS = {
   devices: {
     name: '🖥 Computers waiting', group: 'Studio day', area: 'users_access', level: 'edit', size: 's', open: ['openDevicesPane'],
     desc: 'Studio computers waiting for approval.',
-    async load() {
+    async load(b) {
       const P = ((await dashRpc('hub_devices_list')) || []).filter(d => d.status === 'pending');
       return P.length ? dashBig(P.length, 'waiting', 'warn') + dashRows(P, 4, d => dashLine(esc(dashStudio(d.studio_id)), esc(relTime(d.requested_at)))) : '<div class="dash-empty">Nothing waiting. ✓</div>';
     }
@@ -201,7 +203,7 @@ const DASH_BLOCKS = {
   date_suggestions: {
     name: '🗓️ Date suggestions', group: 'Customers', area: 'class_times', level: 'view', size: 's', tile: true, open: ['openIdeasPane'],
     desc: 'New “Suggest a date!” requests from World, all studios.',
-    async load() {
+    async load(b) {
       const n = +(await dashRpc('hub_ideas_new_count', { p_studio: (typeof _sessionStudioId !== 'undefined' && _sessionStudioId) || null, p_all: true })) || 0;
       return n ? dashBig(n, n === 1 ? 'new suggestion' : 'new suggestions', 'warn') : '<div class="dash-empty">No new suggestions.</div>';
     }
@@ -232,7 +234,7 @@ const DASH_BLOCKS = {
   sign_offs: {
     name: '✍️ Policy sign-offs', group: 'People', area: 'hr_policies', level: 'view', size: 's', open: ['openAckCompliance', 'ho'],
     desc: 'Overdue, due and signed policy sign-offs across all studios.',
-    async load() {
+    async load(b) {
       const R = (await dashRpc('kb_ack_compliance', { p_studio_id: null })) || [];
       const n = s => R.filter(r => r.status === s).length;
       if (!R.length) return '<div class="dash-empty">No policies need signing right now.</div>';
@@ -242,7 +244,7 @@ const DASH_BLOCKS = {
   concerns: {
     name: '🛡️ Concerns', group: 'People', area: 'hr_policies', level: 'edit', size: 's', tile: true, open: ['openConcernsAdmin'],
     desc: 'New and open concerns: counts and age only. Details stay on the Concerns page.',
-    async load() {
+    async load(b) {
       const L = (await dashRpc('hub_concerns_list')) || [];
       const fresh = L.filter(c => c.status === 'new'); dashGlanceSet(b, fresh.length ? fresh.length + ' new concerns' : ''); const looking = L.filter(c => c.status === 'reviewing');
       const oldest = fresh.map(c => c.created_at).filter(Boolean).sort()[0];
@@ -442,7 +444,7 @@ const DASH_BLOCKS = {
   newsletters: {
     name: '📧 Newsletters', group: 'Comms', area: 'newsletters', level: 'view', size: 's', open: ['openNewsPane'],
     desc: 'Drafts, scheduled and recently sent customer newsletters.',
-    async load() {
+    async load(b) {
       const L = (await dashRpc('news_issues_list', { p_templates: false })) || [];
       const n = s => L.filter(i => i.status === s).length;
       const last = L.filter(i => i.status === 'sent').sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))[0];
@@ -467,7 +469,7 @@ const DASH_BLOCKS = {
   staff_news: {
     name: '📰 Staff newsletter', group: 'Comms', area: 'staff_comms', level: 'view', size: 's', open: ['openStaffNewsPane'],
     desc: 'The latest staff newsletter: draft or published, and how many have read it.',
-    async load() {
+    async load(b) {
       const L = (await dashRpc('hub_staffnews_list')) || [];
       if (!L.length) return '<div class="dash-empty">No staff newsletters yet.</div>';
       const pub = L.filter(x => x.status === 'published').sort((a, b) => String(b.month).localeCompare(String(a.month)))[0], drafts = L.filter(x => x.status === 'draft').length;
@@ -493,7 +495,7 @@ const DASH_BLOCKS = {
   donations: {
     name: '🎁 Donations & giveaways', group: 'World', area: 'world_site_deals', level: 'view', size: 's', open: ['openDonPane'],
     desc: 'Giveaway codes handed out and how many have been used.',
-    async load() {
+    async load(b) {
       const R = (await dashRpc('hub_donations_list', { p_search: null, p_from: null, p_to: null })) || [];
       const codes = R.reduce((t, d) => t.concat(d.code_status || []), []), used = codes.filter(c => c.used === true).length;
       return `<div class="dash-stats"><div><b>${R.length}</b>Entries</div><div><b>${codes.length}</b>Codes given</div><div><b class="ok">${used}</b>Used</div></div>`;
@@ -725,7 +727,7 @@ async function openMyDash() {
 const DASH_PERSONAL = ['theme', 'avatar', 'name', 'greet', 'start'];   // (a person's own choices: a starting dashboard never overwrites them)
 function dashNormalize(L) {
   if (!L || !Array.isArray(L.blocks)) return null;
-  const out = { v: 1, start: !!L.start, starter: L.starter || '', blocks: L.blocks.filter(b => b && DASH_BLOCKS[b.type]).map(b => Object.assign({ id: b.id || dashNewId(), type: b.type, size: ['xs', 's', 'm', 'l'].includes(b.size) ? b.size : 'm', opts: Object.assign({}, DASH_BLOCKS[b.type].opts || {}, b.opts || {}) }, dashHeightOk(b.h) ? { h: dashHeightOk(b.h) } : {}, b.view === 'stat' ? { view: 'stat' } : {})) };
+  const out = { v: 1, start: !!L.start, starter: L.starter || '', blocks: L.blocks.filter(b => b && DASH_BLOCKS[b.type]).map(b => Object.assign({ id: b.id || dashNewId(), type: b.type, size: ['xs', 's', 'm', 'l'].includes(b.size) ? b.size : 'm', opts: Object.assign({}, DASH_BLOCKS[b.type].opts || {}, b.opts || {}) }, dashHeightOk(b.h) ? { h: dashHeightOk(b.h) } : {}, b.view === 'stat' ? { view: 'stat' } : {}, Number.isInteger(b.x) && b.x >= 0 && b.x < 8 ? { x: b.x } : {})) };
   if (L.theme && DASH_THEMES.some(t => t.key === L.theme)) out.theme = L.theme;
   if (L.avatar && typeof L.avatar === 'object' && (L.avatar.key || L.avatar.emoji)) out.avatar = { key: L.avatar.key ? String(L.avatar.key).slice(0, 300) : undefined, emoji: L.avatar.emoji ? String(L.avatar.emoji).slice(0, 16) : undefined };
   if (L.name) out.name = String(L.name).slice(0, 40);
@@ -806,7 +808,7 @@ function dashDraw(noLoad) {   // noLoad: redraw from blocks already loaded, with
   const bar = _dash.edit ? `<div class="dash-editbar"><button class="ho-btn primary" onclick="dashAddOpen()">+ Add a block</button>
       <button class="ho-btn" onclick="dashReset()">${!T && _dash.me.template ? '↺ Back to my starting dashboard' : '↺ Start again from a role’s layout'}</button>
       ${T ? '' : `<label class="dash-start"><input type="checkbox" ${L.start ? 'checked' : ''} onchange="_dash.layout.start=this.checked;dashSaveSoon()"> Open My dashboard when the Hub starts</label>`}
-      <span class="fd-sm">Drag ⠿ to move, or use ◀ ▶. S, M and L change the width; drag a block’s bottom-right corner to change its height. Blocks stack up to fill gaps.</span></div>` : '';
+      <span class="fd-sm">Drag ⠿ to move: drop it in any column, even on empty space, and it stacks under what’s there. ◀ ▶ also move. S, M and L change the width; drag a block’s bottom-right corner to change its height.</span></div>` : '';
   el.innerHTML = head + bar + `<div class="dash-grid${_dash.edit ? ' editing' : ''}" id="dash-grid"${_dash.edit ? ' ondragover="dashDragOver(event)" ondrop="dashDrop(event)"' : ''}>${L.blocks.map(dashBlockShell).join('')}</div>` +
     (!L.blocks.length ? `<div class="ho-card"><div class="goal-note">No blocks yet.</div><button class="ho-btn primary" onclick="${_dash.edit ? '' : 'dashToggleEdit();'}dashAddOpen()">+ Add a block</button></div>` : '');
   dashStatus(); dashGlanceDraw();
@@ -913,19 +915,34 @@ function dashDragStart(e, id) {
   const bl = e.currentTarget.closest('.dash-block');
   if (bl) { try { e.dataTransfer.setDragImage(bl, 20, 20); } catch (x) { } setTimeout(() => bl.classList.add('dragging'), 0); }   // (after the drag picture is taken)
 }
+function dashPointerCol(e, b) {   // the column under the pointer, on the 8-column grid, so the block fits
+  const g = document.getElementById('dash-grid'), r = g.getBoundingClientRect(), cols = dashCols(), w = dashSpanW(b, cols);
+  const cw = (r.width + 12) / cols; let c = Math.floor((e.clientX - r.left) / cw) - Math.floor((w - 1) / 2);
+  c = Math.max(0, Math.min(cols - w, c));
+  return Math.round(c * 8 / cols);
+}
 function dashDragOver(e, target) {
   if (!_dash.drag) return;
   e.preventDefault(); try { e.dataTransfer.dropEffect = 'move'; } catch (x) { }
-  if (!target || target === _dash.drag || Date.now() < _dash.dragWait) return;
-  const tEl = document.getElementById('dash-' + target), dEl = document.getElementById('dash-' + _dash.drag); if (!tEl || !dEl) return;
+  if (target) e.stopPropagation();   // (over a block: that block decides; the grid's own handler is for empty space)
+  if (target === _dash.drag || Date.now() < _dash.dragWait) return;
+  const B = _dash.layout.blocks, from = dashIdx(_dash.drag), x = B[from], dEl = document.getElementById('dash-' + _dash.drag); if (!x || !dEl) return;
+  const col = dashPointerCol(e, x);
+  if (!target) {   // empty space: to that column, under what's already there (the end of the order)
+    if (x.x === col && from === B.length - 1) return;
+    B.splice(from, 1); B.push(x); x.x = col;
+    _dash.dragMoved = true; _dash.dragWait = Date.now() + 160;
+    dashFlip(() => { document.getElementById('dash-grid').appendChild(dEl); dashPack(); });
+    return;
+  }
+  const tEl = document.getElementById('dash-' + target); if (!tEl) return;
   const r = tEl.getBoundingClientRect();
   const after = (r.width > r.height * 1.4) ? e.clientX > r.left + r.width / 2 : e.clientY > r.top + r.height / 2;   // (wide blocks: left/right half; tall ones: top/bottom half)
-  const B = _dash.layout.blocks, from = dashIdx(_dash.drag);
-  const x = B.splice(from, 1)[0]; let to = dashIdx(target) + (after ? 1 : 0);
-  B.splice(to, 0, x);
-  if (B.indexOf(x) === from) return;   // (already there)
+  B.splice(from, 1); const to = dashIdx(target) + (after ? 1 : 0); B.splice(to, 0, x);
+  if (B.indexOf(x) === from && x.x === col) return;   // (already there)
+  x.x = col;
   _dash.dragMoved = true; _dash.dragWait = Date.now() + 160;   // (a short pause so blocks sliding under the pointer don't bounce back)
-  dashFlip(() => { const g = document.getElementById('dash-grid'); g.insertBefore(dEl, after ? tEl.nextSibling : tEl); });
+  dashFlip(() => { const g = document.getElementById('dash-grid'); g.insertBefore(dEl, after ? tEl.nextSibling : tEl); dashPack(); });
 }
 function dashFlip(change) {   // move blocks, then animate each from where it was to where it is now
   const els = Array.from(document.querySelectorAll('#dash-grid .dash-block')), first = new Map(els.map(el => [el, el.getBoundingClientRect()]));
@@ -986,23 +1003,40 @@ function dashNoteInput(id, text) {
 // Each block spans as many 4px grid rows as its height needs, and the grid fills gaps (dense), so short blocks slide up
 // under shorter neighbours. In Customize, a block's own resize corner sets its height; it's saved as b.h (pixels).
 function dashHeightOk(h) { const n = Math.round(+h / 10) * 10; return n >= DASH_HMIN && n <= DASH_HMAX ? n : 0; }
-function dashSpan(el) {
-  const h = el.getBoundingClientRect().height;
-  el.style.gridRowEnd = 'span ' + Math.max(1, Math.ceil((h + DASH_GAP) / DASH_ROW));
+function dashCols() { return window.matchMedia('(max-width: 640px)').matches ? 2 : window.matchMedia('(max-width: 1100px)').matches ? 4 : 8; }   // (the same widths as the grid's own CSS)
+function dashSpanW(b, cols) { const t = b.view === 'stat'; const z = !t && b.size === 'xs' ? 's' : b.size; const w = z === 'xs' ? 1 : z === 's' ? 2 : z === 'm' ? 4 : cols; return Math.min(cols, cols >= 8 ? w : cols >= 4 ? (z === 'xs' ? 1 : z === 's' ? 2 : cols) : (z === 'xs' ? 1 : cols)); }
+// Place every block: in its saved column (b.x, on the 8-column grid) if it has one, else in the highest gap that fits (leftmost on a
+// tie), each one under whatever is already in its columns. Positions are set on the blocks, so the browser just draws them.
+function dashPack() {
+  const g = document.getElementById('dash-grid'); if (!g || !_dash.layout) return;
+  const cols = dashCols(), sky = new Array(cols).fill(0); _dash.place = {};
+  _dash.layout.blocks.forEach(b => {
+    const el = document.getElementById('dash-' + b.id); if (!el) return;
+    const w = dashSpanW(b, cols), rows = Math.max(1, Math.ceil((el.getBoundingClientRect().height + DASH_GAP) / DASH_ROW));
+    const top = x => Math.max.apply(null, sky.slice(x, x + w));
+    let x = Number.isInteger(b.x) ? Math.min(Math.round(b.x * cols / 8), cols - w) : -1;
+    if (x < 0) { x = 0; for (let c = 1; c + w <= cols; c++) if (top(c) < top(x)) x = c; }
+    const y = top(x);
+    el.style.gridColumn = (x + 1) + ' / span ' + w; el.style.gridRow = (y + 1) + ' / span ' + rows;
+    for (let c = x; c < x + w; c++) sky[c] = y + rows;
+    _dash.place[b.id] = { x, w, cols };
+  });
 }
+function dashPackSoon() { if (_dash.packing) return; _dash.packing = true; requestAnimationFrame(() => { _dash.packing = false; dashPack(); }); }
 function dashPackStart() {
   if (_dash.ro) _dash.ro.disconnect();
   const els = document.querySelectorAll('#dash-grid .dash-block');
-  els.forEach(dashSpan);
+  dashPack();
   if (typeof ResizeObserver !== 'function') return;
-  _dash.ro = new ResizeObserver(entries => entries.forEach(en => {
-    const el = en.target; dashSpan(el);
+  _dash.ro = new ResizeObserver(entries => { dashPackSoon(); entries.forEach(en => {
+    const el = en.target;
     if (!_dash.edit || !el.style.height) return;   // (only a drag of the corner, in Customize, changes the saved height)
     const b = _dash.layout && _dash.layout.blocks.find(x => x.id === el.getAttribute('data-id')); if (!b) return;
     const h = dashHeightOk(parseFloat(el.style.height)) || (parseFloat(el.style.height) < DASH_HMIN ? DASH_HMIN : DASH_HMAX);
     if (h !== b.h) { b.h = h; el.classList.add('fixed'); dashSaveSoon(); dashHeightBtn(b); }
-  }));
+  }); });
   els.forEach(el => _dash.ro.observe(el));
+  if (!_dash.winPack) { _dash.winPack = true; window.addEventListener('resize', dashPackSoon); }
 }
 function dashHeightBtn(b) {   // (show ↕ Auto once a block has a height, without redrawing mid-drag)
   const t = document.querySelector('#dash-' + b.id + ' .dash-tools');
@@ -1267,7 +1301,7 @@ function dashStyles() {
 .dash-status { font-size: 13px; color: var(--ink-soft); } .dash-status.bad { color: var(--red); font-weight: 700; }
 .dash-editbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: var(--accent-soft); border-radius: 14px; padding: 10px 12px; margin: 8px 0 12px; }
 .dash-start { font-size: 13px; display: flex; align-items: center; gap: 6px; }
-.dash-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); grid-auto-rows: 4px; grid-auto-flow: row dense; gap: 0 12px; align-items: start; margin-top: 8px; }
+.dash-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); grid-auto-rows: 4px; gap: 0 12px; align-items: start; margin-top: 8px; }
 .dash-block { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px 14px; min-width: 0; box-sizing: border-box; display: flex; flex-direction: column; margin-bottom: 12px; }
 .dash-block.fixed .dash-body { flex: 1 1 auto; min-height: 0; max-height: none; }
 .dash-block.sz-xs { grid-column: span 1; } .dash-block.sz-s { grid-column: span 2; } .dash-block.sz-m { grid-column: span 4; } .dash-block.sz-l { grid-column: 1 / -1; }
