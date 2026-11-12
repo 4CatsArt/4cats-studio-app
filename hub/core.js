@@ -1,7 +1,7 @@
 // hub/core.js: shared by every part of the Hub. Loaded by hub.html BEFORE its main script.
 // The Supabase client, the sign-in token on Edge Function calls, fnHeaders, STUDIO_NAMES, and the
 // everyday helpers: esc, escAttr, localDateStr, shortTime, openDutySheet/closeDutySheet, PANES/showOnlyPane/
-// paneVisible, setActiveNav. Moved out of hub.html as-is (Nov 11 2026). (Nov 12 2026: + mydash-pane for 🏠 My dashboard)
+// paneVisible, setActiveNav. Moved out of hub.html as-is (Nov 11 2026). (Nov 12 2026: + mydash-pane for 🏠 My dashboard; + the 👁 "Viewing as" banner for owners' Sign in as)
 
 /* ==========================================================================
    LIVE CONFIG
@@ -132,3 +132,21 @@ function relTime(iso) {
   const h = Math.round(mins / 60); if (h < 24) return h + ' h ago';
   const d = Math.round(h / 24); return d === 1 ? 'yesterday' : d + ' days ago';
 }
+
+// 👁 (Nov 12 2026) "Sign in as" (access.html → admin-sign-in-as): the page opened from the one-time link carries ?viewing_as=<name>.
+// Kept for this window only (sessionStorage), with a banner on every page so it's never mistaken for your own sign-in.
+(function () {
+  try {
+    var q = new URLSearchParams(location.search).get('viewing_as');
+    if (q) { sessionStorage.setItem('hub-viewing-as', q); history.replaceState(null, '', location.pathname + location.hash); }
+    var who = sessionStorage.getItem('hub-viewing-as'); if (!who) return;
+    var show = function () {
+      if (document.getElementById('viewing-as-bar')) return;
+      var b = document.createElement('div'); b.id = 'viewing-as-bar';
+      b.setAttribute('style', 'position:fixed;left:0;right:0;bottom:0;z-index:99999;background:#7a1fa2;color:#fff;font:600 14px/1.4 system-ui,sans-serif;padding:8px 14px;text-align:center;box-shadow:0 -2px 8px rgba(0,0,0,.25)');
+      b.textContent = '👁 Viewing as ' + who + '. Everything here is done as them. Close this window when you\u2019re done.';
+      document.body.appendChild(b);
+    };
+    if (document.body) show(); else document.addEventListener('DOMContentLoaded', show);
+  } catch (e) { /* no banner */ }
+})();
