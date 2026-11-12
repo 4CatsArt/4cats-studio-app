@@ -408,7 +408,7 @@ async function dashSaveNow() {
 function dashStatus() { const el = document.getElementById('dash-status'); if (el) { el.textContent = _dash.saving || ''; el.className = 'dash-status' + (/^Not saved/.test(_dash.saving) ? ' bad' : ''); } }
 
 // ---------- Drawing ----------
-function dashDraw() {
+function dashDraw(noLoad) {   // noLoad: redraw from blocks already loaded, without asking the database again
   const el = document.getElementById('mydash-pane'); if (!el) return;
   const head = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🏠 My dashboard</div><span class="spacer"></span>
     <span id="dash-status" class="dash-status"></span>
@@ -422,11 +422,11 @@ function dashDraw() {
       <button class="ho-btn" onclick="dashReset()">↺ Start again from a role's layout</button>
       <label class="dash-start"><input type="checkbox" ${L.start ? 'checked' : ''} onchange="_dash.layout.start=this.checked;dashSaveSoon()"> Open My dashboard when the Hub starts</label>
       <span class="fd-sm">Drag ⠿ to move, or use ◀ ▶. S, M and L change the width; drag a block’s bottom-right corner to change its height. Blocks stack up to fill gaps.</span></div>` : '';
-  el.innerHTML = head + bar + `<div class="dash-grid${_dash.edit ? ' editing' : ''}" id="dash-grid">${L.blocks.map(dashBlockShell).join('')}</div>` +
+  el.innerHTML = head + bar + `<div class="dash-grid${_dash.edit ? ' editing' : ''}" id="dash-grid"${_dash.edit ? ' ondragover="dashDragOver(event)" ondrop="dashDrop(event)"' : ''}>${L.blocks.map(dashBlockShell).join('')}</div>` +
     (!L.blocks.length ? `<div class="ho-card"><div class="goal-note">No blocks yet.</div><button class="ho-btn primary" onclick="${_dash.edit ? '' : 'dashToggleEdit();'}dashAddOpen()">+ Add a block</button></div>` : '');
   dashStatus();
   dashPackStart();
-  L.blocks.forEach(b => dashLoadBlock(b.id, false));
+  L.blocks.forEach(b => { if (!noLoad || _dash.cache[b.id] === undefined) dashLoadBlock(b.id, false); });
 }
 function dashBlockShell(b, i) {
   const t = DASH_BLOCKS[b.type], ed = _dash.edit, n = _dash.layout.blocks.length;
@@ -436,7 +436,7 @@ function dashBlockShell(b, i) {
       ${sizes}${b.h ? `<button class="dash-hauto" onclick="dashHeightAuto('${b.id}')" title="Fit the height to what's in it">↕ Auto</button>` : ''}${t.settings ? `<button onclick="dashSettings('${b.id}')" title="Settings">⚙</button>` : ''}<button onclick="dashRemove('${b.id}')" title="Remove">✕</button></div>` : '';
   const acts = !ed ? `${t.open ? `<button class="dash-open" onclick="dashOpen('${escAttr(t.open[0])}'${t.open[1] !== undefined ? `,'${escAttr(t.open[1])}'` : ''})">Open →</button>` : ''}
       <button class="dash-ref" onclick="dashLoadBlock('${b.id}', true)" title="Refresh">↻</button>` : '';
-  return `<section class="dash-block sz-${b.size}${b.h ? ' fixed' : ''}" id="dash-${b.id}" data-id="${b.id}"${b.h ? ` style="height:${b.h}px"` : ''} ${ed ? `ondragover="dashDragOver(event)" ondrop="dashDrop(event,'${b.id}')"` : ''}>
+  return `<section class="dash-block sz-${b.size}${b.h ? ' fixed' : ''}" id="dash-${b.id}" data-id="${b.id}"${b.h ? ` style="height:${b.h}px"` : ''} ${ed ? `ondragover="dashDragOver(event,'${b.id}')" ondrop="dashDrop(event)"` : ''}>
     <header><b>${esc(t.name)}</b><span class="spacer"></span>${acts}</header>${tools}
     <div class="dash-body" id="dash-body-${b.id}">${_dash.cache[b.id] || '<div class="dash-empty">Loading…</div>'}</div></section>`;
 }
@@ -496,16 +496,46 @@ function dashRemove(id) {
   const i = dashIdx(id); if (i < 0) return;
   _dash.layout.blocks.splice(i, 1); delete _dash.cache[id]; dashSaveSoon(); dashDraw();
 }
-function dashDragStart(e, id) { _dash.drag = id; try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', id); } catch (x) { } const bl = e.currentTarget.closest('.dash-block'); if (bl) { bl.classList.add('dragging'); try { e.dataTransfer.setDragImage(bl, 20, 20); } catch (x) { } } }
-function dashDragOver(e) { if (_dash.drag) { e.preventDefault(); try { e.dataTransfer.dropEffect = 'move'; } catch (x) { } } }
-function dashDrop(e, target) {
-  e.preventDefault(); const from = _dash.drag; _dash.drag = null;
-  if (!from || from === target) { dashDraw(); return; }
-  const B = _dash.layout.blocks, i = dashIdx(from); const [x] = B.splice(i, 1);
-  B.splice(dashIdx(target) + (i <= dashIdx(target) ? 1 : 0), 0, x);
-  dashSaveSoon(); dashDraw();
+// Dragging: the block being dragged stays in the grid as a faded placeholder, and as it passes over another block it's moved
+// in front of or behind it right away, so the others slide out of the way (animated). Letting go just saves the new order.
+function dashDragStart(e, id) {
+  _dash.drag = id; _dash.dragMoved = false; _dash.dragWait = 0;
+  try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', id); } catch (x) { }
+  const bl = e.currentTarget.closest('.dash-block');
+  if (bl) { try { e.dataTransfer.setDragImage(bl, 20, 20); } catch (x) { } setTimeout(() => bl.classList.add('dragging'), 0); }   // (after the drag picture is taken)
 }
-function dashDragEnd() { _dash.drag = null; document.querySelectorAll('.dash-block.dragging').forEach(x => x.classList.remove('dragging')); }
+function dashDragOver(e, target) {
+  if (!_dash.drag) return;
+  e.preventDefault(); try { e.dataTransfer.dropEffect = 'move'; } catch (x) { }
+  if (!target || target === _dash.drag || Date.now() < _dash.dragWait) return;
+  const tEl = document.getElementById('dash-' + target), dEl = document.getElementById('dash-' + _dash.drag); if (!tEl || !dEl) return;
+  const r = tEl.getBoundingClientRect();
+  const after = (r.width > r.height * 1.4) ? e.clientX > r.left + r.width / 2 : e.clientY > r.top + r.height / 2;   // (wide blocks: left/right half; tall ones: top/bottom half)
+  const B = _dash.layout.blocks, from = dashIdx(_dash.drag);
+  const x = B.splice(from, 1)[0]; let to = dashIdx(target) + (after ? 1 : 0);
+  B.splice(to, 0, x);
+  if (B.indexOf(x) === from) return;   // (already there)
+  _dash.dragMoved = true; _dash.dragWait = Date.now() + 160;   // (a short pause so blocks sliding under the pointer don't bounce back)
+  dashFlip(() => { const g = document.getElementById('dash-grid'); g.insertBefore(dEl, after ? tEl.nextSibling : tEl); });
+}
+function dashFlip(change) {   // move blocks, then animate each from where it was to where it is now
+  const els = Array.from(document.querySelectorAll('#dash-grid .dash-block')), first = new Map(els.map(el => [el, el.getBoundingClientRect()]));
+  change();
+  els.forEach(el => {
+    const a = first.get(el), b = el.getBoundingClientRect(), dx = a.left - b.left, dy = a.top - b.top;
+    if (!dx && !dy) return;
+    el.style.transition = 'none'; el.style.transform = `translate(${dx}px, ${dy}px)`;
+    el.getBoundingClientRect();   // (apply before animating back)
+    el.style.transition = 'transform 180ms ease'; el.style.transform = '';
+    setTimeout(() => { el.style.transition = ''; }, 200);
+  });
+}
+function dashDrop(e) { e.preventDefault(); }
+function dashDragEnd() {
+  const moved = _dash.drag && _dash.dragMoved; _dash.drag = null; _dash.dragMoved = false;
+  document.querySelectorAll('.dash-block.dragging').forEach(x => x.classList.remove('dragging'));
+  if (moved) { dashSaveSoon(); dashDraw(true); }   // (redraw from what's already loaded, to refresh the ◀ ▶ buttons)
+}
 function dashAddOpen() {
   const have = new Set(_dash.layout.blocks.map(b => b.type));
   const html = `<h3 style="margin:0 0 4px">+ Add a block</h3><p class="fd-sm" style="margin:0 0 10px">Only blocks your access allows are listed.</p>` +
@@ -601,7 +631,7 @@ function dashStyles() {
 .dash-open, .dash-ref { border: 0; background: none; color: var(--accent); font-weight: 700; font-size: 13px; cursor: pointer; padding: 2px 4px; white-space: nowrap; flex: none; }
 .dash-ref { color: var(--ink-soft); }
 .dash-body { max-height: 420px; overflow-y: auto; font-size: 13.5px; }
-.dash-grid.editing .dash-block { outline: 2px dashed var(--accent-soft); resize: vertical; overflow: hidden; min-height: 120px; max-height: 1000px; } .dash-block.dragging { opacity: .45; }
+.dash-grid.editing .dash-block { outline: 2px dashed var(--accent-soft); resize: vertical; overflow: hidden; min-height: 120px; max-height: 1000px; } .dash-block.dragging { opacity: .4; outline: 2px dashed var(--accent) !important; box-shadow: none; }
 .dash-tools { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: -2px 0 8px; }
 .dash-tools button { border: 1px solid var(--border); background: #fff; border-radius: 8px; min-width: 28px; height: 28px; font-size: 12px; cursor: pointer; }
 .dash-tools button:disabled { opacity: .35; cursor: default; } .dash-tools .dash-sz.on { background: var(--accent); border-color: var(--accent); color: #fff; }
