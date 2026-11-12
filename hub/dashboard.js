@@ -3,7 +3,8 @@
 // my_dashboard SQL step 2: hub_dash_me / hub_dash_save). Each block is a summary with "Open →" to its full Hub page.
 // The page only hides blocks a person can't open: every block loads through the same RPC or Edge Function as its full page,
 // and that call checks access itself (a refusal shows "No access" on the block). Loaded by hub.html after the other area files.
-// Design: "4Cats Hub — My dashboard design v1" doc. (Nov 12 2026: heights by dragging a block's corner, and blocks stack into gaps.)
+// Design: "4Cats Hub — My dashboard design v1" doc. (Nov 12 2026: heights by dragging a block's corner, blocks stack into gaps,
+// live reordering while dragging; Customize buttons sit in each block's header so blocks are the same size in both modes.)
 
 // ---------- State ----------
 let _dash = { me: null, layout: null, edit: false, err: '', saving: '', saveTimer: null, refreshTimer: null, drag: null, choose: false, cache: {}, ro: null };
@@ -433,11 +434,11 @@ function dashBlockShell(b, i) {
   const sizes = ['s', 'm', 'l'].map(s => `<button class="dash-sz${b.size === s ? ' on' : ''}" onclick="dashSize('${b.id}','${s}')" title="${s === 's' ? 'Small' : s === 'm' ? 'Medium' : 'Full width'}">${s.toUpperCase()}</button>`).join('');
   const tools = ed ? `<div class="dash-tools"><span class="dash-grip" title="Drag to move" draggable="true" ondragstart="dashDragStart(event,'${b.id}')" ondragend="dashDragEnd()">⠿</span>
       <button onclick="dashMove('${b.id}',-1)" ${i === 0 ? 'disabled' : ''} title="Move back">◀</button><button onclick="dashMove('${b.id}',1)" ${i === n - 1 ? 'disabled' : ''} title="Move forward">▶</button>
-      ${sizes}${b.h ? `<button class="dash-hauto" onclick="dashHeightAuto('${b.id}')" title="Fit the height to what's in it">↕ Auto</button>` : ''}${t.settings ? `<button onclick="dashSettings('${b.id}')" title="Settings">⚙</button>` : ''}<button onclick="dashRemove('${b.id}')" title="Remove">✕</button></div>` : '';
+      ${sizes}${b.h ? `<button class="dash-hauto" onclick="dashHeightAuto('${b.id}')" title="Height: fit to what's in it">↕</button>` : ''}${t.settings ? `<button onclick="dashSettings('${b.id}')" title="Settings">⚙</button>` : ''}<button onclick="dashRemove('${b.id}')" title="Remove">✕</button></div>` : '';
   const acts = !ed ? `${t.open ? `<button class="dash-open" onclick="dashOpen('${escAttr(t.open[0])}'${t.open[1] !== undefined ? `,'${escAttr(t.open[1])}'` : ''})">Open →</button>` : ''}
       <button class="dash-ref" onclick="dashLoadBlock('${b.id}', true)" title="Refresh">↻</button>` : '';
   return `<section class="dash-block sz-${b.size}${b.h ? ' fixed' : ''}" id="dash-${b.id}" data-id="${b.id}"${b.h ? ` style="height:${b.h}px"` : ''} ${ed ? `ondragover="dashDragOver(event,'${b.id}')" ondrop="dashDrop(event)"` : ''}>
-    <header><b>${esc(t.name)}</b><span class="spacer"></span>${acts}</header>${tools}
+    <header><b title="${escAttr(t.name)}">${esc(t.name)}</b><span class="spacer"></span>${ed ? tools : acts}</header>
     <div class="dash-body" id="dash-body-${b.id}">${_dash.cache[b.id] || '<div class="dash-empty">Loading…</div>'}</div></section>`;
 }
 async function dashLoadBlock(id, fresh) {
@@ -595,7 +596,7 @@ function dashPackStart() {
 }
 function dashHeightBtn(b) {   // (show ↕ Auto once a block has a height, without redrawing mid-drag)
   const t = document.querySelector('#dash-' + b.id + ' .dash-tools');
-  if (t && !t.querySelector('.dash-hauto')) { const x = document.createElement('button'); x.className = 'dash-hauto'; x.textContent = '↕ Auto'; x.title = 'Fit the height to what’s in it'; x.onclick = () => dashHeightAuto(b.id); t.insertBefore(x, t.querySelector('[title="Settings"], [title="Remove"]')); }
+  if (t && !t.querySelector('.dash-hauto')) { const x = document.createElement('button'); x.className = 'dash-hauto'; x.textContent = '↕'; x.title = 'Height: fit to what’s in it'; x.onclick = () => dashHeightAuto(b.id); t.insertBefore(x, t.querySelector('[title="Settings"], [title="Remove"]')); }
 }
 function dashHeightAuto(id) { const b = _dash.layout.blocks[dashIdx(id)]; if (!b) return; delete b.h; dashSaveSoon(); dashDraw(); }
 function dashPinThenRefresh() {
@@ -626,16 +627,17 @@ function dashStyles() {
 .dash-block { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px 14px; min-width: 0; box-sizing: border-box; display: flex; flex-direction: column; margin-bottom: 12px; }
 .dash-block.fixed .dash-body { flex: 1 1 auto; min-height: 0; max-height: none; }
 .dash-block.sz-s { grid-column: span 1; } .dash-block.sz-m { grid-column: span 2; } .dash-block.sz-l { grid-column: 1 / -1; }
-.dash-block header { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; } .dash-block header b { font-size: 15px; }
+.dash-block header { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; height: 28px; flex: none; min-width: 0; }
+.dash-block header b { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .dash-block .spacer { flex: 1; }
 .dash-open, .dash-ref { border: 0; background: none; color: var(--accent); font-weight: 700; font-size: 13px; cursor: pointer; padding: 2px 4px; white-space: nowrap; flex: none; }
 .dash-ref { color: var(--ink-soft); }
 .dash-body { max-height: 420px; overflow-y: auto; font-size: 13.5px; }
-.dash-grid.editing .dash-block { outline: 2px dashed var(--accent-soft); resize: vertical; overflow: hidden; min-height: 120px; max-height: 1000px; } .dash-block.dragging { opacity: .4; outline: 2px dashed var(--accent) !important; box-shadow: none; }
-.dash-tools { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: -2px 0 8px; }
-.dash-tools button { border: 1px solid var(--border); background: #fff; border-radius: 8px; min-width: 28px; height: 28px; font-size: 12px; cursor: pointer; }
+.dash-grid.editing .dash-block { outline: 2px dashed var(--accent-soft); resize: vertical; overflow: hidden; max-height: 1000px; } .dash-block.dragging { opacity: .4; outline: 2px dashed var(--accent) !important; box-shadow: none; }
+.dash-tools { display: flex; flex-wrap: nowrap; gap: 3px; align-items: center; flex: none; }   /* (in the header, so Customize never changes a block's height) */
+.dash-tools button { border: 1px solid var(--border); background: #fff; border-radius: 7px; min-width: 24px; height: 24px; padding: 0 4px; font-size: 11px; cursor: pointer; }
 .dash-tools button:disabled { opacity: .35; cursor: default; } .dash-tools .dash-sz.on { background: var(--accent); border-color: var(--accent); color: #fff; }
-.dash-grip { cursor: grab; font-size: 18px; color: var(--ink-soft); padding: 0 4px; }
+.dash-grip { cursor: grab; font-size: 18px; line-height: 24px; color: var(--ink-soft); padding: 0 2px; }
 .dash-empty { color: var(--ink-soft); padding: 4px 0; } .dash-empty.bad { color: var(--red); }
 .dash-list { display: flex; flex-direction: column; gap: 6px; }
 .dash-row { border-left: 3px solid var(--border); padding: 2px 0 2px 8px; } .dash-row.late { border-left-color: var(--red); }
