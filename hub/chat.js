@@ -1,5 +1,7 @@
 // hub/chat.js: 💬 Staff chat (rooms, unread counts, the Team app's chat tab) and 🔔 phone notifications for chat (hub-push + sw.js).
 // Moved out of hub.html as-is (Nov 12 2026). Loaded by hub.html after its main script.
+// (Nov 12 2026) 🏢 Home office chat (hub_chat_office.sql): a Home office group and private home office messages, at the top of
+// home office's chat list, with + New message; home office posts carry the person's name and 🎨 picture.
 
 // ---------- 💬 Staff chat (hub_chat.sql) ----------
 // One component for three places: staff phones (their studio chats + private messages),
@@ -9,7 +11,7 @@
 let _chat = null;
 function chatStop() { if (_chat) { clearInterval(_chat.poll); clearInterval(_chat.listPoll); clearTimeout(_chat.asTimer); } _chat = null; }
 async function openChatPane() { showOnlyPane('chat-pane'); setActiveNav('nav-chat'); chatMount('hub-chat', _studioData && _studioData.isAdmin ? 'admin' : 'studio'); }
-function chatAvatar(m, size) { return hubAvatarHtml({ name: m.author_name || 'Home office', avatar_key: m.avatar_key, staff_id: m.author_staff_id || m.author_name }, size); }
+function chatAvatar(m, size) { return hubAvatarHtml({ name: m.author_name || 'Home office', avatar_key: m.avatar_key, staff_id: m.author_staff_id || m.author_user || m.author_name }, size); }
 async function chatMount(hostId, mode) {
   chatStop();
   _chat = { host: hostId, mode, threads: [], open: null, msgs: [], last: 0, as: null, pin: null, pinUntil: 0, people: null };
@@ -37,13 +39,15 @@ function chatRenderThreads() {
   const q = String(_chat.filter || '').trim().toLowerCase();
   const hit = t => !q || [t.title, STUDIO_NAMES[t.studio_id], t.last && t.last.who, t.last && t.last.body].some(x => String(x || '').toLowerCase().includes(q));
   const shown = _chat.threads.filter(hit);
+  const office = shown.filter(t => t.kind === 'office' || t.kind === 'office_direct').sort((a, b) => (a.kind === 'office' ? -1 : 0) - (b.kind === 'office' ? -1 : 0));
   const studios = shown.filter(t => t.kind === 'studio'), mine = shown.filter(t => t.kind === 'direct' && !t.watching), watch = shown.filter(t => t.kind === 'direct' && t.watching);
   const row = t => `<button class="chat-thread${_chat.open === t.id ? ' on' : ''}" onclick="chatOpen('${escAttr(t.id)}')">
-      ${t.kind === 'studio' ? '<span class="chat-ic">🏠</span>' : t.other ? hubAvatarHtml({ name: t.other.name, avatar_key: t.other.avatar_key, staff_id: t.other.staff_id }, 32) : '<span class="chat-ic">👥</span>'}
+      ${t.kind === 'studio' ? '<span class="chat-ic">🏠</span>' : t.kind === 'office' ? '<span class="chat-ic">🏢</span>' : t.other && t.kind === 'office_direct' ? hubAvatarHtml({ name: t.other.name, avatar_key: t.other.avatar_key, staff_id: t.other.user_id }, 32) : t.other ? hubAvatarHtml({ name: t.other.name, avatar_key: t.other.avatar_key, staff_id: t.other.staff_id }, 32) : '<span class="chat-ic">👥</span>'}
       <span class="chat-tmain"><b>${esc(t.title)}</b><span class="goal-note">${t.last ? esc((t.last.who ? (/^home office$/i.test(t.last.who) ? t.last.who : t.last.who.split(' ')[0]) + ': ' : '') + t.last.body) : 'No messages yet'}</span></span>
       ${t.unread > 0 && !t.watching ? `<span class="nav-badge">${t.unread}</span>` : ''}</button>`;
   list.innerHTML = `${_chat.mode === 'staff' ? `<div id="push-card"></div><button class="ho-btn primary" style="width:100%;margin-bottom:8px" onclick="chatNewDirect()">+ New direct message</button>` : ''}
     ${_chat.mode === 'admin' ? '<div id="push-admin"></div>' : ''}
+    ${office.length || _chat.mode === 'admin' ? `<div class="chat-sec" style="display:flex;align-items:center;gap:6px">🏢 Home office${_chat.mode === 'admin' ? '<span style="flex:1"></span><button class="ho-btn sm" onclick="chatNewOffice()" title="A private message to someone at home office">+ New message</button>' : ''}</div>${office.map(row).join('')}` : ''}
     ${studios.length ? `<div class="chat-sec">Studio chat${studios.length === 1 ? '' : 's'}</div>${studios.map(row).join('')}` : ''}
     ${mine.length ? `<div class="chat-sec">Direct messages</div>${mine.map(row).join('')}` : ''}
     ${watch.length ? `<details class="chat-watch"${_chat.watchOpen || q ? ' open' : ''} ontoggle="if (!(_chat.filter || '').trim()) _chat.watchOpen = this.open"><summary class="chat-sec">${_chat.mode === 'admin' ? 'Direct messages, all studios' : 'Direct messages'} (${watch.length})</summary>${watch.map(row).join('')}</details>` : ''}
@@ -69,7 +73,9 @@ async function chatOpen(id) {
   document.querySelector('#' + _chat.host + ' .chat-wrap').classList.add('room-open');
   document.querySelectorAll('.chat-thread').forEach(b => b.classList.toggle('on', b.getAttribute('onclick').includes(id)));
   const room = document.getElementById('chat-room');
-  const privacy = t.kind === 'direct' ? `<div class="chat-note">${t.watching ? '👀 You’re viewing a direct message. Read-only. '
+  const privacy = t.kind === 'office' ? '<div class="chat-note">🏢 Only home office can see this chat.</div>'
+    : t.kind === 'office_direct' ? `<div class="chat-note">🔒 Only you and ${esc(t.title || 'them')} can see these messages.</div>`
+    : t.kind === 'direct' ? `<div class="chat-note">${t.watching ? '👀 You’re viewing a direct message. Read-only. '
     : t.other_studio ? 'You don’t work at the same studio any more, so this chat is read-only. ' : ''}<button type="button" class="chat-about" onclick="chatAboutDM()">ℹ️ About Direct Messages</button></div>` : '';
   room.innerHTML = `<div class="chat-head"><button class="ho-btn chat-back" onclick="document.querySelector('#${_chat.host} .chat-wrap').classList.remove('room-open')">←</button><b>${esc(t.title || 'Chat')}</b></div>
     ${privacy}<div class="chat-msgs" id="chat-msgs"><div class="goal-note" style="padding:12px">Loading…</div></div>
@@ -103,9 +109,10 @@ function chatRender() {
   box.innerHTML = _chat.msgs.map(m => {
     const d = new Date(m.created_at), day = d.toDateString();
     const sep = day !== lastDay ? `<div class="chat-day">${esc(d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }))}</div>` : ''; lastDay = day;
-    const canRemove = !m.deleted && (m.mine || _chat.mode === 'admin');
+    const ot = (_chat.threads.find(x => x.id === _chat.open) || {}).kind, inOffice = ot === 'office' || ot === 'office_direct';
+    const canRemove = !m.deleted && (m.mine || (_chat.mode === 'admin' && ot !== 'office_direct'));
     return sep + `<div class="chat-m${m.mine ? ' mine' : ''}${m.author_kind === 'home_office' ? ' ho' : ''}">${m.mine ? '' : chatAvatar(m, 30)}
-      <div class="chat-bub"><div class="chat-who">${m.mine ? '' : esc(m.author_name || 'Home office') + (m.author_kind === 'home_office' ? ' <span class="duty-tag ho">Home office</span>' : '')}
+      <div class="chat-bub"><div class="chat-who">${m.mine ? '' : esc(m.author_name || 'Home office') + (m.author_kind === 'home_office' && !inOffice ? ' <span class="duty-tag ho">Home office</span>' : '')}
           <span class="goal-note">${esc(d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }))}${m.via_studio ? ' · studio computer' : ''}</span>
           ${canRemove ? `<button class="chat-x" title="Remove" onclick="chatRemove(${m.id})">✕</button>` : ''}</div>
         ${m.deleted ? `<i class="goal-note">Message removed${m.deleted_by ? ' by ' + esc(m.deleted_by) : ''}</i>` : `<div class="chat-body">${esc(m.body).replace(/\n/g, '<br>')}</div>`}</div></div>`;
@@ -166,6 +173,29 @@ function chatAboutDM() {
     '<p>Please keep all messages professional and respectful.</p><button type="button" class="ho-btn primary" onclick="this.closest(\'.dm-about-back\').remove()">Got it</button></div>';
   back.addEventListener('click', e => { if (e.target === back) back.remove(); });
   document.body.appendChild(back);
+}
+// 🏢 Home office: a private message to someone at home office
+async function chatNewOffice() {
+  if (!_chat.officePeople) { const r = await sb.rpc('hub_chat_office_people'); _chat.officePeople = r.error ? [] : (r.data || []); if (r.error) { alert(/hub_chat_office_people/.test(r.error.message) ? 'Run the home office chat SQL first.' : r.error.message); return; } }
+  openDutySheet(`<h3>New message</h3><p class="goal-note" style="margin:0 0 8px">🔒 Only the two of you will see it.</p>
+    <input id="chat-ofind" class="chat-find" placeholder="Search home office…" oninput="chatFilterOffice(this.value)" autocomplete="off">
+    <div class="chat-people" id="chat-opeople"></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button></div>`);
+  chatFilterOffice('');
+  setTimeout(() => { const f = document.getElementById('chat-ofind'); if (f) f.focus(); }, 50);
+}
+function chatFilterOffice(q) {
+  q = String(q || '').toLowerCase().trim();
+  const list = (_chat.officePeople || []).filter(p => !q || String(p.name || '').toLowerCase().includes(q));
+  document.getElementById('chat-opeople').innerHTML = list.map(p => `<button class="chat-person" onclick="chatStartOffice('${escAttr(p.user_id)}')">${hubAvatarHtml({ name: p.name, avatar_key: p.avatar_key, staff_id: p.user_id }, 30)}<span><b>${esc(p.name)}</b></span></button>`).join('')
+    || `<div class="goal-note">${(_chat.officePeople || []).length ? 'No one found.' : 'No one else at home office yet.'}</div>`;
+}
+async function chatStartOffice(userId) {
+  const { data, error } = await sb.rpc('hub_chat_office_direct', { p_user: userId });
+  if (error) { alert(error.message); return; }
+  closeDutySheet();
+  await chatLoadThreads();
+  chatOpen(data);
 }
 // Staff: start a direct message
 async function chatNewDirect() {
@@ -296,4 +326,3 @@ async function pushAdminSave() {
   if (error) { document.getElementById('pa-msg').innerHTML = `<div class="me-msg err">${esc(error.message)}</div>`; return; }
   document.getElementById('push-admin').dataset.open = ''; pushAdminRender();
 }
-
