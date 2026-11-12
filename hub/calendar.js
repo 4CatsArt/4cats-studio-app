@@ -4,6 +4,8 @@
 // Loaded by hub.html after dashboard.js. Weeks start on Sunday, like pay periods.
 // (Nov 12 2026: 👥 meetings and 1:1s (hub_calendar_meetings.sql): invite home office people, Yes / Maybe / No, repeats, skip a
 // date, agenda, and notes for each date: shared with the people invited; a 1:1's only the two of you.)
+// (Nov 12 2026: ⚙ My calendar settings: your Zoom link (fills in new meetings) and time zone (hub_cal_settings); email invites,
+// updates and cancellations through the hub-cal-invite Edge Function; hub.html#cal-<id> ("Answer in the Hub") opens that meeting.)
 
 if (typeof PANES !== 'undefined' && !PANES.includes('cal-pane')) PANES.push('cal-pane');
 const CAL_LAYERS = [
@@ -21,7 +23,7 @@ const calTime = t => { if (!t) return ''; const [h, m] = t.split(':').map(Number
 function openCalPane() {
   showOnlyPane('cal-pane'); setActiveNav('nav-cal');
   if (!_cal.day) _cal.day = calD(calIso(new Date()));
-  calStyles(); calLoad();
+  calStyles(); calLoad(); calMe().catch(() => {});
 }
 function calRange() {   // the dates the current view shows
   const d = _cal.day;
@@ -91,7 +93,7 @@ function calDraw() {
       : '<p class="ho-intro">Nothing in the next 5 weeks on the layers you’ve switched on.</p>';
   }
   el.innerHTML = `<div class="ho-head"><div class="pts-page-title" style="margin:0">📅 Calendar</div><span class="spacer"></span>
-      <button class="ho-btn" onclick="calNew(null, 'one_on_one')">+ 1:1</button><button class="ho-btn" onclick="calNew(null, 'meeting')">+ Meeting</button><button class="ho-btn primary" onclick="calNew()">+ Add event</button></div>
+      <button class="ho-btn" onclick="calSettings()" title="Your Zoom link and time zone">⚙</button><button class="ho-btn" onclick="calNew(null, 'one_on_one')">+ 1:1</button><button class="ho-btn" onclick="calNew(null, 'meeting')">+ Meeting</button><button class="ho-btn primary" onclick="calNew()">+ Add event</button></div>
     <div class="cal-bar"><div class="cal-nav"><button class="ho-btn" onclick="calMove(-1)" title="Back">◀</button><button class="ho-btn" onclick="calToday()">Today</button><button class="ho-btn" onclick="calMove(1)" title="Forward">▶</button>
         <b class="cal-title">${esc(title)}</b>${_cal.loading ? '<span class="fd-sm">Loading…</span>' : ''}</div>
       <div class="cal-views">${[['month', 'Month'], ['week', 'Week'], ['agenda', 'Agenda']].map(([v, l]) => `<button class="${_cal.view === v ? 'on' : ''}" onclick="calView('${v}')">${l}</button>`).join('')}</div></div>
@@ -158,12 +160,14 @@ async function calSkip() {
   const { error } = await sb.rpc('hub_cal_skip', { p_event: x.id, p_date: x.start_date, p_skip: true });
   if (error) { document.getElementById('cm-msg').textContent = error.message; return; }
   closeDutySheet(); calLoad();
+  calInvite(x.id, 'send');   // (✉️ the update takes that date off their calendars)
 }
 
 // ---------- add or change an event ----------
 function calNew(iso, kind) {
   const d = iso || calIso(_cal.day || new Date()), m = kind === 'meeting' || kind === 'one_on_one';
-  calForm({ start_date: d, end_date: d, all_day: !m, start_time: m ? '10:00' : '', end_time: m ? (kind === 'one_on_one' ? '10:30' : '11:00') : '', layer: m ? 'meeting' : 'event', kind: kind || 'event', visibility: m ? 'attendees' : 'office', attendees: [] });
+  calForm({ start_date: d, end_date: d, all_day: !m, start_time: m ? '10:00' : '', end_time: m ? (kind === 'one_on_one' ? '10:30' : '11:00') : '', layer: m ? 'meeting' : 'event', kind: kind || 'event', visibility: m ? 'attendees' : 'office', attendees: [],
+    location: m && _cal.me && _cal.me.zoom_link ? _cal.me.zoom_link : '' });
 }
 async function calPeople() {   // home office people to invite (the same list as 🏢 chat's + New message)
   if (_cal.people) return _cal.people;
@@ -213,12 +217,58 @@ async function calSave() {
   if (kind === 'meeting' && !p.attendees.length) { msg.textContent = 'Invite at least one person.'; return; }
   if (p.repeat !== 'none' && p.end_date !== p.start_date) { msg.textContent = 'A repeating one has to start and end on the same day.'; return; }
   if (!all && (!p.start_time || !p.end_time)) { msg.textContent = 'Choose both times, or tick All day.'; return; }
-  const { error } = await sb.rpc('hub_cal_event_save', { p });
-  if (error) { msg.textContent = error.message; return; }
+  const btn = document.querySelector('.duty-sheet .ho-btn.primary'); if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  const { data, error } = await sb.rpc('hub_cal_event_save', { p });
+  if (error) { msg.textContent = error.message; if (btn) { btn.disabled = false; btn.textContent = 'Save'; } return; }
   closeDutySheet(); calLoad();
+  if (kind !== 'event' && data && data.id) calInvite(data.id, 'send');   // (✉️ the invites, or their update)
+}
+// ✉️ email invites (hub-cal-invite): after a meeting is saved or a date skipped ('send'), before it's deleted ('cancel')
+async function calInvite(id, action) {
+  try {
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/hub-cal-invite`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify({ event_id: id, action }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.error) { calToast('Invites didn’t go out: ' + (d.error || r.status) + (r.status === 404 && !d.error ? ' (is hub-cal-invite deployed?)' : ''), true); return d; }
+    const bits = [d.sent ? `✉️ invite sent to ${d.sent}` : '', d.updated ? `update sent to ${d.updated}` : '', d.cancelled ? `cancellation sent to ${d.cancelled}` : ''].filter(Boolean);
+    if (bits.length || (d.errors || []).length) calToast((bits.join(' · ') || 'Nothing sent') + ((d.errors || []).length ? ' · ⚠ ' + d.errors[0] : ''), !!(d.errors || []).length);
+    return d;
+  } catch (e) { calToast('Invites didn’t go out: ' + (e.message || e), true); return null; }
+}
+function calToast(text, bad) {
+  let t = document.getElementById('cal-toast'); if (!t) { t = document.createElement('div'); t.id = 'cal-toast'; document.body.appendChild(t); }
+  t.textContent = text; t.className = 'cal-toast' + (bad ? ' bad' : ''); t.style.display = 'block';
+  clearTimeout(_cal.toastT); _cal.toastT = setTimeout(() => { t.style.display = 'none'; }, bad ? 9000 : 5000);
+}
+// ⚙ your Zoom link and time zone
+async function calMe() { if (_cal.me) return _cal.me; const { data } = await sb.rpc('hub_cal_me_get'); _cal.me = data || {}; return _cal.me; }
+async function calSettings() {
+  const me = await calMe();
+  openDutySheet(`<h3 style="margin:0 0 10px">⚙ My calendar settings</h3>
+    <div class="cal-form"><label class="wide">Your Zoom link<input id="cs-zoom" value="${escAttr(me.zoom_link || '')}" placeholder="https://us02web.zoom.us/j/…"></label>
+    <p class="wide fd-sm" style="margin:0">Your personal meeting room link (in Zoom: Meetings → Personal Room → Invite link). New meetings and 1:1s fill it in for you.</p>
+    <label>Your time zone<select id="cs-tz">${[['America/Vancouver', 'BC time'], ['America/Edmonton', 'Alberta time'], ['America/Toronto', 'Ontario time']].map(([v, l]) => `<option value="${v}"${(me.tz || 'America/Vancouver') === v ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+    <p class="wide fd-sm" style="margin:0">Invites you send show their times in this time zone.</p></div>
+    <div class="fd-msg" id="cs-msg"></div>
+    <div style="text-align:right;margin-top:12px"><button class="ho-btn" onclick="closeDutySheet()">Cancel</button> <button class="ho-btn primary" onclick="calSettingsSave()">Save</button></div>`);
+}
+async function calSettingsSave() {
+  const { data, error } = await sb.rpc('hub_cal_me_set', { p_zoom: document.getElementById('cs-zoom').value, p_tz: document.getElementById('cs-tz').value });
+  if (error) { document.getElementById('cs-msg').textContent = error.message; return; }
+  _cal.me = data; closeDutySheet(); calToast('✓ Saved');
+}
+// "Answer in the Hub" (hub.html#cal-<id>): open the calendar at that meeting's next date
+async function calOpenById(id) {
+  openCalPane();
+  const t = new Date(), a = calIso(calAdd(t, -7)), z = calIso(calAdd(t, 90));
+  const { data } = await sb.rpc('hub_cal_range', { p_from: a, p_to: z, p_layers: ['meeting', 'event', 'planning'] });
+  const L = (data || []).filter(x => x.id === id), x = L.find(y => y.start_date >= calIso(t)) || L[L.length - 1];
+  if (!x) { calToast('That meeting isn’t on your calendar (it may have been cancelled).', true); return; }
+  _cal.day = calD(x.start_date); await calLoad();
+  const i = _cal.items.findIndex(y => y.id === x.id && y.start_date === x.start_date); if (i >= 0) calOpen(i);
 }
 async function calDelete() {
   if (!_cal.edit || !_cal.edit.id || !confirm('Delete “' + _cal.edit.title + '”' + (_cal.edit.repeat && _cal.edit.repeat !== 'none' ? ' and every date it repeats' : '') + '?')) return;
+  if (_cal.edit.layer === 'meeting' && _cal.edit.mine) await calInvite(_cal.edit.id, 'cancel');   // (✉️ cancellations go out first)
   const { error } = await sb.rpc('hub_cal_event_delete', { p_id: _cal.edit.id });
   if (error) { document.getElementById('cf-msg').textContent = error.message; return; }
   closeDutySheet(); calLoad();
@@ -270,6 +320,8 @@ function calStyles() {
 .cal-att { display: flex; flex-wrap: wrap; gap: 6px; } .cal-a { border-radius: 999px; padding: 3px 10px; font-size: 13px; background: #f1f0f6; }
 .cal-a.yes { background: #e7f4e8; color: #1b5e20; } .cal-a.no { background: #fde2e2; color: #b91c1c; } .cal-a.maybe { background: #fff3e0; color: #92400e; }
 .cal-ans { display: flex; gap: 6px; flex-wrap: wrap; }
+.cal-toast { position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 10001; background: #1f1b3a; color: #fff; padding: 10px 18px; border-radius: 999px; font-weight: 600; font-size: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.2); max-width: 90vw; }
+.cal-toast.bad { background: #b91c1c; }
 @media (max-width: 760px) { #cal-pane .cal-week { grid-template-columns: 1fr; } #cal-pane .cal-days { grid-auto-rows: minmax(64px, auto); } #cal-pane .cal-chip { font-size: 10.5px; padding: 1px 4px; } }`;
   document.head.appendChild(st);
 }
