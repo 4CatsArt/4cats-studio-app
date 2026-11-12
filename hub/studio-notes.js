@@ -47,7 +47,9 @@ async function snsLoad() {
   _sns.rows = null; snsDraw();
   const { data, error } = await sb.rpc('hub_studio_notes_all');
   _sns.err = error ? (/hub_studio_notes_all/.test(error.message) ? 'Run world_studio_notes_page.sql in Supabase first.' : error.message) : '';
-  _sns.rows = error ? [] : (data.notes || []); _sns.photos = error ? {} : (data.photos || {}); snsDraw();
+  _sns.rows = error ? [] : (data.notes || []); _sns.photos = error ? {} : (data.photos || {});
+  try { const fc = await sb.rpc('hub_note_follow_counts'); _sns.follows = fc.error ? {} : (fc.data || {}); } catch (e) { _sns.follows = {}; }   // ✉️ (Nov 12 2026) followers by email
+  snsDraw();
 }
 function snsStatus(n, t) { return n.show_from > t ? 'upcoming' : (n.show_until && n.show_until < t) ? 'ended' : 'live'; }
 function snsDraw() {
@@ -58,6 +60,8 @@ function snsDraw() {
   let h = `<div class="ho-head"><div class="pts-page-title" style="margin:0">✍️ Studio notes</div><span class="spacer"></span>
       <button class="ho-btn primary" onclick="snsEdit(null)">+ New note</button><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
     <p class="ho-intro">The little note on each studio’s World home page. Each studio shows its newest note that has started (and hasn’t ended); when it ends, the one before it shows again.</p>`;
+  { const F = _sns.follows || {}, tot = Object.values(F).reduce((a, b) => a + Number(b || 0), 0);
+    h += `<p class="goal-note" style="margin-top:-6px">✉️ ${tot ? `<b>${tot}</b> ${tot === 1 ? 'person follows' : 'people follow'} studio notes by email (they tick it on the studio’s World page). A note is emailed to its studio’s followers once, on the day it starts showing, around 8am there.` : 'Customers can follow a studio’s notes by email from its World page. A note is emailed to its followers on the day it starts showing.'}</p>`; }
   if (_sns.msg) h += `<p class="fd-msg">${esc(_sns.msg)}</p>`;
   if (_sns.err) { el.innerHTML = h + `<p class="fd-msg">${esc(_sns.err)}</p>`; return; }
   if (!_sns.rows) { el.innerHTML = h + '<p class="goal-note">Loading…</p>'; return; }
@@ -83,7 +87,7 @@ function snsDraw() {
         return `<tr><td>${many ? `<b>🏬 ${copies.length} studios</b><div class="goal-note">${esc(copies.map(c => String(STUDIO_NAMES[c.studio_id] || c.studio_id).replace(/^.*?\s-\s/, '')).slice(0, 6).join(', '))}${copies.length > 6 ? '…' : ''}</div>` : esc(STUDIO_NAMES[n.studio_id] || n.studio_id)}</td>
           <td style="white-space:nowrap">${esc(ptyDayLabel(n.show_from))}${n.show_until ? ' – ' + esc(ptyDayLabel(n.show_until)) : ' on'}</td>
           <td>${n.title ? `<b>${esc(n.title)}</b><br>` : ''}<span class="sn-snip">${esc(snPlain(n.body).slice(0, 110))}${snPlain(n.body).length > 110 ? '…' : ''}</span></td>
-          <td>${stTxt}</td>
+          <td>${stTxt}${n.emailed_at ? `<div class="goal-note">✉️ Emailed to ${Number(n.emailed_count || 0)}</div>` : (!many && (_sns.follows || {})[n.studio_id] ? `<div class="goal-note">✉️ ${Number(_sns.follows[n.studio_id])} following</div>` : '')}</td>
           <td style="white-space:nowrap"><button class="ho-btn sm" onclick="snsEdit('${escAttr(n.id)}')">Edit</button><button class="ho-btn sm" onclick="snsRemove('${escAttr(n.id)}')">Remove</button></td></tr>`; }).join('')}</tbody></table>`
       : '<p class="goal-note">No notes here.</p>';
   }
