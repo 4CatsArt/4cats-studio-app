@@ -342,7 +342,9 @@ function parsePartyAddons(rawPayload, subtype) {
       // Skip the main party booking line item (has date prefix) and studio variant lines
       if (/^\d+(am|pm|\:\d)/i.test(title)) continue
       if (!title || title === variant) continue
-      addons.push({ title, variant, qty: li.quantity || 1 })
+      if (li.current_quantity !== undefined && li.current_quantity !== null && Number(li.current_quantity) === 0) continue   // (removed by a Shopify order edit)
+      const qty = li.current_quantity != null ? Number(li.current_quantity) : (li.quantity || 1)
+      addons.push({ title, variant, qty })
     }
     return addons
   } catch(e) { return [] }
