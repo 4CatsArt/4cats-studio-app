@@ -1032,7 +1032,7 @@ async function famCardsLoad(box, removeId) {
   box.innerHTML = '<p class="fam-meta">Checking with Stripe…</p>';
   try {
     const r = await fetch(`${SUPABASE_URL}/functions/v1/camp-checkout`, { method: 'POST', headers: await fnHeaders(),
-      body: JSON.stringify(removeId ? { staff: true, action: 'staff_card_remove', studio: _sessionStudioId, family: { email }, payment_method: removeId } : { staff: true, action: 'staff_cards', studio: _sessionStudioId, family: { email } }) });
+      body: JSON.stringify(removeId ? { staff: true, staff_pin: fdPin() || undefined, action: 'staff_card_remove', studio: _sessionStudioId, family: { email }, payment_method: removeId } : { staff: true, staff_pin: fdPin() || undefined, action: 'staff_cards', studio: _sessionStudioId, family: { email } }) });
     const d = await r.json().catch(() => ({})); if (!r.ok || d.error) throw new Error(d.error || 'HTTP ' + r.status);
     const L = d.cards || [], ho = !!(_studioData && _studioData.isAdmin);
     box.innerHTML = !L.length ? '<p class="fam-meta">No saved cards. A card is saved when they tick “Save my payment information” on a 4Cats payment page.</p>'
