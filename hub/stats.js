@@ -750,6 +750,15 @@ function deriveWeatherTag(w) {
   return null;
 }
 
+// 🌤️ (Nov 12 2026) The weather strip on the Today screen: now, then Today / Tomorrow pills (› shows the rest of the week).
+async function weatherStripDraw(studioId, w) {
+  const el = document.getElementById('weather-strip'); if (!el) return;
+  let days = [];
+  try { days = await fetchWeatherForecast(studioId); } catch (e) { days = []; }
+  const now = w && w.tempC !== null && w.tempC !== undefined
+    ? `<div class="weather-now">🌤️ Now <b>${esc(w.tempC)}°C</b> · ${esc(w.condition || '')}${w.feelsLikeC !== undefined && w.feelsLikeC !== null ? ' · feels like ' + esc(w.feelsLikeC) + '°' : ''}</div>` : '';
+  el.innerHTML = now + forecastPillsHtml(days);
+}
 // Current conditions. No tile any more (the forecast pills in "Today at 4Cats"
 // cover weather), but the fetch stays: Suggested Emails use _lastWeatherData's
 // weather tag. If a #mini-weather tile is ever added back, it draws itself.
@@ -758,6 +767,7 @@ async function renderWeatherCard(studioId) {
   try {
     const w = await WEATHER_SOURCE(studioId);
     _lastWeatherData = w;
+    weatherStripDraw(studioId, w);   // (Nov 12 2026) 🌤️ the weather strip at the top of the Today screen
     if (!el) return;
     el.innerHTML = w.tempC === null ? `
       <div class="eyebrow">🌤️ Weather</div>
