@@ -21,6 +21,7 @@
 // (Nov 12 2026: "← My dashboard" at the top of every other Hub page for home office logins; hub.html#mydash opens it.)
 // (Nov 12 2026: 💰 Labour cost asks hub_day_labour studio by studio, 6 at a time (one call for all 31 timed out); ⏱ punch notes
 // (shown, ✎ to add or change: hub_ho_punch_note, SQL step 9); 🏬 time for studios (hub_ho_alloc_set, SQL step 10).)
+// (Nov 12 2026: contractor clocks, hours only (SQL step 11): set in 👥 Set up for…, never on Timesheets; 📄 Hours report with CSV.)
 
 // ---------- State ----------
 let _dash = { me: null, layout: null, edit: false, err: '', saving: '', saveTimer: null, refreshTimer: null, drag: null, choose: false, cache: {}, ro: null };
@@ -1195,12 +1196,12 @@ async function dashSetupOpen() {
   catch (e) { openDutySheet(`<h3 style="margin:0 0 8px">👥 Set up a starting dashboard</h3><p class="fd-msg">${esc(/hub_dash_people/.test(e.message || '') ? 'Run My dashboard step 4 SQL in Supabase first.' : e.message)}</p><div style="text-align:right"><button class="ho-btn" onclick="closeDutySheet()">Close</button></div>`); return; }
   _dash.people = P;
   let CL = null; try { CL = await dashRpc('hub_ho_clock_list'); } catch (e) { }
-  const clk = {}; ((CL && CL.links) || []).forEach(l => { clk[l.user_id] = l.name; });
+  const clk = {}; ((CL && CL.links) || []).forEach(l => { clk[l.user_id] = l.mode === 'contract' ? 'contractor hours' : 'punches as ' + l.name; });
   const when = t => t ? new Date(t).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '';
   openDutySheet(`<h3 style="margin:0 0 4px">👥 Set up a starting dashboard</h3>
     <p class="fd-sm" style="margin:0 0 10px">Pick someone to arrange their blocks and colour. They can change it afterwards, and ↺ always takes them back to the one you set.</p>
     ${P.map((x, i) => `<div class="dash-addrow"><div><div><b>${esc(x.name || x.email)}</b>${x.me ? ' <span class="dash-pill">you</span>' : ''} <span class="fd-sm">${esc(x.email || '')}</span></div>
-      <div class="dash-sub">${x.template_at ? `Starting dashboard set${x.template_by ? ' by ' + esc(x.template_by) : ''} ${esc(when(x.template_at))}` : 'No starting dashboard yet'}${x.arranged_at ? ` · arranged their own ${esc(when(x.arranged_at))}` : ' · hasn’t opened My dashboard yet'}${clk[x.user_id] ? ` · ⏱ punches as ${esc(clk[x.user_id])}` : ''}</div></div>
+      <div class="dash-sub">${x.template_at ? `Starting dashboard set${x.template_by ? ' by ' + esc(x.template_by) : ''} ${esc(when(x.template_at))}` : 'No starting dashboard yet'}${x.arranged_at ? ` · arranged their own ${esc(when(x.arranged_at))}` : ' · hasn’t opened My dashboard yet'}${clk[x.user_id] ? ` · ⏱ ${esc(clk[x.user_id])}` : ''}</div></div>
       <button class="ho-btn sm primary" onclick="dashSetupStart(${i})">${x.template_at ? 'Edit' : 'Set up'}</button></div>`).join('') || '<p class="fd-sm">No home office logins found.</p>'}
     <div style="text-align:right;margin-top:10px"><button class="ho-btn" onclick="closeDutySheet()">Close</button></div>`);
 }
@@ -1272,12 +1273,14 @@ function dashClockHtml(b, S) {
     : S.state === 'break' ? `<b class="mid">On a break</b> since ${esc(dashTime(last && last.at))}` : `<b>Not punched in</b>${last ? ' · out at ' + esc(dashTime(last.at)) : ''}`;
   dashGlanceSet(b, S.state === 'in' ? '⏱ on the clock' : S.state === 'break' ? '⏱ on a break' : '');
   dashStatSet(b, [[S.state === 'in' ? 'In' : S.state === 'break' ? 'Break' : 'Out', S.state === 'out' ? 'not punched in' : 'since ' + dashTime((P.filter(p => p.kind === (S.state === 'in' ? 'in' : 'break_out')).pop() || {}).at), S.state === 'in' ? 'ok' : S.state === 'break' ? 'mid' : ''], [hm, 'today', '']]);
-  return `<div class="dash-clock ${S.state}"><div class="dash-clock-st">${status}</div><div class="dash-sub">${P.length ? esc(hm) + ' worked today' : 'No punches today yet'} · ${esc(S.name || '')} · 🏠 Home office</div></div>
+  const ct = S.mode === 'contract';
+  return `<div class="dash-clock ${S.state}"><div class="dash-clock-st">${status}</div><div class="dash-sub">${P.length ? esc(hm) + ' worked today' : 'No punches today yet'} · ${esc(S.name || '')} · ${ct ? '📄 Contractor hours' : '🏠 Home office'}</div></div>
+    ${ct ? `<div class="dash-stats" style="margin-bottom:8px"><div><b>${esc(dashH(+S.week_minutes || 0))}</b>This week (Mon–Sun)</div><div><b>${esc(dashH(+S.month_minutes || 0))}</b>This month</div></div>` : ''}
     <div class="dash-clock-btns">${(S.can || []).map(k => `<button class="ho-btn${k === 'in' || k === 'break_in' ? ' primary' : ''}" onclick="dashPunch('${b.id}','${k}')">${DASH_PUNCH[k]}</button>`).join('')}</div>
     <input type="text" class="dash-clock-note" id="dash-cn-${b.id}" maxlength="500" placeholder="Note with this punch (optional)">
     ${P.length ? '<div class="dash-list" style="margin-top:8px">' + P.map(p => `<div class="dash-row"><div class="dash-main" style="font-weight:500">${esc(DASH_PUNCHED[p.kind] || p.kind)} · ${esc(dashTime(p.at))}
         ${p.id ? `<button class="dash-pen" title="${p.comment ? 'Change the note' : 'Add a note'}" onclick="dashPunchNote('${b.id}','${escAttr(p.id)}')">✎</button>` : ''}</div>${p.comment ? `<div class="dash-sub">📝 ${esc(p.comment)}</div>` : ''}</div>`).join('') + '</div>' : ''}
-    ${dashAllocHtml(b, S)}`;
+    ${ct ? `<button class="ho-btn sm" style="margin-top:8px" onclick="dashHoursOpen(null, '')">📄 Hours report</button>` : dashAllocHtml(b, S)}`;
 }
 async function dashPunch(id, kind) {
   const el = document.getElementById('dash-body-' + id), note = document.getElementById('dash-cn-' + id);
@@ -1344,20 +1347,65 @@ async function dashAllocSave() {
     const id = _dash.allocFor, b = _dash.layout.blocks.find(x => x.id === id), h = dashClockHtml(b, S2); _dash.cache[id] = h; const el = document.getElementById('dash-body-' + id); if (el) el.innerHTML = h;
   } catch (e) { if (err) err.textContent = e.message || String(e); }
 }
+// 📄 A contractor's hours report: themselves, or an owner for them (hub_contract_hours). Days, in/out, breaks, hours, notes; CSV.
+function dashHoursRange(k) {
+  const d = new Date(); d.setHours(12, 0, 0, 0); const f = x => localDateStr(x);
+  const mon = new Date(d); mon.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  if (k === 'week') return [f(mon), f(d)];
+  if (k === 'lastweek') { const a = new Date(mon); a.setDate(a.getDate() - 7); const z = new Date(mon); z.setDate(z.getDate() - 1); return [f(a), f(z)]; }
+  if (k === 'lastmonth') return [f(new Date(d.getFullYear(), d.getMonth() - 1, 1, 12)), f(new Date(d.getFullYear(), d.getMonth(), 0, 12))];
+  return [f(new Date(d.getFullYear(), d.getMonth(), 1, 12)), f(d)];
+}
+function dashHoursOpen(user, name) {
+  const [a, z] = dashHoursRange('month');
+  _dash.hrs = { user: user || null, name: name || '', from: a, to: z, data: null, err: '' };
+  dashHoursDraw(); dashHoursLoad();
+}
+async function dashHoursLoad() {
+  const H = _dash.hrs; if (!H) return; H.data = null; H.err = ''; dashHoursDraw();
+  try { H.data = await dashRpc('hub_contract_hours', { p_user: H.user, p_from: H.from, p_to: H.to }); } catch (e) { H.err = e.message || String(e); }
+  dashHoursDraw();
+}
+function dashHoursPick(k) { const [a, z] = dashHoursRange(k); _dash.hrs.from = a; _dash.hrs.to = z; dashHoursLoad(); }
+function dashHoursDraw() {
+  const H = _dash.hrs; if (!H) return;
+  const tm = t => t ? dashTime(t) : '', D = (H.data && H.data.days) || [], who = (H.data && H.data.name) || H.name || '';
+  openDutySheet(`<h3 style="margin:0 0 6px">📄 Hours${who ? ' · ' + esc(who) : ''}</h3>
+    <div class="dash-set-row" style="flex-wrap:wrap"><label>From <input type="date" value="${escAttr(H.from)}" onchange="_dash.hrs.from=this.value;dashHoursLoad()"></label>
+      <label>To <input type="date" value="${escAttr(H.to)}" onchange="_dash.hrs.to=this.value;dashHoursLoad()"></label>
+      ${[['week', 'This week'], ['lastweek', 'Last week'], ['month', 'This month'], ['lastmonth', 'Last month']].map(([k, l]) => `<button class="ho-btn sm" onclick="dashHoursPick('${k}')">${l}</button>`).join('')}</div>
+    ${H.err ? `<p class="fd-msg">${esc(H.err)}</p>` : !H.data ? '<p class="fd-sm">Loading…</p>' : !D.length ? '<p class="fd-sm">No hours in these dates.</p>' :
+      `<div style="overflow-x:auto"><table class="dash-hrs"><thead><tr><th>Day</th><th>In</th><th>Out</th><th>Break</th><th>Hours</th><th>Notes</th></tr></thead><tbody>${D.map(d => `<tr>
+        <td>${esc(dashDay(d.date))}</td><td>${esc(tm(d.first_in))}</td><td>${d.open ? '<i>still in</i>' : esc(tm(d.last_out))}</td><td>${+d.break_minutes ? esc(dashH(d.break_minutes)) : ''}</td>
+        <td><b>${esc(dashH(d.minutes))}</b></td><td>${esc((d.notes || []).join(' · '))}</td></tr>`).join('')}</tbody>
+        <tfoot><tr><td colspan="4"><b>Total</b></td><td><b>${esc(dashH(H.data.minutes))}</b></td><td>${(Math.round(+H.data.minutes / 60 * 100) / 100).toFixed(2)} h</td></tr></tfoot></table></div>`}
+    <div style="text-align:right;margin-top:12px">${D.length ? '<button class="ho-btn" onclick="dashHoursCsv()">⬇ Download CSV</button> ' : ''}<button class="ho-btn primary" onclick="closeDutySheet()">Done</button></div>`);
+}
+function dashHoursCsv() {
+  const H = _dash.hrs; if (!H || !H.data) return;
+  const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"', tm = t => t ? dashTime(t) : '';
+  const rows = [['Date', 'In', 'Out', 'Break (min)', 'Hours', 'Notes']].concat((H.data.days || []).map(d => [d.date, tm(d.first_in), d.open ? 'still in' : tm(d.last_out), d.break_minutes || 0, (Math.round(+d.minutes / 60 * 100) / 100).toFixed(2), (d.notes || []).join(' · ')]));
+  rows.push(['Total', '', '', '', (Math.round(+H.data.minutes / 60 * 100) / 100).toFixed(2), '']);
+  const blob = new Blob(['\ufeff' + rows.map(r => r.map(q).join(',')).join('\r\n')], { type: 'text/csv' }), a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = `hours-${String(H.data.name || 'contractor').toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${H.from}-to-${H.to}.csv`;
+  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+}
 function dashSetupClockHtml() {
   const T = _dash.target, CL = _dash.clockList; if (!T || !CL) return '';
   const link = (CL.links || []).find(l => l.user_id === T.user_id), tz = (link && link.tz) || 'America/Vancouver';
   return `<div class="dash-set-row" style="margin-top:8px;flex-wrap:wrap">⏱ <b>Punch clock</b>
-    <select id="dash-clk-staff" onchange="dashSetupClock()"><option value="">Off: no punch clock</option>${(CL.staff || []).map(s => `<option value="${escAttr(s.staff_id)}"${link && link.staff_id === s.staff_id ? ' selected' : ''}>Punches as ${esc(s.name)}</option>`).join('')}</select>
+    <select id="dash-clk-staff" onchange="dashSetupClock()"><option value="">Off: no punch clock</option><option value="__contract__"${link && link.mode === 'contract' ? ' selected' : ''}>Contractor: hours only (not on Timesheets)</option>${(CL.staff || []).map(s => `<option value="${escAttr(s.staff_id)}"${link && link.staff_id === s.staff_id ? ' selected' : ''}>Punches as ${esc(s.name)}</option>`).join('')}</select>
     <select id="dash-clk-tz" onchange="dashSetupClock()">${[['America/Vancouver', 'BC time'], ['America/Edmonton', 'Alberta time'], ['America/Toronto', 'Ontario time']].map(([v, l]) => `<option value="${v}"${tz === v ? ' selected' : ''}>${l}</option>`).join('')}</select>
-    <span class="fd-sm">Saves straight away. Punches go on Timesheets as 🏠 Home office.</span></div>`;
+    <span class="fd-sm">Saves straight away. ${link && link.mode === 'contract' ? 'Contractor hours stay off Timesheets, payroll and labour.' : 'Punches go on Timesheets as 🏠 Home office.'}</span>
+    ${link && link.mode === 'contract' ? `<button class="ho-btn sm" onclick="dashHoursOpen('${escAttr(T.user_id)}', ${escAttr(JSON.stringify(T.name))})">📄 Hours</button>` : ''}</div>`;
 }
 async function dashSetupClock() {
   const T = _dash.target; if (!T) return;
   const st = document.getElementById('dash-clk-staff').value, tz = document.getElementById('dash-clk-tz').value;
-  const name = st ? (((_dash.clockList && _dash.clockList.staff) || []).find(s => s.staff_id === st) || {}).name : '';
-  if (!confirm(st ? `${T.name} will punch in and out as ${name} (${tz.split('/')[1]} time)?` : `Turn off ${T.name}’s punch clock? Their past punches stay on Timesheets.`)) { dashDraw(true); return; }
-  try { await dashRpc('hub_ho_clock_set', { p_user: T.user_id, p_staff: st || null, p_tz: st ? tz : null }); _dash.clockList = await dashRpc('hub_ho_clock_list'); }
+  const contract = st === '__contract__', name = st && !contract ? (((_dash.clockList && _dash.clockList.staff) || []).find(s => s.staff_id === st) || {}).name : '';
+  if (!confirm(contract ? `${T.name} will track hours only, as a contractor (${tz.split('/')[1]} time)? Their hours stay off Timesheets, payroll and labour.`
+      : st ? `${T.name} will punch in and out as ${name} (${tz.split('/')[1]} time)?` : `Turn off ${T.name}’s punch clock? Their past punches and hours are kept.`)) { dashDraw(true); return; }
+  try { await dashRpc('hub_ho_clock_set', { p_user: T.user_id, p_staff: st && !contract ? st : null, p_tz: st ? tz : null, p_mode: contract ? 'contract' : null }); _dash.clockList = await dashRpc('hub_ho_clock_list'); }
   catch (e) { alert(e.message || e); }
   _dash.me.clock = !!st; _dash.saving = st ? 'Punch clock on ✓' : 'Punch clock off'; dashDraw(true);
 }
@@ -1460,6 +1508,8 @@ function dashStyles() {
 .dash-alloc { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
 .dash-alloc-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; } .dash-alloc-row select { flex: 1; min-width: 0; padding: 6px; border-radius: 8px; border: 1px solid #ddd; font: inherit; }
 .dash-alloc-row input { width: 76px; padding: 6px; border-radius: 8px; border: 1px solid #ddd; font: inherit; }
+.dash-hrs { width: 100%; border-collapse: collapse; font-size: 13px; } .dash-hrs th, .dash-hrs td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #eee; white-space: nowrap; }
+.dash-hrs td:last-child { white-space: normal; min-width: 160px; } .dash-hrs tfoot td { border-top: 2px solid #ddd; border-bottom: 0; }
 .dash-pace { display: flex; flex-direction: column; }
 .dash-pace-row { display: grid; grid-template-columns: 30px minmax(0, 1fr) minmax(50px, 30%) 56px; gap: 8px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
 .dash-pace-row:last-child { border-bottom: 0; } .dash-rank { text-align: center; font-weight: 700; color: var(--ink-soft); }
