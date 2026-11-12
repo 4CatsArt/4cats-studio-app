@@ -24,6 +24,10 @@
 // (Nov 12 2026: contractor clocks, hours only (SQL step 11): set in 👥 Set up for…, never on Timesheets; 📄 Hours report with CSV.)
 // (Nov 12 2026: Layout blocks: 📌 Section header and ➖ Divider / space, no card around them; same size in Customize and after Done.)
 // (Nov 12 2026: 🗓️ Date suggestions lists them (hub_ideas_list): newest first or by the date asked for, new or new + seen.)
+// (Nov 12 2026: Customize: each block shows only ⠿ and ✏️ (a menu: move, width, view, height, settings, remove), so it looks as
+// it will; 👁 Preview hides even those.)
+// (Nov 12 2026: 🏭 Warehouse blocks from hub_retail_stock (retail_stock.sql): warehouse stock running low, studios low on kits
+// (🚚 Send opens Products' send screen), held for bookings; a Warehouse starting layout with section headers.)
 // (Nov 12 2026: their styling: headers' style, size, colour, alignment and subtitle; dividers' line style, thickness, colour,
 // length, space and a centre mark; a live preview in ⚙. Older ones keep their look: opts.line maps to the matching style.)
 
@@ -66,7 +70,7 @@ function dashOpen(fn, arg) {
 
 // ---------- The block library ----------
 // type: { name, group, area, level, size (default), sizes, opts (defaults), settings(b) → html, open: [fn, arg], load(b) → html }
-const DASH_GROUPS = ['Layout', 'Mine', 'Studio day', 'Customers', 'People', 'Money', 'Comms', 'World', 'Community', 'Admin'];
+const DASH_GROUPS = ['Layout', 'Mine', 'Studio day', 'Customers', 'People', 'Money', 'Warehouse', 'Comms', 'World', 'Community', 'Admin'];
 const DASH_ROWS_SETTING = b => `<label>Rows to show <select data-opt="rows">${[3, 5, 8, 12].map(n => `<option value="${n}"${+b.opts.rows === n ? ' selected' : ''}>${n}</option>`).join('')}</select></label>`;
 const DASH_BLOCKS = {
   // ---- Mine ----
@@ -516,6 +520,59 @@ const DASH_BLOCKS = {
     }
   },
 
+  // ---- Warehouse (retail_stock.sql: on hand at the warehouse and each studio, held for bookings, sold 30 days / 365 days) ----
+  wh_stock: {
+    name: '🏭 Warehouse stock', group: 'Warehouse', area: 'retail_products', level: 'view', size: 'm', opts: { rows: 8 }, settings: DASH_ROWS_SETTING, open: ['dashLinkGo', 'n_rp'], words: 'kits inventory salt spring low out reorder',
+    desc: 'Kits running low or out at the Salt Spring warehouse, against what sells across studios and online (about a month left or less).',
+    async load(b) {
+      const L = (await dashRetailStock()).filter(x => !dashSnackish(x));
+      const rows = L.map(x => { const wh = +((x.on_hand || {}).WAREHOUSE) || 0, s30 = dashSum(x.sold30), days = s30 > 0 ? Math.floor(wh / (s30 / 30)) : null;
+        return { x, wh, s30, days, out: wh <= 0 && s30 > 0, low: wh > 0 && s30 > 0 && days < 30 }; }).filter(r => r.out || r.low)
+        .sort((a, c) => (a.out ? -1 : 0) - (c.out ? -1 : 0) || a.days - c.days);
+      const out = rows.filter(r => r.out).length, low = rows.length - out;
+      dashGlanceSet(b, out ? dashPl(out, 'kit', 'kits') + ' out at the warehouse' : '');
+      dashStatSet(b, [[String(out), 'out', out ? 'bad' : 'ok'], [String(low), 'running low', low ? 'mid' : 'ok']]);
+      return `<div class="dash-chips"><span class="dash-pill ${out ? 'bad' : 'ok'}">${out} out</span><span class="dash-pill ${low ? 'mid' : 'ok'}">${low} running low</span></div>` +
+        dashRows(rows, +b.opts.rows || 8, r => dashLine(`${esc(dashKitName(r.x))} <span class="dash-o-amt">${r.wh} left</span>`,
+          `${r.out ? '⛔ out' : '≈ ' + (r.days < 14 ? r.days + ' day' + (r.days === 1 ? '' : 's') : Math.round(r.days / 7) + ' weeks') + ' left'} · ${r.s30} sold in the last 30 days${r.x.sku ? ' · SKU ' + esc(r.x.sku) : ''}`, r.out ? 'late' : ''),
+          'Nothing running low at the warehouse. ✓');
+    }
+  },
+  wh_studios_low: {
+    name: '🏪 Studios low on kits', group: 'Warehouse', area: 'retail_products', level: 'view', size: 'm', opts: { rows: 8 }, settings: DASH_ROWS_SETTING, open: ['dashLinkGo', 'n_rp'], words: 'kits send transfer restock studios',
+    desc: 'Kits selling faster than what’s left at a studio, with 🚚 Send (the Products send screen, split by last year’s sales).',
+    async load(b) {
+      const L = (await dashRetailStock()).filter(x => !dashSnackish(x)), rows = [];
+      L.forEach(x => Object.keys(Object.assign({}, x.on_hand || {}, x.sold30 || {})).forEach(k => {
+        if (k === 'WAREHOUSE' || !STUDIO_NAMES[k]) return;
+        const oh = +((x.on_hand || {})[k]) || 0, s30 = +((x.sold30 || {})[k]) || 0;
+        if (s30 > 0 && oh <= Math.max(2, Math.ceil(s30 / 4))) rows.push({ x, k, oh, s30 });   // (the same rule as Products' ⚠ low)
+      }));
+      rows.sort((a, c) => (a.oh - a.s30 / 4) - (c.oh - c.s30 / 4));
+      const studios = new Set(rows.map(r => r.k)).size;
+      dashGlanceSet(b, rows.length ? `${studios} studio${studios === 1 ? '' : 's'} low on kits` : '');
+      dashStatSet(b, [[String(rows.length), 'kits low', rows.length ? 'mid' : 'ok'], [String(studios), studios === 1 ? 'studio' : 'studios', '']]);
+      return `<div class="dash-chips"><span class="dash-pill ${rows.length ? 'mid' : 'ok'}">${rows.length} low</span><span class="dash-pill">${studios} studio${studios === 1 ? '' : 's'}</span></div>` +
+        dashRows(rows, +b.opts.rows || 8, r => `<div class="dash-row${r.oh <= 0 ? ' late' : ''}" style="display:flex;gap:8px;align-items:center"><div style="flex:1;min-width:0">
+            <div class="dash-main">${esc(dashStudio(r.k))} · ${esc(dashKitName(r.x))}</div><div class="dash-sub">${r.oh <= 0 ? '⛔ none left' : r.oh + ' left'} · ${r.s30} sold in 30 days · 🏭 ${+((r.x.on_hand || {}).WAREHOUSE) || 0} at the warehouse</div></div>
+            <button class="ho-btn sm" onclick="dashKitSend('${escAttr(r.x.variant_id)}')" title="Send from the warehouse">🚚 Send</button></div>`, 'Every studio has enough kits. ✓');
+    }
+  },
+  wh_held: {
+    name: '☕ Held for bookings', group: 'Warehouse', area: 'retail_products', level: 'view', size: 's', opts: { rows: 6 }, settings: DASH_ROWS_SETTING, open: ['dashLinkGo', 'n_rp'], words: 'hot chocolate candy snacks add-ons booked',
+    desc: 'Hot chocolates and candy bags booked with upcoming bookings, and studios that don’t have enough on hand for them.',
+    async load(b) {
+      const L = await dashRetailStock(), rows = [];
+      L.forEach(x => Object.entries(x.held || {}).forEach(([k, h]) => { h = +h || 0; if (!h || k === 'WAREHOUSE') return; const oh = +((x.on_hand || {})[k]) || 0; rows.push({ x, k, h, oh, short: Math.max(0, h - oh) }); }));
+      rows.sort((a, c) => c.short - a.short || c.h - a.h);
+      const short = rows.filter(r => r.short > 0), tot = rows.reduce((t, r) => t + r.h, 0);
+      dashGlanceSet(b, short.length ? `${short.length} studio${short.length === 1 ? '' : 's'} short for booked treats` : '');
+      dashStatSet(b, [[String(short.length), 'short', short.length ? 'bad' : 'ok'], [String(tot), 'held', '']]);
+      return `<div class="dash-chips"><span class="dash-pill ${short.length ? 'bad' : 'ok'}">${short.length} short</span><span class="dash-pill">${tot} held</span></div>` +
+        dashRows(rows, +b.opts.rows || 6, r => dashLine(`${esc(dashStudio(r.k))} · ${esc(dashKitName(r.x))}`, `${r.h} held · ${r.oh} on hand${r.short ? ` · <b>${r.short} short</b>` : ''}`, r.short ? 'late' : ''), 'Nothing held for upcoming bookings.');
+    }
+  },
+
   // ---- Comms ----
   newsletters: {
     name: '📧 Newsletters', group: 'Comms', area: 'newsletters', level: 'view', size: 's', open: ['openNewsPane'],
@@ -607,7 +664,9 @@ const DASH_LINKS = [
   { key: 'n_ts', name: '🕒 Timesheets', nav: 'nav-ts', area: 'timesheets', level: 'view' },
   { key: 'n_stf', name: '👥 Staffing', nav: 'nav-stf', area: 'staff_scheduling', level: 'view' },
   { key: 'n_news', name: '📧 Newsletters', nav: 'nav-news', area: 'newsletters', level: 'view' },
-  { key: 'n_rp', name: '🛍️ Products', nav: 'nav-rp', area: 'retail_products', level: 'view' }
+  { key: 'n_rp', name: '🛍️ Products', nav: 'nav-rp', area: 'retail_products', level: 'view' },
+  { key: 'n_sup', name: '🧺 Supplies list', nav: 'nav-sup', area: 'supplies_inventory', level: 'view' },
+  { key: 'shipstation', name: '📮 ShipStation', url: 'https://ship.shipstation.com', area: 'retail_products', level: 'view' }
 ];
 function dashLinkGo(key) {
   const l = DASH_LINKS.find(x => x.key === key); if (!l) return;
@@ -702,6 +761,24 @@ async function dashAssign(id, i, sel) {
   try { const n = await dashRpc('set_sales_line_studio', { p_order_name: r.shopify_order_name, p_line_item_id: r.shopify_line_item_id || null, p_studio_id: st }); if (!n) throw new Error('Nothing was updated (already assigned?)'); }
   catch (e) { alert(e.message || e); sel.disabled = false; sel.value = ''; return; }
   dashLoadBlock(id, false);
+}
+
+// ---------- 🏭 Warehouse: the stock list (hub_retail_stock), shared by the warehouse blocks for 2 minutes ----------
+async function dashRetailStock() {
+  if (_dash.rstock && Date.now() - _dash.rstock.at < 120000) return _dash.rstock.d;
+  if (!_dash.rstockBusy) _dash.rstockBusy = dashRpc('hub_retail_stock', { p_studio: null }).then(d => { _dash.rstock = { at: Date.now(), d: d || [] }; return d || []; }).finally(() => { _dash.rstockBusy = null; });
+  const d = await _dash.rstockBusy;
+  if (typeof _rpStock !== 'undefined') { try { _rpStock = d; } catch (e) { } }   // (so 🚚 Send can open Products' send screen right here)
+  return d;
+}
+const dashSum = o => Object.values(o || {}).reduce((t, v) => t + (+v || 0), 0);
+const dashKitName = x => (x.product || 'Item') + (x.variant && x.variant !== 'Default' ? ' · ' + x.variant : '');
+const dashSnackish = x => !!(x.held && Object.keys(x.held).length) || /hot choc|candy|snack|drink|cocoa/i.test(String(x.product || ''));
+async function dashKitSend(vid) {
+  if (typeof rpStkSend !== 'function') { dashLinkGo('n_rp'); return; }
+  await dashRetailStock(); rpStkSend(vid);
+  // (when the send screen closes, the warehouse blocks show the new numbers)
+  const t = setInterval(() => { if (!document.getElementById('rp-send')) { clearInterval(t); _dash.rstock = null; (_dash.layout ? _dash.layout.blocks : []).filter(x => /^wh_/.test(x.type)).forEach(x => dashLoadBlock(x.id, true)); } }, 700);
 }
 
 // ---------- Layout blocks: section headers and dividers, and their styling ----------
@@ -810,6 +887,8 @@ const DASH_STARTERS = [
   { key: 'home_office_ops', name: 'Home office ops', blocks: [['for_you', 'm'], ['flash', 'm'], ['orders', 'm'], ['paylinks', 's'], ['party_owing', 's'], ['open_close', 'm'], ['class_problems', 'm'], ['sick_calls', 's'], ['swaps', 's'], ['field_trips', 's'], ['buyouts', 's'], ['devices', 's'], ['retail_stock', 's'], ['announcements', 'm']] },
   { key: 'hr', name: 'HR', blocks: [['for_you', 'm'], ['timesheets', 's'], ['sched_check', 'm'], ['sick_calls', 'm'], ['swaps', 's'], ['time_off', 's'], ['timesheets', 'm'], ['sign_offs', 'm'], ['concerns', 's'], ['missing_pins', 's'], ['staff_news', 'm']] },
   { key: 'registration', name: 'Registration', blocks: [['for_you', 'm'], ['find_family', 'm'], ['party_owing', 's'], ['paylinks', 's'], ['find_membership', 's'], ['family_changes', 's'], ['date_suggestions', 's'], ['parties_chase', 's'], ['field_trips', 's'], ['unpaid_invoices', 's'], ['class_problems', 'm'], ['chat_unread', 's']] },
+  { key: 'warehouse', name: 'Warehouse', blocks: [['section', 'l', { text: '📦 Stock', style: 'line', colour: 'accent' }], ['wh_stock', 'm'], ['wh_held', 's'], ['quick_links', 's', { links: ['n_rp', 'n_sup', 'shipstation'] }],
+    ['section', 'l', { text: '🏪 Studios', style: 'line', colour: 'accent' }], ['wh_studios_low', 'm'], ['for_you', 'm']] },
   { key: 'marketing', name: 'Marketing', blocks: [['for_you', 'm'], ['newsletters', 'm'], ['studio_notes', 'm'], ['project_interest', 's'], ['donations', 's'], ['points', 's'], ['sales_pace', 's'], ['fill_rates', 'l']] }
 ];
 function dashAllowed(type) { const t = DASH_BLOCKS[type]; return !!t && dashCan(t.area, t.level) && (!t.need || !!(_dash.me && _dash.me[t.need])); }
@@ -824,8 +903,8 @@ function dashBestStarter() {
 function dashBuild(keys) {
   const out = [], seen = new Set();
   keys.forEach(k => { const st = DASH_STARTERS.find(s => s.key === k); if (!st) return;
-    dashStarterBlocks(st).forEach(([type, size]) => { if (seen.has(type)) return; seen.add(type);
-      out.push({ id: dashNewId(), type, size, opts: Object.assign({}, DASH_BLOCKS[type].opts || {}) }); }); });
+    dashStarterBlocks(st).forEach(([type, size, opts]) => { if (seen.has(type) && !DASH_BLOCKS[type].deco) return; seen.add(type);   // (layout blocks: as many as the layout has)
+      out.push({ id: dashNewId(), type, size, opts: Object.assign({}, DASH_BLOCKS[type].opts || {}, opts || {}) }); }); });
   if (!out.length) ['for_you', 'quick_links'].forEach(type => out.push({ id: dashNewId(), type, size: 'm', opts: Object.assign({}, DASH_BLOCKS[type].opts || {}) }));
   return { v: 1, start: false, starter: keys[0] || '', blocks: out };
 }
@@ -921,8 +1000,9 @@ function dashDraw(noLoad) {   // noLoad: redraw from blocks already loaded, with
   const bar = _dash.edit ? `<div class="dash-editbar"><button class="ho-btn primary" onclick="dashAddOpen()">+ Add a block</button>
       <button class="ho-btn" onclick="dashReset()">${!T && _dash.me.template ? '↺ Back to my starting dashboard' : '↺ Start again from a role’s layout'}</button>
       ${T ? '' : `<label class="dash-start"><input type="checkbox" ${L.start ? 'checked' : ''} onchange="_dash.layout.start=this.checked;dashSaveSoon()"> Open My dashboard when the Hub starts</label>`}
-      <span class="fd-sm">Drag ⠿ to move: drop it in any column, even on empty space, and it stacks under what’s there. ◀ ▶ also move. S, M and L change the width; drag a block’s bottom-right corner to change its height.</span></div>` : '';
-  el.innerHTML = head + bar + `<div class="dash-grid${_dash.edit ? ' editing' : ''}" id="dash-grid"${_dash.edit ? ' ondragover="dashDragOver(event)" ondrop="dashDrop(event)"' : ''}>${L.blocks.map(dashBlockShell).join('')}</div>` +
+      <button class="ho-btn${_dash.preview ? ' primary' : ''}" onclick="dashPreview()">${_dash.preview ? '✏️ Back to editing' : '👁 Preview'}</button>
+      <span class="fd-sm">${_dash.preview ? 'This is how it will look. Click ✏️ Back to editing to change it.' : 'Drag ⠿ to move a block (into any column, even empty space). ✏️ on a block: width, view, settings or remove. Drag a block’s bottom-right corner to change its height.'}</span></div>` : '';
+  el.innerHTML = head + bar + `<div class="dash-grid${_dash.edit ? ' editing' : ''}${_dash.edit && _dash.preview ? ' preview' : ''}" id="dash-grid"${_dash.edit ? ' ondragover="dashDragOver(event)" ondrop="dashDrop(event)"' : ''}>${L.blocks.map(dashBlockShell).join('')}</div>` +
     (!L.blocks.length ? `<div class="ho-card"><div class="goal-note">No blocks yet.</div><button class="ho-btn primary" onclick="${_dash.edit ? '' : 'dashToggleEdit();'}dashAddOpen()">+ Add a block</button></div>` : '');
   dashStatus(); dashGlanceDraw();
   dashPackStart();
@@ -932,10 +1012,7 @@ function dashBlockShell(b, i) {
   const t = DASH_BLOCKS[b.type], ed = _dash.edit, n = _dash.layout.blocks.length, deco = !!t.deco, tile = !deco && b.view === 'stat';
   const SZ = { xs: 'Extra small', s: 'Small', m: 'Medium', l: 'Full width' };
   const sizes = (tile ? ['xs', 's', 'm'] : ['s', 'm', 'l']).map(z => `<button class="dash-sz${b.size === z ? ' on' : ''}" onclick="dashSize('${b.id}','${z}')" title="${SZ[z]}">${z.toUpperCase()}</button>`).join('');
-  const tools = ed ? `<div class="dash-tools"><span class="dash-grip" title="Drag to move" draggable="true" ondragstart="dashDragStart(event,'${b.id}')" ondragend="dashDragEnd()">⠿</span>
-      <button onclick="dashMove('${b.id}',-1)" ${i === 0 ? 'disabled' : ''} title="Move back">◀</button><button onclick="dashMove('${b.id}',1)" ${i === n - 1 ? 'disabled' : ''} title="Move forward">▶</button>
-      ${deco ? '' : `<button class="dash-view" onclick="dashToggleView('${b.id}')" title="${tile ? 'Show the full block' : 'Show only its main numbers, as a small tile'}">${tile ? '▤' : '▦'}</button>`}
-      ${sizes}${b.h ? `<button class="dash-hauto" onclick="dashHeightAuto('${b.id}')" title="Height: fit to what's in it">↕</button>` : ''}${t.settings ? `<button onclick="dashSettings('${b.id}')" title="Settings">⚙</button>` : ''}<button onclick="dashRemove('${b.id}')" title="Remove">✕</button></div>` : '';
+  const tools = ed ? `<div class="dash-tools"><span class="dash-grip" title="Drag to move" draggable="true" ondragstart="dashDragStart(event,'${b.id}')" ondragend="dashDragEnd()">⠿</span><button class="dash-edit" onclick="dashBlockMenu(event,'${b.id}')" title="Edit this block: move, width, view, settings, remove">✏️</button></div>` : '';
   const acts = !ed && !tile && !deco ? `${t.open ? `<button class="dash-open" onclick="dashOpen('${escAttr(t.open[0])}'${t.open[1] !== undefined ? `,'${escAttr(t.open[1])}'` : ''})">Open →</button>` : ''}
       <button class="dash-ref" onclick="dashLoadBlock('${b.id}', true)" title="Refresh">↻</button>` : '';
   const size = !tile && b.size === 'xs' ? 's' : b.size;
@@ -1153,10 +1230,38 @@ function dashPackStart() {
   els.forEach(el => _dash.ro.observe(el));
   if (!_dash.winPack) { _dash.winPack = true; window.addEventListener('resize', dashPackSoon); }
 }
-function dashHeightBtn(b) {   // (show ↕ Auto once a block has a height, without redrawing mid-drag)
+function dashHeightBtn(b) { return; }   // (Nov 12 2026: ↕ is in the ✏️ menu now)
+function dashHeightBtnOld(b) {
   const t = document.querySelector('#dash-' + b.id + ' .dash-tools');
   if (t && !t.querySelector('.dash-hauto')) { const x = document.createElement('button'); x.className = 'dash-hauto'; x.textContent = '↕'; x.title = 'Height: fit to what’s in it'; x.onclick = () => dashHeightAuto(b.id); t.insertBefore(x, t.querySelector('[title="Settings"], [title="Remove"]')); }
 }
+// ✏️ a block's menu (Customize): move, width, full or stats tile, height, settings, remove
+function dashBlockMenu(ev, id) {
+  ev.stopPropagation(); dashBlockMenuClose();
+  const i = dashIdx(id), b = _dash.layout.blocks[i]; if (!b) return; const t = DASH_BLOCKS[b.type], n = _dash.layout.blocks.length;
+  const deco = !!t.deco, tile = !deco && b.view === 'stat', SZ = { xs: 'XS', s: 'S', m: 'M', l: 'L' };
+  const go = js => `onclick="dashBlockMenuClose();${js}"`;
+  const m = document.createElement('div'); m.id = 'dash-bmenu'; m.className = 'dash-bmenu';
+  m.innerHTML = `<div class="bm-h">${esc(t.name)}</div>
+    <div class="bm-row"><span>Move</span><button ${i === 0 ? 'disabled' : ''} ${go(`dashMove('${id}',-1)`)}>◀ Back</button><button ${i === n - 1 ? 'disabled' : ''} ${go(`dashMove('${id}',1)`)}>Forward ▶</button></div>
+    <div class="bm-row"><span>Width</span>${(tile ? ['xs', 's', 'm'] : ['s', 'm', 'l']).map(z => `<button class="${b.size === z ? 'on' : ''}" ${go(`dashSize('${id}','${z}')`)} title="${{ xs: 'Extra small', s: 'Small', m: 'Medium', l: 'Full width' }[z]}">${SZ[z]}</button>`).join('')}</div>
+    ${deco ? '' : `<div class="bm-row"><span>Show</span><button class="${tile ? '' : 'on'}" ${tile ? go(`dashToggleView('${id}')`) : 'disabled'}>▤ Full block</button><button class="${tile ? 'on' : ''}" ${tile ? 'disabled' : go(`dashToggleView('${id}')`)}>▦ Stats tile</button></div>`}
+    ${b.h ? `<button class="bm-item" ${go(`dashHeightAuto('${id}')`)}>↕ Height: fit to what’s in it</button>` : ''}
+    ${t.settings ? `<button class="bm-item" ${go(`dashSettings('${id}')`)}>⚙ Settings</button>` : ''}
+    <button class="bm-item bm-del" ${go(`dashRemove('${id}')`)}>✕ Remove this block</button>`;
+  document.body.appendChild(m);
+  const r = ev.currentTarget.getBoundingClientRect(), w = m.offsetWidth, h = m.offsetHeight;
+  m.style.left = Math.max(8, Math.min(window.innerWidth - w - 8, r.right - w)) + 'px';
+  m.style.top = (r.bottom + 6 + h > window.innerHeight - 8 ? Math.max(8, r.top - h - 6) : r.bottom + 6) + 'px';
+  setTimeout(() => { document.addEventListener('click', dashBlockMenuOutside); document.addEventListener('keydown', dashBlockMenuKey); window.addEventListener('scroll', dashBlockMenuClose, { once: true, capture: true }); }, 0);
+}
+function dashBlockMenuOutside(e) { const m = document.getElementById('dash-bmenu'); if (m && !m.contains(e.target)) dashBlockMenuClose(); }
+function dashBlockMenuKey(e) { if (e.key === 'Escape') dashBlockMenuClose(); }
+function dashBlockMenuClose() {
+  const m = document.getElementById('dash-bmenu'); if (m) m.remove();
+  document.removeEventListener('click', dashBlockMenuOutside); document.removeEventListener('keydown', dashBlockMenuKey);
+}
+function dashPreview() { _dash.preview = !_dash.preview; dashBlockMenuClose(); dashDraw(true); }
 function dashHeightAuto(id) { const b = _dash.layout.blocks[dashIdx(id)]; if (!b) return; delete b.h; dashSaveSoon(); dashDraw(); }
 
 // ---------- 📋 For you: its buttons come from today.js and refresh only the Today screen's card ----------
@@ -1607,7 +1712,7 @@ function dashStyles() {
 .dash-hrs td:last-child { white-space: normal; min-width: 160px; } .dash-hrs tfoot td { border-top: 2px solid #ddd; border-bottom: 0; }
 .dash-block.deco { background: none; border: 0; box-shadow: none; padding: 0 2px; }
 .dash-block.deco .dash-body { max-height: none; overflow: visible; }
-.dash-block.deco header { position: absolute; top: 2px; right: 2px; left: auto; height: auto; margin: 0; z-index: 3; background: var(--card-bg); border-radius: 8px; padding: 2px; box-shadow: var(--shadow); }
+.dash-block.deco header { position: static; height: 0; min-height: 0; padding: 0; margin: 0; background: none; box-shadow: none; overflow: visible; }   /* (Customize: only its ⠿ ✏️ in the corner) */
 .dash-block.deco header > b, .dash-block.deco header > .spacer { display: none; }
 .dash-sec { padding: 12px 0 2px; --dc: var(--ink); }
 .dash-sec-row { display: flex; align-items: center; gap: 12px; min-height: 30px; }
@@ -1687,8 +1792,19 @@ function dashStyles() {
 .dash-tile { display: flex; flex-wrap: wrap; gap: 4px 14px; } .dash-tn { display: flex; flex-direction: column; min-width: 0; }
 .dash-tn b { font-size: 26px; line-height: 1.1; color: var(--ink); } .dash-tn b.bad { color: var(--red); } .dash-tn b.mid { color: var(--amber); } .dash-tn b.ok { color: var(--green); }
 .dash-tn span { font-size: 11.5px; color: var(--ink-soft); line-height: 1.25; } .dash-tile-full { font-size: 12.5px; }
-.dash-grid.editing .dash-block.sz-xs .dash-tools { position: absolute; top: 4px; left: 4px; right: 4px; flex-wrap: wrap; background: var(--card-bg); padding: 2px; border-radius: 8px; box-shadow: var(--shadow); z-index: 3; }
-.dash-grid.editing .dash-block.sz-xs header b { visibility: hidden; }
+.dash-grid.editing .dash-block .dash-tools { position: absolute; top: 6px; right: 6px; z-index: 4; background: var(--card-bg); padding: 2px; border-radius: 9px; box-shadow: var(--shadow); gap: 2px; }
+.dash-grid.editing .dash-block .dash-tools .dash-grip { padding: 0 4px; font-size: 15px; }
+.dash-grid.editing .dash-block .dash-tools .dash-edit { min-width: 28px; height: 26px; font-size: 13px; }
+.dash-grid.preview .dash-block .dash-tools { display: none; }
+.dash-grid.preview .dash-block, .dash-grid.preview .dash-block.deco { outline: none; resize: none; }
+.dash-bmenu { position: fixed; z-index: 10000; background: #fff; color: #1f1b3a; border: 1px solid #e6e3ee; border-radius: 12px; box-shadow: 0 10px 30px rgba(20, 16, 50, .18); padding: 8px; width: 260px; font-size: 13px; }
+.dash-bmenu .bm-h { font-weight: 800; padding: 2px 4px 6px; border-bottom: 1px solid #f0eef6; margin-bottom: 6px; }
+.dash-bmenu .bm-row { display: flex; align-items: center; gap: 4px; padding: 3px 4px; } .dash-bmenu .bm-row > span { width: 48px; color: #6b6a80; font-size: 12px; }
+.dash-bmenu .bm-row button { flex: 1; border: 1px solid #e6e3ee; background: #fff; border-radius: 7px; padding: 5px 4px; font: inherit; font-size: 12px; cursor: pointer; color: inherit; }
+.dash-bmenu .bm-row button.on { background: #6d4aeb; border-color: #6d4aeb; color: #fff; } .dash-bmenu .bm-row button:disabled:not(.on) { opacity: .35; cursor: default; }
+.dash-bmenu .bm-item { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 7px 8px; border-radius: 7px; font: inherit; cursor: pointer; color: inherit; }
+.dash-bmenu .bm-item:hover, .dash-bmenu .bm-row button:not(:disabled):hover { background: #f4f2fb; } .dash-bmenu .bm-row button.on:hover { background: #6d4aeb; }
+.dash-bmenu .bm-del { color: #c62828; border-top: 1px solid #f0eef6; margin-top: 4px; border-radius: 0 0 7px 7px; }
 .dash-search { width: 100%; box-sizing: border-box; padding: 9px 12px; border: 1px solid #ddd; border-radius: 10px; font: inherit; margin-bottom: 6px; }`;
   document.head.appendChild(s);
 }
