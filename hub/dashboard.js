@@ -19,6 +19,8 @@
 // (Nov 12 2026: the dashboard places blocks itself: each goes in the column it was dropped in (b.x, saved), stacked under what's
 // already there; blocks never placed fill the highest gap that fits. Replaces the browser's own gap-filling.)
 // (Nov 12 2026: "← My dashboard" at the top of every other Hub page for home office logins; hub.html#mydash opens it.)
+// (Nov 12 2026: 💰 Labour cost asks hub_day_labour studio by studio, 6 at a time (one call for all 31 timed out); ⏱ punch notes
+// (shown, ✎ to add or change: hub_ho_punch_note, SQL step 9); 🏬 time for studios (hub_ho_alloc_set, SQL step 10).)
 
 // ---------- State ----------
 let _dash = { me: null, layout: null, edit: false, err: '', saving: '', saveTimer: null, refreshTimer: null, drag: null, choose: false, cache: {}, ro: null };
@@ -434,8 +436,24 @@ const DASH_BLOCKS = {
     desc: 'Labour against booked revenue for the whole network this week (or month); open it up to see every studio.',
     settings: b => `<label>Period <select data-opt="range"><option value="week"${b.opts.range !== 'month' ? ' selected' : ''}>This week (Sun–Sat)</option><option value="month"${b.opts.range === 'month' ? ' selected' : ''}>This month</option></select></label>`,
     async load(b) {
-      const [a, z] = dashLabourRange(b.opts.range);
-      const d = (await dashRpc('hub_dash_labour', { p_from: a, p_to: z })) || {};
+      const [a, z] = dashLabourRange(b.opts.range), ids = Object.keys(STUDIO_NAMES), rows = [];
+      let done = 0, skipped = 0, money = false, lab = 0, rev = 0, refused = 0;
+      const el = () => document.getElementById('dash-body-' + b.id);
+      const tick = () => { const e = el(); if (e && !_dash.cache[b.id]) e.innerHTML = `<div class="dash-empty">Working out labour: ${done} of ${ids.length} studios…</div>`; };
+      const one = async id => {   // (each studio on its own: the whole network in one call ran past the database's time limit)
+        try {
+          const r = (await dashRpc('hub_day_labour', { p_studio_id: id, p_from: a, p_to: z })) || {};
+          money = money || !!r.money; lab += +r.total_labour || 0; rev += +r.total_revenue || 0;
+          rows.push({ studio_id: id, pct: r.total_pct, labour: r.total_labour, revenue: r.total_revenue, hours: Math.round((r.days || []).reduce((t, d) => t + (+d.hours || 0), 0) * 10) / 10 });
+        } catch (e) { skipped++; if (e && e.code === '42501') refused++; }
+        done++; tick();
+      };
+      tick();
+      for (let i = 0; i < ids.length; i += 6) await Promise.all(ids.slice(i, i + 6).map(one));
+      if (refused === ids.length) { const e = new Error('permission'); e.code = '42501'; throw e; }
+      const P = rows.filter(r => r.pct != null);
+      const d = { money, studios: rows, skipped, labour: money ? Math.round(lab) : null, revenue: money ? Math.round(rev) : null,
+        pct: money && rev > 0 ? Math.round(lab / rev * 100) : null, avg_pct: P.length ? Math.round(P.reduce((t, r) => t + (+r.pct), 0) / P.length) : null };
       (_dash.labData = _dash.labData || {})[b.id] = d;
       return dashLabourHtml(b, d);
     }
@@ -1257,7 +1275,9 @@ function dashClockHtml(b, S) {
   return `<div class="dash-clock ${S.state}"><div class="dash-clock-st">${status}</div><div class="dash-sub">${P.length ? esc(hm) + ' worked today' : 'No punches today yet'} · ${esc(S.name || '')} · 🏠 Home office</div></div>
     <div class="dash-clock-btns">${(S.can || []).map(k => `<button class="ho-btn${k === 'in' || k === 'break_in' ? ' primary' : ''}" onclick="dashPunch('${b.id}','${k}')">${DASH_PUNCH[k]}</button>`).join('')}</div>
     <input type="text" class="dash-clock-note" id="dash-cn-${b.id}" maxlength="500" placeholder="Note with this punch (optional)">
-    ${P.length ? '<div class="dash-list" style="margin-top:8px">' + P.map(p => `<div class="dash-row"><div class="dash-main" style="font-weight:500">${esc(DASH_PUNCHED[p.kind] || p.kind)} · ${esc(dashTime(p.at))}</div></div>`).join('') + '</div>' : ''}`;
+    ${P.length ? '<div class="dash-list" style="margin-top:8px">' + P.map(p => `<div class="dash-row"><div class="dash-main" style="font-weight:500">${esc(DASH_PUNCHED[p.kind] || p.kind)} · ${esc(dashTime(p.at))}
+        ${p.id ? `<button class="dash-pen" title="${p.comment ? 'Change the note' : 'Add a note'}" onclick="dashPunchNote('${b.id}','${escAttr(p.id)}')">✎</button>` : ''}</div>${p.comment ? `<div class="dash-sub">📝 ${esc(p.comment)}</div>` : ''}</div>`).join('') + '</div>' : ''}
+    ${dashAllocHtml(b, S)}`;
 }
 async function dashPunch(id, kind) {
   const el = document.getElementById('dash-body-' + id), note = document.getElementById('dash-cn-' + id);
@@ -1266,7 +1286,63 @@ async function dashPunch(id, kind) {
     const S = await dashRpc('hub_ho_punch', { p_kind: kind, p_comment: note && note.value.trim() ? note.value.trim() : null });
     const b = _dash.layout.blocks.find(x => x.id === id), html = dashClockHtml(b, S);
     _dash.cache[id] = html; if (el) el.innerHTML = html;
+    if (kind === 'out' && S && S.alloc_day && dashAllocWorked(S) > 0) dashAllocOpen(id, true);   // (punching out: any of the day for a studio?)
   } catch (e) { alert(e.message || e); dashLoadBlock(id, true); }
+}
+async function dashPunchNote(id, punchId) {
+  const S = (_dash.clock || {})[id], p = S && (S.today || []).find(x => x.id === punchId); if (!p) return;
+  const v = prompt(`Note for “${DASH_PUNCHED[p.kind] || p.kind} · ${dashTime(p.at)}” (shows on Timesheets; leave empty to remove it)`, p.comment || '');
+  if (v === null) return;
+  try { const S2 = await dashRpc('hub_ho_punch_note', { p_punch: punchId, p_comment: v }); const b = _dash.layout.blocks.find(x => x.id === id), h = dashClockHtml(b, S2); _dash.cache[id] = h; const el = document.getElementById('dash-body-' + id); if (el) el.innerHTML = h; }
+  catch (e) { alert(e.message || e); }
+}
+// 🏬 time for studios: how much of a day was for which studios (counts toward that studio's labour; the rest stays home office)
+const dashH = m => { m = Math.round(+m || 0); return Math.floor(m / 60) + 'h' + (m % 60 ? ' ' + String(m % 60).padStart(2, '0') + 'm' : ''); };
+function dashAllocWorked(S) { return S.alloc_day && S.alloc_day === S.work_date ? Math.max(+S.alloc_worked || 0, dashWorked(S.today)) : (+S.alloc_worked || 0); }   // (today: time so far, still punched in included)
+function dashAllocDayLabel(S) { if (!S.alloc_day) return ''; return S.alloc_day === S.work_date ? 'today' : new Date(S.alloc_day + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }); }
+function dashAllocHtml(b, S) {
+  if (!S.alloc_day) return '';
+  const A = S.alloc || [], given = A.reduce((t, a) => t + (+a.minutes || 0), 0);
+  return `<div class="dash-alloc"><div class="dash-main">🏬 Time for studios <span class="dash-sub" style="display:inline">· ${esc(dashAllocDayLabel(S))}</span></div>
+    ${A.length ? `<div class="dash-chips" style="margin:4px 0">${A.map(a => `<span class="dash-pill">${esc(dashStudio(a.studio_id))} · ${esc(dashH(a.minutes))}</span>`).join('')}</div>
+      <div class="dash-sub">${esc(dashH(given))} for studios · ${esc(dashH(Math.max(0, dashAllocWorked(S) - given)))} home office</div>`
+      : `<div class="dash-sub">None yet: all ${esc(dashH(dashAllocWorked(S)))} counts as home office.</div>`}
+    <button class="ho-btn sm" style="margin-top:6px" onclick="dashAllocOpen('${b.id}')">${A.length ? '✎ Change' : '+ Give time to a studio'}</button></div>`;
+}
+function dashAllocOpen(id, atOut) {
+  const S = (_dash.clock || {})[id]; if (!S || !S.alloc_day) return;
+  _dash.allocRows = (S.alloc || []).map(a => ({ studio_id: a.studio_id, hours: Math.round(a.minutes / 15) / 4 }));
+  if (!_dash.allocRows.length) _dash.allocRows.push({ studio_id: '', hours: '' });
+  _dash.allocFor = id; _dash.allocAtOut = !!atOut; dashAllocDraw();
+}
+function dashAllocDraw() {
+  const S = (_dash.clock || {})[_dash.allocFor]; if (!S) return;
+  const R = _dash.allocRows, worked = dashAllocWorked(S), given = R.reduce((t, r) => t + Math.round((+r.hours || 0) * 60), 0);
+  const opts = v => '<option value="">Choose a studio…</option>' + Object.keys(STUDIO_NAMES).sort((x, y) => STUDIO_NAMES[x].localeCompare(STUDIO_NAMES[y])).map(k => `<option value="${k}"${k === v ? ' selected' : ''}>${esc(STUDIO_NAMES[k])}</option>`).join('');
+  openDutySheet(`<h3 style="margin:0 0 4px">🏬 ${_dash.allocAtOut ? 'Any of today’s time for a studio?' : 'Time for studios'}</h3>
+    <p class="fd-sm" style="margin:0 0 10px">${esc(dashAllocDayLabel(S) === 'today' ? 'Today' : dashAllocDayLabel(S))}: you worked <b>${esc(dashH(worked))}</b>. Hours you give a studio count toward its labour; the rest stays home office. Timesheets and pay don’t change.</p>
+    ${R.map((r, i) => `<div class="dash-alloc-row"><select onchange="_dash.allocRows[${i}].studio_id=this.value">${opts(r.studio_id)}</select>
+      <input type="number" min="0" max="24" step="0.25" value="${escAttr(r.hours)}" placeholder="hours" oninput="_dash.allocRows[${i}].hours=this.value;dashAllocLeft()"> h
+      <button class="ho-btn sm" title="Remove" onclick="_dash.allocRows.splice(${i},1);dashAllocDraw()">✕</button></div>`).join('')}
+    <button class="ho-btn sm" onclick="_dash.allocRows.push({ studio_id: '', hours: '' });dashAllocDraw()">+ Another studio</button>
+    <div class="dash-sub" id="dash-alloc-left" style="margin-top:8px"></div><div class="fd-msg" id="dash-alloc-err"></div>
+    <div style="text-align:right;margin-top:12px"><button class="ho-btn" onclick="closeDutySheet()">${_dash.allocAtOut ? 'Skip' : 'Cancel'}</button> <button class="ho-btn primary" onclick="dashAllocSave()">Save</button></div>`);
+  dashAllocLeft();
+}
+function dashAllocLeft() {
+  const S = (_dash.clock || {})[_dash.allocFor], el = document.getElementById('dash-alloc-left'); if (!S || !el) return;
+  const given = _dash.allocRows.reduce((t, r) => t + Math.round((+r.hours || 0) * 60), 0), left = dashAllocWorked(S) - given;
+  el.innerHTML = left < 0 ? `<b style="color:var(--red)">${esc(dashH(-left))} more than you worked</b>` : `${esc(dashH(given))} for studios · <b>${esc(dashH(left))}</b> stays home office`;
+}
+async function dashAllocSave() {
+  const S = (_dash.clock || {})[_dash.allocFor], err = document.getElementById('dash-alloc-err'); if (!S) return;
+  const R = _dash.allocRows.filter(r => +r.hours > 0);
+  if (R.some(r => !r.studio_id)) { if (err) err.textContent = 'Choose a studio for each line with hours.'; return; }
+  try {
+    const S2 = await dashRpc('hub_ho_alloc_set', { p_date: S.alloc_day, p_allocs: R.map(r => ({ studio_id: r.studio_id, hours: +r.hours })) });
+    closeDutySheet();
+    const id = _dash.allocFor, b = _dash.layout.blocks.find(x => x.id === id), h = dashClockHtml(b, S2); _dash.cache[id] = h; const el = document.getElementById('dash-body-' + id); if (el) el.innerHTML = h;
+  } catch (e) { if (err) err.textContent = e.message || String(e); }
 }
 function dashSetupClockHtml() {
   const T = _dash.target, CL = _dash.clockList; if (!T || !CL) return '';
@@ -1380,6 +1456,10 @@ function dashStyles() {
 .dash-clock.in .dash-sub, .dash-clock.break .dash-sub { color: #3f3f46; } .dash-clock.in, .dash-clock.break { color: #18181b; }
 .dash-clock-btns { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; } .dash-clock-btns .ho-btn { flex: 1; min-height: 46px; font-size: 14px; white-space: nowrap; padding: 0 10px; }
 .dash-clock-note { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; }
+.dash-pen { border: 0; background: none; color: var(--ink-soft); cursor: pointer; font-size: 13px; padding: 0 4px; } .dash-pen:hover { color: var(--accent); }
+.dash-alloc { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
+.dash-alloc-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; } .dash-alloc-row select { flex: 1; min-width: 0; padding: 6px; border-radius: 8px; border: 1px solid #ddd; font: inherit; }
+.dash-alloc-row input { width: 76px; padding: 6px; border-radius: 8px; border: 1px solid #ddd; font: inherit; }
 .dash-pace { display: flex; flex-direction: column; }
 .dash-pace-row { display: grid; grid-template-columns: 30px minmax(0, 1fr) minmax(50px, 30%) 56px; gap: 8px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
 .dash-pace-row:last-child { border-bottom: 0; } .dash-rank { text-align: center; font-weight: 700; color: var(--ink-soft); }
