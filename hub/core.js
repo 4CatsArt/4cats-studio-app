@@ -1,7 +1,7 @@
 // hub/core.js: shared by every part of the Hub. Loaded by hub.html BEFORE its main script.
 // The Supabase client, the sign-in token on Edge Function calls, fnHeaders, STUDIO_NAMES, and the
 // everyday helpers: esc, escAttr, localDateStr, shortTime, openDutySheet/closeDutySheet, PANES/showOnlyPane/
-// paneVisible, setActiveNav. Moved out of hub.html as-is (Nov 11 2026).
+// paneVisible, setActiveNav. Moved out of hub.html as-is (Nov 11 2026). (Nov 12 2026: + mydash-pane for 🏠 My dashboard)
 
 /* ==========================================================================
    LIVE CONFIG
@@ -100,7 +100,7 @@ function escAttr(s) {
 }
 // The page panes: only one shows at a time. Points + Instagram are
 // coordinator-only (their sidebar buttons only appear when unlocked).
-const PANES = ['memb-pane', 'ft-pane', 'bo-pane', 'sn-pane', 'as-pane', 'stf-pane', 'rp-pane', 'sup-pane', 'spots-pane', 'snotes-pane', 'wsm-pane', 'fd-pane', 'se-pane', 'mv-pane', 'news-pane', 'ct-pane', 'act-pane', 'don-pane', 'bulk-pane', 'dashboard-main', 'hist-pane', 'ann-pane', 'concern-pane', 'concerns-pane', 'swaps-pane', 'chat-pane', 'dm-pane', 'devices-pane', 'etpl-pane', 'tickets-pane', 'moments-pane', 'info-pane', 'duties-pane', 'schedule-pane', 'points-pane', 'instagram-pane', 'occupancy-pane', 'inventory-pane', 'announce-pane', 'checklist-pane', 'oc-overview-pane', 'plan-pane', 'parties-pane', 'families-pane', 'notif-pane', 'ideas-pane', 'interest-pane', 'rules-pane', 'sick-pane', 'punch-pane', 'ts-pane', 'acks-pane', 'ackc-pane'];
+const PANES = ['memb-pane', 'ft-pane', 'bo-pane', 'sn-pane', 'as-pane', 'stf-pane', 'rp-pane', 'sup-pane', 'spots-pane', 'snotes-pane', 'wsm-pane', 'fd-pane', 'se-pane', 'mv-pane', 'news-pane', 'ct-pane', 'act-pane', 'don-pane', 'bulk-pane', 'dashboard-main', 'hist-pane', 'ann-pane', 'concern-pane', 'concerns-pane', 'swaps-pane', 'chat-pane', 'dm-pane', 'devices-pane', 'etpl-pane', 'tickets-pane', 'moments-pane', 'info-pane', 'duties-pane', 'schedule-pane', 'points-pane', 'instagram-pane', 'occupancy-pane', 'inventory-pane', 'announce-pane', 'checklist-pane', 'oc-overview-pane', 'plan-pane', 'parties-pane', 'families-pane', 'notif-pane', 'ideas-pane', 'interest-pane', 'rules-pane', 'sick-pane', 'punch-pane', 'ts-pane', 'acks-pane', 'ackc-pane', 'mydash-pane'];
 function showOnlyPane(id) {
   if (id !== 'chat-pane' && _chat && _chat.mode !== 'staff') chatStop();   // leaving Chat: stop checking for messages
   PANES.forEach(p => {
