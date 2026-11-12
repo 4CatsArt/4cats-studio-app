@@ -48,6 +48,7 @@ async function snsLoad() {
   const { data, error } = await sb.rpc('hub_studio_notes_all');
   _sns.err = error ? (/hub_studio_notes_all/.test(error.message) ? 'Run world_studio_notes_page.sql in Supabase first.' : error.message) : '';
   _sns.rows = error ? [] : (data.notes || []); _sns.photos = error ? {} : (data.photos || {});
+  try { const ps = await sb.rpc('hub_note_photo_schedule'); _sns.sched = ps.error ? null : (ps.data || []); } catch (e) { _sns.sched = null; }   // 🗓 (Nov 12 2026) scheduled default pictures
   try { const fc = await sb.rpc('hub_note_follow_counts'); _sns.follows = fc.error ? {} : (fc.data || {}); } catch (e) { _sns.follows = {}; }   // ✉️ (Nov 12 2026) followers by email
   snsDraw();
 }
@@ -91,6 +92,7 @@ function snsDraw() {
           <td style="white-space:nowrap"><button class="ho-btn sm" onclick="snsEdit('${escAttr(n.id)}')">Edit</button><button class="ho-btn sm" onclick="snsRemove('${escAttr(n.id)}')">Remove</button></td></tr>`; }).join('')}</tbody></table>`
       : '<p class="goal-note">No notes here.</p>';
   }
+  h += snsSchedHtml();
   // pictures
   const P = _sns.photos || {};
   h += `<details class="card" style="margin-top:14px"><summary><b>📷 Note pictures</b> <span class="goal-note">${P['*'] ? 'every-studio picture set' : 'no every-studio picture'} · ${Object.keys(P).filter(k => k !== '*').length} studios with their own</span></summary>
@@ -114,7 +116,7 @@ function snsEdit(id, forStudio, preScope) {
         <input type="hidden" id="sns-photo" value="${escAttr((n && n.photo) || '')}">
         <div id="sns-photo-prev">${snsPhotoPrev((n && n.photo) || '')}</div>
         <label class="ho-btn sm">📷 ${n && n.photo ? 'Change' : 'Add a picture'}<input type="file" accept="image/*" hidden onchange="snsNotePhoto(this)"></label>
-        <span class="fd-sm">Shows only while this note shows. No picture here: the studio’s own picture, else the one for every studio.</span></div>
+        <span class="fd-sm">Shows only while this note shows. No picture here: a scheduled default picture for the day, else the studio’s own, else the one for every studio.</span></div>
       <label class="ba-check"><input type="checkbox" id="sns-auto" ${n && n.auto_staff === false ? '' : 'checked'}> Add the studio’s coordinator and that day’s staff after it (their 4Cats names: the coordinator first, then the published schedule)</label>
       ${n ? (copies.length > 1 ? `<label class="ba-check"><input type="radio" name="sns-scope" value="all" ${preScope === 'one' ? '' : 'checked'}> Change all ${copies.length} studios’ copies</label>
           <label class="ba-check"><input type="radio" name="sns-scope" value="one" ${preScope === 'one' ? 'checked' : ''}> Only ${esc(STUDIO_NAMES[n.studio_id] || n.studio_id)} <span class="fd-sm">(it becomes its own note, with its own text)</span></label>` : `<p class="fd-sm">For ${esc(STUDIO_NAMES[n.studio_id] || n.studio_id)}.</p>`) + snsAlsoHtml(n, copies)
@@ -143,6 +145,40 @@ async function snsSave(id) {
     added = (c.data && c.data.added) || 0;
   }
   closeDutySheet(); _sns.msg = `✓ Saved${r.data && r.data.studios > 1 ? ' for ' + r.data.studios + ' studios' : ''}${added ? `, and posted at ${added} more studio${added === 1 ? '' : 's'}` : ''}.`; snsLoad();
+}
+// 🗓 (Nov 12 2026) Scheduled default pictures: a picture for a date range (every studio, or chosen ones), used by any note
+// without its own picture while the dates last (world_note_photo_for: the note's own → scheduled → the studio's → every studio's)
+function snsSchedHtml() {
+  const S = _sns.sched; if (S === null || S === undefined) return '';
+  const t = localDateStr(new Date()), nm = x => (x.studio_ids && x.studio_ids.length) ? x.studio_ids.map(id => String(STUDIO_NAMES[id] || id).replace(/^.*?\s-\s/, '')).join(', ') : 'Every studio';
+  return `<details class="card" style="margin-top:14px"${S.length ? ' open' : ''}><summary><b>🗓 Scheduled default pictures</b> <span class="goal-note">${S.filter(x => x.starts_on <= t && x.ends_on >= t).length} showing today · ${S.length} in all</span></summary>
+    <p class="goal-note" style="margin:6px 0">A note without its own picture uses one of these while its dates last: a studio’s own schedule first, then one for every studio. Outside these dates, the pictures below are used.</p>
+    ${S.length ? S.map(x => `<div class="sn-line"><img src="${escAttr(x.url)}" alt="" class="sns-ph"><span><b>${esc(x.label || 'Picture')}</b><br><span class="goal-note">${esc(ptyDayLabel(x.starts_on))} – ${esc(ptyDayLabel(x.ends_on))} · ${esc(nm(x))}${x.starts_on <= t && x.ends_on >= t ? ' · <b>showing now</b>' : ''}</span></span>
+      <span class="spacer" style="flex:1"></span><button class="ho-btn sm" onclick="snsSchedRemove('${escAttr(x.id)}')">Remove</button></div>`).join('') : '<p class="goal-note">None yet.</p>'}
+    <button class="ho-btn sm" style="margin-top:8px" onclick="snsSchedAdd()">+ Schedule a picture</button></details>`;
+}
+function snsSchedAdd() {
+  openDutySheet(`<h3>🗓 Schedule a default picture</h3><div class="me-form">
+    <label>Name (for you)<input id="sps-label" maxlength="80" placeholder="Holidays"></label>
+    <div class="sup-two"><label>From<input type="date" id="sps-from" value="${escAttr(localDateStr(new Date()))}"></label><label>Until<input type="date" id="sps-until"></label></div>
+    <input type="hidden" id="sns-photo" value=""><b style="display:block;margin:6px 0 4px">The picture</b><div id="sns-photo-prev"></div>
+    <label class="ho-btn sm">📷 Choose a picture<input type="file" accept="image/*" hidden onchange="snsNotePhoto(this)"></label>
+    <details style="margin:10px 0"><summary><b>Studios</b> <span class="fd-sm">(none ticked = every studio)</span></summary>
+      <div class="sn-studios">${Object.keys(STUDIO_NAMES).map(sid => `<label class="ba-check"><input type="checkbox" class="sps-st" value="${escAttr(sid)}"> ${esc(STUDIO_NAMES[sid])}</label>`).join('')}</div></details>
+    <div id="sps-msg"></div></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="snsSchedSave()">Save</button></div>`);
+}
+async function snsSchedSave() {
+  const v = id => (document.getElementById(id) || {}).value || '';
+  const { error } = await sb.rpc('hub_note_photo_schedule_put', { p: { url: v('sns-photo'), label: v('sps-label'), starts_on: v('sps-from'), ends_on: v('sps-until'),
+    studios: [...document.querySelectorAll('.sps-st:checked')].map(c => c.value) } });
+  if (error) { document.getElementById('sps-msg').innerHTML = `<p class="fd-msg">${esc(error.message)}</p>`; return; }
+  closeDutySheet(); _sns.msg = '✓ Picture scheduled.'; snsLoad();
+}
+async function snsSchedRemove(id) {
+  if (!confirm('Remove this scheduled picture?')) return;
+  const { error } = await sb.rpc('hub_note_photo_schedule_remove', { p_id: id }); if (error) { alert(error.message); return; }
+  _sns.msg = '✓ Removed.'; snsLoad();
 }
 // 📷 (Nov 12 2026) A note's own picture: uploaded right away, saved with the note
 function snsPhotoPrev(url) {
