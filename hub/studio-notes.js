@@ -107,9 +107,9 @@ function snsEdit(id, forStudio, preScope) {
   openDutySheet(`<h3>✍️ ${n ? 'Edit note' : 'New note'}</h3>
     <div class="me-form">
       <div class="sup-two"><label>Show from<input type="date" id="sns-from" value="${escAttr((n && n.show_from) || localDateStr(new Date()))}"></label><label>Until (optional)<input type="date" id="sns-until" value="${escAttr((n && n.show_until) || '')}"></label></div>
-      <label>Heading (optional)<input id="sns-title" maxlength="120" value="${escAttr((n && n.title) || '')}" placeholder="A Little Note from (each studio's own name)"></label>
+      <label>Heading (optional)<input id="sns-title" maxlength="120" value="${escAttr((n && n.title) || '')}" placeholder="💌 A little note from 4Cats (each studio’s name), if left blank"></label>
       <label>The note<textarea id="sns-body" rows="6" maxlength="2000">${esc((n && n.body) || '')}</textarea></label><div class="fd-sm" style="margin:-4px 0 8px"><button class="ho-btn sm" type="button" onclick="snsAddLink()">🔗 Add a link</button> Highlight some words first to turn them into the link. A web address typed into the note becomes clickable too.</div>
-      <label>Sign-off (optional)<textarea id="sns-signed" rows="2" maxlength="200" placeholder="See you at the studio,">${esc((n && n.signed) || '')}</textarea></label>
+      <label>Sign-off (optional)<textarea id="sns-signed" rows="2" maxlength="200" placeholder="See you at the studio! (if left blank)">${esc((n && n.signed) || '')}</textarea></label>
       <label class="ba-check"><input type="checkbox" id="sns-auto" ${n && n.auto_staff === false ? '' : 'checked'}> Add the studio’s coordinator and that day’s staff after it (their 4Cats names: the coordinator first, then the published schedule)</label>
       ${n ? (copies.length > 1 ? `<label class="ba-check"><input type="radio" name="sns-scope" value="all" ${preScope === 'one' ? '' : 'checked'}> Change all ${copies.length} studios’ copies</label>
           <label class="ba-check"><input type="radio" name="sns-scope" value="one" ${preScope === 'one' ? 'checked' : ''}> Only ${esc(STUDIO_NAMES[n.studio_id] || n.studio_id)} <span class="fd-sm">(it becomes its own note, with its own text)</span></label>` : `<p class="fd-sm">For ${esc(STUDIO_NAMES[n.studio_id] || n.studio_id)}.</p>`) + snsAlsoHtml(n, copies)
@@ -121,7 +121,8 @@ function snsEdit(id, forStudio, preScope) {
 }
 async function snsSave(id) {
   const v = x => (document.getElementById(x) || {}).value || '';
-  const p = { title: v('sns-title'), body: v('sns-body'), signed: v('sns-signed'), show_from: v('sns-from'), show_until: v('sns-until'), auto_staff: document.getElementById('sns-auto').checked };
+  const p = { title: v('sns-title'), body: v('sns-body'), signed: v('sns-signed').trim() || 'See you at the studio!',   // (Nov 12 2026) the default sign-off
+    show_from: v('sns-from'), show_until: v('sns-until'), auto_staff: document.getElementById('sns-auto').checked };
   const n = id ? (_sns.rows || []).find(x => x.id === id) : null;
   const scope = (document.querySelector('input[name="sns-scope"]:checked') || {}).value;
   let r;
