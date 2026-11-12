@@ -8,7 +8,7 @@
 // place on World's Workshops page (Move to top / bottom). Add workshop: a project from the Projects library.
 let _wsm = { rows: null, err: '', q: '', kind: '', show: 'all', studio: '', sort: 'title', desc: false, all: false, add: null, tiers: null, msg: '', sel: new Set(), mass: {}, massBusy: '' };
 async function openWsmPane() {
-  if (!_hoCan.edit) { alert('The Workshops manager needs Studio Ops edit access.'); return; }
+  await hoAreaLoad('class_times'); if (!hoA('class_times', 'edit')) { alert('The Workshops manager needs “Class times” (Edit) on the Access page.'); return; }   // (Nov 11 2026: access.html)
   showOnlyPane('wsm-pane'); setActiveNav('nav-wsm'); wsmDraw(); wsmLoad();
   if (!_wsm.tiers) { const pt = await sb.rpc('world_setting_get', { p_key: 'price_tiers' }); _wsm.tiers = pt.error ? [] : ((pt.data && pt.data.tiers) || []); wsmDraw(); }   // (the price tier dropdowns)
 }
@@ -655,4 +655,3 @@ async function m2sGo() {
     <br>Check them in <b>Hub → Class times</b> and on the class page in World.`;
   _m2s.rows = null; _m2s.sel = new Set(); m2wDraw();
 }
-
