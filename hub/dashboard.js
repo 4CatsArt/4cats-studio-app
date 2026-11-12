@@ -1,1149 +1,8377 @@
-// hub/dashboard.js: 🏠 My dashboard (Nov 12 2026), home office logins only. A grid of blocks picked from a library, started from
-// a role's layout, then added to, removed, moved and resized by each person; saved to their own login (hub_dashboards table,
-// my_dashboard SQL step 2: hub_dash_me / hub_dash_save). Each block is a summary with "Open →" to its full Hub page.
-// The page only hides blocks a person can't open: every block loads through the same RPC or Edge Function as its full page,
-// and that call checks access itself (a refusal shows "No access" on the block). Loaded by hub.html after the other area files.
-// Design: "4Cats Hub — My dashboard design v1" doc. (Nov 12 2026: heights by dragging a block's corner, blocks stack into gaps,
-// live reordering while dragging; Customize buttons sit in each block's header so blocks are the same size in both modes.)
-// (Nov 12 2026: 🏁 Studio pace from pace.html's numbers, 🗓️ Weekly schedule check shared between people, 🧾 New orders feed
-// with per-person ✓; my_dashboard SQL step 3.)
-// (Nov 12 2026: a personal header (greeting, picture, today at a glance), 🎨 colour themes, and owners' 👥 Set up for…: a starting
-// dashboard per person (hub_dash_templates, SQL step 4) that ↺ always goes back to; step 4 also adds can_set_up to hub_dash_me.)
-// (Nov 12 2026: 🚨 System health, 🎉 Party balances owing, 💳 Pay links not paid, ❓ Sales with no studio; SQL step 5.)
+<!DOCTYPE html>
+<!-- hub.html: 4Cats Hub, the all-in-one staff tool (studio login, coordinator PIN, personal login, home office tools incl. Class times, Bulk add, Newsletters). -->
+<html lang="en"> 
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<!-- Add to Home Screen: opens full screen like an app -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="4Cats Team">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#f5f4fa">
+<!-- Home screen + notification icons (the 4Cats can, Oct 2026): files next to hub.html -->
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="hub-icon-192.png">
+<title>4Cats Hub</title>
+<link rel="manifest" href="hub.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fredoka:wght@500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+/* ==========================================================================
+   4CATS HUB (hub.html) — the all-in-one staff tool.
+   Started Oct 2026 as a copy of community-dashboard.html, which stays live
+   until studios switch over. Same Edge Functions, same studio login +
+   coordinator PIN, same weekly themes (projects.html → Themes).
+   ==========================================================================
+   Opens with the studio email login (studio view, any staff member on the
+   studio's device). A coordinator PIN unlocks the coordinator view on top.
+   Every card is live: data comes from community-* Edge Functions, which
+   enforce both levels server-side (see resolveAccess in each function).
 
-// ---------- State ----------
-let _dash = { me: null, layout: null, edit: false, err: '', saving: '', saveTimer: null, refreshTimer: null, drag: null, choose: false, cache: {}, ro: null };
-const DASH_RANK = { none: 0, own: 1, view: 2, edit: 3, manage: 4 };
-const DASH_REFRESH_MS = 5 * 60 * 1000;
-const DASH_MAX_BLOCKS = 50;
-const DASH_ROW = 4, DASH_GAP = 12, DASH_HMIN = 120, DASH_HMAX = 1000;   // the stacking grid: 4px rows, 12px gaps (a block's bottom margin); heights people can drag to
+   Card visibility classes:
+     .sc-only    — coordinator view only (PIN unlocked)
+     .admin-only — admin PIN only (e.g. studio sales in dollars)
+     .dev-only   — admin preview only (admin PIN); for future in-progress cards
+   ========================================================================== */
 
-// ---------- Small helpers ----------
-function dashCan(area, level) {
-  if (!area) return true;
-  const have = (_dash.me && _dash.me.areas && _dash.me.areas[area]) || 'none';
-  return (DASH_RANK[have] || 0) >= (DASH_RANK[level || 'view'] || 0);
+:root {
+  --sidebar-bg: #211c49;
+  --sidebar-bg-2: #2b2461;
+  --sidebar-active: #3a3080;
+  --accent: #6d4aeb;
+  --accent-deep: #5636c9;
+  --accent-soft: #ece7ff;
+  --page-bg: #f5f4fb;
+  --card-bg: #ffffff;
+  --ink: #1f1b3a;
+  --ink-soft: #6b6a80;
+  --border: #eceaf6;
+  --green: #16a34a;
+  --green-bg: #e3f9ec;
+  --amber: #b45309;
+  --amber-bg: #fef3d6;
+  --pink: #be185d;
+  --pink-bg: #fce7f3;
+  --blue: #1d4ed8;
+  --blue-bg: #dbeafe;
+  --red: #dc2626;
+  --red-bg: #fee2e2;
+  --gold: #f5a623;
+  --radius: 16px;
+  --shadow: 0 1px 2px rgba(31,27,58,0.04), 0 8px 24px -8px rgba(31,27,58,0.08);
 }
-function dashIsOwner() { return !!(_dash.me && (_dash.me.roles || []).includes('owner')); }
-function dashDay(d) { return d ? new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }) : ''; }
-function dashStudio(id) { return STUDIO_NAMES[id] || id || ''; }
-function dashToday() { return localDateStr(new Date()); }
-function dashNewId() { return 'b' + Math.random().toString(36).slice(2, 9); }
-function dashRows(list, n, row, emptyText) {
-  if (!list.length) return `<div class="dash-empty">${esc(emptyText || 'Nothing here.')}</div>`;
-  const shown = list.slice(0, n);
-  return `<div class="dash-list">${shown.map(row).join('')}</div>${list.length > n ? `<div class="dash-more">+ ${list.length - n} more</div>` : ''}`;
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--page-bg);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
 }
-function dashLine(main, sub, cls) { return `<div class="dash-row${cls ? ' ' + cls : ''}"><div class="dash-main">${main}</div>${sub ? `<div class="dash-sub">${sub}</div>` : ''}</div>`; }
-function dashBig(n, label, tone) { return `<div class="dash-big"><b class="${tone || ''}">${esc(n)}</b> <span>${esc(label)}</span></div>`; }
-async function dashRpc(name, args) {
-  const r = await sb.rpc(name, args || {});
-  if (r.error) throw r.error;
-  return r.data;
+.mono { font-family: 'IBM Plex Mono', monospace; }
+
+a { color: var(--accent-deep); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+button { font-family: inherit; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
 }
-function dashOpen(fn, arg) {
+
+/* ---------- prototype banner ---------- */
+
+/* ---------- shell layout ---------- */
+.shell { display: flex; min-height: 100vh; }
+
+/* ---------- sidebar ---------- */
+.sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  background: linear-gradient(180deg, var(--sidebar-bg) 0%, var(--sidebar-bg-2) 100%);
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 14px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+.sidebar-logo { display: flex; align-items: center; gap: 8px; padding: 4px 10px 22px; }
+.sidebar-logo .mark {
+  width: 30px; height: 30px; border-radius: 9px; background: var(--accent);
+  display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0;
+}
+.sidebar-logo .word { font-weight: 800; font-size: 15px; line-height: 1.15; }
+.sidebar-logo .word small { display: block; font-weight: 600; font-size: 9px; letter-spacing: 0.14em; color: #b7aee8; }
+
+.nav-group { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 10px; border-radius: 10px; color: #cfc9f0;
+  font-size: 13.5px; font-weight: 500; cursor: pointer; border: none; background: none;
+  width: 100%; text-align: left;
+}
+.nav-item .ic { width: 18px; text-align: center; font-size: 14px; }
+.nav-item:hover { background: rgba(255,255,255,0.06); color: #fff; }
+.nav-item.active { background: var(--sidebar-active); color: #fff; }
+
+.sidebar-spacer { flex: 1; }
+
+/* ---------- 4Cats Hub look ---------- */
+.sidebar-logo .mark.hub {
+  width: 40px; height: 40px; border-radius: 12px; background: var(--hub-pop, #ffb547);
+  color: var(--sidebar-bg); font-family: 'Fredoka', 'Inter', sans-serif; font-weight: 700; font-size: 17px;
+}
+.sidebar-logo .mark-img { width: 30px; height: auto; display: block; flex-shrink: 0; border-radius: 6px; }
+.sidebar-logo .word.hub { font-family: 'Fredoka', 'Inter', sans-serif; font-weight: 600; font-size: 19px; }
+.nav-label {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase;
+  color: #a39cd6; padding: 10px 10px 4px;
+}
+.nav-group.coord { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.10); }
+.nav-item.locked-teaser { border: 1px dashed rgba(255,255,255,0.25); color: #d8d4f2; }
+body.sc-mode .locked-teaser { display: none !important; }
+
+.hero-greeting { font-family: 'Fredoka', 'Inter', sans-serif; font-weight: 600; letter-spacing: -0.01em; }
+
+/* On stage today */
+.floor-card { padding: 20px 22px; margin-bottom: 14px; }
+.floor-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.floor-title { font-family: 'Fredoka', 'Inter', sans-serif; font-weight: 600; font-size: 22px; color: var(--ink); }
+.floor-count { font-size: 13px; color: var(--ink-soft); }
+.floor-head .spacer { flex: 1; }
+.floor-btn {
+  border: 1px solid var(--border); background: #fff; color: var(--ink); border-radius: 999px;
+  padding: 8px 14px; font-size: 13px; font-weight: 700;
+}
+.floor-btn:hover { border-color: var(--accent); color: var(--accent-deep); }
+.floor-list { display: flex; flex-direction: column; gap: 8px; }
+.ev-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.ev-row { display: flex; gap: 14px; flex-wrap: wrap; padding: 14px 16px; border-radius: 14px; background: #fff4dd; border: 1px solid #ffd998; }
+.ev-tag { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: #8a4b00; background: #ffe2a8; border-radius: 999px; padding: 4px 10px; align-self: flex-start; white-space: nowrap; }
+.ev-main { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 4px; color: #3d2a00; }
+.ev-title { font-size: 16px; font-weight: 800; }
+.ev-time { font-weight: 600; font-size: 14px; color: #8a4b00; margin-left: 4px; }
+.ev-line { font-size: 13.5px; line-height: 1.45; }
+.ev-plan { white-space: pre-line; }
+.ev-staff { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 4px; font-size: 13px; }
+.ev-need { font-size: 12px; font-weight: 700; color: #8a4b00; }
+.floor-row {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px; background: #fff;
+}
+.floor-row.past { opacity: 0.55; }
+.floor-time { width: 74px; font-family: 'Fredoka', 'Inter', sans-serif; font-weight: 600; font-size: 18px; color: var(--ink); }
+.floor-time small { display: block; font-family: 'Inter', sans-serif; font-weight: 500; font-size: 11px; color: var(--ink-soft); }
+.floor-main { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.floor-name { font-size: 15px; font-weight: 700; color: var(--ink); }
+.kind-chip {
+  align-self: flex-start; font-size: 10.5px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase;
+  padding: 3px 9px; border-radius: 999px;
+}
+.kind-wheel    { background: var(--blue-bg);  color: #1e3a8a; }
+.kind-kids     { background: var(--green-bg); color: #14532d; }
+.kind-party    { background: var(--pink-bg);  color: #831843; }
+.kind-glazing  { background: var(--amber-bg); color: #7c2d12; }
+.kind-camp     { background: #fff1e6;         color: #9a3412; }
+.kind-event    { background: #fff4dd;         color: #7c2d12; }
+.kind-workshop { background: var(--accent-soft); color: var(--accent-deep); }
+.floor-booked { font-size: 13px; color: var(--ink); white-space: nowrap; }
+.floor-booked b { font-size: 17px; }
+.floor-empty { font-size: 14px; color: var(--ink-soft); padding: 6px 2px; }
+.roles-strip { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 10px 12px; margin-bottom: 10px; background: var(--accent-soft); border-radius: 12px; }
+.roles-auto { flex-basis: 100%; font-size: 11.5px; color: var(--accent-deep); opacity: 0.85; }
+.roles-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.roles-label { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent-deep); }
+.role-chip { display: inline-flex; align-items: center; gap: 6px; background: #fff; border-radius: 999px; padding: 2px 10px 2px 3px; font-size: 13px; color: var(--ink); }
+.role-chip small { color: var(--ink-soft); font-size: 11px; margin-left: 2px; }
+.role-chip b { font-weight: 700; color: var(--ink-soft); font-size: 11.5px; }
+.floor-staff { display: flex; flex-wrap: wrap; gap: 6px; }
+.floor-staff .role-chip { background: #f3f1fb; }
+a.floor-btn.lp { text-decoration: none; display: inline-flex; align-items: center; background: var(--accent-soft); border-color: transparent; color: var(--accent-deep); }
+
+/* Announcements */
+#hub-announcements { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+#hub-announcements:empty { display: none; }
+.ann {
+  display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap;
+  padding: 16px 20px; border-radius: 18px; background: #fff4dd; border: 1px solid #ffd998; color: #3d2a00;
+}
+.ann.urgent { background: #fde8e8; border-color: #f5b5b5; color: #5c1010; }
+.ann-icon { width: 42px; height: 42px; border-radius: 12px; background: #ffb547; color: #211c49; display: flex; align-items: center; justify-content: center; font-size: 20px; flex: none; }
+.ann.urgent .ann-icon { background: #dc2626; color: #fff; }
+.ann-main { flex: 1 1 300px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.ann-eyebrow { font-size: 11px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: #8a4b00; }
+.ann.urgent .ann-eyebrow { color: #b91c1c; }
+.ann-title { font-size: 16px; font-weight: 700; }
+.ann-body { font-size: 14.5px; line-height: 1.5; }
+.ann-body p, .ann-full p, .ho-body p { margin: 0 0 8px; } .ann-body ul, .ann-full ul, .ho-body ul { margin: 0 0 8px; padding-left: 20px; } .ann-body li, .ann-full li, .ho-body li { margin: 2px 0; }
+.ann-body .ann-h, .ann-full .ann-h, .ho-body .ann-h { font-weight: 700; margin-top: 10px; } .ann-body a, .ann-full a, .ho-body a { color: inherit; text-decoration: underline; }
+.ann-body > :last-child, .ann-full > :last-child, .ho-body > :last-child { margin-bottom: 0; }
+.ann-tools { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; margin: 2px 0 4px; } .ann-tools button { font: inherit; font-size: 13px; border: 1px solid var(--border); background: #fff; border-radius: 8px; padding: 4px 10px; cursor: pointer; min-width: 34px; }
+.ann-tools button:hover { background: #f4f2ee; } .ann-tools-tip { font-size: 12px; color: #8a8a82; margin-left: 6px; }
+.ann-btn { border: none; border-radius: 999px; min-height: 44px; padding: 0 20px; background: var(--sidebar-bg); color: #fff; font-weight: 700; font-size: 14px; align-self: center; }
+.ann-btn:disabled { opacity: 0.6; }
+.ann-read { font-size: 12.5px; font-weight: 700; color: #15803d; align-self: center; white-space: nowrap; }
+.ann-note { font-size: 12.5px; color: var(--ink-soft); align-self: center; }
+.ann-earlier { border: 1px solid var(--border); background: var(--card-bg); border-radius: 16px; }
+.ann-earlier summary { cursor: pointer; padding: 12px 18px; font-size: 13.5px; font-weight: 700; color: var(--ink); list-style: none; display: flex; align-items: center; gap: 8px; }
+.ann-earlier summary::-webkit-details-marker { display: none; }
+.ann-earlier summary::after { content: "▾"; margin-left: auto; color: var(--ink-soft); }
+.ann-earlier[open] summary::after { content: "▴"; }
+.ann-earlier .ann-item { padding: 10px 18px 12px; border-top: 1px solid var(--border); }
+.ann-earlier .ann-item .ann-title { font-size: 14.5px; }
+.ann-earlier .ann-item .ann-meta { font-size: 12px; color: var(--ink-soft); margin-top: 3px; }
+
+/* Home office → Announcements */
+.ho-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.ho-head .spacer { flex: 1; }
+.ho-intro { font-size: 13.5px; color: var(--ink-soft); margin: 0 0 14px; line-height: 1.5; }
+.ho-btn { border: 1px solid var(--border); background: #fff; color: var(--ink); border-radius: 999px; min-height: 40px; padding: 0 16px; font-weight: 700; font-size: 13.5px; }
+.ho-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ho-btn.danger { color: var(--red); border-color: #f5c6cb; }
+.ho-btn:disabled { opacity: 0.6; }
+.ho-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 18px; padding: 16px 18px; margin-bottom: 10px; box-shadow: var(--shadow); }
+.ho-row { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
+.ho-main { flex: 1 1 320px; min-width: 0; }
+.ho-title { font-size: 16px; font-weight: 700; color: var(--ink); }
+.ho-body { font-size: 13.5px; color: var(--ink-soft); margin-top: 4px; line-height: 1.5; }
+.ho-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; font-size: 12px; color: var(--ink-soft); align-items: center; }
+.ho-pill { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: 999px; font-size: 11px; font-weight: 800; }
+.ho-pill.live { background: var(--green-bg); color: #15803d; }
+.ho-pill.soon { background: var(--blue-bg); color: #1e3a8a; }
+.ho-pill.ended { background: #eeedf3; color: #5d5b73; }
+.ho-pill.urgent { background: var(--red-bg); color: #b91c1c; }
+.ho-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.ho-reads summary { cursor: pointer; font-size: 12.5px; font-weight: 700; color: var(--ink); }
+.ho-reads .list { margin-top: 6px; font-size: 12px; line-height: 1.7; color: var(--ink); }
+.ho-reads .not-yet { color: var(--ink-soft); margin-top: 4px; }
+.ho-section-head { font-size: 11.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); margin: 18px 0 8px; }
+.ho-form { display: grid; gap: 14px; }
+.ho-form label.f { display: flex; flex-direction: column; gap: 5px; font-size: 12px; font-weight: 700; color: var(--ink-soft); }
+.ho-form input[type=text], .ho-form input[type=date], .ho-form textarea, .ho-form select {
+  font: inherit; font-size: 14px; color: var(--ink); border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px; background: #fff; box-sizing: border-box; width: 100%;
+}
+.ho-form textarea { min-height: 96px; resize: vertical; line-height: 1.5; }
+.ho-grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.ho-choice { display: flex; gap: 8px; flex-wrap: wrap; }
+.ho-choice label { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 600; color: var(--ink); border: 1px solid var(--border); border-radius: 999px; padding: 8px 14px; cursor: pointer; }
+.ho-studios { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.ho-prov { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
+.ho-prov label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink); padding: 3px 0; cursor: pointer; }
+.ho-prov label.all { font-weight: 800; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 4px; }
+.ho-preview-label { font-size: 11.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
+
+/* Opening / closing */
+.oc-card { padding: 18px 20px; }
+.kiln-card { padding: 16px 20px; margin-top: 14px; }
+.age-sum { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-left: 10px; vertical-align: middle; }
+.age-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.age-pill { display: inline-block; font-size: 12px; font-weight: 700; border-radius: 999px; padding: 2px 9px; background: #eef2f7; color: #334; white-space: nowrap; }
+.age-pill.u8 { background: #fde2e2; color: #b91c1c; }
+.age-pill.k811 { background: #fef3d6; color: #8a5a00; }
+.age-pill.k1215 { background: #e0f2fe; color: #0369a1; }
+@media print { .age-pill { border: 1px solid #999; background: none !important; color: #000 !important; } }
+.kiln-card .kiln-now { display: flex; align-items: center; gap: 10px; font-weight: 700; margin-bottom: 10px; }
+.kiln-card .kiln-now .kn-ico { font-size: 26px; }
+.kiln-card .kiln-pick { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 10px; }
+.kiln-card .kiln-pick button { border: 1px solid var(--border); background: #fff; border-radius: 10px; padding: 8px 4px; font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
+.kiln-card .kiln-pick button.on.ok { background: #e3f9ec; border-color: #15803d; color: #15803d; }
+.kiln-card .kiln-pick button.on.behind { background: #fef3d6; border-color: #b45309; color: #b45309; }
+.kiln-card .kiln-pick button.on.issue { background: #fde2e2; border-color: #b91c1c; color: #b91c1c; }
+.kiln-card .kiln-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 14px; margin-bottom: 8px; }
+.kiln-card input { font: inherit; border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; }
+.kiln-card .kiln-meta { font-size: 12px; color: #888; margin-top: 6px; }
+.oc-title { font-family: 'Fredoka', 'Inter', sans-serif; font-weight: 600; font-size: 20px; color: var(--ink); margin-bottom: 12px; }
+.oc-rings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.oc-ring { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 8px; border: 1px solid var(--border); border-radius: 16px; background: #fff; text-align: center; font: inherit; color: var(--ink); }
+.oc-ring:hover:not(:disabled) { border-color: var(--accent); }
+.oc-ring:disabled { opacity: 0.6; }
+.oc-ring .nm { font-size: 14.5px; font-weight: 800; }
+.oc-ring .st { font-size: 12px; color: var(--ink-soft); line-height: 1.35; }
+.oc-ring .st.good { color: #15803d; font-weight: 700; }
+.oc-ring .st.warn { color: #b45309; font-weight: 700; }
+.oc-alert { margin-top: 10px; font-size: 12.5px; color: #7c2d12; background: #fff4dd; border-radius: 10px; padding: 8px 10px; white-space: pre-line; }
+
+/* Checklist page */
+.cl-top { position: sticky; top: 0; z-index: 5; background: var(--page-bg); padding: 4px 0 12px; }
+.cl-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cl-head h1 { margin: 0; font-family: 'Fredoka', 'Inter', sans-serif; font-weight: 600; font-size: 26px; color: var(--ink); }
+.cl-head .spacer { flex: 1; }
+.cl-sub { font-size: 13px; color: var(--ink-soft); margin-top: 4px; }
+.cl-bar { height: 10px; border-radius: 5px; background: var(--border); overflow: hidden; margin-top: 10px; }
+.cl-bar > div { height: 100%; background: var(--accent); border-radius: 5px; transition: width .25s; }
+.cl-section { font-size: 12px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent-deep); margin: 20px 0 8px; }
+.cl-item { background: var(--card-bg); border: 1px solid var(--border); border-radius: 16px; padding: 14px 16px; margin-bottom: 8px; }
+.cl-item.done { border-color: #bbe5c8; background: #f6fdf8; }
+.cl-q { font-size: 16px; font-weight: 700; color: var(--ink); line-height: 1.35; }
+.cl-hint { font-size: 13px; color: var(--ink-soft); margin-top: 4px; line-height: 1.45; }
+.cl-weekly { font-size: 10.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; background: var(--blue-bg); color: #1e3a8a; padding: 2px 8px; border-radius: 999px; margin-left: 6px; vertical-align: middle; }
+.cl-tick { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; border: none; background: none; padding: 0; font: inherit; color: inherit; min-height: 44px; }
+.cl-box { width: 28px; height: 28px; border-radius: 8px; border: 2px solid #cbd5e1; flex: none; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 900; }
+.cl-box.on { background: #16a34a; border-color: #16a34a; }
+.cl-subs { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+.cl-subs .cl-tick { font-size: 15px; min-height: 42px; }
+.cl-opts { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.cl-opt { text-align: left; border: 1.5px solid var(--border); background: #fff; border-radius: 12px; padding: 11px 14px; font: inherit; font-size: 14.5px; color: var(--ink); min-height: 46px; }
+.cl-opt.sel { border-color: #16a34a; background: #effbf3; font-weight: 700; }
+.cl-opt.sel.flag { border-color: #d97706; background: #fff7e6; }
+.cl-note { width: 100%; box-sizing: border-box; margin-top: 8px; border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px; font: inherit; font-size: 14px; min-height: 64px; resize: vertical; color: var(--ink); }
+.cl-foot { position: sticky; bottom: 0; background: var(--page-bg); padding: 12px 0 calc(12px + env(safe-area-inset-bottom, 0px)); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cl-foot .msg { flex: 1; font-size: 13px; color: var(--ink-soft); }
+.cl-foot button { min-height: 48px; border: none; border-radius: 999px; padding: 0 26px; background: var(--accent); color: #fff; font-weight: 800; font-size: 15px; }
+.cl-foot button:disabled { opacity: 0.45; }
+.cl-handoff { background: #fff4dd; color: #3d2a00; border: 1px solid #ffd998; border-radius: 14px; padding: 12px 16px; font-size: 14px; margin-top: 10px; white-space: pre-line; }
+.cl-item.cl-info { background: var(--accent-soft); border-color: transparent; }
+.cl-item.cl-info .cl-hint { white-space: pre-line; color: var(--ink); font-size: 14px; }
+.oc-tabs { display: inline-flex; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; background: #fff; }
+.oc-tabs button { border: none; background: none; padding: 8px 16px; font-weight: 700; font-size: 13.5px; color: var(--ink-soft); min-height: 38px; }
+.oc-tabs button.on { background: var(--accent); color: #fff; }
+.och-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 12.5px; color: var(--ink-soft); margin-bottom: 10px; }
+.och-table { border-collapse: separate; border-spacing: 0; font-size: 12.5px; background: var(--card-bg); }
+.och-table th, .och-table td { padding: 6px 6px; border-bottom: 1px solid var(--border); text-align: center; white-space: nowrap; }
+.och-table th { font-size: 11px; color: var(--ink-soft); font-weight: 700; background: #faf9fe; }
+.och-table .och-studio { position: sticky; left: 0; background: var(--card-bg); text-align: left; z-index: 1; padding-left: 12px; min-width: 150px; }
+.och-table th.och-studio { background: #faf9fe; }
+.och-score { text-align: left !important; }
+.ocs { display: inline-block; font-size: 11.5px; font-weight: 800; padding: 2px 7px; border-radius: 999px; margin-right: 4px; background: #eeedf3; color: #5d5b73; }
+.ocs.good { background: var(--green-bg); color: #15803d; }
+.ocs.mid { background: var(--amber-bg); color: #b45309; }
+.ocs.bad { background: var(--red-bg); color: #b91c1c; }
+.och-c { min-width: 54px; }
+.och-sq { display: inline-flex; flex-direction: column; align-items: center; justify-content: center; width: 22px; height: 30px; border-radius: 6px; border: 1px solid transparent; margin: 0 1px; font-size: 12px; font-weight: 800; padding: 0; line-height: 1; vertical-align: middle; }
+.och-sq small { font-size: 8.5px; font-weight: 700; opacity: 0.7; }
+.och-legend .och-sq { height: 20px; width: 20px; }
+.och-sq.done { background: #dcfce7; color: #15803d; }
+.och-sq.part { background: #fef3c7; color: #b45309; }
+.och-sq.miss { background: #fee2e2; color: #b91c1c; }
+.och-sq.closed { background: #f1f0f5; color: #b3b1c4; }
+.och-sq.wait { background: #fff; border-color: #d4d1e6; color: var(--ink-soft); }
+.och-sq.fut { background: transparent; color: transparent; }
+.plan-days { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; margin-bottom: 12px; }
+.plan-day { flex: none; border: 1px solid var(--border); background: #fff; border-radius: 12px; padding: 7px 10px; text-align: center; min-width: 58px; font: inherit; color: var(--ink); }
+.plan-day .dw { font-size: 11px; color: var(--ink-soft); font-weight: 700; text-transform: uppercase; }
+.plan-day .dn { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 18px; font-weight: 600; }
+.plan-day.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.plan-day.on .dw { color: #ece7ff; }
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.plan-role { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; background: #fff; display: flex; flex-direction: column; gap: 6px; }
+.plan-role label { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent-deep); }
+.plan-role select, .plan-role input, .plan-sess select { font: inherit; font-size: 14px; border: 1px solid var(--border); border-radius: 9px; padding: 7px 9px; background: #fff; color: var(--ink); min-height: 38px; }
+.plan-role .brk { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-soft); }
+.plan-role .brk input { flex: 1; min-width: 0; font-size: 13px; }
+.plan-shifts { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+.plan-sess { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: #fff; margin-bottom: 8px; }
+.plan-sess .t { font-family: 'Fredoka', 'Inter', sans-serif; font-weight: 600; width: 64px; }
+.idea-report { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; margin: 0 0 14px; font-size: 14px; }
+.idea-report-pct { color: #6b6b63; }
+.idea-report-more { margin-top: 6px; } .idea-report-more summary { cursor: pointer; font-weight: 700; color: #2f6fb0; font-size: 13px; }
+.idea-report-wrap { overflow-x: auto; margin-top: 8px; }
+.idea-report-tbl { border-collapse: collapse; width: 100%; font-size: 13px; }
+.idea-report-tbl th, .idea-report-tbl td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.idea-report-tbl th { color: #6b6b63; font-weight: 600; } .idea-report-tbl .num { text-align: right; }
+.idea-report-tbl tr.bk td { background: #fff6cc; }
+.idea-own { font-size: 11px; font-weight: 700; color: #1d6b39; }
+.idea-others { color: #1d4f91; font-weight: 700; } .idea-report-tbl .idea-others { font-size: 11px; }
+.idea-others-tag { background: #dcebff; color: #1d4f91; border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 800; }
+.idea-report-tbl tr.go { cursor: pointer; } .idea-report-tbl tr.go:hover td { background: #eef4fb; } .idea-report-tbl tr.go.bk:hover td { background: #ffeeaa; }
+.idea-report-date { color: #2f6fb0; font-weight: 600; text-decoration: underline; }
+.plan-sess.plan-flash { box-shadow: 0 0 0 3px #f2c14e; transition: box-shadow .3s; } .idea-report-who { color: #6b6b63; }
+.idea-row.is-booked { background: #fff6cc !important; border-color: #f1d27a !important; }
+.idea-booked { background: #ffe58a; color: #6b4e00; border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 800; }
+.idea-auto { background: #f1e8fb; color: #5b2d82; border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 700; }
+.idea-pin { display: flex; align-items: stretch; gap: 0; margin: 0 0 12px; max-width: 100%; }
+.idea-pin-main { flex: 1; min-width: 0; text-align: left; background: #fff7d6; border: 1px solid #f1d27a; border-right: 0; border-radius: 999px 0 0 999px; padding: 8px 14px; font: inherit; font-size: 14px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.idea-pin-x { background: #fff7d6; border: 1px solid #f1d27a; border-radius: 0 999px 999px 0; padding: 0 14px; font-size: 18px; cursor: pointer; }
+.idea-pin-box { background: #fff; border: 1px solid #f1d27a; border-radius: 12px; padding: 12px; margin: -6px 0 14px; display: grid; gap: 8px; max-width: 560px; }
+.idea-pin-box label { display: grid; gap: 4px; font-size: 13px; font-weight: 600; } .idea-pin-box input[type=url] { font: inherit; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; }
+.idea-pin-box .idea-chk { display: flex; gap: 8px; align-items: center; font-weight: 400; }
+.plan-sess.cu15 { background: #fff8e6; border-color: #f5d48a; padding: 6px 12px; } .plan-sess.cu15 .nm { font-size: 14px; }
+.dev-info { font-size: 13px; color: #3d4540; margin: 2px 0; }
+/* 🏫 Field trips tracker */
+.ft-wrap { max-height: calc(100vh - 260px); } .ft-tbl td { padding: 3px 4px; vertical-align: top; } .ft-tbl th { white-space: nowrap; }
+.ft-in { width: 100%; font: inherit; font-size: 13px; padding: 4px 6px; border: 1px solid transparent; border-radius: 6px; background: transparent; box-sizing: border-box; }
+.ft-in:hover { border-color: var(--border); background: #fff; } .ft-in:focus { border-color: #8aa2c0; background: #fff; outline: none; }
+.ft-notes-in { resize: vertical; min-height: 28px; } .ft-ro { font-size: 13px; color: #6b6b63; white-space: nowrap; padding-top: 8px !important; }
+.ft-tbl tr.ft-due td { background: #fff6e0; } .ft-due-n { color: #8a5a00; } .ft-tbl tr.ft-r-declined td { color: #9a9a92; } .ft-tbl tr.ft-r-booked td:first-child { box-shadow: inset 4px 0 #1d6b39; }
+select.ft-st-new { color: #9b1b22; font-weight: 700; } select.ft-st-contacted { color: #8a5a00; font-weight: 700; } select.ft-st-invoiced { color: #1f4f80; font-weight: 700; } select.ft-st-booked { color: #1d6b39; font-weight: 700; }
+.ft-x button { border: 0; background: none; cursor: pointer; opacity: .5; } .ft-x button:hover { opacity: 1; } .ft-x { font-size: 13px; color: #1d6b39; }
+.ft-add { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; margin: 8px 0; }
+.ft-add label { display: grid; gap: 3px; font-size: 12px; color: #6b6b63; } .ft-add input, .ft-add select, .ft-add textarea { font: inherit; font-size: 14px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; }
+.ft-add-wide { flex-basis: 100%; } .ft-add-wide textarea { width: 100%; box-sizing: border-box; } .ft-add > b { flex-basis: 100%; }
+/* 🗓️ Auto-schedule */
+.as-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0; } .as-bar b { font-size: 17px; min-width: 190px; text-align: center; }
+.as-bar input, .as-bar select { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 10px; }
+.as-done { background: #e3f4e8; color: #14532d; border-radius: 12px; padding: 10px 14px; margin: 8px 0; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.as-sum { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 8px 14px; margin: 8px 0; } .as-sum b { font-size: 18px; }
+.as-key { display: inline-flex; gap: 8px; align-items: center; font-size: 12px; color: #6b6b63; margin-left: auto; } .as-key i { display: inline-block; width: 14px; height: 14px; border-radius: 4px; vertical-align: -2px; margin-right: 2px; }
+.k-old, .as-e.old { background: #f1f0ec; } .k-rem, .as-e.rem { background: #fde8e8; } .k-new, .as-e.new { background: #e3f4e8; }
+.as-studios { display: grid; gap: 10px; padding-bottom: 70px; }
+.as-studio { background: #fff; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
+.as-sh { display: flex; gap: 10px; align-items: center; width: 100%; font: inherit; background: #f8f6f1; border: 0; padding: 9px 12px; cursor: pointer; text-align: left; } .as-sh span { font-size: 13px; color: #6b6b63; } .as-sh .spacer { flex: 1; }
+.as-note { margin: 6px 12px; font-size: 13px; color: #8a5a00; }
+.as-week { display: grid; grid-template-columns: repeat(7, minmax(150px, 1fr)); gap: 0; overflow-x: auto; }
+.as-day { border-left: 1px solid #f0ece3; padding: 6px; display: grid; gap: 4px; align-content: start; min-height: 60px; min-width: 0; grid-template-columns: minmax(0, 1fr); } .as-day:first-child { border-left: 0; } .as-day.closed { background: #fafaf8; }
+.as-dh { font-weight: 800; font-size: 13px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 2px; } .as-dh span { font-weight: 600; font-size: 11px; color: #8a8a82; }
+.as-dn { font-size: 11px; color: #6b6b63; } .as-dn.warn { color: #9b1b22; font-weight: 700; }
+.as-e { border-radius: 8px; padding: 4px 6px; font-size: 12px; line-height: 1.3; display: grid; gap: 2px; min-width: 0; overflow: hidden; overflow-wrap: anywhere; grid-template-columns: minmax(0, 1fr); } .as-e span { color: #6b6b63; font-size: 11px; }
+.as-e.rem { text-decoration: line-through; color: #9b1b22; cursor: pointer; } .as-e.rem span { text-decoration: none; } .as-e.old[onclick] { cursor: pointer; outline: 1px dashed #d9b4b4; }
+.as-shw { display: flex; align-items: center; background: #f8f6f1; gap: 8px; } .as-pubone { font-size: 13px; padding: 4px 12px; white-space: nowrap; }
+.as-pub { font-size: 13px; font-weight: 700; color: #14532d; background: #e3f4e8; border-radius: 999px; padding: 3px 10px; margin-right: 10px; white-space: nowrap; } .as-shw .as-sh { flex: 1; } .as-view-sm { margin-right: 10px; } .as-view-sm button { font-size: 12px; padding: 3px 10px; }
+.as-e.cls0 { background: #fdebc8; outline: 1px solid #f0c674; } .as-e.cls0 span { color: #8a5a00; font-weight: 700; }
+.as-pad.low { border-color: #e5a3a3; background: #fdecec; } .as-padlow { color: #9b1b22; font-weight: 700; } .as-padn.low { color: #9b1b22; background: #fdecec; }
+.stf-sep { width: 1px; align-self: stretch; background: var(--border); }
+.as-note2 { background: #fff7c7; border: 1px solid #ecd97a; border-radius: 8px; padding: 4px 6px; font-size: 12px; display: grid; gap: 2px; overflow-wrap: anywhere; }
+.as-note2.done { opacity: .55; text-decoration: line-through; } .as-note2b { display: flex; gap: 4px; align-items: center; font-size: 11px; color: #6b6b63; } .as-note2b span { flex: 1; }
+.as-note2b button { font: inherit; font-size: 11px; border: 1px solid #e0cf6f; background: #fff; border-radius: 6px; padding: 0 5px; cursor: pointer; text-decoration: none; }
+.as-staffb { color: #1f4f80 !important; border-color: #a9c6e6 !important; }
+.as-noteb { color: #8a6d00 !important; border-color: #e0cf6f !important; } .as-todo-n { background: #c3090c; color: #fff; border-radius: 999px; padding: 0 6px; font-size: 11px; font-weight: 800; margin-left: 2px; }
+.as-todo-day { margin: 10px 0; display: grid; gap: 6px; } .as-todo-row { display: flex; gap: 8px; align-items: flex-start; background: #fffbe6; border: 1px solid #f0e2a0; border-radius: 10px; padding: 6px 8px; }
+.as-todo-row > div { flex: 1; font-size: 14px; } .as-todo-row.done { opacity: .55; }
+.as-addb { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 2px; } .as-addb button { font: inherit; font-size: 11px; font-weight: 700; color: #1d6b39; background: #fff; border: 1px dashed #9ccaa9; border-radius: 6px; padding: 2px 6px; cursor: pointer; }
+.as-addb button:hover { background: #e3f4e8; }
+.as-pad { display: grid; gap: 3px; font-size: 12px; background: #eef7ff; border: 1px solid #cfe3f7; border-radius: 8px; padding: 5px 6px; } .as-pad.ask { background: #fff4d6; border-color: #e8cf8a; }
+.as-pad select { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 6px; width: 100%; min-width: 0; box-sizing: border-box; } .as-pad { min-width: 0; overflow-wrap: anywhere; } .as-padn { color: #8a5a00; background: #fff4d6; border-radius: 999px; padding: 2px 10px; font: inherit; border: 0; cursor: pointer; } .as-padn:hover { filter: brightness(.96); }
+.as-skipped { color: #6b6b63; }
+.as-wd { border: 1px solid #f0c9c9; background: #fff6f5; border-radius: 10px; margin: 4px 0; overflow: hidden; } .as-wd.ok { border-color: var(--border); background: transparent; }
+.as-wdh { display: flex; gap: 6px; align-items: center; width: 100%; font: inherit; font-size: 12.5px; font-weight: 800; color: #a3191c; background: none; border: 0; padding: 5px 8px; cursor: pointer; text-align: left; }
+.as-wd.ok .as-wdh { color: #6b6b63; } .as-wdh span { font-weight: 600; color: #6b6b63; } .as-wdh .spacer { flex: 1; }
+.as-wd .as-dn { padding: 4px 8px; border-top: 1px solid #f3dcdc; font-size: 12px; }
+.as-wact { font: inherit; font-size: 11.5px; font-weight: 700; border: 1px solid currentColor; border-radius: 999px; padding: 1px 6px; background: #fff; color: inherit; max-width: 100%; margin-top: 2px; }
+.as-noted { font-size: 11px; font-weight: 700; color: #14532d; white-space: nowrap; }
+.as-disb { font: inherit; font-size: 11px; font-weight: 700; border: 1px solid currentColor; background: #fff; border-radius: 999px; padding: 0 8px; margin-left: 4px; cursor: pointer; }
+.as-dn.as-dis { color: #6b6b63; font-size: 12px; } .as-ovt tr.as-ov-x td { color: #6b6b63; }
+.as-ov { margin-top: 10px; } .as-ovh { display: flex; gap: 10px; align-items: center; width: 100%; text-align: left; font: inherit; background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 10px 14px; margin-bottom: 8px; cursor: pointer; } .as-ovh span { color: #6b6b63; font-size: 13px; } .as-ovh .spacer { flex: 1; } .as-ovf { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; } .as-ovf button { font: inherit; font-size: 13px; border: 1px solid var(--border); background: #fff; border-radius: 999px; padding: 4px 12px; cursor: pointer; } .as-ovf button.on { background: #1f2a24; color: #fff; border-color: #1f2a24; }
+.as-ovw { overflow-x: auto; background: #fff; border: 1px solid var(--border); border-radius: 14px; } .as-ovt { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.as-ovt th, .as-ovt td { text-align: left; vertical-align: top; padding: 7px 8px; border-bottom: 1px solid var(--border); } .as-ovt td.nw { white-space: nowrap; } .as-ovt th { font-size: 12px; color: #6b6b63; }
+.as-ovt tr.as-ov-w td:nth-child(4) { color: #a3191c; } .as-ovt tr.ask td:nth-child(3) { font-weight: 800; } .as-ovt tr.done td { opacity: .55; } .as-ovt select { max-width: 260px; font: inherit; font-size: 13px; }
+.as-ovt .ho-btn { white-space: nowrap; }
+.as-ovn { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; } .as-ovdone { display: inline-flex; gap: 4px; align-items: center; } .as-for { margin-top: 4px; font-size: 12.5px; } .as-forsel { font: inherit; font-size: 13px; max-width: 220px; }
+.mn-row { border-top: 1px solid var(--border); padding: 6px 0; font-size: 14px; } .inbox-chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 6px; }
+.inbox-chip { font: inherit; font-size: 12.5px; border: 1px solid var(--border); background: #fff; border-radius: 999px; padding: 3px 10px; cursor: pointer; }
+.inbox-chip:hover, .inbox-more:hover { background: #f6f4ee; }
+.inbox-more { font: inherit; font-size: 13px; font-weight: 600; border: 0; background: none; color: var(--ink); padding: 6px 0 2px; cursor: pointer; text-decoration: underline; }
+.inbox-page { position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: rgba(20, 20, 20, .35); z-index: 9000; display: flex; justify-content: center; align-items: stretch; padding: 3vh 12px; }
+.inbox-page-in { background: #fff; border-radius: 14px; width: 100%; max-width: 900px; overflow-y: auto; padding: 14px 18px 24px; box-shadow: 0 12px 40px rgba(0,0,0,.25); }
+.inbox-page-head { display: flex; align-items: center; gap: 10px; position: sticky; top: -14px; background: #fff; padding: 6px 0 8px; z-index: 1; font-size: 17px; }
+.inbox-filters { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 10px; } .inbox-filters select, .inbox-filters input { font: inherit; font-size: 13px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+.inbox-filters input { flex: 1; min-width: 160px; }
+.inbox-row .inbox-btns { margin-top: 5px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; } .inbox-sel { font: inherit; font-size: 13px; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border); max-width: 100%; } .mn-row label { display: inline-flex; gap: 6px; align-items: center; }
+/* glazing stands out (no colour of its own): heavier text and a dark outline */
+.as-e.as-glz { font-weight: 800; box-shadow: inset 0 0 0 2px currentColor; text-transform: none; } .as-e.as-glz b { font-weight: 900; }
+.as-e.as-glz > span { font-weight: 600; } .as-e.as-glz select { font-weight: 800; }
+.as-e.as-open { background: transparent; border: 1px dashed var(--border); color: #6b6b63; font-size: 12.5px; padding: 4px 8px; }
+.as-e.as-pclose { font-size: 12.5px; padding: 4px 8px; cursor: pointer; } .as-e.as-pclose span { display: block; font-size: 11.5px; }
+.as-e.as-open b { color: #3d4540; } .as-e.as-open span { display: block; font-size: 11.5px; }
+/* the PA/PD days and field trips list: a wider window; the answer box shrinks so "Go to" always fits */
+.duty-sheet.as-padsheet { max-width: 860px; }
+.as-padr > div:first-child { flex: 1 1 240px; min-width: 0; }
+.as-padr select { flex: 0 1 340px; min-width: 0; max-width: 100%; }
+.as-padr .ho-btn { flex: none; white-space: nowrap; }
+@media (max-width: 640px) { .as-padr { flex-wrap: wrap; } .as-padr select { flex: 1 1 100%; } }
+.as-padl { display: grid; gap: 6px; max-height: 60vh; overflow: auto; } .as-padr { display: flex; gap: 10px; align-items: center; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; }
+.as-padr > div { flex: 1; } .as-padr.ask { background: #fffbe6; } .as-padr.low { border-color: #e5a3a3; background: #fdecec; } .as-padr select { font: inherit; font-size: 13px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 8px; }
+.as-view { display: inline-flex; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; } .as-view button { font: inherit; font-size: 13px; font-weight: 700; border: 0; background: #fff; padding: 5px 12px; cursor: pointer; }
+.as-view button.on { background: #1f2a24; color: #fff; } .as-newtag { font-style: normal; font-size: 10px; font-weight: 800; color: #fff; background: #1d6b39; border-radius: 4px; padding: 0 4px; vertical-align: 1px; }
+.as-e.drop { background: #fff; border: 1px dashed #ccc; color: #9a9a92; cursor: pointer; }
+.as-e.new select, .as-e.new input { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid #b9dcc3; border-radius: 6px; background: #fff; max-width: 100%; min-width: 0; box-sizing: border-box; }
+.as-e.new select { width: 100%; text-overflow: ellipsis; } .as-er input[type=time] { flex: 1; width: auto; }
+.as-er { display: flex; gap: 4px; align-items: center; min-width: 0; } .as-x { flex: none; border: 0; background: none; cursor: pointer; color: #6b6b63; margin-left: auto; font-size: 15px; padding: 0 2px; }
+.as-x:hover { color: #9b1b22; } .as-dn { overflow-wrap: anywhere; } .as-dh { min-width: 0; }
+.as-foot { position: sticky; bottom: 0; display: flex; gap: 12px; align-items: center; justify-content: flex-end; background: rgba(255,255,255,.96); border-top: 1px solid var(--border); padding: 10px 14px; margin: 0 -4px; }
+/* 👥 Studio staffing */
+.as-tabs { display: flex; gap: 6px; margin: 4px 0 10px; } .as-tabs button { font: inherit; font-weight: 600; border: 1px solid var(--border); background: #fff; border-radius: 999px; padding: 6px 14px; cursor: pointer; color: var(--ink); }
+.as-tabs button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+.as-rules { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 6px 20px 16px; max-width: 860px; line-height: 1.55; }
+.as-rules h3 { font-size: 16px; margin: 18px 0 6px; display: flex; gap: 8px; align-items: center; } .as-rules ul { margin: 0; padding-left: 20px; } .as-rules li { margin: 0 0 5px; font-size: 14px; }
+.asn { background: #fff; border: 1px solid var(--border); border-radius: 12px; margin: 8px 0; }
+.asn-head { display: flex; gap: 10px; align-items: center; width: 100%; background: none; border: 0; font: inherit; padding: 10px 14px; cursor: pointer; text-align: left; color: var(--ink); }
+.asn-head .fd-sm { flex: 1; } .asn-car { color: var(--ink-soft); }
+.asn-pill { font-size: 12px; font-weight: 700; padding: 1px 9px; border-radius: 999px; background: #eee; color: #666; } .asn-pill.on { background: #e2f1e8; color: #1d5640; }
+.asn-body { padding: 0 14px 12px; } .asn-body h4 { margin: 12px 0 6px; font-size: 13.5px; }
+.asn-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; } .asn-sw { display: flex; gap: 6px; align-items: center; font-weight: 600; }
+.asn-tbl td { font-size: 13px; vertical-align: top; } .asn-body h4 .ho-btn { margin-left: 8px; font-weight: 400; } .asn-wait { background: #fff7e0; border: 1px solid #f0d89a; border-radius: 10px; padding: 8px 12px; font-size: 13px; margin: 8px 0; }
+.asn-resp { display: flex; gap: 14px; flex-wrap: wrap; } .asn-resp label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 600; } .asn-resp select { font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--border); min-width: 220px; } .asn-undone td { opacity: .5; text-decoration: line-through; } .asn-undone td:last-child { text-decoration: none; }
+.stf-rb { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; margin: 16px 0; max-width: 980px; }
+.stf-rb h3 { margin: 0 0 4px; font-size: 17px; } .stf-rb h4 { margin: 14px 0 6px; font-size: 13.5px; color: var(--ink-soft); }
+.stf-rtbl input, .stf-si input { width: 72px; font: inherit; padding: 4px 6px; border: 1px solid var(--border); border-radius: 8px; text-align: right; }
+.stf-sg { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 6px 18px; }
+.stf-si { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 13.5px; } .stf-sb { font-size: 13.5px; display: flex; gap: 8px; align-items: center; grid-column: 1 / -1; }
+.stf-rules { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px; margin: 8px 0; max-width: 980px; }
+.stf-rules label { display: inline-flex; gap: 6px; align-items: center; font-size: 14px; } .stf-rules input { width: 64px; font: inherit; padding: 5px 7px; border: 1px solid var(--border); border-radius: 8px; }
+.stf-tbl th.c, .stf-tbl td.c { text-align: center; } .stf-tbl td { padding: 6px 8px; } .stf-wrap { max-height: calc(100vh - 290px); }
+.stf-pv td { background: #f8f6f1; font-weight: 800; font-size: 13px; color: #6b6b63; text-transform: uppercase; letter-spacing: .04em; }
+.stf-sel { font: inherit; font-weight: 800; width: 58px; padding: 5px 4px; border-radius: 8px; border: 1px solid var(--border); text-align: center; cursor: pointer; }
+.stf-sel.s0, .stf-key .s0 { background: #eeeeea; color: #8a8a82; } .stf-sel.s1, .stf-key .s1 { background: #fdf3d8; color: #7a5600; } .stf-sel.s2, .stf-key .s2 { background: #e6f1fb; color: #1f4f80; }
+.stf-sel.s3, .stf-key .s3 { background: #e3f4e8; color: #1d6b39; } .stf-sel.s4, .stf-key .s4 { background: #cfeedb; color: #14532d; }
+.stf-key { display: inline-flex; gap: 8px; align-items: center; font-size: 12px; color: #6b6b63; } .stf-key i { display: inline-block; width: 14px; height: 14px; border-radius: 4px; border: 1px solid var(--border); vertical-align: -2px; margin-right: 2px; }
+.stf-all { font: inherit; font-size: 11px; margin-top: 3px; border: 1px solid var(--border); border-radius: 6px; padding: 1px 2px; }
+.stf-time { font: inherit; font-size: 13px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 8px; } .stf-off td { opacity: .55; } .stf-st { width: 70px; font-size: 13px; color: #1d6b39; }
+/* 🛍️ Products */
+.rp-tbl tbody tr { cursor: pointer; } .rp-tbl tbody tr:hover td { background: #fbf8f1; } .rp-tbl tr.rp-off td { color: #9a9a92; }
+.rp-tbl td small { font-size: 10px; vertical-align: super; } .rp-inv { font-size: 11px; font-weight: 700; color: #8a5a00; background: #fdf3d8; border-radius: 999px; padding: 1px 7px; }
+.rp-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; max-width: 1150px; }
+.rp-card { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 14px; display: grid; gap: 10px; align-content: start; } .rp-card h4 { margin: 0; }
+.rp-wide { grid-column: 1 / -1; } .rp-card label { display: grid; gap: 4px; font-size: 13px; font-weight: 600; color: #4b4b44; } .rp-card label.fd-chk { display: flex; font-weight: 400; color: inherit; font-size: 15px; }
+.rp-card input:not([type=checkbox]):not([type=radio]), .rp-card select, .rp-card textarea { font: inherit; font-size: 14px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+.rp-two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; } .rp-sub { margin-left: 28px; display: grid; gap: 6px; }
+.rp-studios { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 3px; max-height: 220px; overflow: auto; } .rp-studios label { display: flex !important; gap: 6px; font-weight: 400 !important; }
+.rp-pics { display: flex; gap: 8px; flex-wrap: wrap; } .rp-pics figure { margin: 0; width: 104px; } .rp-pics img { width: 104px; height: 104px; object-fit: cover; border-radius: 10px; border: 1px solid var(--border); display: block; }
+.rp-pics figcaption { display: flex; gap: 4px; justify-content: center; margin-top: 3px; } .rp-pics figcaption button { border: 1px solid var(--border); background: #fff; border-radius: 6px; cursor: pointer; padding: 0 7px; }
+.rp-up { width: 104px; height: 104px; border: 2px dashed var(--border); border-radius: 10px; display: flex !important; align-items: center; justify-content: center; cursor: pointer; color: #2f6fb0; font-weight: 700; text-align: center; }
+.rp-vt input { font: inherit; font-size: 13px; padding: 5px 6px; border: 1px solid var(--border); border-radius: 8px; } .rp-vt td { white-space: nowrap; vertical-align: top; } .rp-dims input { margin: 0 2px; }
+.rp-card > .ho-btn { justify-self: start; } .rp-vt th, .rp-vt td { padding: 6px 6px; }
+.rp-ship { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px; margin: 8px 0; max-width: 980px; }
+.rp-ship.on { display: grid; gap: 8px; } .rp-ship label { display: flex; gap: 8px; align-items: center; } .rp-money input { width: 100px; font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; margin-left: 4px; }
+.rp-drop { display: flex; align-items: center; justify-content: center; border: 2px dashed var(--border); border-radius: 14px; padding: 22px; font-weight: 800; color: #2f6fb0; cursor: pointer; background: #fff; max-width: 980px; margin: 8px 0; }
+.rp-bulk img { width: 54px; height: 54px; object-fit: cover; border-radius: 8px; } .rp-bulk select { font: inherit; font-size: 13px; padding: 5px 6px; border: 1px solid var(--border); border-radius: 8px; max-width: 320px; }
+.rp-bulk tr.rp-nomatch td { background: #fdf3d8; } .rp-bulk td { white-space: normal; vertical-align: middle; }
+.fam-acts { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; justify-content: flex-end; } .fam-acts .ho-btn { white-space: nowrap; }
+.fam-row2:has(.fam-acts) { grid-template-columns: 150px minmax(0, 1fr) auto; }
+@media (max-width: 700px) { .fam-row2:has(.fam-acts) { grid-template-columns: 1fr; } .fam-acts { justify-content: flex-start; } }
+.chg-lines { display: grid; margin: 6px 0; } .ba-addrow { display: flex; gap: 6px; align-items: center; margin: 4px 0; flex-wrap: wrap; } .ba-addrow input:not([type=checkbox]) { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; } .ba-addrow input:first-child { flex: 1; min-width: 110px; } .ba-addrow input[type=date] { width: 150px; } .ba-addrow { flex-wrap: nowrap; } .chg-modes { display: grid; gap: 8px; margin: 10px 0; }
+.rp-foot { display: flex; gap: 8px; max-width: 1150px; margin: 14px 0 30px; }
+@media (max-width: 900px) { .rp-grid { grid-template-columns: 1fr; } }
+/* 🖼️ Workshops manager */
+.wsm-add { margin: 10px 0 14px; } .wsm-add.on { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 12px; display: grid; gap: 10px; max-width: 980px; }
+.wsm-add input, .wsm-add select { font: inherit; padding: 7px 10px; border: 1px solid var(--border); border-radius: 10px; }
+.wsm-hits { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px; max-height: 280px; overflow: auto; }
+.wsm-hit { display: flex; gap: 8px; align-items: center; text-align: left; font: inherit; background: #f8f6f1; border: 1px solid var(--border); border-radius: 10px; padding: 6px; cursor: pointer; }
+.wsm-hit:disabled { opacity: .55; cursor: default; } .wsm-hit img, .wsm-name img, .wsm-picked img { width: 44px; height: 44px; object-fit: cover; border-radius: 8px; flex: none; }
+.wsm-noimg { width: 44px; height: 44px; border-radius: 8px; background: #eee; display: inline-block; flex: none; }
+.wsm-form { display: grid; gap: 10px; } .wsm-picked { display: flex; gap: 10px; align-items: center; }
+.wsm-tbl td { vertical-align: middle; } .wsm-name { display: flex; gap: 10px; align-items: center; white-space: normal !important; min-width: 240px; }
+.wsm-tbl tr.wsm-off td { background: #faf9f6; } .wsm-tbl tr.wsm-ret td { color: #8a7a5a; } .wsm-rt { color: #b45309; }
+.wsm-int span { white-space: nowrap; margin-right: 4px; }
+.wsm-ck { width: 34px; text-align: center; }
+.wsm-range { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px; margin: 8px 0; font-size: 14px; }
+.wsm-range input { font: inherit; font-size: 13px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 8px; } .wsm-rsum { flex-basis: 100%; color: #3d4540; } .wsm-tbl tr.wsm-sel td { background: #fdf8ea; }
+.wsm-mass { display: flex; gap: 10px 14px; flex-wrap: wrap; align-items: center; background: #fffaf0; border: 2px solid #e8cf8a; border-radius: 12px; padding: 10px 12px; margin: 6px 0 10px; }
+.wsm-mass label { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; } .wsm-mass select, .wsm-mass input[type=date] { font: inherit; font-size: 13px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 8px; }
+.wsm-mass p { margin: 0; flex-basis: 100%; }
+.wsm-offer { white-space: nowrap; } .wsm-offer input { font: inherit; font-size: 12px; padding: 3px 4px; border: 1px solid var(--border); border-radius: 6px; width: 118px; } .wsm-offer span { font-size: 11px; color: #8a8a82; margin: 0 3px; }
+.wsm-link { font: inherit; background: none; border: 0; padding: 0; color: #2f6fb0; cursor: pointer; text-align: left; } .wsm-link:hover { text-decoration: underline; } .wsm-link.num { font-weight: 800; }
+.fd-sheet.wsd-sheet { max-width: 1040px; } .wsd-tbl td, .wsd-tbl td:nth-child(3) { white-space: nowrap; } .wsd-head { display: flex; gap: 12px; align-items: center; } .wsd-head img { width: 56px; height: 56px; object-fit: cover; border-radius: 10px; } .wsd-head .spacer { flex: 1; }
+.wsd-sum { display: flex; gap: 18px; flex-wrap: wrap; background: #f8f6f1; border-radius: 12px; padding: 10px 14px; } .wsd-sum b { font-size: 18px; }
+.wsd-wrap { max-height: calc(100vh - 300px); } .wsd-tbl tr.wsd-past td { color: #9a9a92; } .wsd-tbl tr.wsd-hid td { background: #faf9f6; }
+.wsd-bar { display: inline-block; width: 70px; height: 8px; background: #eee; border-radius: 4px; overflow: hidden; vertical-align: middle; }
+.wsd-bar i { display: block; height: 100%; background: #e0b84a; } .wsd-bar i.good { background: #3d9a5d; } .wsd-bar i.full { background: #1d6b39; } .wsd-bar i.low { background: #d98a8f; }
+.wsd-s { display: inline-block; font-size: 11px; font-weight: 800; color: #fff; background: #2f6fb0; border-radius: 4px; padding: 0 5px; }
+.wsm-ord { display: grid; gap: 4px; justify-items: start; } .wsm-tbl td.wsm-ord { display: table-cell; } .wsm-ord .wsm-pin { display: block; }
+.wsm-pin { font: inherit; font-size: 12px; font-weight: 700; border: 1px solid var(--border); background: #fff; border-radius: 999px; padding: 4px 9px; margin: 2px 0; cursor: pointer; white-space: nowrap; }
+.wsm-pin.on { background: #fdf3d8; border-color: #e0b84a; color: #7a5600; } .wsm-pin.bot.on { background: #eef1f6; border-color: #9aa8bf; color: #3c4a63; } .wsm-tier { font: inherit; font-size: 13px; padding: 5px 6px; border: 1px solid var(--border); border-radius: 8px; max-width: 140px; } .wsm-ord { white-space: nowrap; } .wsm-ord .ho-btn { margin: 2px 2px 0 0; }
+.wsm-wrap { max-height: calc(100vh - 300px); }
+.nav-test { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; background: #fdf3d8; color: #8a5a00; border: 1px solid #e8cf8a; border-radius: 999px; padding: 0 6px; margin-left: 4px; vertical-align: 1px; }
+.fd-testing { background: #fdf3d8; color: #5c3d00; border: 1px solid #e8cf8a; border-radius: 12px; padding: 8px 12px; margin: 0 0 10px; font-size: 14px; }
+/* 🛒 Front desk: one cart on the right, tabs to add from (iPad-friendly) */
+.fd-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; } .fd-studio { color: #6b6b63; font-weight: 700; } .fd-top .spacer { flex: 1; }
+.fd-tabs { display: flex; gap: 6px; margin: 12px 0; flex-wrap: wrap; }
+.fd-tab { font: inherit; font-size: 15px; font-weight: 800; padding: 10px 14px; border-radius: 12px; border: 2px solid var(--border); background: #fff; cursor: pointer; }
+.fd-tab.on { background: #1f2a24; color: #fff; border-color: #1f2a24; }
+.fd-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 16px; align-items: start; }
+.fd-main { min-width: 0; }
+.fd-cart { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 10px); }
+.fd-cart-in { background: #fff; border: 1px solid var(--border); border-radius: 16px; padding: 14px; display: grid; gap: 10px; max-height: calc(100vh - 40px); overflow: auto; }
+.fd-cart-in h3 { margin: 0; }
+.fd-sm { color: #6b6b63; font-size: 13px; } .fd-msg { color: #9b1b22; font-weight: 700; margin: 0; } .fd-warn { color: #9b1b22; font-size: 13px; font-weight: 700; margin: 4px 0; }
+.fd-pill { background: #fdf3d8; border-radius: 999px; padding: 1px 8px; font-size: 12px; font-weight: 700; }
+.fd-inline { display: flex; gap: 6px; flex-wrap: wrap; } .fd-inline input { flex: 1; min-width: 0; }
+.fd-cart input, .fd-sheet input, .fd-filters input, .fd-filters select, .fd-datebar input { font: inherit; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+.fd-hits { display: grid; gap: 4px; } .fd-hit { display: grid; text-align: left; background: #f8f6f1; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; cursor: pointer; font: inherit; }
+.fd-link { background: none; border: 0; color: #2f6fb0; font: inherit; font-weight: 700; cursor: pointer; padding: 2px 0; text-align: left; }
+.fd-newfam { display: grid; gap: 6px; }
+.fd-fam { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
+.fd-people { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; } .fd-person { background: #eef4fb; border-radius: 999px; padding: 3px 10px; font-size: 13px; } .fd-person button { border: 0; background: none; cursor: pointer; }
+.fd-items { display: grid; gap: 6px; border-top: 1px solid var(--border); padding-top: 8px; }
+.fd-item { display: flex; gap: 8px; justify-content: space-between; align-items: flex-start; background: #f8f6f1; border-radius: 10px; padding: 8px 10px; } .fd-item > div { display: grid; gap: 2px; }
+.fd-x { border: 0; background: none; font-size: 22px; line-height: 1; cursor: pointer; color: #6b6b63; }
+.fd-giftl { display: grid; gap: 4px; }
+.fd-sub { display: grid; border-top: 1px solid var(--border); padding-top: 6px; } .fd-sub .fd-pl { padding: 4px 0; }
+.labour-card { margin: 10px 0; } .lab-row, .lab-line { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 8px 12px; }
+.lab-line { margin: 4px 0 10px; } .lab-ttl { font-weight: 800; } .lab-sub { color: #6b6b63; font-size: 13px; } .lab-row .spacer { flex: 1; }
+.lab-pct { font-weight: 900; font-size: 20px; padding: 0 8px; border-radius: 10px; } .lab-pct.good { color: #14532d; background: #e3f4e8; } .lab-pct.ok { color: #8a5a00; background: #fff4d6; } .lab-pct.high { color: #a3191c; background: #fdeaea; }
+.lab-admin { font-size: 10px; font-weight: 800; text-transform: uppercase; color: #6b6b63; border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; }
+.plan-timeoff { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; } .plan-timeoff:empty { display: none; }
+.pto-h { font-size: 12.5px; font-weight: 700; color: #6b6b63; } .pto { display: inline-flex; align-items: center; gap: 6px; border: 1px dashed var(--border); border-radius: 999px; padding: 2px 10px 2px 3px; font-size: 13px; }
+.pto small { color: #6b6b63; } .pto b { font-size: 11px; } .pto.ok b { color: #14532d; } .pto.wait b { color: #8a5a00; }
+.lab-pct.sm { font-size: 15px; }
+.lab-card { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 10px 12px; } .lab-card .lab-row { border: 0; padding: 0; background: none; }
+.lab-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin: 8px 0 4px; } .lab-line .lab-pair, .lab-line .lab-item { display: inline-flex; margin: 0; }
+.lab-item { display: grid; grid-template-columns: auto auto 1fr; gap: 2px 8px; align-items: center; } .lab-item .lab-hint { grid-column: 1 / -1; }
+.lab-item .lab-pct { justify-self: start; }
+.lab-k { font-weight: 800; font-size: 13px; color: #3d4540; } .lab-hint { display: block; color: #6b6b63; font-size: 12.5px; line-height: 1.35; }
+.lab-verdict { font-weight: 800; font-size: 14px; border-radius: 999px; padding: 2px 10px; } .lab-verdict.good { background: #e3f4e8; color: #14532d; } .lab-verdict.ok { background: #fff4d6; color: #8a5a00; } .lab-verdict.high { background: #fdeaea; color: #a3191c; }
+.lab-verdict-big { font-weight: 900; font-size: 18px; border-radius: 12px; padding: 8px 12px; margin: 4px 0; } .lab-verdict-big.good { background: #e3f4e8; color: #14532d; } .lab-verdict-big.ok { background: #fff4d6; color: #8a5a00; } .lab-verdict-big.high { background: #fdeaea; color: #a3191c; }
+.lab-pct.off { color: #4a4a44; background: #eeeeea; font-size: 16px; }
+.lab-money { font-weight: 800; } .lab-money.up { color: #14532d; } .lab-money.down { color: #a3191c; }
+.lab-mini { font-size: 13px; } .lab-sold .lab-mini { grid-column: 2 / -1; }
+.lab-break { margin-top: 6px; } .lab-break .tot td { font-weight: 800; border-top: 2px solid var(--border); }
+.lab-verdict.off, .lab-verdict-big.off { background: #eeeeea; color: #4a4a44; }
+.lab-verdict-big .lab-hint { font-weight: 500; margin-top: 2px; } .lab-result { margin-top: 6px; font-size: 15px; } .lab-result.up b { color: #14532d; } .lab-result.down b { color: #a3191c; }
+.lab-big { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; } .lab-big .lab-pct { font-size: 28px; }
+.lab-tbl { width: 100%; border-collapse: collapse; font-size: 14px; } .lab-tbl th, .lab-tbl td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--border); } .lab-tbl .num { text-align: right; }
+.fd-invrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; } .fd-invrow input { font: inherit; font-size: 13px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 8px; }
+.fd-paybtns { display: grid; gap: 6px; }
+.fd-pay { font: inherit; font-size: 17px; font-weight: 800; color: #fff; background: #c8232c; border: 0; border-radius: 12px; padding: 12px 16px; cursor: pointer; }
+.fd-pay2 { background: #1f2a24; } .fd-pay:disabled, .fd-book:disabled { opacity: .45; cursor: default; }
+.fd-clear { color: #6b6b63; font-weight: 600; font-size: 13px; }
+/* Today */
+.fd-datebar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.fd-arrow { font-size: 28px; line-height: 1; width: 50px; height: 50px; border-radius: 12px; border: 2px solid var(--border); background: #fff; cursor: pointer; }
+.fd-date { display: grid; text-align: center; min-width: 150px; } .fd-date b { font-size: 19px; } .fd-date span { color: #6b6b63; }
+.fd-list { display: grid; gap: 8px; }
+.fd-row { display: grid; grid-template-columns: 76px minmax(0, 1fr) 100px 96px; gap: 10px; align-items: center; background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 10px 12px; min-height: 60px; }
+.fd-row.full { opacity: .6; } .fd-time { font-size: 18px; font-weight: 800; } .fd-what { display: grid; gap: 2px; font-size: 16px; }
+.fd-count { display: grid; text-align: right; font-size: 14px; } .fd-count b { font-size: 19px; } .fd-count > span { color: #6b6b63; font-size: 13px; } .fd-count > span.fd-bk { color: inherit; font-size: 14px; white-space: nowrap; }
+.fd-act { text-align: right; }
+.fd-book { font: inherit; font-size: 17px; font-weight: 800; color: #fff; background: #c8232c; border: 0; border-radius: 12px; padding: 12px 18px; cursor: pointer; }
+/* spreadsheets */
+.fd-filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; } .fd-filters label { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: #6b6b63; }
+.fd-filters .spacer { flex: 1; }
+.fd-chips { display: inline-flex; gap: 3px; } .fd-chip { font: inherit; font-size: 13px; font-weight: 700; padding: 7px 9px; border-radius: 999px; border: 1px solid var(--border); background: #fff; cursor: pointer; }
+.fd-chip.on { background: #1f2a24; color: #fff; border-color: #1f2a24; }
+.fd-tbl-wrap { overflow: auto; max-height: calc(100vh - 260px); background: #fff; border: 1px solid var(--border); border-radius: 14px; }
+.fd-tbl { border-collapse: collapse; width: 100%; font-size: 14px; }
+.fd-tbl th { position: sticky; top: 0; background: #f8f6f1; text-align: left; padding: 9px 10px; z-index: 1; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.fd-th { font: inherit; font-weight: 700; color: #1f2a24; background: none; border: 0; cursor: pointer; padding: 0; text-align: left; white-space: nowrap; } .fd-th.on { color: #c8232c; }
+.fd-tbl td { padding: 8px 10px; border-bottom: 1px solid #f0ece3; white-space: nowrap; } .fd-tbl td:nth-child(3) { white-space: normal; }
+.fd-tbl .num { text-align: right; } .fd-tbl tr.full td { color: #9a9a92; }
+.fd-add { font: inherit; font-weight: 800; color: #fff; background: #c8232c; border: 0; border-radius: 10px; padding: 8px 14px; cursor: pointer; }
+/* camps */
+.fd-seg { display: inline-flex; gap: 4px; }
+.fd-progs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.fd-prog { font: inherit; text-align: left; display: grid; gap: 2px; background: #fff; border: 2px solid var(--border); border-radius: 12px; padding: 8px 12px; cursor: pointer; }
+.fd-prog span { font-size: 12px; color: #6b6b63; } .fd-prog.on { border-color: #c8232c; box-shadow: 0 0 0 2px #f6c6c9; }
+.fd-cal2 { background: #fff; border: 1px solid var(--border); border-radius: 16px; padding: 12px; max-width: 720px; }
+.fd-cal2-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; } .fd-cal2-head b { font-size: 18px; }
+.fd-cal2-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 5px; }
+.fd-cal2-dow { font-size: 12px; font-weight: 800; color: #6b6b63; text-align: center; padding: 2px 0; }
+.fd-cal2-day { min-height: 70px; border-radius: 10px; padding: 4px; display: grid; align-content: start; gap: 3px; background: #faf9f6; }
+.fd-cal2-day.blank { background: none; } .fd-cal2-day.open { background: #f3faf5; border: 1px solid #cfe8d6; }
+.fd-cal2-num { font-size: 12px; font-weight: 800; color: #6b6b63; } .fd-cal2-opts { display: grid; gap: 3px; }
+.fd-cal2-opt { font: inherit; font-size: 14px; font-weight: 800; border: 1px solid #b9dcc3; background: #fff; border-radius: 8px; padding: 8px 4px; cursor: pointer; display: grid; text-align: center; }
+.fd-cal2-opt small { font-size: 11px; font-weight: 600; color: #6b6b63; } .fd-cal2-opt.on { background: #c8232c; border-color: #c8232c; color: #fff; } .fd-cal2-opt.on small { color: #fde3e4; }
+.fd-cal2-opt:disabled { background: #eee; border-color: #ddd; color: #999; cursor: default; }
+.fd-cal2-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: #6b6b63; margin-top: 8px; } .fd-cal2-legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; border: 1px solid #ccc; margin-right: 4px; vertical-align: -2px; }
+.fd-cal2-legend i.o { background: #f3faf5; } .fd-cal2-legend i.c { background: #c8232c; border-color: #c8232c; } .fd-cal2-legend i.f { background: #eee; }
+.fd-chips2 { display: flex; gap: 6px; flex-wrap: wrap; }
+.fd-ptywrap { display: grid; grid-template-columns: minmax(0, 1fr) 190px; gap: 12px; align-items: start; }
+.fd-ptyday { font: inherit; text-align: left; cursor: pointer; } .fd-ptyday.sel { outline: 3px solid #c8232c; } .fd-cal2-day.gone { background: #eee; cursor: default; }
+.fd-ptyn { font-size: 12px; font-weight: 800; color: #1d6b39; } .fd-cal2-day.gone .fd-ptyn { color: #999; }
+.fd-ptytimes { display: grid; gap: 6px; background: #fff; border: 1px solid var(--border); border-radius: 16px; padding: 12px; }
+.fd-ptytime { font: inherit; font-size: 17px; font-weight: 800; display: flex; justify-content: space-between; align-items: center; border: 2px solid #b9dcc3; background: #f3faf5; border-radius: 12px; padding: 12px; cursor: pointer; }
+.fd-ptytime span { font-size: 12px; color: #1d6b39; } .fd-ptytime:disabled { background: #eee; border-color: #ddd; color: #999; cursor: default; } .fd-ptytime:disabled span { color: #999; }
+.fd-stepper { display: inline-flex; align-items: center; gap: 14px; } .fd-stepper button { font: inherit; font-size: 22px; width: 46px; height: 46px; border-radius: 12px; border: 2px solid var(--border); background: #fff; cursor: pointer; } .fd-stepper b { font-size: 22px; min-width: 2ch; text-align: center; }
+.fd-sheet textarea, .fd-sheet select { font: inherit; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; }
+@media (max-width: 1100px) { .fd-ptywrap { grid-template-columns: 1fr; } } .fd-month { min-width: 150px; text-align: center; font-size: 17px; }
+.fd-arrow.sm { width: 40px; height: 40px; font-size: 22px; } .fd-arrow:disabled { opacity: .35; cursor: default; }
+.fd-cal { display: grid; grid-template-columns: 74px repeat(7, minmax(0, 1fr)); gap: 4px; }
+.fd-cal-h { font-size: 12px; font-weight: 800; color: #6b6b63; text-align: center; padding: 4px 0; }
+.fd-cal-wk { display: flex; align-items: center; } .fd-wkbtn { font: inherit; font-size: 12px; font-weight: 800; border: 1px solid var(--border); background: #fff; border-radius: 10px; padding: 8px 6px; cursor: pointer; width: 100%; }
+.fd-wkbtn.on { background: #1d6b39; color: #fff; border-color: #1d6b39; }
+.fd-cal-d { background: #fff; border: 1px solid var(--border); border-radius: 10px; min-height: 76px; padding: 4px; display: grid; align-content: start; gap: 3px; } .fd-cal-d.out { opacity: .35; }
+.fd-cal-n { font-size: 12px; font-weight: 800; color: #6b6b63; }
+.fd-cday { font: inherit; font-size: 13px; font-weight: 800; border: 2px solid #e6d9b8; background: #fffaf0; border-radius: 8px; padding: 5px 4px; cursor: pointer; display: grid; text-align: center; }
+.fd-cday span { font-size: 11px; font-weight: 600; color: #6b6b63; } .fd-cday.on { background: #c8232c; border-color: #c8232c; color: #fff; } .fd-cday.on span { color: #fde3e4; }
+.fd-cday.full { opacity: .45; cursor: default; } .fd-tick { width: 22px; height: 22px; }
+.fd-camp { display: grid; grid-template-columns: 28px 1fr auto; gap: 8px; align-items: center; background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; cursor: pointer; font-size: 15px; }
+.fd-camp input { width: 22px; height: 22px; } .fd-camp.full { opacity: .55; }
+/* the add panel and the pay screen */
+.fd-sheet-back { position: fixed; inset: 0; background: rgba(20, 30, 40, .45); z-index: 9000; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.fd-sheet { background: #fff; border-radius: 18px; padding: 18px 20px; width: 100%; max-width: 560px; max-height: calc(100vh - 32px); overflow: auto; display: grid; gap: 12px; box-shadow: 0 20px 50px rgba(0,0,0,.25); }
+.fd-sheet h3 { margin: 0; } .fd-sheet p { margin: 0; }
+.fd-both { display: flex; gap: 10px; align-items: flex-start; border: 2px solid var(--border); border-radius: 12px; padding: 10px 12px; cursor: pointer; } .fd-both.on { border-color: #1d6b39; background: #f1f9f3; } .fd-both.off { opacity: .55; } .fd-both input { width: 20px; height: 20px; margin-top: 2px; }
+.fd-who, .fd-field { display: grid; gap: 6px; } .fd-chk.off { color: #9a9a92; } .fd-help { display: block; font-size: 11px; color: #9a9a92; } .fd-ok { color: #1d6b39; font-size: 13px; font-weight: 700; margin: 4px 0; } .fd-chk { display: flex; gap: 8px; align-items: center; font-size: 16px; } .fd-chk input { width: 20px; height: 20px; }
+.fd-bands { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; } .fd-bands label { display: grid; gap: 4px; font-size: 13px; color: #6b6b63; }
+.fd-campday { display: flex; justify-content: space-between; gap: 8px; align-items: center; border-bottom: 1px dashed var(--border); padding: 4px 0; }
+.fd-sheet-btns { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.fd-paysheet { max-width: 640px; } .fd-plines { display: grid; } .fd-pl { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px dashed var(--border); padding: 6px 0; } .fd-ptotal { font-weight: 800; font-size: 18px; border-bottom: 0; }
+.fd-qrwrap { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; } .fd-qr { width: 250px; height: 250px; background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 10px; } .fd-qr svg { width: 100%; height: 100%; display: block; }
+.fd-count-down { font-size: 30px; font-weight: 800; }
+.fd-paid { background: #e3f4e8; color: #1d6b39; font-size: 22px; font-weight: 800; border-radius: 14px; padding: 18px; text-align: center; }
+.fd-expired { background: #f6f1e8; color: #6b6b63; font-weight: 700; border-radius: 14px; padding: 14px; text-align: center; }
+.fd-rec { display: flex; gap: 8px; align-items: center; border-bottom: 1px solid var(--border); padding: 8px 0; } .fd-rec > span:first-child { flex: 1; }
+.fd-st { font-size: 12px; font-weight: 800; border-radius: 999px; padding: 2px 10px; } .fd-st.ok { background: #e3f4e8; color: #1d6b39; } .fd-st.wait { background: #fdf3d8; color: #8a5a00; } .fd-st.off { background: #eee; color: #666; }
+.fd-backcart { margin-right: auto; font-weight: 700; border-width: 2px; } .fd-backcart small { font-weight: 400; opacity: .75; }
+.rp-pv-back { position: fixed; inset: 0; z-index: 200; background: rgba(20,24,22,.55); overflow: auto; padding: 0 0 40px; }
+.rp-pv-bar { position: sticky; top: 0; z-index: 2; display: flex; gap: 10px; align-items: center; background: #1f2a24; color: #fff; padding: 10px 16px; }
+.rp-pv-bar .fd-sm { color: #ffd166; }
+.rp-pv-page { max-width: 1060px; margin: 24px auto; background: #fff; border-radius: 18px; padding: 24px 28px; font-family: "Work Sans", system-ui, sans-serif; color: #1f2a24; }
+.rp-pv-page.phone { max-width: 390px; padding: 16px; }
+.rp-pv-crumb { color: #5b6660; font-size: 13px; margin-bottom: 12px; }
+.rp-pv-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 28px; } .rp-pv-page.phone .rp-pv-grid { grid-template-columns: 1fr; gap: 14px; }
+.rp-pv-main { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 16px; display: block; background: #f6f3ea; }
+.rp-pv-none { display: flex; align-items: center; justify-content: center; color: #b45309; font-weight: 600; }
+.rp-pv-thumbs { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; } .rp-pv-thumbs img { width: 64px; height: 64px; object-fit: cover; border-radius: 10px; cursor: pointer; opacity: .7; border: 2px solid transparent; } .rp-pv-thumbs img.on { opacity: 1; border-color: #c8232c; }
+.rp-pv-info h1 { font-family: "DM Sans", system-ui, sans-serif; font-weight: 800; letter-spacing: 1px; font-size: 30px; line-height: 1.1; margin: 0 0 8px; }
+.rp-pv-blurb { color: #5b6660; margin: 0 0 12px; } .rp-pv-price { font-size: 24px; margin: 6px 0 12px; } .rp-pv-price s { color: #999; font-size: 18px; }
+.rp-pv-lab { font-size: 13px; background: #fdecea; color: #c8232c; border-radius: 999px; padding: 2px 8px; vertical-align: 4px; } .rp-pv-mem { font-size: 14px; color: #6b4b00; margin-top: 4px; } .rp-pv-ends { font-size: 13px; color: #c8232c; }
+.rp-pv-opts { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; } .rp-pv-opts button { border: 2px solid #ddd; background: #fff; border-radius: 999px; padding: 6px 14px; cursor: pointer; font: inherit; } .rp-pv-opts button.on { border-color: #1f2a24; font-weight: 700; }
+.rp-pv-ages { color: #5b6660; margin: 0 0 12px; }
+.rp-pv-buy { display: flex; gap: 10px; align-items: center; } .rp-pv-qty { border: 1px solid #ddd; border-radius: 999px; padding: 10px 16px; color: #5b6660; }
+.rp-pv-add { flex: 1; background: #c8232c; color: #fff; border: 0; border-radius: 999px; padding: 14px 20px; font: inherit; font-weight: 700; font-size: 16px; cursor: pointer; }
+.rp-pv-ship { color: #5b6660; font-size: 14px; } .rp-pv-panels { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; } .rp-pv-panels button { background: none; border: 0; color: #c8232c; font: inherit; font-weight: 600; cursor: pointer; padding: 0; text-decoration: underline; }
+.rp-pv-desc, .rp-pv-inside { margin-top: 22px; max-width: 720px; line-height: 1.55; } .rp-pv-desc h3, .rp-pv-inside h3 { font-family: "DM Sans", system-ui, sans-serif; }
+.rp-pv-pop { position: fixed; inset: 0; z-index: 210; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; padding: 20px; }
+.rp-pv-pop > div { background: #fff; border-radius: 16px; padding: 20px 22px; max-width: 520px; max-height: 80vh; overflow: auto; position: relative; font-family: "Work Sans", system-ui, sans-serif; } .rp-pv-x { position: absolute; top: 10px; right: 10px; border: 0; background: #eee; border-radius: 50%; width: 30px; height: 30px; cursor: pointer; }
+.mb-meth { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; } .mb-hist { background: #fafaf6; border-radius: 10px; padding: 8px 12px; font-size: 13px; } .mb-hist div { padding: 2px 0; }
+.rp-stk { white-space: nowrap; font-size: 13px; } .rp-stk-v { border-top: 1px solid var(--border, #eee); padding: 10px 0; } .rp-stk-v:first-of-type { border-top: 0; }
+.rp-stk-h { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; } .rp-stk-t td, .rp-stk-t th { padding: 4px 8px; }
+.rp-send-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 14px; max-height: 50vh; overflow: auto; margin: 10px 0; }
+.rp-send-grid label { display: grid; grid-template-columns: 1fr 70px; align-items: center; gap: 6px; font-size: 13px; } .rp-send-grid label .fd-sm { grid-column: 1; }
+.fd-stk { position: absolute; top: 12px; right: 12px; background: rgba(255,255,255,.92); color: #1f2a24; font-size: 11.5px; font-weight: 700; border-radius: 999px; padding: 2px 8px; } .fd-stk.out { background: #fdecea; color: #c0392b; }
+.fd-wait-chip { border: 2px solid #f0c27a; background: #fff8e6; border-radius: 999px; padding: 7px 14px; font: inherit; font-weight: 700; cursor: pointer; margin-right: 6px; }
+.fd-wait-chip.good { border-color: #86c79a; background: #ecf8ef; } .fd-wait-chip.bad { border-color: #e8a19a; background: #fdecea; color: #a12a22; animation: fdPulse 2s ease-in-out infinite; }
+@keyframes fdPulse { 50% { box-shadow: 0 0 0 4px rgba(200,35,44,.15); } }
+.fd-wait-h { margin: 14px 0 6px; font-size: 14px; } .fd-wait-row { display: flex; gap: 10px; justify-content: space-between; align-items: center; padding: 10px 12px; border: 1px solid var(--border, #eee); border-radius: 12px; margin-bottom: 6px; }
+.fd-wait-row.unpaid { border-color: #e8a19a; background: #fff7f6; } .fd-wait-row.paid { border-color: #b8e0c3; background: #f6fcf7; }
+.fd-wait-act { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.fd-ret-pick { width: 100%; text-align: left; background: #fff; cursor: pointer; font: inherit; }
+.fd-ret-sum { margin: 12px 0; border-top: 1px solid var(--border, #eee); padding-top: 8px; } .fd-ret-sum div { display: flex; justify-content: space-between; padding: 2px 0; } .fd-ret-sum .tot { font-size: 17px; border-top: 1px dashed #ddd; margin-top: 4px; padding-top: 6px; }
+.fd-ret-code { display: flex; flex-direction: column; align-items: center; gap: 4px; border: 2px dashed #c8232c; border-radius: 14px; padding: 14px; margin: 10px 0; } .fd-ret-code b { font-size: 26px; letter-spacing: 2px; }
+.fd-here-btn { border: 2px solid var(--border, #ddd); background: #fff; border-radius: 999px; padding: 8px 14px; font: inherit; font-weight: 700; cursor: pointer; margin: 4px 0; }
+.fd-here-s { margin: 10px 0; } .fd-here-t { margin-bottom: 6px; } .fd-here-g { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
+.fd-here-f { display: flex; gap: 10px; align-items: center; text-align: left; border: 1px solid var(--border, #ddd); background: #fff; border-radius: 12px; padding: 10px; font: inherit; cursor: pointer; }
+.fd-here-f:active { transform: scale(.98); } .fd-here-f .fd-sm { display: block; }
+.fd-here-tab { min-width: 46px; text-align: center; font-weight: 800; font-size: 17px; background: #f6f3ea; border-radius: 10px; padding: 8px 6px; }
+.fd-cof { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; border: 2px solid #b8e0c3; background: #f6fcf7; border-radius: 12px; padding: 8px 10px; margin: 6px 0; }
+.fd-pay-cof { flex: 1 1 100%; background: #1f7a45 !important; }
+.rp-grid-wrap { max-height: 60vh; overflow: auto; } .rp-grid th { position: sticky; top: 0; background: #faf8f3; z-index: 1; font-size: 12px; white-space: nowrap; padding: 6px 4px; }
+.rp-grid .rp-grid-k { position: sticky; left: 0; background: #fff; z-index: 2; min-width: 220px; text-align: left; } .rp-grid th.rp-grid-k { z-index: 3; background: #faf8f3; }
+.rp-grid td { padding: 3px 4px; text-align: center; } .rp-gcell { width: 46px; text-align: center; padding: 4px 2px; border: 1px solid #ddd; border-radius: 8px; } .rp-gcell.on { background: #fff3c4; border-color: #e0b84a; font-weight: 700; }
+.rp-sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; border: 1px solid rgba(0,0,0,.15); }
+.pm-box { margin-top: 10px; padding: 10px 14px; border-radius: 12px; background: #fff3e0; border: 1px solid #f0c27a; font-size: 14px; max-width: 760px; color: #1a1a1a; text-shadow: none; }
+.pm-box b, .pm-box span, .pm-box a { color: #1a1a1a; text-shadow: none; } .pm-box a { color: #8a2a1a; }
+.pm-box a.pm-open { font-weight: 700; font-size: 13px; margin-left: auto; padding: 2px 10px; border-radius: 999px; background: #fff; border: 1px solid #f0c27a; text-decoration: none; }
+.pm-row { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 6px 0; border-top: 1px dashed #f0c27a; } .pm-row:first-of-type { margin-top: 6px; }
+@keyframes paGlow { 0%, 100% { box-shadow: 0 0 0 0 rgba(192,57,43,.55); } 50% { box-shadow: 0 0 14px 4px rgba(192,57,43,.45); } }
+.pa-glow { animation: paGlow 1.8s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .pa-glow { animation: none; box-shadow: 0 0 0 3px rgba(192,57,43,.4); } }
+.inv-cnt-top { margin-bottom: 12px; }
+.inv-cnt-jump { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.inv-cnt-jump a { font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px; background: #f2eee6; color: #333; text-decoration: none; }
+.inv-cnt-jump a span { color: #8a6d3b; margin-left: 3px; }
+.inv-cnt-grp { margin-top: 12px; }
+.inv-cnt-grp > summary { cursor: pointer; font-size: 16px; padding: 2px 0 8px; list-style-position: inside; }
+.sup-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; } .sup-tools input[type=search] { min-width: 220px; }
+.sup-grp { margin-top: 12px; } .sup-grp > summary { cursor: pointer; font-size: 16px; padding-bottom: 8px; }
+.sup-tbl td, .sup-tbl th { vertical-align: top; } .sup-tbl tr.sup-off td { opacity: .5; }
+.sup-form label { display: block; margin-bottom: 8px; } .sup-two { display: flex; flex-wrap: wrap; gap: 8px; } .sup-two label { flex: 1; min-width: 120px; }
+.sup-ov { margin-top: 10px; padding: 10px 12px; border: 1px solid #e6dfd2; border-radius: 10px; background: #fbf8f2; }
+.ft-dragth { cursor: grab; } .ft-dragth:active { cursor: grabbing; }
+.ft-dwrap { position: relative; display: block; min-width: 128px; cursor: pointer; } .ft-dlabel { display: block; padding: 6px 4px; white-space: nowrap; font-weight: 600; }
+.ft-dwrap .ft-dpick { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
+.ts-shift { font-size: 12px; font-weight: 700; color: #555; background: #f2eee6; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+.tsg-shift { white-space: nowrap; color: #6b6b6b; font-size: 12px; }
+.plan-day.plan-day-booked { position: relative; } .plan-day.plan-day-booked::after { content: ''; position: absolute; top: 5px; right: 6px; width: 7px; height: 7px; border-radius: 50%; background: #c0392b; }
+body:not(.admin-login) .admin-only-spots { display: none; }
+.sp-tbl .sp-swap { max-width: 280px; font: inherit; padding: 3px 6px; border: 1px solid #d8d2c4; border-radius: 8px; }
+.sp-closed { font-size: 11px; font-weight: 800; color: #fff; background: #8a8a8a; border-radius: 999px; padding: 1px 7px; margin-left: 4px; }
+.sp-tbl thead th { top: 52px !important; } .sp-bulk { min-height: 40px; box-shadow: 0 2px 6px rgba(0,0,0,.06); }
+.sp-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+.sp-bulk { position: sticky; top: 0; z-index: 3; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 12px; margin-bottom: 8px; border-radius: 10px; background: #f2eee6; opacity: .6; }
+.sp-bulk.on { opacity: 1; background: #fff3cd; }
+.sp-tbl td, .sp-tbl th { vertical-align: middle; } .sp-tbl .c { text-align: center; } .sp-tbl .sp-t { white-space: nowrap; font-weight: 700; }
+.sp-tbl .sp-in { width: 70px; text-align: center; font: inherit; padding: 4px; border: 1px solid #d8d2c4; border-radius: 8px; }
+.sp-tbl tr.sp-day td { background: #f7f4ee; font-weight: 800; font-size: 13px; } .sp-tbl tr.sp-hidden td { opacity: .55; } .sp-tbl .sp-st { min-width: 90px; font-size: 12px; }
+.sns-live { color: #1d6b39; font-weight: 800; } .sns-up { color: #8a6d00; font-weight: 700; } .sns-ph { height: 40px; border-radius: 6px; margin-left: 8px; }
+.sn-line { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 4px 0; border-top: 1px dashed #f0c27a; } .sn-snip { flex: 1; min-width: 160px; font-size: 13px; color: #444; }
+.sn-studios { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 2px 10px; max-height: 220px; overflow: auto; border: 1px solid #e6dfd2; border-radius: 8px; padding: 6px 8px; }
+.sn-quick { display: flex; gap: 6px; margin-bottom: 6px; }
+.wu-booked { background: #eef7ee; border: 1px solid #b8e0c3; border-radius: 10px; padding: 8px 12px; margin: 8px 0; font-size: 14px; }
+.rp-ck { width: 30px; text-align: center; } .rp-ck input { width: 18px; height: 18px; cursor: pointer; }
+.rp-tbl tr.rp-sel td { background: #fff8e6; }
+.rp-bulk { position: sticky; top: 0; z-index: 3; background: #fff8e6; border: 1px solid #f0c27a; border-radius: 12px; padding: 10px 12px; margin: 8px 0; }
+.rp-bulk-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; } .rp-bulk input[type=number] { width: 110px; } .rp-bulk .rp-studios { max-height: 180px; overflow: auto; }
+.inbox-sum { overflow-x: auto; margin-top: 8px; } .inbox-sum table { border-collapse: collapse; font-size: 13px; min-width: 100%; }
+.inbox-sum th { text-align: center; font-weight: 600; color: var(--muted, #777); padding: 4px 6px; white-space: nowrap; } .inbox-sum th:first-child, .inbox-sum td:first-child { text-align: left; white-space: nowrap; padding-right: 12px; }
+.inbox-sum td { text-align: center; padding: 3px 6px; border-top: 1px solid var(--border, #eee); }
+.inbox-n { min-width: 30px; border: 1px solid var(--border, #ddd); background: #fff; border-radius: 999px; padding: 2px 8px; font-weight: 700; cursor: pointer; }
+.inbox-n.hi { background: #fff3e0; border-color: #f0c27a; } .inbox-n.tot { background: #f6f3ea; }
+.inbox-gh { margin: 18px 0 2px; font-size: 16px; } .inbox-wh { margin: 8px 0 2px; font-size: 13.5px; color: #444; }
+.fd-shop-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.fd-shop-tile { position: relative; display: flex; flex-direction: column; gap: 3px; text-align: left; background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 8px; cursor: pointer; font: inherit; }
+.fd-shop-tile:active { transform: scale(.98); }
+.fd-shop-tile img, .fd-shop-nopic { width: 100%; height: auto; aspect-ratio: 1 / 1; object-fit: cover; border-radius: 10px; display: block; }   /* (Nov 10 2026) square */
+.fd-shop-tile img.fit { object-fit: contain; padding: 8px; background: #f6f3ea; box-sizing: border-box; }
+.fd-shop-nopic { display: flex; align-items: center; justify-content: center; font-size: 34px; background: #f6f3ea; }
+.fd-shop-pr { font-weight: 700; } .fd-shop-pr s { color: #999; font-weight: 400; } .fd-shop-pr small { font-weight: 600; color: #6b4b00; }
+.fd-shop-in { position: absolute; top: 12px; left: 12px; background: #1f6f43; color: #fff; font-size: 12px; font-weight: 700; border-radius: 999px; padding: 2px 8px; }
+.fd-shop-h { margin: 14px 0 6px; }
+.fd-shop-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.fd-qty { display: inline-flex; align-items: center; gap: 6px; margin: 0 6px; } .fd-qty button { width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--border); background: #fff; font-size: 16px; cursor: pointer; }
+.fd-soon { max-width: 560px; background: #fff; border: 2px dashed var(--border); border-radius: 18px; padding: 26px; text-align: center; } .fd-soon-ic { font-size: 44px; } .fd-soon b { font-size: 20px; }
+@media (max-width: 1100px) { .fd-wrap { grid-template-columns: minmax(0, 1fr) 290px; } .fd-row { grid-template-columns: 64px minmax(0, 1fr) 84px 80px; } }
+@media (max-width: 820px) { .fd-wrap { grid-template-columns: 1fr; } .fd-cart { position: static; } }
+/* Home office → ✉️ Email staff */
+.se-out-hits { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; } .se-out-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
+.se-chip { display: inline-flex; align-items: center; gap: 4px; background: #fdecec; border: 1px solid #f3b9b9; border-radius: 999px; padding: 3px 4px 3px 10px; font-size: 13px; }
+.se-chip button { border: 0; background: none; font-size: 15px; cursor: pointer; padding: 0 6px; }
+.se-card { max-width: 760px; display: grid; gap: 12px; }
+.se-card label { display: grid; gap: 4px; font-weight: 600; font-size: 14px; }
+.se-card input[type=email], .se-card input:not([type]), .se-card textarea { font: inherit; font-weight: 400; padding: 9px 11px; border: 1px solid var(--border); border-radius: 10px; }
+.se-card textarea { line-height: 1.5; resize: vertical; }
+.se-help { font-size: 12px; color: #6b6b63; margin-top: -6px; }
+.se-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.se-card label.se-who { display: flex; gap: 6px; align-items: center; font-weight: 400; }
+.se-studios { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 4px 12px; padding: 10px; border: 1px solid var(--border); border-radius: 10px; }
+.se-card .se-studios label { display: flex; gap: 6px; align-items: center; font-weight: 400; font-size: 13px; }
+.se-count { color: #6b6b63; font-size: 13px; } .se-msg { margin: 0; font-weight: 600; min-height: 1.3em; }
+.se-h { margin: 22px 0 8px; } .se-hist { max-width: 760px; display: grid; gap: 6px; }
+.se-sent { background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; font-size: 14px; } .se-sent span { color: #6b6b63; font-size: 12px; display: block; }
+/* Chat → "ℹ️ About Direct Messages" */
+.chat-about { background: none; border: 0; padding: 0; font: inherit; font-size: 13px; font-weight: 600; color: #2f6fb0; text-decoration: underline; cursor: pointer; }
+.dm-about-back { position: fixed; inset: 0; background: rgba(20,30,40,.45); z-index: 10050; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.dm-about { background: #fff; border-radius: 16px; padding: 20px 22px; max-width: 420px; width: 100%; box-shadow: 0 20px 50px rgba(0,0,0,.25); font-size: 15px; line-height: 1.5; }
+.dm-about h3 { margin: 0 0 10px; font-size: 18px; } .dm-about p { margin: 0 0 10px; } .dm-about .ho-btn { margin-top: 6px; }
+/* Schedule: workshop times set up from World's "Suggest a date" */
+.sug-s { width: 22px; height: 22px; border-radius: 50%; border: 0; background: #7b3fa0; color: #fff; font: 800 12px/22px 'Inter', sans-serif; padding: 0; cursor: pointer; flex: none; }
+.plan-sess { position: relative; }
+.sug-pop { position: absolute; z-index: 30; right: 12px; top: 100%; margin-top: 4px; background: #fff; border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.15); padding: 10px 12px; min-width: 230px; max-width: 300px; font-size: 14px; cursor: default; }
+.sug-pop .sub { color: #6b6b63; font-size: 12px; margin-top: 2px; }
+.sug-pop .who { margin-top: 8px; }
+.sug-name { background: none; border: 0; padding: 0; font: inherit; font-weight: 700; color: #7b3fa0; text-decoration: underline; cursor: pointer; }
+.plan-sess .nm { flex: 1 1 200px; font-weight: 700; color: var(--ink); }
+.plan-sess .sub { font-size: 12px; color: var(--ink-soft); font-weight: 500; }
+/* Party forms — copied from the schedule's Day view, only inside the Schedule page */
+#plan-pane #party-alerts, #parties-pane #party-alerts { margin-bottom: 0.5rem; }
+#plan-pane .party-alerts-header, #parties-pane .party-alerts-header { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: #99354e; text-transform: uppercase; letter-spacing: 0.5px; padding: 10px 0 6px; }
+#plan-pane .party-alert-item, #parties-pane .party-alert-item { display: flex; align-items: center; gap: 12px; padding: 10px 14px; margin-bottom: 5px; border-radius: 10px; background: #fff5f8; border: 1px solid #f0b8cc; font-size: 13px; color: #5a1a2e; }
+#plan-pane .party-alert-item .alert-icon, #parties-pane .party-alert-item .alert-icon { font-size: 15px; flex-shrink: 0; }
+#plan-pane .party-alert-item .alert-body, #parties-pane .party-alert-item .alert-body { flex: 1; min-width: 0; }
+#plan-pane .party-alert-item .alert-body strong, #parties-pane .party-alert-item .alert-body strong { color: #99354e; }
+#plan-pane .party-alert-item .alert-time, #parties-pane .party-alert-item .alert-time { font-size: 11px; color: #c06080; margin-top: 2px; }
+#plan-pane .party-alert-dismiss, #parties-pane .party-alert-dismiss { background: #fff; border: 0.5px solid #f0b8cc; color: #99354e; font-size: 11px; font-weight: 500; cursor: pointer; padding: 4px 12px; border-radius: 20px; white-space: nowrap; flex-shrink: 0; transition: background 0.15s; }
+#plan-pane .party-alert-dismiss:hover, #parties-pane .party-alert-dismiss:hover { background: #fce8f0; }
+#plan-pane .party-cancel-header, #parties-pane .party-cancel-header { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: #9a4e00; text-transform: uppercase; letter-spacing: 0.5px; padding: 10px 0 6px; }
+#plan-pane .party-cancel-item, #parties-pane .party-cancel-item { display: flex; align-items: center; gap: 12px; padding: 10px 14px; margin-bottom: 5px; border-radius: 10px; background: #fff8f0; border: 1px solid #ffd0a0; font-size: 13px; color: #5a2e00; }
+#plan-pane .party-cancel-item .alert-icon, #parties-pane .party-cancel-item .alert-icon { font-size: 15px; flex-shrink: 0; }
+#plan-pane .party-cancel-item .alert-body, #parties-pane .party-cancel-item .alert-body { flex: 1; min-width: 0; }
+#plan-pane .party-cancel-item .alert-body strong, #parties-pane .party-cancel-item .alert-body strong { color: #9a4e00; }
+#plan-pane .party-cancel-item .alert-time, #parties-pane .party-cancel-item .alert-time { font-size: 11px; color: #c07030; margin-top: 2px; }
+#plan-pane .party-cancel-dismiss, #parties-pane .party-cancel-dismiss { background: #fff; border: 0.5px solid #ffd0a0; color: #9a4e00; font-size: 11px; font-weight: 500; cursor: pointer; padding: 4px 12px; border-radius: 20px; white-space: nowrap; flex-shrink: 0; transition: background 0.15s; }
+#plan-pane .party-cancel-dismiss:hover, #parties-pane .party-cancel-dismiss:hover { background: #fff3e0; }
+#plan-pane .session-card.party-card, #parties-pane .session-card.party-card { border-color: #f0b8cc; }
+#plan-pane .field-group, #parties-pane .field-group { display: flex; flex-direction: column; gap: 4px; }
+#plan-pane .field-group.full, #parties-pane .field-group.full { grid-column: 1 / -1; }
+#plan-pane .field-label, #parties-pane .field-label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
+#plan-pane .field-group input[type="text"], #parties-pane .field-group input[type="text"] ,#plan-pane .field-group input[type="number"], #parties-pane .field-group input[type="number"] ,#plan-pane .field-group select, #parties-pane .field-group select { padding: 8px 10px; border: 0.5px solid #d0d0c8; border-radius: 6px; font-size: 14px; outline: none; width: 100%; background: white; }
+#plan-pane .field-group input[type="text"]:focus, #parties-pane .field-group input[type="text"]:focus ,#plan-pane .field-group input[type="number"]:focus, #parties-pane .field-group input[type="number"]:focus ,#plan-pane .field-group select:focus, #parties-pane .field-group select:focus { border-color: #888; }
+#plan-pane .party-base-pill, #parties-pane .party-base-pill { display: inline-flex; align-items: center; gap: 6px; background: #fff0f5; border: 0.5px solid #f0b8cc; border-radius: 20px; padding: 4px 12px; font-size: 12px; color: #99354e; margin-bottom: 12px; }
+#plan-pane .party-paid-pill, #parties-pane .party-paid-pill { display: inline-flex; align-items: center; gap: 6px; background: #fff8e1; border: 0.5px solid #ffd54f; border-radius: 20px; padding: 4px 12px; font-size: 12px; color: #7a5800; margin-bottom: 12px; margin-left: 8px; }
+#plan-pane .party-booking-block, #parties-pane .party-booking-block { background: #fff5f8; border-radius: 10px; border: 0.5px solid #f0b8cc; padding: 1rem; margin-bottom: 1rem; }
+#plan-pane .party-booking-header, #parties-pane .party-booking-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
+#plan-pane .party-booking-name, #parties-pane .party-booking-name { font-size: 14px; font-weight: 600; color: #99354e; }
+#plan-pane .party-booking-meta, #parties-pane .party-booking-meta { font-size: 12px; color: #c06080; margin-top: 2px; }
+#plan-pane .party-addon-pills, #parties-pane .party-addon-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+#plan-pane .addon-pill, #parties-pane .addon-pill { font-size: 11px; padding: 3px 10px; border-radius: 20px; background: #fce8f0; color: #99354e; border: 0.5px solid #f0b8cc; }
+#plan-pane .addon-pill.upgrade, #parties-pane .addon-pill.upgrade { background: #fff3e0; color: #c56000; border-color: #ffd099; }
+#plan-pane .party-section-label, #parties-pane .party-section-label { font-size: 10px; color: #99354e; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600; margin: 14px 0 10px; padding-bottom: 4px; border-bottom: 0.5px solid #f0b8cc; }
+#plan-pane .party-fields, #parties-pane .party-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+#plan-pane .party-fields .full, #parties-pane .party-fields .full { grid-column: 1 / -1; }
+#plan-pane .party-fields .field-label, #parties-pane .party-fields .field-label { color: #99354e; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+#plan-pane .party-fields input[type="text"], #parties-pane .party-fields input[type="text"] ,#plan-pane .party-fields input[type="number"], #parties-pane .party-fields input[type="number"] ,#plan-pane .party-fields select, #parties-pane .party-fields select ,#plan-pane .party-fields textarea, #parties-pane .party-fields textarea { padding: 7px 10px; border: 0.5px solid #f0c8d4; border-radius: 6px; font-size: 13px; outline: none; width: 100%; background: white; font-family: inherit; }
+#plan-pane .party-fields input:focus, #parties-pane .party-fields input:focus ,#plan-pane .party-fields select:focus, #parties-pane .party-fields select:focus ,#plan-pane .party-fields textarea:focus, #parties-pane .party-fields textarea:focus { border-color: #99354e; }
+#plan-pane .party-fields textarea, #parties-pane .party-fields textarea { resize: vertical; min-height: 60px; }
+#plan-pane .party-booking-block.party-closed, #parties-pane .party-booking-block.party-closed { background: #eeeeeb; border-color: #c4c4c0; }
+#plan-pane .party-booking-block.party-closed .party-booking-name, #parties-pane .party-booking-block.party-closed .party-booking-name { color: #444; }
+#plan-pane .party-booking-block.party-closed .party-booking-meta, #parties-pane .party-booking-block.party-closed .party-booking-meta { color: #777; }
+#plan-pane .party-booking-block.party-closed .party-section-label, #parties-pane .party-booking-block.party-closed .party-section-label { color: #666; border-bottom-color: #ccc; }
+#plan-pane .party-booking-block.party-closed .party-fields .field-label, #parties-pane .party-booking-block.party-closed .party-fields .field-label { color: #666; }
+#plan-pane .party-booking-block.party-closed .party-fields input, #parties-pane .party-booking-block.party-closed .party-fields input ,#plan-pane .party-booking-block.party-closed .party-fields select, #parties-pane .party-booking-block.party-closed .party-fields select ,#plan-pane .party-booking-block.party-closed .party-fields textarea, #parties-pane .party-booking-block.party-closed .party-fields textarea { border-color: #d4d4d0; background: #f8f8f6; }
+#plan-pane .party-booking-block.party-closed .party-after-section, #parties-pane .party-booking-block.party-closed .party-after-section { background: #e4e4e0; border-color: #c4c4c0; }
+#plan-pane .party-booking-block.party-closed .addon-pill, #parties-pane .party-booking-block.party-closed .addon-pill { background: #e8e8e5; color: #555; border-color: #ccc; }
+#plan-pane .party-booking-block.party-closed .party-paid-pill, #parties-pane .party-booking-block.party-closed .party-paid-pill { background: #eeeeeb; border-color: #ccc; color: #666; }
+#plan-pane .party-after-section, #parties-pane .party-after-section { background: #f8f8f5; border-radius: 8px; border: 0.5px solid #e0e0d8; padding: 10px; margin-top: 12px; }
+#plan-pane .party-after-label, #parties-pane .party-after-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600; margin-bottom: 10px; }
+#plan-pane .outcome-calculator, #parties-pane .outcome-calculator { background: white; border-radius: 8px; border: 1px solid #e0e0d8; padding: 12px 14px; margin-top: 12px; }
+#plan-pane .calc-title, #parties-pane .calc-title { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600; margin-bottom: 10px; }
+#plan-pane .calc-row, #parties-pane .calc-row { display: flex; justify-content: space-between; align-items: center; font-size: 13px; padding: 4px 0; border-bottom: 0.5px solid #f5f5f0; }
+#plan-pane .calc-row:last-child, #parties-pane .calc-row:last-child { border-bottom: none; }
+#plan-pane .calc-row.total, #parties-pane .calc-row.total { font-weight: 600; font-size: 14px; padding-top: 8px; margin-top: 4px; border-top: 1px solid #e0e0d8; border-bottom: none; }
+#plan-pane .calc-label, #parties-pane .calc-label { color: #666; }
+#plan-pane .calc-value, #parties-pane .calc-value { font-weight: 500; }
+#plan-pane .calc-value.credit, #parties-pane .calc-value.credit { color: #2e7d32; }
+#plan-pane .calc-value.charge, #parties-pane .calc-value.charge { color: #99354e; }
+#plan-pane .calc-value.neutral, #parties-pane .calc-value.neutral { color: #888; }
+#plan-pane .calc-minimum-note, #parties-pane .calc-minimum-note { font-size: 11px; color: #888; font-style: italic; margin-top: 6px; }
+#plan-pane .gift-card-btn, #parties-pane .gift-card-btn { width: 100%; margin-top: 10px; padding: 9px; background: #2e7d32; color: white; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; font-weight: 500; }
+#plan-pane .gift-card-btn:hover, #parties-pane .gift-card-btn:hover { background: #246028; }
+#plan-pane .gift-card-btn:disabled, #parties-pane .gift-card-btn:disabled { background: #aaa; cursor: not-allowed; }
+#plan-pane .charge-info, #parties-pane .charge-info { background: #fff3e0; border-radius: 6px; padding: 10px 12px; margin-top: 10px; font-size: 13px; color: #7a4000; }
+#plan-pane .charge-info strong, #parties-pane .charge-info strong { display: block; margin-bottom: 4px; font-size: 14px; }
+#plan-pane .pos-order-row, #parties-pane .pos-order-row { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+#plan-pane .pos-order-row input, #parties-pane .pos-order-row input { flex: 1; padding: 7px 10px; border: 0.5px solid #f0c8d4; border-radius: 6px; font-size: 13px; outline: none; font-family: inherit; }
+#plan-pane .pos-order-row input:focus, #parties-pane .pos-order-row input:focus { border-color: #99354e; }
+#plan-pane .pos-order-row button, #parties-pane .pos-order-row button { padding: 7px 14px; background: #1a1a1a; color: white; border: none; border-radius: 6px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+#plan-pane .pos-order-row button.saved, #parties-pane .pos-order-row button.saved { background: #2e7d32; }
+#plan-pane .party-save-btn, #parties-pane .party-save-btn { margin-top: 12px; padding: 7px 18px; background: #99354e; color: white; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; float: right; }
+#plan-pane .party-save-btn:hover, #parties-pane .party-save-btn:hover { background: #7a2940; }
+#plan-pane .party-save-btn.saved, #parties-pane .party-save-btn.saved { background: #2e7d32; }
+#plan-pane .party-email-btn, #parties-pane .party-email-btn { margin-top: 12px; margin-right: 8px; padding: 7px 16px; background: #1565c0; color: white; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; float: right; }
+#plan-pane .party-email-btn:hover, #parties-pane .party-email-btn:hover { background: #0d47a1; }
+#plan-pane .party-email-btn.sent, #parties-pane .party-email-btn.sent { background: #2e7d32; }
+#plan-pane .party-email-btn:disabled, #parties-pane .party-email-btn:disabled { opacity: 0.6; cursor: default; }
+#plan-pane .party-ticket-display, #parties-pane .party-ticket-display { font-size: 11px; color: #1565c0; font-weight: 600; margin-top: 6px; clear: both; text-align: right; padding-top: 4px; }
+#plan-pane .d2-party-row td, #parties-pane .d2-party-row td { background: #fff8fb; }
+#plan-pane .d2-party-row:hover td, #parties-pane .d2-party-row:hover td { background: #fff0f6 !important; }
+#plan-pane .d2-party-time-pill, #parties-pane .d2-party-time-pill { display: inline-flex; align-items: center; gap: 4px; background: #fce8f0; border: 0.5px solid #f0b8cc; border-radius: 12px; padding: 2px 9px; font-size: 11px; color: #99354e; font-weight: 500; white-space: nowrap; }
+#plan-pane .d2-party-detail-row td, #parties-pane .d2-party-detail-row td { padding: 0 !important; border-bottom: 0.5px solid #f0b8cc !important; }
+#plan-pane .d2-party-detail-inner, #parties-pane .d2-party-detail-inner { padding: 0 12px 14px; background: #fff8fb; }
+#plan-pane .party-row, #parties-pane .party-row { display: flex; align-items: baseline; gap: 12px; padding: 6px 8px; border-bottom: 0.5px solid #f0f0e8; }
+#plan-pane .party-time, #parties-pane .party-time { font-weight: 600; font-size: 12px; white-space: nowrap; min-width: 110px; }
+#plan-pane .party-reason, #parties-pane .party-reason { flex: 1; font-size: 12px; }
+#plan-pane .party-host, #parties-pane .party-host { font-size: 11px; color: #888; white-space: nowrap; }
+#plan-pane .pf-wrap { margin: -2px 0 10px; }
+#plan-pane .pf-btn, #parties-pane .pf-btn { border: 1px solid #f0b8cc; background: #fff5f8; color: #99354e; border-radius: 999px; min-height: 36px; padding: 0 14px; font-weight: 700; font-size: 13px; }
+#plan-pane .pf-btn.open, #parties-pane .pf-btn.open { background: #99354e; color: #fff; border-color: #99354e; }
+#plan-pane .pf-status, #parties-pane .pf-status { font-size: 11.5px; font-weight: 700; border-radius: 999px; padding: 2px 9px; }
+#plan-pane .pf-status.need, #parties-pane .pf-status.need { background: var(--amber-bg); color: #b45309; }
+#plan-pane .pf-status.ok, #parties-pane .pf-status.ok { background: var(--green-bg); color: #15803d; }
+.plan-day.past { opacity: 0.6; }
+/* ---- personal staff view ---- */
+.staff-shell { max-width: 720px; margin: 0 auto; padding: env(safe-area-inset-top, 0px) max(14px, env(safe-area-inset-right, 0px)) calc(40px + env(safe-area-inset-bottom, 0px)) max(14px, env(safe-area-inset-left, 0px)); }
+.me-tabs { top: env(safe-area-inset-top, 0px); }
+.staff-shell .duty-sheet { padding-bottom: calc(18px + env(safe-area-inset-bottom, 0px)); }
+.me-head { display: flex; align-items: center; gap: 12px; padding: 18px 2px 10px; }
+.me-hello { flex: 1; min-width: 0; }
+.me-hi { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 24px; font-weight: 600; color: var(--ink); }
+.me-sub { font-size: 13px; color: var(--ink-soft); }
+.me-tabs { display: flex; gap: 6px; margin: 4px 0 14px; position: sticky; top: 0; background: var(--page-bg); padding: 8px 0; z-index: 5; }
+.me-tab { flex: 1; border: 1px solid var(--border); background: #fff; border-radius: 999px; min-height: 42px; font: inherit; font-weight: 700; font-size: 14px; color: var(--ink); }
+.me-tab.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.me-tab .nav-badge { margin-left: 4px; }
+.me-tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+.me-tabs::-webkit-scrollbar { display: none; }
+.me-tab { flex: 0 0 auto; min-width: 0; padding: 0 14px; font-size: 13.5px; }
+.me-week { font-size: 12px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); margin: 18px 2px 8px; }
+.me-shift { background: var(--card-bg); border: 1px solid var(--border); border-radius: 18px; padding: 14px 16px; margin-bottom: 10px; }
+.me-shift.today { border-color: var(--accent); box-shadow: 0 0 0 2px #ece7ff; }
+.me-shift.sick { background: #fff7f7; border-color: #f5b5b5; }
+.me-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.me-day { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 18px; font-weight: 600; color: var(--ink); }
+.me-time { font-size: 15px; font-weight: 700; color: var(--accent-deep); }
+.me-studio { font-size: 13px; color: var(--ink-soft); margin-top: 2px; }
+.me-note { font-size: 13px; margin-top: 6px; padding: 6px 10px; border-radius: 10px; background: #eef3fb; color: #24467a; }
+.me-note.day { background: #fbf5ea; color: #6b4b00; }
+.me-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.me-chip { font-size: 12.5px; background: var(--accent-soft); color: var(--accent-deep); border-radius: 999px; padding: 4px 10px; font-weight: 600; }
+.me-chip.teach { background: #e0f2fe; color: #0369a1; }
+.me-chip.sick { background: var(--red-bg); color: #b91c1c; }
+.me-team { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 12.5px; color: var(--ink-soft); align-items: center; }
+.me-team .role-chip { font-size: 12.5px; }
+.me-actions { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+.me-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 18px; padding: 14px 16px; margin-bottom: 12px; }
+.me-card h3 { margin: 0 0 8px; font-size: 16px; color: var(--ink); }
+.me-form { display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr); }
+.me-form > *, .me-form label { min-width: 0; }
+.me-form .two { display: flex; gap: 10px; }
+.me-form .two > * { flex: 1; min-width: 0; }
+.me-form input, .me-form select, .me-form textarea { box-sizing: border-box; width: 100%; max-width: 100%; }
+.me-form input[type="checkbox"] { width: auto; min-height: auto; flex: none; }
+.me-form label:has(> input[type="checkbox"]) { flex-direction: row !important; align-items: center; gap: 8px; }
+.me-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 700; color: var(--ink-soft); }
+.me-form input, .me-form select, .me-form textarea { font: inherit; font-size: 16px; border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px; background: #fff; color: var(--ink); min-height: 44px; }
+.me-form textarea { min-height: 70px; }
+.me-list-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.me-list-row:first-of-type { border-top: none; }
+.me-list-row .what { flex: 1; min-width: 180px; }
+.me-list-row .what b { color: var(--ink); }
+.me-list-row .what div { font-size: 12.5px; color: var(--ink-soft); }
+.me-pill { font-size: 11.5px; font-weight: 800; border-radius: 999px; padding: 3px 9px; text-transform: capitalize; }
+.me-pill.pending { background: var(--amber-bg); color: #b45309; }
+.me-pill.approved { background: var(--green-bg); color: #15803d; }
+.me-pill.denied, .me-pill.cancelled { background: #f1f0f5; color: #6b6880; }
+.me-rules { font-size: 13px; color: var(--ink-soft); line-height: 1.5; }
+.me-tally { font-size: 15px; color: var(--ink); margin-bottom: 6px; }
+.me-tally b { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 22px; font-weight: 600; color: var(--accent-deep); }
+.me-bar { height: 10px; border-radius: 999px; background: #ece9f5; overflow: hidden; margin-bottom: 8px; }
+.me-bar span { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+.pf-folders { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.pf-folders button { border: 1px solid var(--border); background: #fff; border-radius: 999px; padding: 6px 12px; font: inherit; font-size: 13px; color: var(--ink); }
+.pf-folders button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.pf-avs { display: grid; grid-template-columns: repeat(auto-fill, minmax(62px, 1fr)); gap: 8px; max-height: 300px; overflow-y: auto; }
+.pf-av { border: 3px solid transparent; background: #f6f5fb; border-radius: 50%; padding: 0; aspect-ratio: 1; overflow: hidden; cursor: pointer; }
+.pf-av img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pf-av.sel { border-color: var(--accent); box-shadow: 0 0 0 2px #ece7ff; }
+.lb-list { display: grid; gap: 8px; margin-bottom: 8px; }
+.lb-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; background: #f6f5fb; border-radius: 12px; padding: 10px 12px; }
+.lb-code { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 24px; font-weight: 600; letter-spacing: 2px; color: var(--ink); white-space: nowrap; }
+.lb-code.none { font-size: 13px; letter-spacing: 0; color: #b91c1c; font-family: inherit; }
+.cover-ask { border: 2px solid var(--accent); box-shadow: 0 0 0 3px #ece7ff; }
+.pc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+.pc-card { border: 1.5px solid var(--border); background: #fff; border-radius: 18px; padding: 16px 12px; display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; font: inherit; color: var(--ink); text-align: center; }
+.pc-card:hover { border-color: var(--accent); }
+.pc-card .nm { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 18px; font-weight: 600; }
+.pc-card .tm { font-size: 12.5px; color: var(--ink-soft); }
+.pc-state { font-size: 12px; font-weight: 800; border-radius: 999px; padding: 3px 10px; }
+.pc-state.none { background: #f1f0f5; color: #6b6880; }
+.pc-state.in { background: var(--green-bg); color: #15803d; }
+.pc-state.break { background: var(--amber-bg); color: #b45309; }
+.pc-state.out { background: #ece7ff; color: #5636c9; }
+.pc-pin { font-size: 30px; letter-spacing: 14px; text-align: center; width: 100%; box-sizing: border-box; border: 1.5px solid var(--border); border-radius: 14px; padding: 10px; font-family: inherit; }
+.pc-keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+.pc-keys button { min-height: 52px; font: inherit; font-size: 22px; font-weight: 700; border: 1px solid var(--border); background: #fff; border-radius: 14px; color: var(--ink); }
+.pc-acts { display: grid; gap: 8px; margin-top: 12px; }
+.pc-acts button { min-height: 56px; font: inherit; font-size: 18px; font-weight: 800; border-radius: 14px; border: none; color: #fff; }
+.pc-acts .in { background: #16a34a; } .pc-acts .break_out { background: #d97706; } .pc-acts .break_in { background: #16a34a; } .pc-acts .out { background: #6d4aff; }
+.et-grid { display: grid; grid-template-columns: 260px 1fr; gap: 14px; align-items: start; }
+@media (max-width: 860px) { .et-grid { grid-template-columns: 1fr; } }
+.et-list { padding: 8px; display: grid; gap: 4px; }
+.et-tpl { text-align: left; border: none; background: none; padding: 10px 12px; border-radius: 10px; font: inherit; font-size: 14px; font-weight: 600; color: var(--ink); cursor: pointer; }
+.et-tpl:hover { background: #f6f5fb; } .et-tpl.on { background: #ece7ff; color: var(--accent-deep); }
+.et-who { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.et-who input, .et-who select { font: inherit; font-size: 14px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; }
+.pe-list { max-height: 160px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; margin: 8px 0 12px; }
+.pe-list label { display: flex; gap: 8px; align-items: center; padding: 6px 10px; font-size: 14px; border-bottom: 1px solid #f1f0f5; cursor: pointer; }
+.camp-short { color: #b45309; font-weight: 700; margin-left: 6px; }
+.camp-ok { color: #15803d; font-weight: 600; margin-left: 6px; }
+.dev-code { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 40px; font-weight: 600; letter-spacing: 4px; color: var(--accent-deep); background: #f1edff; border-radius: 14px; padding: 12px 18px; display: inline-block; margin-top: 10px; }
+.dev-code.sm { font-size: 18px; letter-spacing: 2px; padding: 6px 10px; margin: 0; }
+.dev-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.dev-row:first-of-type { border-top: none; }
+.dev-row.pending { background: #fffbeb; border-radius: 12px; padding: 10px; border: 1px solid #fde68a; margin-top: 8px; }
+.dev-main { flex: 1; min-width: 200px; }
+.dev-row input { font: inherit; font-size: 14px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; min-width: 200px; }
+.dm-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dm-top select, .dm-days, .dm-studios { font: inherit; }
+.dm-top select { padding: 7px 10px; border: 1px solid var(--border); border-radius: 10px; }
+.dm-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border); }
+.dm-main { flex: 1; }
+.dm-days { display: flex; flex-wrap: wrap; gap: 10px; }
+.dm-days label, .dm-studios label, .dm-all { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 500; }
+.dm-prov { margin: 8px 0; } .dm-prov a { font-size: 12px; margin-left: 6px; }
+.dm-studios { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px 12px; margin-top: 4px; }
+.dm-prog { padding: 12px 0; border-top: 1px solid var(--border); }
+.dm-prog-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.dm-bar { height: 8px; background: #eee; border-radius: 99px; overflow: hidden; margin-top: 8px; }
+.dm-bar i { display: block; height: 100%; background: #16a34a; border-radius: 99px; }
+.dm-miss summary { cursor: pointer; font-size: 13px; color: var(--ink-soft); margin-top: 6px; }
+.chat-host { min-height: 0; }
+.push-card { background: #f6f5fb; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; font-size: 13.5px; line-height: 1.45; margin-bottom: 8px; }
+.push-card.on { background: #ecfdf3; border-color: #bbf7d0; }
+.push-ic { display: inline-block; border: 1px solid var(--border); border-radius: 6px; padding: 0 4px; background: #fff; }
+.push-admin { background: #f6f5fb; border-radius: 12px; padding: 8px 10px; margin-bottom: 8px; font-size: 13.5px; }
+.push-admin summary { cursor: pointer; }
+.pa-studios { display: grid; gap: 2px; max-height: 200px; overflow-y: auto; margin: 4px 0 0 22px; font-size: 13px; }
+.pa-studios label { display: flex; gap: 6px; align-items: center; }
+.chat-wrap { display: grid; grid-template-columns: 300px 1fr; gap: 14px; height: calc(100vh - 160px); min-height: 420px; }
+.chat-list { background: #fff; border: 1px solid var(--border); border-radius: 18px; padding: 10px; overflow-y: auto; }
+.chat-room { background: #fff; border: 1px solid var(--border); border-radius: 18px; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.chat-sec { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--ink-soft); margin: 10px 6px 6px; cursor: default; }
+.chat-watch summary { cursor: pointer; }
+.chat-thread { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; border: none; background: none; padding: 9px 8px; border-radius: 12px; font: inherit; cursor: pointer; color: var(--ink); }
+.chat-thread:hover { background: #f6f5fb; } .chat-thread.on { background: #ece7ff; }
+.chat-ic { width: 32px; height: 32px; border-radius: 50%; background: #f1edff; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.chat-tmain { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.chat-tmain b { font-size: 14px; } .chat-tmain .goal-note { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.chat-back { display: none; min-height: 32px; padding: 0 10px; }
+.chat-note { font-size: 12.5px; background: #fffbeb; color: #92400e; padding: 7px 16px; border-bottom: 1px solid #fde68a; }
+.chat-msgs { flex: 1; overflow-y: auto; padding: 14px 16px; background: #faf9fd; }
+.chat-empty { color: var(--ink-soft); text-align: center; padding: 40px 10px; font-size: 14px; }
+.chat-day { text-align: center; font-size: 11.5px; color: var(--ink-soft); margin: 10px 0; font-weight: 600; }
+.chat-m { display: flex; gap: 8px; align-items: flex-end; margin: 6px 0; }
+.chat-m.mine { justify-content: flex-end; }
+.chat-bub { background: #fff; border: 1px solid var(--border); border-radius: 16px 16px 16px 4px; padding: 7px 11px; max-width: min(520px, 78%); }
+.chat-m.mine .chat-bub { background: #ece7ff; border-color: #ddd3ff; border-radius: 16px 16px 4px 16px; }
+.chat-m.ho .chat-bub { border-color: #c4b5fd; }
+.chat-who { font-size: 12.5px; font-weight: 700; display: flex; gap: 6px; align-items: baseline; }
+.chat-body { font-size: 14.5px; line-height: 1.4; word-wrap: break-word; white-space: normal; }
+.chat-x { border: none; background: none; color: var(--ink-soft); cursor: pointer; font-size: 11px; margin-left: auto; padding: 0 2px; }
+.chat-compose { display: flex; gap: 8px; align-items: flex-end; padding: 10px 12px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.chat-compose textarea { flex: 1; font: inherit; font-size: 15px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 14px; resize: none; min-height: 40px; }
+.chat-as { width: 100%; display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--ink-soft); flex-wrap: wrap; }
+.chat-as select, .chat-as input { font: inherit; font-size: 14px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; }
+.chat-as input { width: 80px; }
+#chat-msg .me-msg { margin: 0 12px 10px; }
+.chat-find { width: 100%; font: inherit; font-size: 15px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; }
+.chat-people { max-height: 50vh; overflow-y: auto; margin-top: 8px; display: grid; gap: 2px; }
+.chat-person { display: flex; align-items: center; gap: 10px; border: none; background: none; text-align: left; padding: 8px; border-radius: 10px; font: inherit; cursor: pointer; color: var(--ink); }
+.chat-person:hover { background: #f6f5fb; }
+/* phones: the list or the open chat, one at a time */
+.chat-wrap.phone { grid-template-columns: 1fr; height: calc(100vh - 230px); }
+.chat-wrap.phone .chat-room { display: none; }
+.chat-wrap.phone.room-open .chat-list { display: none; }
+.chat-wrap.phone.room-open .chat-room { display: flex; }
+.chat-wrap.phone .chat-back { display: inline-flex; }
+@media (max-width: 760px) { .chat-wrap { grid-template-columns: 1fr; } .chat-wrap .chat-room { display: none; } .chat-wrap.room-open .chat-list { display: none; } .chat-wrap.room-open .chat-room { display: flex; } .chat-back { display: inline-flex; } }
+.me-offer { margin-top: 8px; background: #f1edff; border-radius: 10px; padding: 8px 10px; font-size: 13.5px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.me-offer .ho-btn { min-height: 30px; padding: 0 10px; margin-left: auto; }
+.ann-banner { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; border: 1px solid #fecaca; background: #fef2f2; color: #7f1d1d; border-radius: 14px; padding: 10px 14px; font: inherit; cursor: pointer; margin-bottom: 10px; }
+.ann-banner-ic { font-size: 20px; } .ann-banner-main { flex: 1; min-width: 0; display: flex; flex-direction: column; font-size: 14px; }
+.ann-banner-main span { color: #991b1b; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ann-banner-go { font-weight: 700; font-size: 13px; white-space: nowrap; }
+.ann-nudge { width: 100%; text-align: left; border: 1px solid var(--border); background: #fff; border-radius: 14px; padding: 10px 14px; font: inherit; font-size: 14px; cursor: pointer; margin-bottom: 10px; color: var(--ink); }
+.ann-nudge b { float: right; color: var(--accent-deep); }
+#me-ann-banner .ann-banner { margin: 0 0 10px; }
+.me-head .ho-btn { min-height: 38px; padding: 0 11px; font-size: 13px; flex: none; }
+.me-head .me-hello { min-width: 0; flex: 1; }
+.me-head .me-hi { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 420px) { .me-head { gap: 8px; } .me-head .me-sub { font-size: 12px; } .me-head .me-hi { font-size: 24px; } }
+.me-ann-btn { position: relative; }
+/* announcements on staff phones are off for now (HUB_STAFF_ANNOUNCEMENTS) */
+.me-ann-btn, #me-ann-banner { display: none !important; } .me-ann-btn .nav-badge { position: absolute; top: -6px; right: -6px; }
+.ann-list { display: grid; gap: 12px; max-width: 760px; }
+.ann-card { background: #fff; border: 1px solid var(--border); border-radius: 16px; padding: 14px 16px; }
+.ann-card.urgent { border-color: #fca5a5; background: #fff7f7; } .ann-card.read { opacity: .85; }
+.ann-card .ann-eyebrow { font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; color: var(--ink-soft); }
+.ann-card .ann-title { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 18px; font-weight: 600; margin: 4px 0 6px; }
+.ann-full { font-size: 14.5px; line-height: 1.55; color: var(--ink); }
+.ann-foot { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.ann-foot .ann-btn { margin-left: auto; }
+.ann-readby { color: #15803d; font-size: 13px; font-weight: 600; }
+.ann-who { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 6px; max-height: 50vh; overflow-y: auto; }
+.ann-who label { display: flex; align-items: center; gap: 8px; background: #f6f5fb; border-radius: 10px; padding: 8px 10px; font-size: 14px; cursor: pointer; }
+.ann-who label.done { color: #15803d; } .ann-who input { width: 18px; height: 18px; flex: none; }
+.reach-top { font-size: 14px; } .reach-studios { display: grid; gap: 2px; margin-top: 6px; font-size: 13px; }
+.reach-studios div { display: flex; justify-content: space-between; max-width: 320px; }
+
+/* "Report a concern" is hidden for now (studio + staff). To bring it back, delete this one line.
+   Home office's 🛡️ Concerns page stays. */
+.hub-concern-link { display: none !important; }
+.hist-box { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px; background: #fff; }
+.hist-box summary { cursor: pointer; font-weight: 700; font-size: 14px; }
+.hist-list { display: grid; gap: 2px; margin-top: 6px; }
+.hist-row { display: flex; gap: 10px; padding: 7px 0; border-bottom: 1px solid #f0eef6; font-size: 13.5px; }
+.hist-row:last-child { border-bottom: 0; }
+.hist-ic { width: 22px; text-align: center; flex: none; } .hist-main { flex: 1; min-width: 0; }
+.hist-main span { color: var(--ink-soft); }
+.hist-filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.hist-filters input, .hist-filters select { font: inherit; font-size: 14px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; }
+.hist-filters label { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--ink-soft); }
+.cn-intro { background: #f6f5fb; border: 1px solid var(--border); border-radius: 12px; padding: 4px 14px; font-size: 14px; line-height: 1.45; margin-bottom: 10px; }
+.cn-intro p { margin: 8px 0; } .cn-intro a { color: var(--accent-deep); font-weight: 600; }
+.cn-anon { background: #ecfdf3; border: 1px solid #bbf7d0; border-radius: 12px; padding: 10px 12px; font-size: 14px; }
+.cn-kinds { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (max-width: 560px) { .cn-kinds { grid-template-columns: 1fr; } }
+.cn-kind { text-align: left; border: 2px solid var(--border); background: #fff; border-radius: 14px; padding: 12px; font: inherit; cursor: pointer; display: flex; flex-direction: column; gap: 4px; color: var(--ink); }
+.cn-kind span { font-size: 13px; color: var(--ink-soft); }
+.cn-kind.on { border-color: var(--accent); background: #f6f3ff; }
+.cn-share { display: flex; gap: 22px; }
+.me-form .cn-share label, .cn-share label { display: flex; flex-direction: row; gap: 8px; align-items: center; font-weight: 500; font-size: 15px; }
+.me-form .cn-share input[type=radio], .cn-share input[type=radio] { width: 20px !important; height: 20px !important; min-height: 0 !important; padding: 0 !important; margin: 0; flex: none; }
+.cn-done { background: #fffbeb; border: 1px solid #fde68a; border-radius: 12px; padding: 14px; font-size: 15px; line-height: 1.5; }
+.cn-card { margin-bottom: 12px; } .cn-card.resolved { opacity: .7; }
+.cn-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.cn-st { font-size: 11px; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 99px; background: #eee; }
+.cn-st.new { background: #fee2e2; color: #b91c1c; } .cn-st.reviewing { background: #fef3c7; color: #92400e; } .cn-st.resolved { background: #dcfce7; color: #166534; }
+.cn-text { font-size: 15px; line-height: 1.5; margin: 10px 0; white-space: normal; }
+.cn-edit { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.cn-edit select, .cn-edit input { font: inherit; font-size: 14px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; }
+.cn-edit input { flex: 1; min-width: 200px; }
+.glz-edit { display: flex; gap: 6px; align-items: center; }
+.glz-edit input { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; min-width: 160px; }
+.glz-edit .ho-btn { min-height: 30px; padding: 0 10px; }
+.glz-msg { font-size: 12px; margin-top: 2px; }
+.si-row { gap: 6px; flex-wrap: wrap; }
+.si-row select { font: inherit; font-size: 13px; padding: 5px; border: 1px solid var(--border); border-radius: 8px; max-width: 220px; }
+.si-row .ho-btn { min-height: 30px; padding: 0 10px; }
+.eh-detail { padding: 6px 10px 12px; }
+.eh-msg { background: #faf9fd; border: 1px solid var(--border); border-radius: 10px; padding: 10px; font-size: 13px; margin-top: 6px; }
+.plan-day .dm { font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: .3px; color: var(--accent-deep); line-height: 1.1; }
+.plan-day.on .dm { color: #fff; }
+.plan-pick { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-soft); font-weight: 600; }
+.plan-pick input { font: inherit; font-size: 14px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 10px; color: var(--ink); background: #fff; }
+.plan-day.today:not(.on) { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.plan-ci { border: none; background: #e3f9ec; color: #15803d; border-radius: 999px; padding: 3px 10px; font: inherit; font-size: 12.5px; font-weight: 700; cursor: pointer; margin-left: 6px; }
+.ts-nav { display: flex; align-items: center; gap: 10px; }
+.ts-nav .ts-per { flex: 1; text-align: center; }
+.ts-nav .ts-per b { display: block; font-size: 15.5px; margin-bottom: 4px; }
+.ts-day { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 10px 12px; margin-bottom: 8px; }
+.ts-day.open { border-color: #fca5a5; }
+.ts-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.ts-head .ts-tot { margin-left: auto; font-weight: 700; font-size: 13.5px; }
+.ts-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.ts-p { background: #f6f5fb; border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; font-size: 13px; }
+.ts-p.flag { background: #fff8ec; border-color: #f5c38a; }
+.ts-p.edited { border-color: #c7b8ff; }
+.ts-p.add { cursor: pointer; color: var(--accent-deep); border-style: dashed; }
+.ts-p[onclick] { cursor: pointer; }
+.ts-line { font-size: 12.5px; color: var(--ink-soft); margin-top: 5px; }
+.ts-note { background: #f8f7ff; border-radius: 10px; padding: 7px 10px; margin-top: 7px; font-size: 13.5px; }
+.ts-answer { font-size: 12.5px; color: #15803d; margin-top: 3px; }
+.ts-answer.muted { color: var(--ink-soft); }
+.ts-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.ts-tools select { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; }
+.tsg-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.tse { border: 1px solid var(--border); border-radius: 14px; padding: 12px; margin-bottom: 12px; background: #fcfbff; }
+.tse-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+.tse-row { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 10px; }
+.tse-row + .tse-row { margin-top: 4px; }
+.tse-row.changed { background: #f1edff; }
+.tse-row.new { background: #ecfdf3; }
+.tse-row.gone { opacity: .5; text-decoration: line-through; }
+.tse-kind { min-width: 110px; font-weight: 700; font-size: 14px; }
+.tse-kind select, .tse-row input[type=time], .tse-why input { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; }
+.tse-x { border: 1px solid var(--border); background: #fff; border-radius: 8px; width: 30px; height: 30px; cursor: pointer; margin-left: auto; }
+.tse-adds { display: flex; gap: 8px; margin: 10px 0; }
+.tse-why { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 700; }
+.tse-save { display: flex; justify-content: flex-end; margin-top: 8px; }
+.tsg-modes { display: inline-flex; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.tsg-modes button { border: none; background: #fff; font: inherit; font-size: 13px; padding: 7px 12px; cursor: pointer; color: var(--ink); }
+.tsg-modes button.on { background: var(--accent); color: #fff; }
+.tsg-selbar { display: flex; align-items: center; gap: 10px; padding: 8px 14px; margin-bottom: 10px; border-radius: 12px; background: #fff; border: 1px solid var(--border); font-size: 14px; }
+.tsg-selbar.on { background: #f1edff; border-color: #c7b8ff; position: sticky; top: 8px; z-index: 3; }
+.tsg-selbar .ho-btn { min-height: 32px; }
+.tsg-cb { width: 26px; text-align: center; }
+.tsg-cb input { width: 16px; height: 16px; cursor: pointer; }
+.tsg-sel td { background: #f4f0ff !important; }
+.tsg-per { display: flex; flex-direction: column; align-items: center; min-width: 220px; }
+.tsg-per b { font-size: 16px; color: var(--accent-deep); }
+.tsg-bar select, .tsg-bar input { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; }
+.tsg-bar input { width: 120px; }
+.tsg-wrap { padding: 0; overflow: auto; max-height: 72vh; }
+.tsg { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tsg th { position: sticky; top: 0; background: #fafafc; z-index: 1; text-align: left; font-size: 10.5px; font-weight: 800; letter-spacing: 0.03em;
+  text-transform: uppercase; color: #5b5870; padding: 10px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.tsg td { padding: 8px 8px; border-bottom: 1px solid #eeedf3; white-space: nowrap; vertical-align: middle; }
+.tsg-group td { background: #f1f0f6; font-size: 12px; color: #3d3a52; padding: 7px 10px; }
+.tsg-group td b { letter-spacing: 0.02em; }
+.tsg-name span { margin-left: 6px; vertical-align: middle; }
+.tsg-name > :first-child { vertical-align: middle; }
+.tsg-row:hover td { background: #faf9ff; }
+.tsg-open td { background: #fff6f6; }
+.tsg-tog { border: none; background: none; font-size: 13px; cursor: pointer; padding: 0 4px; color: var(--ink-soft); }
+.tsg-st { font-size: 10px; font-weight: 800; letter-spacing: 0.03em; border-radius: 5px; padding: 3px 7px; color: #fff; }
+.tsg-st.need { background: #f5a524; }
+.tsg-st.ok { background: #16a34a; }
+.tsg-red { color: #dc2626; font-weight: 700; }
+.tsg-ot { color: #b45309; white-space: nowrap; }
+.tsg td.tsg-loc { white-space: normal; min-width: 80px; max-width: 110px; line-height: 1.25; }
+.ot-tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.ot-tbl th { text-align: left; font-size: 11px; color: var(--ink-soft); font-weight: 700; padding: 6px; }
+.ot-tbl td { padding: 6px; border-top: 1px solid var(--border); }
+.ot-tbl input { width: 70px; font: inherit; padding: 6px; border: 1px solid var(--border); border-radius: 8px; }
+.ot-tbl select { font: inherit; font-size: 12.5px; padding: 6px; border: 1px solid var(--border); border-radius: 8px; max-width: 220px; }
+.tsg-x { font-size: 10.5px; margin-left: 1px; color: #92400e; }
+.tsg-by { font-size: 10.5px; color: var(--ink-soft); margin-top: 2px; }
+.tsg-flagicon { color: #d97706; font-size: 15px; cursor: help; }
+.tsg-flag { background: #fff3dd; border-radius: 5px; padding: 1px 5px; }
+.tsg-edit { text-decoration: underline dotted #8b7bd8; }
+.tsg-note { border: none; background: #f1f0f5; border-radius: 8px; padding: 4px 7px; cursor: pointer; font-size: 14px; }
+.tsg-note.new { background: #ffe8c2; box-shadow: 0 0 0 2px #f5a524 inset; }
+.tsg-more { border: 1px solid var(--border); background: #fff; border-radius: 8px; width: 30px; height: 30px; cursor: pointer; font-size: 16px; line-height: 1; }
+.tsg-actions { text-align: left; }
+.tsg-actions .tsg-st { margin-right: 4px; }
+.tsg-actions .ho-btn { min-height: 30px; padding: 0 12px; margin-left: 6px; }
+.ts-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.ts-table th { text-align: left; font-size: 11px; text-transform: uppercase; color: var(--ink-soft); padding: 10px; border-bottom: 1px solid var(--border); }
+.ts-table td { padding: 8px 10px; border-bottom: 1px solid #f1f0f5; white-space: nowrap; }
+.duty-sheet.wide { max-width: 680px; }
+#attach-lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.88); z-index: 9999; align-items: center; justify-content: center; }
+#attach-lightbox.open { display: flex; }
+#attach-lightbox img { max-width: 90vw; max-height: 88vh; border-radius: 8px; box-shadow: 0 8px 40px rgba(0,0,0,0.5); }
+#attach-lightbox-close { position: fixed; top: 20px; right: 24px; color: white; font-size: 28px; cursor: pointer; background: none; border: none; line-height: 1; }
+.copied-view { padding: 18px 20px; }
+.tw-tips { background: #f6f5fb; border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; font-size: 13.5px; line-height: 1.45; }
+.tw-tips ul { margin: 6px 0 0; padding-left: 18px; } .tw-tips li { margin: 3px 0; } .tw-tips a { color: var(--accent-deep); font-weight: 600; }
+.tw-help { display: flex; gap: 8px; flex-wrap: wrap; }
+.me-form .tw-tick, .tw-tick { display: flex; flex-direction: row; align-items: flex-start; gap: 8px; font-weight: 500; font-size: 14px; }
+.me-form .tw-tick input, .tw-tick input { width: 18px !important; height: 18px !important; min-height: 0 !important; margin-top: 2px; flex: none; }
+.tw-emerg { margin-top: 12px; font-size: 13.5px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 10px; padding: 8px 12px; }
+.tw-emerg a { color: #b91c1c; font-weight: 700; }
+#tickets-unread-badge { min-width: 10px; height: 10px; padding: 0 !important; border-radius: 50%; font-size: 0; box-shadow: 0 0 0 2px #fff; }   /* purple: waiting on the studio · red: unread reply */
+.pc-today { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 10px; }
+.pc-today span { background: #f6f5fb; border-radius: 999px; padding: 5px 11px; font-size: 13.5px; color: var(--ink); }
+.pc-done { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 26px; font-weight: 600; text-align: center; padding: 18px 6px; }
+.tc-card { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 10px 12px; margin-bottom: 8px; }
+.tc-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.tc-head .nm { font-weight: 800; color: var(--ink); }
+.tc-head .tot { margin-left: auto; font-size: 13px; color: var(--ink-soft); }
+.tc-punches { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.tc-p { border: 1px solid var(--border); background: #faf9fd; border-radius: 10px; padding: 5px 9px; font-size: 12.5px; cursor: pointer; font: inherit; color: var(--ink); }
+.tc-p.edited { border-color: #c7b8ff; }
+.tc-p.flag { border-color: #f5c38a; background: #fff8ec; }
+.tc-note { font-size: 12px; color: var(--ink-soft); margin-top: 4px; }
+.me-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.me-file { border: 1px solid var(--border); background: #fff; border-radius: 999px; padding: 5px 11px; font: inherit; font-size: 12.5px; color: var(--ink); cursor: pointer; display: inline-flex; align-items: center; }
+.me-file.add { color: var(--accent-deep); border-style: dashed; }
+.me-card h3 { font-size: 17px; }
+.me-small { font-size: 13px; color: var(--ink-soft); margin-top: 4px; line-height: 1.4; }
+.me-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.me-stat { background: #f6f5fb; border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
+.me-stat b { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 20px; font-weight: 600; color: var(--ink); }
+.me-stat span { font-size: 12.5px; color: var(--ink-soft); line-height: 1.3; }
+.me-sub { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; }
+.me-sub-title { font-size: 12px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); margin: 12px 0 6px; }
+.me-sub .me-sub-title { margin-top: 0; }
+.me-line { font-size: 15px; color: var(--ink); margin-bottom: 6px; }
+.me-bar.thin { height: 7px; }
+.nt { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.nt-row { display: flex; justify-content: space-between; gap: 10px; padding: 10px 12px; font-size: 15px; }
+.nt-row + .nt-row { border-top: 1px solid var(--border); }
+.nt-row span { color: var(--ink-soft); }
+.nt-row b { color: var(--ink); }
+.me-more { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 0 12px; }
+.me-more summary { cursor: pointer; padding: 11px 0; font-weight: 700; font-size: 14.5px; color: var(--accent-deep); list-style: none; }
+.me-more summary::-webkit-details-marker { display: none; }
+.me-more summary::after { content: '＋'; float: right; }
+.me-more[open] summary::after { content: '－'; }
+.me-list { margin: 0 0 12px; padding: 0; list-style: none; display: grid; gap: 8px; font-size: 14.5px; color: var(--ink); line-height: 1.4; }
+.me-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.me-tag { font-size: 12.5px; background: #fff4dd; color: #7c2d12; border-radius: 999px; padding: 4px 10px; }
+.me-star { font-size: 12.5px; color: var(--ink-soft); margin-top: 10px; font-style: italic; }
+.me-msg { font-size: 13.5px; padding: 10px 12px; border-radius: 12px; }
+.me-msg.ok { background: var(--green-bg); color: #14532d; }
+.me-msg.warn { background: var(--amber-bg); color: #7c2d12; }
+.me-msg.err { background: var(--red-bg); color: #7f1d1d; }
+.team-row.sick { background: #fff7f7; border-radius: 12px; }
+.team-tag.sick { background: var(--red-bg); color: #b91c1c; }
+.sick-alert.done { background: var(--green-bg); color: #14532d; }
+.sick-alert.wait { background: var(--amber-bg); color: #7c2d12; }
+.sick-alert { background: var(--red-bg); color: #7f1d1d; border-radius: 12px; padding: 9px 12px; font-size: 13.5px; margin: 6px 0 10px; }
+.spots-btn { min-height: 34px !important; padding: 0 12px !important; font-size: 12.5px !important; }
+button.role-chip.shift-edit { border: 1px solid var(--border); font: inherit; font-size: 13px; cursor: pointer; }
+button.role-chip.shift-edit:hover { border-color: var(--accent); }
+.plan-sess.tap, .floor-row.tap { cursor: pointer; }
+.plan-sess.tap:hover, .floor-row.tap:hover { border-color: var(--accent); }
+.plan-sess.tap:focus-visible, .floor-row.tap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pp-extras { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.pp-chip.ex { background: #fff4dd; color: #7c2d12; }
+.pp-chip.sm { font-size: 12px; padding: 2px 8px; }
+.icon-pencil { border: 1px solid var(--border); background: #fff; border-radius: 999px; width: 36px; height: 36px; font-size: 15px; padding: 0; flex: none; }
+.icon-pencil:hover { border-color: var(--accent); }
+#plan-pane .pf-btn.cl { border-color: var(--border); background: #fff; color: var(--ink); }
+#plan-pane .pf-btn.cl.open { background: var(--sidebar-bg); color: #fff; border-color: var(--sidebar-bg); }
+.plan-note { margin: -4px 0 8px; padding: 7px 12px; background: #fff4dd; border-radius: 10px; font-size: 13px; color: #3d2a00; white-space: pre-line; }
+.cl-list { background: var(--card-bg); border: 1px solid var(--border); border-radius: 14px; padding: 10px 12px; margin-bottom: 10px; }
+.cl-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; font-size: 14px; color: var(--ink-soft); }
+.cl-head b { font-size: 18px; color: var(--ink); }
+.cl-head .spacer { flex: 1; }
+.cl-table td { font-size: 13px; }
+.cl-kids { font-size: 12px; color: #7a5800; margin-top: 2px; }
+.mv-note { font-size: 12px; color: #1e3a8a; margin-top: 2px; }
+.mv-btn { min-height: 32px !important; padding: 0 12px !important; font-size: 12.5px !important; }
+.mv-opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+.mv-opt { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; border: 1.5px solid var(--border); background: #fff; border-radius: 12px; padding: 10px 12px; font: inherit; color: var(--ink); text-align: left; }
+.mv-opt b { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 17px; font-weight: 600; }
+.mv-opt span { font-size: 12px; color: var(--ink-soft); }
+.mv-opt:hover { border-color: var(--accent); }
+.mv-opt.full { border-color: #f5c38a; background: #fff8ec; }
+.mv-opt.full span { color: #b45309; font-weight: 700; }
+/* Kids class table — the Day view's own table and styles */
+#plan-pane .edit-input { border: none; border-bottom: 1px solid #ccc; width: 100%; font-size: 13px; outline: none; background: transparent; padding: 2px 0; font-family: inherit; }
+#plan-pane .edit-input:focus { border-bottom-color: #1a1a1a; }
+#plan-pane .edit-input.short { width: 50px; }
+#plan-pane .row-save-btn { margin-top: 4px; padding: 3px 10px; font-size: 11px; background: #1a1a1a; color: white; border: none; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+#plan-pane .row-save-btn:hover { background: #333; }
+#plan-pane .row-save-btn.saved { background: #2e7d32; }
+#plan-pane .booking-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+#plan-pane .booking-table th { padding: 8px 10px; font-size: 11px; color: #888; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; text-align: left; border-bottom: 0.5px solid #e0e0d8; white-space: nowrap; }
+#plan-pane .booking-table td { padding: 8px 10px; border-bottom: 1px solid #e8e8e0; vertical-align: middle; }
+#plan-pane .booking-table tr:last-child td { border-bottom: none; }
+#plan-pane .attended-check { width: 18px; height: 18px; cursor: pointer; accent-color: #2e7d32; }
+#plan-pane .note-cell { color: #666; font-style: italic; font-size: 12px; }
+#plan-pane .cl-list .booking-table-wrap { overflow-x: auto; }
+#plan-pane .booking-table td { font-size: 13px; }
+/* Catch-up transfers aren't in the Hub yet: hide those buttons (existing catch-ups still show) */
+
+.plan-day.idle { background: #eeedf3; border-color: #e3e1ec; color: #a9a6bb; }
+.plan-day.idle .dw { color: #b7b4c8; }
+.plan-day.idle.on { background: #8e8aa6; border-color: #8e8aa6; color: #fff; }
+.pty-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 16px; padding: 14px 16px; margin-bottom: 8px; }
+.pty-card.urgent { border-color: #f5b5b5; background: #fff7f7; }
+.pty-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.pty-when { width: 120px; flex: none; }
+.pty-when b { display: block; font-family: 'Fredoka', 'Inter', sans-serif; font-size: 17px; font-weight: 600; color: var(--ink); }
+.pty-when span { font-size: 12px; color: var(--ink-soft); }
+.pty-main { flex: 1 1 240px; min-width: 0; }
+.pty-name { font-size: 15.5px; font-weight: 700; color: var(--ink); }
+.pty-sub { font-size: 12.5px; color: var(--ink-soft); margin-top: 2px; }
+.pty-acts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.pty-acts .ho-btn { min-height: 34px; padding: 0 12px; font-size: 12.5px; }
+.pty-acts .ho-btn.on { background: #e3f9ec; border-color: #9fdcb5; color: #15803d; }
+.pty-days { font-size: 11px; font-weight: 800; border-radius: 999px; padding: 2px 8px; background: var(--red-bg); color: #b91c1c; margin-left: 6px; }
+.ntf { display: flex; gap: 12px; align-items: flex-start; background: var(--card-bg); border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; margin-bottom: 8px; }
+.ntf .ic { font-size: 20px; line-height: 1; }
+.ntf .bd { flex: 1; min-width: 0; }
+.ntf .tt { font-size: 14.5px; font-weight: 700; color: var(--ink); }
+.ntf .mt { font-size: 12.5px; color: var(--ink-soft); margin-top: 2px; }
+.ntf .tm { font-size: 11.5px; color: var(--ink-soft); white-space: nowrap; }
+.ntf.new { border-color: #c7b8ff; background: #f8f6ff; }
+.ntf.cancel { border-color: #f5b5b5; background: #fff7f7; }
+.pp-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.pp-total { font-size: 15px; color: var(--ink-soft); }
+.pp-total b { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 30px; font-weight: 600; color: var(--accent-deep); margin-right: 4px; }
+.pp-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.pp-chip { font-size: 13px; background: var(--accent-soft); color: var(--accent-deep); border-radius: 999px; padding: 4px 11px; }
+.pp-chip b { margin-left: 3px; }
+.pp-note { flex-basis: 100%; font-size: 12px; color: var(--ink-soft); }
+.plan-count { font-size: 12.5px; color: var(--ink-soft); white-space: nowrap; }
+.plan-count b { color: var(--ink); font-size: 14px; }
+.plan-closed { margin-top: 12px; }
+.plan-closed summary { cursor: pointer; font-size: 13px; font-weight: 700; color: var(--ink-soft); padding: 8px 2px; }
+.plan-sess.off { background: #f6f5fa; color: var(--ink-soft); }
+.plan-sess.off .nm { color: var(--ink-soft); font-weight: 600; }
+.plan-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 14px; position: sticky; bottom: 0; background: var(--page-bg); padding: 10px 0; }
+.plan-msg { flex: 1; font-size: 13px; color: var(--ink-soft); align-self: center; }
+.cl-done-banner { background: #e3f9ec; color: #14532d; border-radius: 14px; padding: 12px 16px; font-size: 14px; font-weight: 600; margin-top: 10px; }
+.oc-table { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--card-bg); border-radius: 14px; overflow: hidden; }
+.oc-table th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-soft); padding: 10px 12px; border-bottom: 1px solid var(--border); background: #faf9fe; }
+.oc-table td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; color: var(--ink); }
+.oc-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 14px; }
+
+/* Today's duties */
+.duties-card { padding: 20px 22px; margin-bottom: 14px; }
+.duties-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.duties-title { font-family: 'Fredoka', 'Inter', sans-serif; font-weight: 600; font-size: 22px; color: var(--ink); }
+.duties-count { font-size: 13px; color: var(--ink-soft); }
+.duties-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
+.duty { display: flex; gap: 12px; align-items: flex-start; padding: 13px 14px; border: 1px solid var(--border); border-radius: 14px; background: #fff; }
+.duty.done { background: #f6fdf8; }
+.duty-check { width: 26px; height: 26px; border-radius: 8px; border: 2px solid #cbd5e1; background: #fff; flex: none; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 900; font-size: 15px; margin-top: 1px; }
+.duty.done .duty-check { background: #16a34a; border-color: #16a34a; }
+.duty-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.duty-name { font-size: 15px; font-weight: 700; color: var(--ink); line-height: 1.3; }
+.duty.done .duty-name { text-decoration: line-through; color: var(--ink-soft); }
+.duty-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-soft); }
+.duty-who { display: inline-flex; align-items: center; gap: 6px; }
+.duty-tag { font-size: 10.5px; font-weight: 800; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.04em; }
+.duty-tag.ho { background: var(--accent-soft); color: var(--accent-deep); }
+.duty-tag.late { background: var(--red-bg); color: #b91c1c; }
+.duty-note { font-size: 13px; color: #7c2d12; background: #fff4dd; border-radius: 8px; padding: 5px 9px; align-self: flex-start; white-space: pre-line; }
+.duty-snote { font-size: 13px; color: #1e3a8a; background: var(--blue-bg); border-radius: 8px; padding: 5px 9px; align-self: flex-start; white-space: pre-line; }
+.duty-link { font-size: 12.5px; font-weight: 700; }
+.duty-actions { display: flex; gap: 4px; }
+.duty-mini { border: none; background: none; color: var(--ink-soft); font-size: 12px; font-weight: 700; padding: 4px 6px; border-radius: 6px; }
+.duty-mini:hover { background: var(--accent-soft); color: var(--accent-deep); }
+.duty-add { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.duty-add label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 700; color: var(--ink-soft); }
+.duty-add select, .duty-add input { font: inherit; font-size: 14px; color: var(--ink); min-height: 44px; border: 1px solid var(--border); border-radius: 12px; padding: 0 12px; background: #fff; box-sizing: border-box; }
+.duty-add .grow { flex: 2 1 240px; } .duty-add .mid { flex: 1 1 150px; }
+.duty-add button { min-height: 44px; border: none; border-radius: 999px; padding: 0 22px; background: var(--accent); color: #fff; font-weight: 700; font-size: 14px; }
+/* "Who did this?" / edit sheet */
+.duty-sheet-back { position: fixed; inset: 0; background: rgba(20, 16, 40, 0.45); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 16px; }
+.duty-sheet { background: #fff; border-radius: 20px; padding: 22px; width: 100%; max-width: 460px; box-shadow: 0 20px 50px rgba(0,0,0,0.25); }
+/* Tall pop-ups scroll instead of running off the screen; buttons stay pinned at the bottom (Oct 2026) */
+.duty-sheet { max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+.duty-sheet .sheet-actions { position: sticky; bottom: -22px; background: #fff; margin: 14px -22px -22px; padding: 12px 22px calc(14px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--border); z-index: 2; }
+@media (max-width: 600px) {
+  .duty-sheet-back { align-items: flex-end; padding: 0; }
+  .duty-sheet { max-width: none; border-radius: 20px 20px 0 0; max-height: 92vh; max-height: 92dvh; animation: hubSheetUp .22s ease-out; }
+}
+@keyframes hubSheetUp { from { transform: translateY(40px); opacity: .6; } to { transform: none; opacity: 1; } }
+.duty-sheet h3 { margin: 0 0 4px; font-family: 'Fredoka', 'Inter', sans-serif; font-weight: 600; font-size: 21px; color: var(--ink); }
+.duty-sheet p { margin: 0 0 14px; font-size: 13.5px; color: var(--ink-soft); }
+.who-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 10px; }
+.who-btn { display: flex; flex-direction: column; align-items: center; gap: 6px; border: 2px solid transparent; background: #f7f6fc; border-radius: 14px; padding: 10px 6px; font-size: 13px; font-weight: 700; color: var(--ink); }
+.who-btn:hover, .who-btn.sel { border-color: var(--accent); }
+.sheet-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+.sheet-actions button { min-height: 42px; border-radius: 999px; padding: 0 18px; font-weight: 700; font-size: 13.5px; border: 1px solid var(--border); background: #fff; color: var(--ink); }
+.sheet-actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.sheet-actions button.danger { color: var(--red); border-color: #f5c6cb; }
+.duty-sheet label.f { display: flex; flex-direction: column; gap: 5px; font-size: 12px; font-weight: 700; color: var(--ink-soft); margin-bottom: 12px; }
+.duty-sheet select, .duty-sheet textarea { font: inherit; font-size: 14px; border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px; color: var(--ink); background: #fff; }
+.duty-sheet textarea { min-height: 80px; resize: vertical; }
+
+.today-row { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; margin-bottom: 14px; }
+.today-row > .floor-card { flex: 999 1 520px; min-width: 0; margin-bottom: 0; }
+.today-row > .today-side { flex: 1 1 280px; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.today-side > .team-card { margin-bottom: 0; padding: 20px 22px; }
+
+/* Who's working today */
+.team-title { font-family: 'Fredoka', 'Inter', sans-serif; font-weight: 600; font-size: 22px; color: var(--ink); margin-bottom: 12px; }
+.team-list { display: flex; flex-direction: column; gap: 12px; }
+.team-row { display: flex; align-items: center; gap: 12px; }
+.team-row.done { opacity: 0.5; }
+.hub-av { position: relative; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; flex-shrink: 0; font-weight: 800; }
+.hub-av img { width: 100%; height: 100%; object-fit: contain; border-radius: 50%; display: block; }
+.hub-av .on-now { position: absolute; right: -1px; bottom: -1px; width: 12px; height: 12px; border-radius: 50%; background: var(--green); border: 2px solid #fff; }
+.team-who { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.team-name { font-size: 15px; font-weight: 700; color: var(--ink); }
+.team-shift { font-size: 13px; color: var(--ink-soft); }
+.team-tags { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.team-tag { font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-deep); white-space: nowrap; }
+.team-tag.note { background: #eef3fb; color: #24467a; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team-daynote { font-size: 13px; font-weight: 600; color: #24467a; background: #eef3fb; border: 1px solid #c9daf3; border-radius: 10px; padding: 7px 12px; margin: 6px 0 8px; }
+.team-tag.open  { background: #fff4dd; color: #8a4b00; }
+.team-tag.close { background: #e0e7ff; color: #3730a3; }
+.team-empty { font-size: 14px; color: var(--ink-soft); line-height: 1.45; }
+
+/* ---------- main column ---------- */
+.main { flex: 1; min-width: 0; padding: 22px 26px 60px; }
+
+.top-strip-live { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 220px)); gap: 12px; margin-bottom: 18px; }
+.top-mini {
+  background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 13px 14px;
+}
+.top-mini .eyebrow { display: flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 700; letter-spacing: 0.07em; color: var(--ink-soft); text-transform: uppercase; }
+.top-mini .big { font-family: 'IBM Plex Mono', monospace; font-size: 19px; font-weight: 700; margin-top: 6px; line-height: 1.1; }
+.top-mini .sub { font-size: 11px; color: var(--ink-soft); margin-top: 2px; }
+.top-mini .sub.good { color: var(--green); font-weight: 700; }
+
+.progress-track { height: 6px; background: var(--border); border-radius: 999px; margin-top: 9px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--accent); border-radius: 999px; }
+
+/* ---------- section header ---------- */
+.section-head {
+  display: flex; align-items: center; gap: 10px; margin: 26px 0 12px;
+  font-size: 11.5px; font-weight: 700; letter-spacing: 0.08em; color: var(--accent-deep); text-transform: uppercase;
+}
+.section-head::after { content: ""; flex: 1; height: 2px; background: linear-gradient(90deg, var(--accent-soft), transparent); }
+.section-head.first { margin-top: 0; }
+.section-head.ops { color: var(--blue); }
+.section-head.ops::after { background: linear-gradient(90deg, var(--blue-bg), transparent); }
+
+/* ---------- stat cards ---------- */
+
+/* ---------- mode visibility: dev-only sections hidden until preview mode ----------
+   !important is deliberate here: .dev-only has the same specificity as base
+   rules like .trio/.bottom-row/.foot-bar (one class each), and those rules
+   sit later in this file, so without !important they'd win the tie and stay
+   visible regardless of mode. This forces the hide (and its preview-mode
+   overrides below) to always win regardless of where anything else sits. */
+.dev-only { display: none !important; }
+/* PIN boxes: plain text fields shown as dots, so browsers never offer to save or fill in a PIN. */
+.pin-mask { -webkit-text-security: disc; text-security: disc; }
+body.preview-mode .dev-only { display: revert !important; }
+
+/* ---------- admin-only: real, live cards that only home office sees ----------
+   Unlike .dev-only (mock/in-progress previews), these are finished cards that
+   managers simply shouldn't see. Hidden unless the admin (preview-mode) class
+   is on the body. */
+.admin-only { display: none !important; }
+body.preview-mode .section-head.admin-only { display: flex !important; }
+body.preview-mode .card.admin-only { display: block !important; }
+
+/* ---------- studio view vs coordinator (SC) view ----------
+   .sc-only cards appear only after a coordinator PIN unlocks them; the
+   server also refuses their data without the PIN, so this is not just hiding. */
+body:not(.sc-mode) .sc-only { display: none !important; }
+/* Admin logins: the Hub's own coordinator tabs (Parties, Notifications) show without a PIN */
+body.admin-login:not(.sc-mode) .sc-only.admin-ok { display: flex !important; }
+body.admin-login .studio-only { display: none !important; }
+.view-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; font-size: 12.5px; color: var(--ink-soft); }
+.view-bar .who { font-weight: 700; color: var(--ink); }
+.view-bar .spacer { flex: 1; }
+.view-bar button { border: 1px solid var(--border); background: #fff; color: var(--ink); border-radius: 999px; padding: 6px 14px; font: inherit; font-weight: 700; cursor: pointer; }
+.view-bar button.unlock { background: var(--accent); border-color: var(--accent); color: #fff; }
+.view-bar button.unlock:hover { background: var(--accent-deep); }
+.view-bar .sc-badge { display: inline-block; padding: 2px 9px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-deep); font-weight: 800; font-size: 11px; }
+.gate-text-input { width: 100%; box-sizing: border-box; padding: 12px 13px; border: 1px solid var(--border); border-radius: 10px; font: inherit; font-size: 16px; margin-bottom: 10px; min-height: 48px; }   /* 16px: phones don't zoom in */
+.forecast-temp { font-weight: 800; margin-left: 2px; }
+
+/* ---------- Coordinator Points card ---------- */
+.pts-top { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 14px; margin-bottom: 14px; }
+.pts-tile { background: var(--accent-soft); border-radius: 14px; padding: 14px 16px; }
+.pts-tile.plain { background: #f6f5fb; }
+.pts-big { font-family: 'IBM Plex Mono', monospace; font-size: 34px; font-weight: 700; line-height: 1.1; color: var(--ink); margin: 4px 0; }
+.pts-level { display: inline-block; margin-top: 6px; padding: 2px 10px; border-radius: 999px; background: #fff; font-size: 12px; font-weight: 800; color: var(--accent-deep); }
+.pts-wait { font-size: 12.5px; color: var(--ink-soft); background: #fff8e6; border-radius: 10px; padding: 8px 12px; margin-bottom: 12px; }
+.pts-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; margin-bottom: 14px; }
+.pts-subhead { font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 8px; }
+.pts-row { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.pts-row:last-child { border-bottom: none; }
+.pts-row .amt { font-family: 'IBM Plex Mono', monospace; font-weight: 700; white-space: nowrap; }
+.pts-row .amt.plus { color: var(--green, #1f8a4c); }
+.pts-row .amt.minus { color: #b4462f; }
+.pts-row .how { color: var(--ink-soft); font-size: 12px; text-align: right; }
+.pts-empty { font-size: 13px; color: var(--ink-soft); padding: 6px 0; }
+.pts-tiers { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.pts-page-title { font-size: 22px; font-weight: 800; color: var(--ink); margin: 2px 0 14px; }
+.pts-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.pts-section { margin: 18px 0 8px; }
+.mtg-top-card { margin-bottom: 12px; }
+.mtg-top { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; }
+.mtg-big { font-family: 'IBM Plex Mono', monospace; font-size: 26px; font-weight: 700; }
+.mtg-big span { font-family: inherit; font-size: 14px; color: var(--ink-soft); font-weight: 600; }
+.mtg-pct { font-family: 'IBM Plex Mono', monospace; font-size: 30px; font-weight: 700; color: var(--accent-deep); }
+.mtg-bar { position: relative; height: 16px; border-radius: 999px; background: #f0eef7; margin: 14px 0 34px; }
+.mtg-fill { height: 100%; border-radius: 999px; background: var(--accent); transition: width .4s; }
+.mtg-fill.hit { background: var(--green); }
+.mtg-tick { position: absolute; top: -4px; width: 2px; height: 24px; background: var(--amber); transform: translateX(-1px); }
+.mtg-tick.hit { background: var(--green); }
+.mtg-tick b, .mtg-tick i { position: absolute; left: 50%; transform: translateX(-50%); white-space: nowrap; font-size: 10.5px; font-style: normal; }
+.mtg-tick b { top: 26px; font-weight: 800; color: var(--ink); }
+.mtg-tick i { top: 39px; color: var(--ink-soft); }
+.mtg-foot { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; font-size: 13px; margin-top: 6px; }
+.friday-ahead { border-top: 1px solid var(--border); margin-top: 14px; }
+.fa-row { display: grid; grid-template-columns: 64px minmax(0, 1fr) 46px; grid-template-areas: "d b p" ". s s"; gap: 2px 10px; align-items: center; padding: 6px 0; }
+.fa-date { grid-area: d; font-size: 13px; font-weight: 700; }
+.fa-bar { grid-area: b; position: relative; height: 12px; border-radius: 999px; background: #f0eef7; overflow: visible; }
+.fa-bar > div { height: 100%; border-radius: 999px; }
+.fa-tick { position: absolute; top: -3px; width: 2px; height: 18px; background: var(--amber); border-radius: 1px; transform: translateX(-1px); }
+.fa-pct { grid-area: p; text-align: right; font-family: 'IBM Plex Mono', monospace; font-weight: 700; font-size: 13px; }
+.fa-sub { grid-area: s; font-size: 11.5px; color: var(--ink-soft); }
+.occ-noplan { background: var(--amber-bg); color: #6b4a00; border-radius: 12px; padding: 12px 14px; font-size: 13.5px; line-height: 1.45; }
+.occ-cal { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.occ-dow { font-size: 11px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); text-align: center; padding: 2px 0 4px; }
+.occ-cell { min-height: 74px; border: 1px solid rgba(0,0,0,0.05); border-radius: 10px; padding: 7px 8px; text-align: left; font: inherit; color: var(--ink); cursor: pointer; display: flex; flex-direction: column; }
+.occ-cell.out { background: transparent; border: 1px dashed #ebe9e3; cursor: default; color: #c9c6be; }
+.occ-cell.closed { background: #f7f6f2; color: var(--ink-soft); cursor: default; }
+.occ-cell.future { border-style: dashed; border-color: rgba(0,0,0,0.18); }
+.occ-cell.today { outline: 2px solid var(--accent); outline-offset: 1px; }
+.occ-cell .oc-date { font-size: 11.5px; font-weight: 700; color: var(--ink-soft); }
+.occ-cell .oc-pct { font-family: 'IBM Plex Mono', monospace; font-size: 18px; font-weight: 700; margin: auto 0 1px; }
+.occ-cell .oc-sub { font-size: 10.5px; color: #555; }
+@media (max-width: 760px) { .occ-cell { min-height: 58px; padding: 5px; } .occ-cell .oc-pct { font-size: 14px; } .occ-cell .oc-sub { display: none; } }
+.pts-tier-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+.pts-tier-card { text-align: left; border: 1px solid var(--border); border-radius: 14px; padding: 14px; background: #fff; font: inherit; color: var(--ink); cursor: pointer; transition: transform .1s, box-shadow .1s; }
+.pts-tier-card:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(0,0,0,0.06); }
+.pts-tier-card.reached { border-color: var(--accent); background: var(--accent-soft); }
+.pts-tier-card .tc-name { font-weight: 800; font-size: 15px; }
+.pts-tier-card .tc-cost { font-family: 'IBM Plex Mono', monospace; font-weight: 700; color: var(--accent-deep); font-size: 13px; margin-top: 2px; }
+.pts-tier-card .tc-sub { font-size: 12px; color: var(--ink-soft); }
+.pts-tier-card .tc-link { margin-top: 8px; font-size: 12.5px; font-weight: 800; color: var(--accent-deep); }
+.prize-modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 1000; background: rgba(20, 16, 40, 0.45); align-items: center; justify-content: center; padding: 20px; }
+.prize-modal-card { background: #fff; border-radius: 18px; width: 100%; max-width: 760px; max-height: 85vh; overflow-y: auto; padding: 18px 20px 20px; box-shadow: 0 20px 60px -20px rgba(0,0,0,0.4); }
+.prize-modal-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 14px; font-size: 18px; font-weight: 800; }
+.prize-modal-head .pm-cost { font-family: 'IBM Plex Mono', monospace; font-size: 14px; color: var(--accent-deep); margin-left: 6px; }
+.pm-close { border: none; background: var(--accent-soft); color: var(--accent-deep); width: 32px; height: 32px; border-radius: 999px; font-size: 14px; cursor: pointer; flex: none; }
+.pm-soon { margin-top: 14px; padding: 12px 14px; border-radius: 12px; background: #fff8e6; font-size: 13px; font-weight: 700; text-align: center; color: #7a5a00; }
+.pts-prize-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
+.pts-prize { border: 1px solid var(--border); border-radius: 14px; padding: 12px; background: #fff; display: flex; flex-direction: column; gap: 6px; }
+.pts-prize.can { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.pts-prize img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 10px; background: #f3f2ec; }
+.pts-prize .p-name { font-weight: 800; font-size: 14px; }
+.pts-prize .p-desc { font-size: 12px; color: var(--ink-soft); }
+.pts-prize .p-cost { font-family: 'IBM Plex Mono', monospace; font-weight: 700; color: var(--accent-deep); font-size: 13px; }
+.pts-prize button { margin-top: auto; border: none; border-radius: 999px; padding: 8px 12px; font: inherit; font-weight: 800; cursor: pointer; background: var(--accent); color: #fff; }
+.pts-prize button:disabled { background: #e6e4f0; color: var(--ink-soft); cursor: default; }
+.pts-project { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; background: #fbfaff; }
+.pts-project-head { display: flex; justify-content: space-between; gap: 10px; font-weight: 800; font-size: 14px; }
+.pts-step { padding-left: 2px; }
+.pts-step-num { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; margin-right: 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-deep); font-size: 11px; font-weight: 800; }
+.flash-card { position: relative; border-radius: 16px; padding: 14px 18px; margin-bottom: 12px; color: #2a1a00;
+  background: linear-gradient(135deg, #ffe08a 0%, #ffc24d 100%); box-shadow: 0 4px 14px rgba(255, 170, 0, 0.25); }
+.flash-card.done { background: linear-gradient(135deg, #c9f2d7 0%, #8fdcaa 100%); box-shadow: none; color: #0f3d22; }
+.flash-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.flash-eyebrow { font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.8; }
+.flash-title { font-size: 19px; font-weight: 800; margin: 2px 0; }
+.flash-desc { font-size: 13px; opacity: 0.85; }
+.flash-pts { text-align: right; font-weight: 800; font-size: 18px; white-space: nowrap; }
+.flash-pts .flash-time { display: block; font-size: 12px; font-weight: 700; opacity: 0.8; }
+.flash-bar { height: 10px; border-radius: 999px; background: rgba(255,255,255,0.55); overflow: hidden; margin: 10px 0 4px; }
+.flash-bar > div { height: 100%; background: #2a1a00; border-radius: 999px; transition: width .4s; }
+.flash-card.done .flash-bar > div { background: #0f3d22; }
+.flash-meta { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; font-weight: 700; flex-wrap: wrap; align-items: center; }
+.flash-card button { border: none; border-radius: 999px; padding: 7px 16px; font: inherit; font-size: 13px; font-weight: 800; cursor: pointer; background: #2a1a00; color: #fff; }
+.btn-confirm { border: none; border-radius: 999px; padding: 6px 14px; font: inherit; font-size: 12px; font-weight: 800; cursor: pointer; background: var(--accent); color: #fff; white-space: nowrap; }
+.pts-status { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 800; text-transform: capitalize; background: #eee; }
+.pts-status.requested { background: #fff4d6; color: #8a6100; }
+.pts-status.approved { background: #e3f0ff; color: #1d4f91; }
+.pts-status.fulfilled { background: var(--green-bg); color: var(--green); }
+.pts-status.cancelled { background: #f5e6e3; color: #b4462f; }
+@media (max-width: 760px) { .pts-stats { grid-template-columns: 1fr; } }
+.pts-tier { flex: 1 1 160px; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; font-size: 12.5px; }
+.pts-tier.unlocked { border-color: var(--accent); background: var(--accent-soft); }
+.pts-tier .t-name { font-weight: 800; }
+.pts-tier .t-cost { font-family: 'IBM Plex Mono', monospace; font-weight: 700; color: var(--accent-deep); }
+.pts-tier .t-prizes { color: var(--ink-soft); margin-top: 3px; }
+@media (max-width: 760px) { .pts-top, .pts-cols { grid-template-columns: 1fr; } }
+
+.admin-switcher-bar {
+  display: flex; align-items: center; gap: 10px; background: var(--amber-bg); border: 1px solid #f5d99a;
+  border-radius: 12px; padding: 10px 14px; margin-bottom: 18px; font-size: 13px;
+}
+.admin-switcher-label { font-weight: 700; color: var(--amber); }
+.admin-switcher-bar select {
+  padding: 6px 10px; border: 1px solid #f5d99a; border-radius: 8px; font-size: 13px;
+  background: #fff; color: var(--ink); font-family: inherit;
+}
+
+/* ---------- whole-dashboard access gate ---------- */
+.dashboard-gate {
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(180deg, var(--sidebar-bg) 0%, var(--sidebar-bg-2) 100%);
+  padding: 20px;
+}
+.gate-card {
+  background: #fff; border-radius: 20px; box-shadow: 0 20px 60px -20px rgba(0,0,0,0.4);
+  padding: 32px 30px; width: 100%; max-width: 340px; text-align: center;
+}
+.gate-logo { font-size: 32px; margin-bottom: 8px; }
+.gate-logo-img { width: 80px; display: block; margin: 0 auto 14px; border-radius: 16px; }
+.gate-title { font-size: 15px; font-weight: 800; color: var(--ink); margin-bottom: 20px; }
+.gate-detail { font-size: 12.5px; color: var(--ink-soft); margin-bottom: 14px; }
+.gate-pin-input {
+  width: 100%; padding: 12px; border: 1.5px solid var(--border); border-radius: 10px;
+  font-size: 18px; letter-spacing: 0.3em; text-align: center; font-family: 'IBM Plex Mono', monospace;
+  margin-bottom: 12px;
+}
+.gate-error { font-size: 12px; color: var(--red); font-weight: 600; margin-bottom: 10px; }
+.gate-btn {
+  width: 100%; padding: 11px 0; background: var(--accent); color: #fff; border: none;
+  border-radius: 10px; font-size: 13.5px; font-weight: 700;
+}
+.gate-btn:hover { background: var(--accent-deep); }
+.gate-divider { display: flex; align-items: center; gap: 10px; margin: 18px 0 12px; font-size: 11px; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.06em; }
+.gate-divider::before, .gate-divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.gate-schedule-btn {
+  width: 100%; padding: 10px 0; background: #fff; color: var(--accent-deep); border: 1.5px solid var(--accent);
+  border-radius: 10px; font-size: 13.5px; font-weight: 700;
+}
+.gate-schedule-btn:hover { background: var(--accent-soft); }
+
+/* ---------- Schedule tab (schedule.html, studio login — no manager PIN) ---------- */
+.schedule-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; height: 100vh; }
+.schedule-pane iframe { flex: 1; width: 100%; border: 0; background: #fafaf8; }
+.gate-studio-btn {
+  display: block; width: 100%; padding: 10px 0; margin-top: 8px;
+  background: var(--accent-soft); color: var(--accent-deep); border: none;
+  border-radius: 10px; font-size: 13px; font-weight: 700;
+}
+.gate-studio-btn:hover { background: #ddd4ff; }
+
+/* ---------- Friday event fill rate ---------- */
+.friday-card { padding: 18px 18px 14px; }
+.friday-toggle { display: flex; gap: 4px; background: var(--page-bg); border-radius: 9px; padding: 3px; }
+.friday-toggle button {
+  border: none; background: none; padding: 6px 12px; font-size: 12px; font-weight: 700;
+  border-radius: 7px; color: var(--ink-soft);
+}
+.friday-toggle button.active { background: #fff; color: var(--accent-deep); box-shadow: var(--shadow); }
+
+.friday-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px; }
+.friday-tile {
+  border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px;
+  background: var(--page-bg);
+}
+.friday-tile.live { background: var(--accent-soft); border-color: #ddd4ff; }
+.friday-tile .eyebrow { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; color: var(--ink-soft); text-transform: uppercase; display: flex; align-items: center; gap: 6px; }
+.friday-tile .eyebrow .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--red); display: inline-block; }
+.friday-tile .date { font-size: 12.5px; color: var(--ink-soft); margin-top: 3px; }
+.friday-tile .pct { font-family: 'IBM Plex Mono', monospace; font-size: 26px; font-weight: 800; margin-top: 4px; }
+.friday-tile .pct.hit { color: var(--green); }
+.friday-tile .detail { font-size: 11.5px; color: var(--ink-soft); margin-top: 2px; }
+.friday-tile .no-cap { font-size: 12.5px; color: var(--amber); font-weight: 600; margin-top: 8px; }
+
+.goal-tile .progress-track { height: 8px; margin-top: 10px; }
+.goal-tile .progress-fill.hit { background: var(--green); }
+.goal-pace { display: inline-block; margin-top: 8px; font-size: 11.5px; font-weight: 700; padding: 3px 9px; border-radius: 999px; }
+.goal-pace.ahead { background: var(--green-bg); color: var(--green); }
+.goal-pace.close { background: var(--amber-bg); color: var(--amber); }
+.goal-pace.behind { background: var(--red-bg); color: var(--red); }
+.goal-note { font-size: 11.5px; color: var(--ink-soft); margin-top: 2px; }
+.goal-msg { font-size: 13px; color: var(--amber); font-weight: 600; padding: 4px 0; }
+
+/* Instagram card */
+.ig-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 900px) { .ig-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.ig-change { font-size: 11.5px; font-weight: 700; margin-top: 3px; }
+.ig-change.up { color: var(--green); }
+.ig-change.down { color: var(--red); }
+.ig-change.flat { color: var(--ink-soft); }
+.ig-handle { font-size: 12.5px; font-weight: 600; color: var(--ink-soft); }
+.ig-warn { font-size: 12px; color: var(--amber); font-weight: 600; margin-bottom: 10px; }
+.ig-foot { font-size: 11.5px; color: var(--ink-soft); margin-top: 10px; }
+
+/* Sales goal leaderboard */
+.sglb { margin-top: 4px; border-top: 1px solid var(--border); padding-top: 14px; }
+/* Sales Goals: month pace tile and leaderboard side by side (stacked on narrow screens) */
+.goal-summary { align-items: start; }
+.ig-grid.five { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.ig-tile-sub { font-size: 11.5px; color: var(--ink-soft); margin-top: 2px; }
+.ig-top-post { display: block; margin-top: 12px; padding: 10px 12px; border-radius: 12px; background: #fff8e6; color: #6b4a00; font-size: 13px; font-weight: 700; text-decoration: none; }
+.ig-top-post:hover { background: #ffefc2; }
+.ig-months { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+.ig-month { flex: 1; min-width: 160px; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
+.ig-month-val { font-family: 'IBM Plex Mono', monospace; font-weight: 700; font-size: 18px; margin-top: 2px; }
+.ig-month-val.up { color: var(--green); } .ig-month-val.down { color: var(--red); }
+.ig-month-sub { font-size: 11.5px; color: var(--ink-soft); }
+.yoy-line { margin: -4px 0 12px; padding: 9px 12px; border-radius: 10px; background: var(--accent-soft); font-size: 13.5px; color: var(--ink); }
+.yoy-line.up { background: #e3f6e9; color: #14532d; }
+.yoy-line.down { background: #fde8e6; color: #7f1d1d; }
+.yoy-line.muted { background: #f7f6f2; color: var(--ink-soft); }
+.yoy-line .yoy-sub { display: block; font-size: 11.5px; opacity: 0.8; margin-top: 2px; }
+.goal-summary .goal-lb .sglb { margin-top: 0; border-top: none; padding-top: 0; }
+@media (max-width: 760px) {
+  .goal-summary { grid-template-columns: 1fr; }
+  .goal-summary .goal-lb .sglb { border-top: 1px solid var(--border); padding-top: 14px; }
+}
+.sglb-title { font-size: 11px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 8px; }
+.sglb-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px; font-size: 13px; }
+.sglb-row + .sglb-row { margin-top: 2px; }
+.sglb-rank { width: 36px; flex-shrink: 0; font-size: 17px; text-align: center; }
+.sglb-rank.num { font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; font-weight: 800; color: var(--ink-soft); }
+.sglb-name { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sglb-bar { width: 90px; flex-shrink: 0; height: 6px; background: var(--border); border-radius: 999px; overflow: hidden; }
+.sglb-bar > div { height: 100%; background: var(--accent); border-radius: 999px; }
+.sglb-bar > div.hit { background: var(--green); }
+.sglb-pct { width: 56px; flex-shrink: 0; text-align: right; font-family: 'IBM Plex Mono', monospace; font-weight: 800; }
+.sglb-row.you { background: var(--accent-soft); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.sglb-row.you .sglb-name { color: var(--accent-deep); font-weight: 800; }
+.sglb-you-tag { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; background: var(--accent); color: #fff; font-size: 10px; font-weight: 800; letter-spacing: 0.04em; vertical-align: 1px; }
+.sglb-gap { text-align: center; color: var(--ink-soft); font-size: 13px; line-height: 1; padding: 4px 0 2px; letter-spacing: 3px; }
+.sglb-foot { font-size: 11.5px; color: var(--ink-soft); margin-top: 8px; }
+.sglb-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.sglb-head .sglb-title { margin-bottom: 0; }
+.sglb-toggle { display: inline-flex; background: var(--border); border-radius: 999px; padding: 2px; }
+.sglb-toggle button { border: none; background: none; padding: 4px 12px; border-radius: 999px; font: inherit; font-size: 11.5px; font-weight: 700; color: var(--ink-soft); cursor: pointer; }
+.sglb-toggle button.on { background: #fff; color: var(--accent-deep); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
+
+.friday-chart-scroll { overflow-x: auto; padding-bottom: 4px; }
+.friday-chart-scroll svg { display: block; }
+
+.friday-list { max-height: 260px; overflow-y: auto; }
+.friday-list-row {
+  display: flex; align-items: center; gap: 10px; padding: 7px 2px; font-size: 12.5px;
+  border-bottom: 1px solid var(--border);
+}
+.friday-list-row:last-of-type { border-bottom: none; }
+.friday-list-row .fl-date { width: 92px; color: var(--ink-soft); flex-shrink: 0; }
+.friday-list-row .fl-bar-track { flex: 1; height: 8px; background: var(--border); border-radius: 999px; overflow: hidden; }
+.friday-list-row .fl-bar-fill { height: 100%; border-radius: 999px; background: var(--accent); }
+.friday-list-row .fl-bar-fill.hit { background: var(--green); }
+.friday-list-row .fl-pct { width: 44px; text-align: right; font-family: 'IBM Plex Mono', monospace; font-weight: 700; flex-shrink: 0; }
+.friday-list-row .fl-detail { width: 90px; text-align: right; color: var(--ink-soft); font-size: 11px; flex-shrink: 0; }
+
+/* ---------- studio sales (live for everyone, per-studio) ---------- */
+.sales-card { padding: 18px 18px 14px; }
+.sales-yoy { font-size: 13px; margin-top: 4px; }
+.sales-yoy-detail { color: var(--ink-soft); font-size: 11.5px; }
+.sales-mom.up { color: var(--green); font-weight: 700; }
+.sales-mom.down { color: var(--red); font-weight: 700; }
+.sales-mom.flat { color: var(--ink-soft); }
+.sales-admin-note { font-size: 11px; color: var(--ink-soft); font-style: italic; margin-top: 10px; }
+
+/* ---------- three-up cards ---------- */
+
+.card {
+  background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 18px;
+}
+.card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.card-head .title { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 700; }
+
+/* ---------- ✍️ Policy sign-offs (kb_acknowledgements.sql) ---------- */
+.ack-reader { position: fixed; inset: 0; z-index: 3000; background: rgba(20,18,40,0.55); display: flex; align-items: stretch; justify-content: center; padding: 16px; }
+.ack-reader-box { background: #fff; border-radius: 20px; width: 100%; max-width: 900px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,0.3); }
+.ack-reader-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.ack-reader-head b { font-size: 16px; flex: 1; }
+.ack-reader iframe { flex: 1; width: 100%; border: 0; background: #fafaf7; min-height: 0; }
+.ack-reader-foot { border-top: 1px solid var(--border); padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px)); background: #fff; }
+.ack-reader-foot .goal-note { font-size: 13px; }
+.ack-sign-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+.ack-sign-row input[type=text] { flex: 1; min-width: 200px; font: inherit; font-size: 16px; padding: 10px 12px; border: 1.5px solid var(--border); border-radius: 12px; }
+.ack-agree { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4; cursor: pointer; }
+.ack-agree input { margin-top: 3px; width: 18px; height: 18px; }
+.ack-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.ack-item:last-child { border-bottom: 0; }
+.ack-item .t { flex: 1; min-width: 0; }
+.ack-item .t b { display: block; font-size: 14.5px; }
+.ack-st { font-size: 11.5px; font-weight: 700; padding: 2px 9px; border-radius: 10px; white-space: nowrap; }
+.ack-st.signed { background: var(--green-bg); color: #14532d; }
+.ack-st.due_soon { background: #fef3c7; color: #78350f; }
+.ack-st.due { background: #ede9fe; color: #4c1d95; }
+.ack-st.overdue { background: var(--red-bg); color: #7f1d1d; }
+.ack-count { font-size: 12px; font-weight: 700; color: #7f1d1d; }
+.ack-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.ack-chip { background: var(--card-bg); border: 1px solid var(--border); border-radius: 14px; padding: 8px 14px; font-size: 13px; }
+.ack-chip b { font-size: 20px; display: block; }
+.ack-tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+.ack-tabs .ho-btn.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.ack-people { font-size: 13px; line-height: 1.9; margin-top: 6px; }
+.ack-people span { display: inline-block; margin-right: 10px; white-space: nowrap; }
+@media (max-width: 640px) { .ack-reader { padding: 0; } .ack-reader-box { border-radius: 0; } }
+
+/* coordinator birthday confetti */
+.confetti-layer { position: fixed; top: 0; right: 0; bottom: 0; left: 0; pointer-events: none; overflow: hidden; z-index: 9999; }
+.confetti-layer span { position: absolute; top: -14px; width: 9px; height: 13px; border-radius: 2px; opacity: .95;
+  animation-name: confetti-fall; animation-timing-function: cubic-bezier(.25,.6,.45,1); animation-fill-mode: forwards; }
+@keyframes confetti-fall { to { transform: translate(var(--drift), 105vh) rotate(var(--spin)); opacity: .85; } }
+
+/* greeting hero — distinct gradient treatment marks this as the "assistant" section.
+   Sept 2026 styling pass: bigger, softer card. No extra dark overlay — the theme
+   loader already adds its own light tint when a banner photo is set, and the
+   seasonal accent colours should show true. Text-shadow keeps text readable
+   on banner photos. */
+.hero-card {
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-deep, #8b6cf0) 100%);
+  color: #ffffff; border: none; padding: 24px 30px; margin-bottom: 14px;
+  background-size: cover; background-position: center right;
+  min-height: 138px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center;
+  border-radius: 22px; overflow: hidden; box-shadow: 0 8px 24px rgba(42,25,45,.10);
+}
+.hero-greeting { font-size: clamp(27px, 2.15vw, 34px); line-height: 1.08; font-weight: 800; letter-spacing: -.025em; margin-bottom: 7px; text-shadow: 0 1px 4px rgba(0,0,0,0.3); }
+.hero-sub { font-size: 16px; line-height: 1.35; font-weight: 500; color: rgba(255,255,255,0.92); margin-bottom: 0; text-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+.hero-sessions { display: flex; flex-direction: column; gap: 6px; margin-top: 16px; }
+.hero-session-row {
+  display: flex; justify-content: space-between; align-items: center;
+  background: rgba(255,255,255,0.14); border-radius: 10px; padding: 9px 13px; font-size: 13px;
+}
+.hero-session-row .time { color: rgba(255,255,255,0.75); font-family: 'IBM Plex Mono', monospace; font-size: 12px; min-width: 68px; }
+.hero-session-row .title { flex: 1; margin: 0 10px; font-weight: 600; }
+.hero-session-row .count { font-family: 'IBM Plex Mono', monospace; font-weight: 700; }
+.hero-empty { font-size: 13px; color: rgba(255,255,255,0.75); font-style: italic; }
+
+/* Values (theme, Friday event, next week) keep the seasonal accent colour. */
+.week-info-bar {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  font-size: 13px; font-weight: 600; color: var(--accent-deep);
+  min-height: 50px; box-sizing: border-box; padding: 10px 18px; margin: 0 0 22px;
+  background: rgba(255,255,255,.96); border: 1px solid rgba(70,49,77,.10); border-radius: 14px;
+  box-shadow: 0 3px 12px rgba(42,25,45,.045);
+}
+.week-info-bar strong { font-weight: 800; }
+.week-info-bar .sep { color: #c8bdcb; font-weight: 400; margin: 0 2px; }
+.week-info-bar .label { color: var(--ink-soft); font-weight: 500; }
+
+/* today's projects (live for everyone, company-wide) */
+.projects-card { padding: 24px 26px 25px; margin-bottom: 22px; border-radius: 22px; }
+.projects-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.projects-head .title { font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.projects-theme { font-size: 12.5px; color: var(--ink-soft); font-weight: 600; }
+.projects-theme .wk { font-family: 'IBM Plex Mono', monospace; color: var(--accent-deep); margin-right: 6px; }
+
+/* header block: big title + weather forecast pills + subtitle + stub button */
+.today-header { margin-bottom: 16px; }
+.today-header-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+.today-title { font-size: clamp(27px, 2vw, 32px); line-height: 1.08; letter-spacing: -.025em; font-weight: 800; color: var(--accent-deep); display: flex; align-items: center; gap: 8px; }
+.today-see-all { flex-shrink: 0; height: 42px; padding: 0 20px; border-radius: 999px; border: 1.5px solid var(--accent); color: var(--accent-deep); background: white; font-size: 13px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+.today-see-all:hover { background: var(--accent-soft); }
+.forecast-row { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin-bottom: 10px; }
+.weather-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 14px; } .weather-strip:empty { display: none; }
+.weather-strip .forecast-row { margin-bottom: 0; } .weather-now { font-size: 14px; color: var(--ink-soft); } .weather-now b { color: var(--ink); font-size: 16px; }
+.forecast-pill {
+  flex-shrink: 0; display: flex; align-items: center; gap: 6px;
+  padding: 8px 16px; border-radius: 999px; border: 1.5px solid #e6dfe7;
+  font-size: 12.5px; font-weight: 600; color: var(--ink-soft); background: white; white-space: nowrap;
+}
+.forecast-pill.today { background: var(--accent); border-color: var(--accent); color: white; box-shadow: 0 3px 10px rgba(109,74,235,.18); }
+.forecast-pill.extra { animation: forecastIn 0.18s ease-out; }
+@keyframes forecastIn { from { opacity: 0; transform: translateX(-4px); } to { opacity: 1; transform: none; } }
+.forecast-toggle {
+  flex-shrink: 0; width: 36px; height: 36px; border-radius: 50%;
+  border: 1.5px solid #e6dfe7; background: white; color: var(--accent-deep);
+  font-size: 18px; font-weight: 700; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.forecast-toggle:hover { border-color: var(--accent); background: var(--accent-soft); }
+.today-subtitle { font-size: 14px; line-height: 1.4; font-weight: 600; color: var(--ink); }
+.projects-event { font-size: 13px; font-weight: 700; color: var(--accent-deep); margin: -6px 0 12px; }
+.projects-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.project-tile { border: 1px solid var(--border); border-radius: 13px; overflow: hidden; background: var(--card-bg); box-shadow: 0 3px 12px rgba(42,25,45,.06); }
+/* Square on purpose: project photos show the whole finished piece. */
+.project-tile .ph { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: cover; background: var(--accent-soft); }
+.project-tile .ph-none { width: 100%; aspect-ratio: 1 / 1; background: var(--accent-soft); display: flex; align-items: center; justify-content: center; font-size: 11.5px; color: var(--ink-soft); }
+.project-tile .nm { padding: 10px 13px 12px; font-size: 16px; font-weight: 700; line-height: 1.22; color: var(--ink); }
+/* medium pill over the photo, printout/template links under the name */
+.project-tile .ph-wrap { position: relative; }
+.project-tile .medium-pill {
+  position: absolute; top: 8px; left: 8px; max-width: calc(100% - 16px);
+  padding: 3px 10px; border-radius: 999px; background: rgba(255,255,255,0.92); color: var(--ink);
+  font-size: 11px; font-weight: 800; letter-spacing: 0.02em; box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.project-tile .project-links { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 13px 12px; margin-top: -4px; }
+.project-tile .project-link {
+  font-size: 12px; font-weight: 700; color: var(--accent-deep); text-decoration: none;
+  padding: 4px 10px; border-radius: 999px; background: var(--accent-soft);
+}
+.project-tile .project-link:hover { background: var(--accent); color: #fff; }
+/* Tap a project for its tools and materials */
+.project-tile.tap { cursor: pointer; transition: box-shadow .15s, transform .15s; }
+.project-tile.tap:hover { box-shadow: 0 6px 18px rgba(42,25,45,.13); transform: translateY(-1px); }
+.project-tile button.project-link { border: none; cursor: pointer; font-family: inherit; }
+.ps-top { display: flex; gap: 14px; align-items: center; margin-bottom: 14px; }
+.ps-top img, .ps-top .ph-none { width: 92px; height: 92px; border-radius: 12px; object-fit: cover; flex: none; background: var(--accent-soft); }
+.ps-top .ps-medium { font-size: 12px; font-weight: 800; color: var(--accent-deep); text-transform: uppercase; letter-spacing: .04em; }
+.ps-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 640px) { .ps-cols { grid-template-columns: 1fr; } }
+.ps-sec { border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; }
+.ps-prep { grid-column: 1 / -1; }
+.ps-sec h4 { font-size: 13px; font-weight: 800; margin: 0 0 8px; }
+.ps-sec ul { list-style: none; margin: 0; padding: 0; }
+.ps-sec li { padding: 6px 0; border-top: 1px solid var(--border); font-size: 14px; line-height: 1.3; display: flex; justify-content: space-between; gap: 10px; }
+.ps-sec li:first-child { border-top: none; }
+.ps-sec li .q { font-family: 'IBM Plex Mono', monospace; font-weight: 700; color: var(--accent-deep); white-space: nowrap; font-size: 13px; }
+.ps-sec li small { display: block; font-size: 12px; color: var(--ink-soft); }
+.ps-empty { font-size: 13px; color: var(--ink-soft); }
+.ps-links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.ps-links .project-link { font-size: 12px; font-weight: 700; color: var(--accent-deep); text-decoration: none; padding: 4px 10px; border-radius: 999px; background: var(--accent-soft); }
+.ps-links .project-link:hover { background: var(--accent); color: #fff; }
+.projects-mini { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+.projects-mini-label { font-size: 11.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 10px; }
+.projects-mini-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.projects-mini-row .project-tile { display: flex; align-items: center; }
+.projects-mini-row .project-tile .ph-wrap { flex: 1 1 50%; width: 50%; }
+.projects-mini-row .project-tile .info { flex: 1 1 50%; width: 50%; }
+.projects-mini-row .project-tile .nm { font-size: 18px; font-weight: 700; padding: 14px 16px; text-align: center; }
+.projects-mini-row .project-tile .project-links { justify-content: center; }
+.projects-empty { font-size: 13px; color: var(--ink-soft); font-style: italic; }
+@media (max-width: 900px) {
+  .hero-card { min-height: 126px; padding: 22px 24px; }
+  .projects-card { padding: 20px; }
+  .today-header-top { align-items: flex-start; }
+}
+@media (max-width: 700px) {
+  .hero-card { min-height: 118px; padding: 20px; border-radius: 18px; }
+  .hero-greeting { font-size: 25px; }
+  .hero-sub { font-size: 14px; }
+  .week-info-bar { margin-bottom: 16px; }
+  .projects-card { padding: 17px; border-radius: 18px; }
+  .today-title { font-size: 25px; }
+  .today-see-all { width: 100%; }
+  .projects-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .project-tile .nm { font-size: 15px; padding: 8px 10px 10px; }
+  .projects-mini-row { grid-template-columns: 1fr; }
+}
+
+/* marketing suggestions */
+.suggestion-row { border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; }
+.suggestion-row:last-child { margin-bottom: 0; }
+.suggestion-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.suggestion-name { font-weight: 700; font-size: 14px; }
+.suggestion-subject { font-size: 13px; color: var(--ink-soft); margin-top: 2px; }
+.suggestion-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.suggestion-btn { height: 32px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--border); background: white; font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.suggestion-btn.primary { background: var(--accent); color: white; border: none; }
+.suggestion-preview { margin-top: 10px; padding: 12px; background: #faf9fd; border-radius: 8px; font-size: 13px; white-space: pre-wrap; display: none; }
+.suggestion-preview.open { display: block; }
+
+/* leaderboard */
+
+/* points ring */
+
+/* earned this week */
+
+/* bottom row: mission / ai coach / events */
+
+/* footer */
+
+/* ---------- responsive ---------- */
+
+@media (max-width: 860px) {
+  .sidebar { display: none; }
+}
+
+/* ---------- Supplies (inventory) ----------
+   Store, blind counts and transfers. While INVENTORY_LIVE is false the nav
+   button is .dev-only (admin PIN preview). .dev-only reverts a button to the
+   browser default, so the nav item gets its flex layout back here. */
+body.preview-mode .nav-item.dev-only { display: flex !important; }
+.nav-badge {
+  margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px;
+  background: var(--red); color: #fff; font-size: 11px; font-weight: 800;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.inv-top { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 14px; }
+.inv-who { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; }
+.inv-who select, .inv-who input {
+  padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; font: inherit;
+  font-size: 14px; font-weight: 500; background: #fff; min-width: 210px;
+}
+.inv-who.missing select, .inv-who.missing input { border-color: var(--amber); background: var(--amber-bg); }
+.inv-tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+.inv-tab {
+  border: 1px solid var(--border); background: #fff; color: var(--ink); border-radius: 999px;
+  padding: 8px 16px; font-weight: 700; font-size: 13px; display: inline-flex; align-items: center; gap: 6px;
+}
+.inv-tab.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.inv-tab .nav-badge { margin-left: 2px; }
+.inv-flash { border-radius: 12px; padding: 11px 14px; font-size: 13.5px; font-weight: 600; margin-bottom: 14px; }
+.inv-flash.ok { background: var(--green-bg); color: var(--green); }
+.inv-flash.err { background: var(--red-bg); color: var(--red); }
+.inv-flash.warn { background: var(--amber-bg); color: var(--amber); }
+.inv-modes { display: inline-flex; background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 3px; margin-bottom: 14px; }
+.inv-modes button { border: none; background: none; padding: 8px 14px; border-radius: 9px; font-weight: 700; font-size: 13px; color: var(--ink-soft); }
+.inv-modes button.on { background: var(--accent-soft); color: var(--accent-deep); }
+.inv-store { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
+@media (max-width: 900px) { .inv-store { grid-template-columns: 1fr; } }
+.inv-group-title { font-size: 11.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); margin: 4px 0 8px; }
+.inv-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 10px; margin-bottom: 18px; }
+.inv-tile {
+  position: relative; background: var(--card-bg); border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: var(--shadow); padding: 12px; text-align: left; display: flex; flex-direction: column;
+  gap: 6px; min-height: 104px; color: var(--ink); transition: transform 0.08s;
+}
+.inv-tile:active { transform: scale(0.97); }
+.inv-tile.return { border-style: dashed; }
+.inv-swatch { width: 34px; height: 34px; border-radius: 10px; border: 1px solid rgba(0,0,0,0.1); flex-shrink: 0; }
+.inv-tile-name { font-weight: 700; font-size: 13.5px; line-height: 1.2; }
+.inv-tile-sub { font-size: 11px; color: var(--ink-soft); }
+.inv-tile-qty {
+  position: absolute; top: 8px; right: 8px; background: var(--accent); color: #fff; border-radius: 999px;
+  min-width: 22px; height: 22px; padding: 0 6px; font-size: 12px; font-weight: 800;
+  display: flex; align-items: center; justify-content: center;
+}
+.inv-cart { position: sticky; top: 16px; }
+.inv-cart h3 { margin: 0 0 10px; font-size: 14px; }
+.inv-line { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.inv-line .nm { flex: 1; min-width: 0; }
+.inv-tag { display: inline-block; font-size: 10.5px; font-weight: 800; padding: 2px 7px; border-radius: 999px; background: var(--green-bg); color: var(--green); margin-top: 3px; }
+.inv-tag.return { background: var(--amber-bg); color: var(--amber); }
+.inv-step { width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--border); background: #fff; font-weight: 800; color: var(--ink); }
+.inv-primary {
+  width: 100%; margin-top: 12px; padding: 12px; border: none; border-radius: 12px;
+  background: var(--accent); color: #fff; font-weight: 800; font-size: 14px;
+}
+.inv-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+.inv-btn { padding: 8px 14px; border-radius: 10px; border: 1px solid var(--border); background: #fff; font-weight: 700; font-size: 13px; color: var(--ink); }
+.inv-btn.go { background: var(--accent); border-color: var(--accent); color: #fff; }
+.inv-btn.warn { color: var(--red); }
+.inv-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.inv-note { font-size: 13px; color: var(--ink-soft); margin: 0 0 12px; line-height: 1.45; }
+.inv-count-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.inv-count-row:last-child { border-bottom: none; }
+.inv-count-row .nm { flex: 1; min-width: 160px; font-weight: 700; }
+.inv-recount { display: block; font-size: 12px; font-weight: 700; color: var(--amber); margin-top: 3px; }
+.inv-count-row input, .inv-form input, .inv-form select {
+  padding: 9px 10px; border: 1px solid var(--border); border-radius: 10px; font: inherit; font-size: 15px; background: #fff;
+}
+.inv-count-row input { width: 90px; text-align: center; }
+.inv-form { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.inv-form input { width: 80px; text-align: center; }
+.inv-xfer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 13.5px; }
+.inv-xfer:last-child { border-bottom: none; }
+.inv-xfer .txt { flex: 1; min-width: 200px; }
+.inv-xfer .when { display: block; font-size: 11.5px; color: var(--ink-soft); margin-top: 2px; }
+.inv-empty { color: var(--ink-soft); font-size: 13px; padding: 6px 0; }
+/* Store categories (tap → pop-up of colours / flavours) */
+.inv-cats { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+.inv-cat {
+  position: relative; background: var(--card-bg); border: 1px solid var(--border); border-radius: 16px;
+  box-shadow: var(--shadow); padding: 16px; text-align: left; display: flex; flex-direction: column;
+  gap: 8px; min-height: 130px; color: var(--ink); transition: transform 0.08s;
+}
+.inv-cat:active { transform: scale(0.98); }
+.inv-cat.return { border-style: dashed; }
+.inv-cat-name { font-weight: 800; font-size: 16px; }
+.inv-mosaic { display: grid; grid-template-columns: repeat(4, 22px); gap: 4px; }
+.inv-mosaic span { width: 22px; height: 22px; border-radius: 6px; border: 1px solid rgba(0,0,0,0.1); }
+.inv-emoji { line-height: 1; display: inline-block; }
+.inv-tile.picked { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+#inv-modal .inv-tiles { margin-bottom: 4px; }
+
+/* Studio hours (Studio info) */
+.hrs-grid { display: grid; grid-template-columns: 1fr; gap: 2px; max-width: 420px; }
+.hrs-row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 8px; border-radius: 8px; font-size: 14px; }
+.hrs-row.today { background: #fdf3d8; font-weight: 700; }
+.hrs-erow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 5px 0; border-bottom: 1px solid #f0ece2; font-size: 14px; }
+.hrs-name { width: 96px; font-weight: 700; }
+.hrs-chk { display: flex; align-items: center; gap: 4px; width: 70px; }
+.hrs-erow input[type=time], .hrs-erow input[type=date], .hrs-label { padding: 6px 8px; border: 1px solid #e6e1d4; border-radius: 8px; font: inherit; }
+.hrs-erow input:disabled { opacity: .4; }
+.hrs-label { width: 140px; }
+/* Project interest */
+.pi-table { overflow-x: auto; }
+.pi-table table { width: 100%; border-collapse: collapse; font-size: 14px; background: #fff; border-radius: 12px; overflow: hidden; }
+.pi-table th { text-align: left; font-size: 12px; color: #888; padding: 8px; border-bottom: 1px solid #eee; white-space: nowrap; }
+.pi-table td { padding: 6px 8px; border-bottom: 1px solid #f3f0ea; vertical-align: middle; }
+.pi-pic { display: block; width: 44px; height: 44px; border-radius: 8px; background: #f6f3ea center / cover no-repeat; }
+.pi-tag { font-size: 10px; font-weight: 800; text-transform: uppercase; background: #e6f0fb; color: #1f4e8a; border-radius: 999px; padding: 2px 7px; }
+.pi-soft { color: #999; font-size: 12px; }
+.pi-hot td { background: #fff6f0; }
+.pi-flag { font-size: 12px; font-weight: 800; color: #b4410b; white-space: nowrap; }
+.pi-flag.soft { color: #8a5a00; }
+/* Suggestions */
+.ideas-all { font-size: 13px; display: inline-flex; gap: 5px; align-items: center; margin-right: 8px; }
+.ideas-filter { font: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid #ddd6c6; border-radius: 8px; margin-right: 8px; }
+.idea-count { font-size: 12px; font-weight: 800; background: #c8232c; color: #fff; border-radius: 999px; padding: 2px 9px; }
+.idea-dates span.shared { background: #c8232c; color: #fff; }
+.idea-person { display: flex; flex-direction: column; gap: 3px; padding: 4px 0; border-top: 1px dashed #eee6d6; }
+.idea-person:first-of-type { border-top: 0; }
+.idea-studio { font-size: 12px; font-weight: 800; background: #e6f0fb; color: #1f4e8a; border-radius: 999px; padding: 2px 9px; }
+.idea-grp { font-size: 15px; margin: 18px 0 6px; } .idea-grp span { color: #999; font-weight: 400; }
+.idea-row { display: flex; gap: 12px; background: #fff; border: 1px solid #ece7dc; border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; }
+.idea-row.is-new { border-color: #e8a93a; }
+.idea-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.idea-top { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; font-size: 13px; }
+.idea-kind { font-size: 11px; font-weight: 800; text-transform: uppercase; background: #f3e8fb; color: #6b3a8f; border-radius: 999px; padding: 2px 8px; }
+.idea-who { font-weight: 700; } .idea-when { color: #999; }
+.idea-dates { display: flex; gap: 5px; flex-wrap: wrap; } .idea-dates span { background: #fdf3d8; border-radius: 999px; padding: 2px 9px; font-size: 13px; font-weight: 700; }
+.idea-line { font-size: 13px; } .idea-line.soft { color: #1d6b39; }
+.idea-text { font-size: 14px; white-space: pre-wrap; background: #faf8f2; border-radius: 8px; padding: 6px 9px; }
+.idea-acts { display: flex; flex-direction: column; gap: 5px; align-items: stretch; min-width: 130px; }
+.idea-add { border-top: 1px dashed #e0dccf; margin-top: 6px; padding-top: 8px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.idea-add input[type=url] { width: 100%; padding: 6px 8px; border: 1px solid #ddd6c6; border-radius: 8px; font: inherit; margin-top: 3px; }
+.idea-help { color: #999; font-size: 12px; } .idea-chk { display: flex; gap: 6px; align-items: center; }
+.idea-btns { display: flex; gap: 6px; justify-content: flex-end; }
+.ho-btn.primary { background: #c8232c; border-color: #c8232c; color: #fff; }
+@media (max-width: 640px) { .idea-row { flex-direction: column; } .idea-acts { flex-direction: row; flex-wrap: wrap; } }
+
+/* Families → "Mark as member" (owners, and home office with "Can fix memberships" ticked in admin) */
+.fam-comp { margin-top: 10px; padding: 10px 12px; border: 1px dashed #c9b8f0; border-radius: 10px; background: #faf8ff; }
+.fam-comp-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin: 8px 0; }
+.fam-comp-row label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.fam-comp-row select, .fam-comp-row input { font: inherit; font-size: 14px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; min-height: 36px; }
+.fam-comp-row .fc-note { flex: 1; min-width: 180px; }
+/* Families table */
+.fam-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; align-items: center; }
+.fam-filters input, .fam-filters select { padding: 8px 10px; border: 1px solid #d0d0c8; border-radius: 8px; font: inherit; font-size: 14px; background: #fff; }
+.fam-filters input { flex: 1 1 220px; }
+.fam-tablewrap { overflow-x: auto; border: 1px solid #e3e0d8; border-radius: 10px; background: #fff; }
+.fam-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.fam-table th { position: sticky; top: 0; background: #f7f5ef; text-align: left; padding: 0; border-bottom: 1px solid #e3e0d8; white-space: nowrap; font-weight: 700; }
+.fam-table th:not(:has(button)) { padding: 8px 10px; }
+.fam-th { border: 0; background: none; font: inherit; font-weight: 700; padding: 8px 10px; cursor: pointer; color: inherit; } .fam-th.on { color: #99354e; }
+.fam-table td { padding: 8px 10px; border-bottom: 1px solid #f0ede6; vertical-align: top; }
+.fam-table tbody tr { cursor: pointer; } .fam-table tbody tr:hover, .fam-table tbody tr:focus { background: #fff8fb; outline: none; }
+.fam-table td.num { text-align: right; }
+.fam-sm { display: block; color: var(--ink-soft); font-size: 12px; }
+/* Camp badges on the family card */
+.fam-badgekid { padding: 6px 0; border-bottom: 1px dashed #eee; }
+.fam-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+.fam-badge { font-size: 12.5px; background: #fdf3d8; color: #6b4b00; border-radius: 999px; padding: 3px 10px; }
+/* Family card sections */
+.fam-sec { border-top: 1px solid #eee; margin-top: 4px; } .fam-sec > summary { cursor: pointer; font-weight: 700; font-size: 15px; padding: 10px 0; list-style: none; }
+.fam-sec > summary::-webkit-details-marker { display: none; } .fam-sec > summary::before { content: '▸ '; color: #99354e; } .fam-sec[open] > summary::before { content: '▾ '; }
+.fam-sec-body { padding: 0 0 12px; }
+.fam-person-d { border: 1px solid #ece8de; border-radius: 10px; margin: 6px 0; background: #fff; } .fam-person-d > summary { cursor: pointer; padding: 9px 12px; list-style: none; }
+.fam-person-d > summary::-webkit-details-marker { display: none; } .fam-person-d[open] > summary { border-bottom: 1px solid #f0ede6; background: #fbfaf6; border-radius: 10px 10px 0 0; }
+.fam-person-body { padding: 4px 12px 12px; } .fam-h4 { font-size: 13.5px; margin: 14px 0 6px; }
+.fam-pill.med { background: #ffe9e9; color: #9b1c1c; }
+.fam-edit { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px 12px; font-size: 13px; margin-bottom: 8px; }
+.fam-edit label { display: flex; flex-direction: column; gap: 3px; } .fam-edit input, .fam-edit select, .fam-edit textarea { padding: 6px 8px; border: 1px solid #d0d0c8; border-radius: 6px; font: inherit; }
+.fam-edit .fam-wide { grid-column: 1 / -1; } .fam-edit .fam-chk { flex-direction: row; align-items: center; gap: 6px; padding-top: 18px; }
+.fam-tl { position: relative; padding-left: 14px; border-left: 2px solid #ece8de; margin-left: 6px; }
+.fam-tl-row { position: relative; display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 10px; padding: 6px 0; font-size: 14px; }
+.fam-tl-dot { position: absolute; left: -21px; top: 11px; width: 10px; height: 10px; border-radius: 50%; background: #99354e; } .fam-tl-row.cancel .fam-tl-dot { background: #d39b00; }
+@media (max-width: 600px) { .fam-tl-row { grid-template-columns: 1fr; gap: 2px; } }
+/* Family card */
+.fam-h { font-size: 15px; margin: 18px 0 6px; padding-top: 10px; border-top: 1px solid #eee; }
+.fam-count { font-size: 12px; background: #f0ece4; border-radius: 999px; padding: 1px 8px; margin-left: 4px; font-weight: 700; }
+.fam-line { margin: 4px 0; font-size: 14px; }
+.fam-flags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.fam-flag { display: inline-block; font-size: 12px; font-weight: 700; border-radius: 999px; padding: 2px 9px; background: #eef2f7; color: #334; }
+.fam-flag.f-allergy { background: #ffe9e9; color: #9b1c1c; } .fam-flag.f-support { background: #e8f1ff; color: #1d4ed8; } .fam-flag.f-payment { background: #fff4d6; color: #8a5a00; } .fam-flag.f-vip { background: #fdf3d8; color: #8a5a00; }
+.fam-rows { display: flex; flex-direction: column; gap: 4px; }
+.fam-row2 { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 10px; padding: 6px 0; border-bottom: 1px dashed #eee; font-size: 14px; }
+.fam-when { display: flex; flex-direction: column; } .fam-when span { color: var(--ink-soft); font-size: 12.5px; }
+.fam-what { display: flex; flex-direction: column; }
+.fam-noteadd { background: #fafaf6; border: 1px solid #eee; border-radius: 10px; padding: 10px; margin-bottom: 8px; }
+.fam-noteadd textarea { width: 100%; box-sizing: border-box; border: 1px solid #d0d0c8; border-radius: 8px; padding: 8px; font: inherit; }
+.fam-note { border-left: 3px solid #ddd; padding: 6px 10px; margin: 6px 0; font-size: 14px; } .fam-note.f-allergy { border-color: #e05252; } .fam-note.f-support { border-color: #3b82f6; } .fam-note.f-payment { border-color: #d39b00; }
+.fam-x { border: 0; background: none; color: #99354e; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; padding: 0; }
+@media (max-width: 600px) { .fam-row2 { grid-template-columns: 1fr; gap: 2px; } }
+/* Coordinator → Families */
+.fam-sub { color: var(--ink-soft); font-size: 13px; margin: 4px 0 12px; max-width: 760px; }
+.fam-search { display: flex; gap: 8px; max-width: 620px; margin-bottom: 12px; } .fam-search input { flex: 1; padding: 10px 12px; border: 1px solid #d0d0c8; border-radius: 8px; font-size: 15px; }
+.fam-msg { color: var(--ink-soft); margin: 8px 0; font-weight: 600; }
+.fam-list { display: flex; flex-direction: column; gap: 6px; max-width: 760px; }
+.fam-row { text-align: left; background: #fff; border: 1px solid #e3e0d8; border-radius: 10px; padding: 10px 14px; cursor: pointer; display: flex; flex-direction: column; gap: 2px; font: inherit; }
+.fam-row:hover { border-color: #99354e; }
+.fam-meta { color: var(--ink-soft); font-size: 12.5px; }
+.fam-card { background: #fff; border: 1px solid #e3e0d8; border-radius: 12px; padding: 14px 16px; margin-top: 10px; max-width: 760px; }
+.fam-name { font-size: 20px; font-weight: 800; }
+.fam-pill { display: inline-block; font-size: 11.5px; font-weight: 700; border-radius: 999px; padding: 2px 9px; background: #fdf3d8; color: #8a5a00; margin-left: 6px; } .fam-pill.warn { background: #e8f1ff; color: #1d4ed8; }
+.fam-person { border-top: 1px solid #eee; padding: 10px 0; } .fam-person.adj { background: linear-gradient(90deg, #f3f8ff, transparent); }
+.fam-p-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.fam-med { font-size: 13px; background: #fff4f4; border-radius: 8px; padding: 6px 10px; margin: 6px 0; color: #8a1c1c; }
+.fam-adj { margin-top: 6px; } .fam-adj summary { cursor: pointer; font-size: 13px; font-weight: 700; color: #99354e; }
+.fam-adj-row { display: flex; gap: 12px; flex-wrap: wrap; margin: 8px 0; font-size: 13px; } .fam-adj-row select, .fam-adj-row input { padding: 6px 8px; border: 1px solid #d0d0c8; border-radius: 6px; font: inherit; margin-left: 4px; }
+.fam-adj-note { display: flex; flex-direction: column; gap: 4px; font-size: 13px; margin-bottom: 8px; max-width: 560px; } .fam-adj-note input { padding: 7px 9px; border: 1px solid #d0d0c8; border-radius: 6px; font: inherit; }
+.ws-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ws-row .nm { flex: 1; min-width: 180px; } .ws-swap { font: inherit; font-weight: 700; border: 1px solid var(--line, #e5e0d6); border-radius: 8px; padding: 4px 6px; max-width: 100%; }
+.ws-count input { width: 60px; font: inherit; padding: 3px 6px; border: 1px solid var(--line, #e5e0d6); border-radius: 8px; }
+.ws-tag { display: inline-block; margin-left: 6px; font-size: 11px; font-weight: 800; padding: 2px 8px; border-radius: 999px; background: #fff3cd; color: #7a5b00; }
+.ws-tag.off { background: #eee; color: #555; } .ws-quiet { box-shadow: inset 3px 0 0 #f0b400; }
+.ws-add { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0 4px; } .ws-add select, .ws-add input { font: inherit; padding: 6px 8px; border: 1px solid var(--line, #e5e0d6); border-radius: 8px; }
+.ws-add .ws-spots input { width: 64px; margin-left: 4px; }
+.ws-dlg { border: 0; border-radius: 16px; padding: 20px; width: min(640px, 94vw); max-height: 90vh; overflow: auto; }
+.ws-f { display: block; margin: 10px 0 0; font-weight: 700; font-size: 14px; } .ws-f input[type=date], .ws-f input[type=text], .ws-f input[type=number], .ws-f select { display: block; width: 100%; box-sizing: border-box; font: inherit; font-weight: 400; padding: 7px 9px; border: 1px solid var(--line, #e5e0d6); border-radius: 8px; margin-top: 4px; }
+.ws-f small { font-weight: 400; color: #777; } .ws-two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.ws-studios { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 10px; font-weight: 400; max-height: 220px; overflow: auto; margin-top: 4px; border: 1px solid var(--line, #e5e0d6); border-radius: 8px; padding: 6px 8px; }
+.ws-days { display: flex; gap: 10px; flex-wrap: wrap; font-weight: 400; margin-top: 4px; }
+.ws-setup { border: 1px dashed #e0c36a; background: #fffbea; border-radius: 10px; padding: 8px 10px; margin: 8px 0 0; font-size: 14px; }
+.ws-setup-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; } .ws-setup-row label { display: flex; flex-direction: column; font-size: 12px; font-weight: 700; gap: 2px; }
+.ws-setup-row input, .ws-setup-row select { font: inherit; font-size: 14px; font-weight: 400; padding: 5px 7px; border: 1px solid var(--line, #e5e0d6); border-radius: 8px; width: 90px; }
+.ws-setup-row label.wide input { width: 260px; } .ws-setup-row select { width: 130px; }
+.ws-pick { position: relative; display: inline-block; } .ws-pick input[type=text] { font: inherit; padding: 6px 10px; border: 1px solid var(--line, #e5e0d6); border-radius: 8px; width: 280px; max-width: 100%; box-sizing: border-box; }
+.ws-f .ws-pick { display: block; margin-top: 4px; } .ws-f .ws-pick input[type=text] { width: 100%; font-weight: 400; }
+.ws-pick-list { position: absolute; z-index: 50; left: 0; top: calc(100% + 4px); width: max(100%, 320px); max-height: 320px; overflow: auto; background: #fff; border: 1px solid var(--line, #e5e0d6); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.12); padding: 4px 0; font-weight: 400; }
+.ws-pick-g { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; color: #888; padding: 8px 12px 4px; }
+.ws-pick-o { padding: 7px 12px; cursor: pointer; } .ws-pick-o.hi, .ws-pick-o:hover { background: #fdf0f0; }
+.ba-btn { margin-left: 4px; } .ba-strip { margin: 8px 0 2px; border: 1px solid #e4e1ec; border-radius: 10px; background: #fff; } .ba-strip summary { cursor: pointer; padding: 8px 12px; font-weight: 700; }
+.ba-list { padding: 0 12px 8px; } .ba-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; border-top: 1px solid #f0eef5; }
+.ba-tabs { display: flex; gap: 4px; margin: 4px 0 10px; } .ba-tabs button { border: 1px solid #ddd; background: #fff; border-radius: 999px; padding: 6px 14px; font: inherit; font-weight: 700; cursor: pointer; }
+.ba-tabs button.on { background: #1f2a24; color: #fff; border-color: #1f2a24; }
+.ba-form { display: grid; gap: 8px; } .ba-radio { display: flex; gap: 16px; flex-wrap: wrap; } .ba-check { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.ba-sum { background: #f4f7f5; border-radius: 10px; padding: 8px 12px; } button.primary.danger, .sheet-actions button.primary.danger { background: #c8232c; border-color: #c8232c; color: #fff; } .sheet-actions button.primary.danger:disabled { opacity: .6; color: #fff; }
+.ba-opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 6px; max-height: 300px; overflow-y: auto; }
+.ba-opt { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; border: 1px solid #ddd; background: #fff; border-radius: 10px; padding: 6px 10px; font: inherit; cursor: pointer; text-align: left; }
+.ba-opt:hover { border-color: #c8232c; } .ba-opt span { font-size: 13px; color: #666; } .ba-opt i { font-style: normal; font-size: 12px; font-weight: 700; color: #1d6b39; } .ba-opt.full i { color: #c8232c; }
+.ba-prices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.ws-inline { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-right: 6px; } .ws-inline .ws-count input { width: 58px; }
+.ws-tag.world { background: #eef3ff; color: #2f4d9a; }
+.plan-studio { display: inline-flex; align-items: center; gap: 6px; margin-left: 12px; font-weight: 700; font-size: 14px; }
+.plan-studio select { font: inherit; font-weight: 700; padding: 5px 8px; border-radius: 8px; border: 1px solid #ddd; background: #fff; max-width: 240px; }
+.sr-ctl { display: inline-flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-left: 8px; } .sr-ctl label { display: inline-flex; gap: 4px; align-items: center; font-size: 13px; font-weight: 700; }
+.sr-ctl select, .sr-ctl input { font: inherit; font-size: 13px; padding: 4px 6px; border: 1px solid #ddd; border-radius: 8px; } .sr-ctl input { width: 120px; }
+.sr-list { display: grid; gap: 6px; } .sr-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: #fff; border: 1px solid #ece9f2; border-radius: 10px; padding: 6px 10px; }
+.sr-role { font-weight: 700; margin-left: 6px; }
+.bk-card { background: #fff; border: 1px solid #ece9f2; border-radius: 14px; padding: 14px 16px; display: grid; gap: 14px; max-width: 980px; }
+.bk-kinds { display: flex; gap: 18px; flex-wrap: wrap; font-weight: 700; } .bk-kinds .off { color: #999; }
+.bk-studios { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 6px 18px; margin-top: 6px; } .bk-studios label { display: flex; gap: 6px; align-items: center; font-size: 14px; }
+.bk-pv { margin: 4px 0 2px; } .ho-btn.sm { padding: 2px 10px; min-height: 0; font-size: 12px; }
+.bk-row { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-end; } .bk-days { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; } .bk-days label { display: flex; gap: 4px; align-items: center; }
+.bk-chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 6px; } .bk-chip { background: #f3f0fa; border-radius: 999px; padding: 3px 4px 3px 10px; font-weight: 700; font-size: 13px; }
+.bk-chip button { border: 0; background: none; cursor: pointer; font-size: 15px; }
+.bk-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; } .bk-res { background: #f4f7f5; border-radius: 10px; padding: 10px 12px; }
+.bk-list { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 6px; font-size: 13px; color: #555; max-height: 180px; overflow-y: auto; }
+.don-filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 4px 0 10px; } .don-filters input[type=search] { flex: 1; min-width: 220px; padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font: inherit; }
+.don-sum { display: flex; gap: 18px; flex-wrap: wrap; background: #fff; border: 1px solid #ece9f2; border-radius: 12px; padding: 10px 14px; margin-bottom: 10px; }
+.don-list { display: grid; gap: 8px; } .don-row { display: flex; gap: 10px; align-items: flex-start; background: #fff; border: 1px solid #ece9f2; border-radius: 12px; padding: 10px 14px; } .don-main { flex: 1; min-width: 0; }
+.don-kind { font-size: 12px; font-weight: 800; background: #f3f0fa; border-radius: 999px; padding: 1px 8px; margin-left: 4px; }
+.don-codes { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; } .don-code { font-family: ui-monospace, monospace; font-size: 12px; background: #fff7e0; border: 1px solid #f1dfa6; border-radius: 6px; padding: 1px 6px; }
+.don-code.used { background: #e3f3e8; border-color: #b9e0c5; } .don-code.off { background: #f2f2f2; border-color: #ddd; color: #888; } .don-code.unk { background: #fff; border-style: dashed; }
+.don-notes { font-size: 13px; color: #555; margin-top: 4px; } .don-two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.don-make { border: 1px dashed #ddd; border-radius: 10px; padding: 8px 10px; } .don-make summary { cursor: pointer; font-weight: 700; } .don-kinds { display: flex; gap: 12px; flex-wrap: wrap; margin: 6px 0; }
+.don-form [hidden] { display: none !important; }
+.ws-tag.kids { background: #eef7ff; color: #1e5a96; } .cl-pickup { font-size: 13px; font-weight: 700; color: #1e5a96; margin-top: 2px; }
+.act-filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 4px 0 10px; } .act-filters select, .act-filters input { font: inherit; padding: 6px 8px; border: 1px solid #ddd; border-radius: 8px; }
+.act-filters input[type=search] { flex: 1; min-width: 200px; } .act-area { font-size: 11px; font-weight: 800; background: #f3f0fa; border-radius: 999px; padding: 1px 8px; }
+.act-chs { font-size: 12px; } .act-ch { display: block; } .act-table td { vertical-align: top; }
+.ct-bulk { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; background: #fff6e5; border: 1px solid #f2d29b; border-radius: 10px; padding: 8px 12px; margin: 0 0 8px; }
+.ct-bulk input { font: inherit; padding: 4px 6px; border: 1px solid #ddd; border-radius: 6px; } .ct-table td { vertical-align: top; } .ct-table tr.ct-off { opacity: .55; }
+.ct-weeks { border-collapse: collapse; margin: 8px 0; } .ct-weeks td, .ct-weeks th { padding: 3px 10px; border-bottom: 1px solid #eee; text-align: left; } .ct-weeks tr.ct-ch td { font-weight: 700; color: #1d6b39; }
+.cta-studios { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 10px; margin: 6px 0; font-size: 14px; } .cta-plan { display: grid; gap: 6px; max-height: 340px; overflow-y: auto; }
+.cs-p2row { background: #fff; border: 1px solid #e3e8f5; border-radius: 10px; padding: 8px 10px; display: grid; gap: 2px; }
+.ct-modes { display: flex; gap: 6px; margin: 0 0 8px; flex-wrap: wrap; }
+.ctw-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0 6px; } .ctw-bar select { font: inherit; padding: 5px 8px; border: 1px solid #ddd; border-radius: 8px; }
+.ctw-grid { display: grid; grid-template-columns: 64px repeat(7, minmax(110px, 1fr)); border: 1px solid #e5e1ee; border-radius: 10px; overflow: auto; max-height: 75vh; background: #fff; }
+.ctw-times { padding-top: 46px; } .ctw-times div { height: var(--row); font-size: 11px; color: #888; text-align: right; padding-right: 6px; line-height: 1; transform: translateY(-5px); }
+.ctw-day { border-left: 1px solid #eee; min-width: 0; } .ctw-day.past { background: #fafafa; }
+.ctw-dh { position: sticky; top: 0; z-index: 3; height: 46px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; font-weight: 800; font-size: 13px; background: #f7f5fb; border-bottom: 1px solid #e5e1ee; }
+.ctw-hol { display: flex; gap: 3px; flex-wrap: nowrap; overflow: hidden; max-width: 100%; padding: 0 3px; } .ctw-hol:empty { display: none; }
+.ctw-stat, .ctw-spec { font-size: 10px; font-weight: 800; border-radius: 999px; padding: 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ctw-stat { background: #c8232c; color: #fff; } .ctw-spec { background: #efe7fb; color: #5b2d91; } .ctw-day.stat .ctw-col { background-color: #fff5f5; } .ctw-dh.today { color: #c8232c; }
+.ctw-col { position: relative; height: calc(var(--rows) * var(--row)); cursor: copy; background-image: repeating-linear-gradient(to bottom, transparent 0 calc(var(--row) * 4 - 1px), #eee calc(var(--row) * 4 - 1px) calc(var(--row) * 4)); }
+.ctw-day.past .ctw-col { cursor: not-allowed; }
+.ctw-b { position: absolute; left: 3px; right: 3px; border-radius: 6px; padding: 2px 5px; font-size: 11px; line-height: 1.25; overflow: hidden; cursor: default; }
+.ctw-b.cls { background: #dbe8ff; border: 1px solid #9fbdf0; color: #173a73; } .ctw-b.other { background: #eee; border: 1px solid #ddd; color: #666; } .ctw-b.hid { opacity: .5; }
+.ctw-b.new { background: #e7f7ec; border: 2px dashed #2f9a55; color: #135a2c; } .ctw-b.new.ghost { opacity: .6; }
+.ctw-x { position: absolute; top: 1px; right: 2px; border: 0; background: none; font-size: 14px; cursor: pointer; color: #135a2c; }
+.ctw-jump { display: inline-flex; align-items: center; gap: 4px; } .ctw-jump input { font: inherit; padding: 4px 6px; border: 1px solid #ddd; border-radius: 8px; }
+.ctw-reg { float: right; margin-left: 4px; font-weight: 800; font-size: 11px; background: rgba(255,255,255,.75); border-radius: 999px; padding: 0 6px; } .ctw-reg.full { background: #c8232c; color: #fff; }
+.ctw-jump select { font: inherit; padding: 4px 6px; border: 1px solid #ddd; border-radius: 8px; }
+.ctw-ages { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 700; } .ctw-ages input { width: 56px; font: inherit; padding: 3px 5px; border: 1px solid #ddd; border-radius: 6px; }
+.ctw-b.ph { background: repeating-linear-gradient(45deg, #fafafa 0 8px, #f1f1f1 8px 16px); border: 1px dashed #d4d4d4; color: #999; }
+.ct-del { color: #b91c1c; } .ct-del:disabled { opacity: .4; cursor: not-allowed; }
+.ct-fam { font-size: 11px; font-weight: 800; background: #fff1e6; color: #8a3b00; border-radius: 999px; padding: 1px 7px; white-space: nowrap; }
+.ct-sortable { cursor: pointer; user-select: none; white-space: nowrap; } .ct-sortable:hover { color: #c8232c; }
+.ct-filter th { padding: 4px 6px; background: #faf9fc; } .ct-filter input, .ct-filter select { width: 100%; min-width: 70px; font: inherit; font-size: 12px; font-weight: 400; padding: 4px 6px; border: 1px solid #ddd; border-radius: 6px; margin: 1px 0; text-transform: none; letter-spacing: 0; }
+.news-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; margin: 8px 0; }
+.news-stats > div { background: #fff; border: 1px solid #e8e4f0; border-radius: 12px; padding: 12px; } .news-stats b { display: block; font-size: 24px; } .news-stats span { font-size: 12px; color: #6b6b7b; }
+.nw-tabs { display: flex; gap: 6px; margin: 4px 0 14px; } .nw-tabs button { border: 1px solid #ddd; background: #fff; border-radius: 999px; padding: 6px 14px; font-weight: 700; cursor: pointer; } .nw-tabs button.on { background: #1f2a24; color: #fff; border-color: #1f2a24; }
+.nw-new { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+.nw-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; } .nw-state { font-size: 13px; color: #8a5a00; }
+.nw-wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 18px; align-items: start; } @media (max-width: 1000px) { .nw-wrap { grid-template-columns: 1fr; } }
+.nw-left { display: flex; flex-direction: column; gap: 8px; } .nw-f { display: flex; flex-direction: column; gap: 3px; font-size: 13px; font-weight: 700; } .nw-f input, .nw-f textarea, .nw-f select, .nw-test input { font: inherit; font-weight: 400; padding: 7px 9px; border: 1px solid #ddd; border-radius: 8px; }
+.nw-fs { flex-direction: row !important; flex-wrap: wrap; } .nw-fs > .nw-f, .nw-fs > .nw-pic, .nw-fs > .nw-two, .nw-fs > small { flex: 1 1 100%; } .nw-fs > .nw-sm { flex: 0 1 150px; }
+.nw-sm { display: inline-flex; margin-right: 10px; } .nw-topics { display: flex; flex-wrap: wrap; gap: 6px 14px; font-weight: 400; } .nw-h { margin: 10px 0 2px; }
+.nw-block { border: 1px solid #e8e4f0; border-radius: 12px; padding: 10px; background: #fff; } .nw-bh { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; } .nw-fs { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.nw-pic { display: flex; flex-direction: column; gap: 6px; } .nw-pic img { max-width: 160px; border-radius: 8px; } .nw-two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; } .nw-up { align-self: flex-start; cursor: pointer; }
+.nw-add { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 0; } .nw-test { display: flex; gap: 8px; } .nw-test input { flex: 1; }
+.nw-right { position: sticky; top: 10px; } .nw-dev { display: flex; gap: 6px; margin-bottom: 6px; } .nw-dev button { border: 1px solid #ddd; background: #fff; border-radius: 999px; padding: 4px 12px; cursor: pointer; } .nw-dev button.on { background: #eef3ff; border-color: #cfdcf7; }
+.nw-inbox { background: #fff; border: 1px solid #e8e4f0; border-radius: 10px; padding: 8px 12px; font-size: 13px; margin-bottom: 6px; display: flex; gap: 8px; overflow: hidden; white-space: nowrap; } .nw-inbox span { color: #888; overflow: hidden; text-overflow: ellipsis; }
+.nw-frame { width: 100%; height: 76vh; border: 1px solid #e8e4f0; border-radius: 12px; background: #f6f1e7; } .nw-frame.phone { width: 390px; max-width: 100%; display: block; margin: 0 auto; }
+.nw-pick { display: flex; flex-direction: column; gap: 6px; } .nw-pick-list { display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow-y: auto; border: 1px solid #eee; border-radius: 8px; padding: 4px; }
+.nw-pick-list button { display: flex; gap: 8px; align-items: center; text-align: left; border: 0; background: none; padding: 4px; border-radius: 6px; cursor: pointer; font: inherit; } .nw-pick-list button:hover { background: #f3f0fa; }
+.nw-pick-list img, .nw-noimg { width: 40px; height: 40px; object-fit: cover; border-radius: 6px; background: #eee; flex: none; } .nw-more summary { cursor: pointer; font-size: 13px; color: #555; margin: 4px 0; }
+.nw-aud { display: flex; gap: 16px; } .nw-rules { display: flex; flex-direction: column; gap: 8px; background: #fff; border: 1px solid #e8e4f0; border-radius: 12px; padding: 10px; font-size: 14px; }
+.nw-rules select, .nw-num { font: inherit; padding: 4px 6px; border: 1px solid #ddd; border-radius: 6px; } .nw-num { width: 76px; } .nw-prov { display: flex; gap: 12px; margin: 4px 0; }
+.nw-studios { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 10px; font-size: 13px; max-height: 220px; overflow-y: auto; }
+.nw-count { background: #eef7ee; border: 1px solid #cfe8cf; border-radius: 10px; padding: 8px 10px; margin-top: 6px; font-size: 14px; }
+.nw-checks { background: #fff; border: 1px solid #e8e4f0; border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+.nw-checks .y { color: #1d6b39; } .nw-checks .n { color: #8a5a00; } .nw-checks .n small { color: #6b6b7b; } .nw-checks.ok { border-color: #bfe3c4; background: #f3fbf4; }
+.nw-sendrow { display: flex; gap: 10px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+.mv-find { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; } .mv-find input { font: inherit; padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; } #mv-q { flex: 1 1 260px; }
+.mv-msg { background: #eef7ee; border: 1px solid #cfe8cf; border-radius: 10px; padding: 8px 10px; }
+.mv-cols { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(260px, 1fr); gap: 16px; align-items: start; } @media (max-width: 1000px) { .mv-cols { grid-template-columns: 1fr; } }
+.mv-group { margin-bottom: 14px; } .mv-gh { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }
+.mv-right { position: sticky; top: 10px; background: #fff; border: 1px solid #e8e4f0; border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.mv-right select, .mv-new input, .mv-new select { font: inherit; padding: 6px 8px; border: 1px solid #ddd; border-radius: 8px; width: 100%; box-sizing: border-box; }
+.mv-new { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid #eee; padding-top: 8px; } .mv-new label { display: flex; flex-direction: column; font-size: 13px; font-weight: 700; gap: 2px; }
+.mv-sum { font-size: 13px; color: #555; }
+.mv-hide { font-size: 13px; display: flex; gap: 6px; align-items: flex-start; }
+.mv-gh { flex-wrap: wrap; } .mv-gsel { font: inherit; font-size: 13px; padding: 4px 6px; border: 1px solid #ddd; border-radius: 8px; max-width: 320px; } .mv-gsel.none { border-color: #f59e0b; background: #fffbeb; }
+.ml-un { display: inline-flex; gap: 4px; align-items: center; margin-top: 3px; } .ml-un select { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid #ddd; border-radius: 6px; max-width: 220px; }
+.proj-btn { white-space: nowrap; min-height: 44px; padding-left: 16px !important; padding-right: 16px !important; touch-action: manipulation; }
+#ps-modal .prize-modal-card { max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px); -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+#ps-modal .pm-close { width: 44px; height: 44px; font-size: 18px; }
+#ps-modal .ps-links .project-link { font-size: 14px; padding: 10px 16px; min-height: 44px; display: inline-flex; align-items: center; touch-action: manipulation; }
+#ps-modal .ps-links { gap: 8px; }
+#ps-modal .ps-sec li { padding: 9px 0; font-size: 15px; }
+#ps-modal .ps-sec li .q { font-size: 14px; }
+@media (max-width: 820px) { #ps-modal { padding: 10px; } #ps-modal .prize-modal-card { padding: 16px; } }
+body.ps-open { overflow: hidden; } .ps-facts { font-size: 13px; color: var(--ink-soft); margin: 2px 0 4px; } .ps-links-top { margin: 10px 0 12px; } .ps-notes { margin-top: 14px; } .ps-notes div { font-size: 15px; line-height: 1.5; }
+.ft-card { background: #fff; border: 1px solid var(--line, #e7e3ef); border-radius: 14px; padding: 14px; margin: 0 0 10px; }
+.ft-top { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; } .ft-top .ft-st { margin-left: auto; font: inherit; padding: 6px 10px; border-radius: 10px; }
+.ft-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px 14px; margin: 10px 0; }
+.ft-grid span, .ft-notes { display: flex; flex-direction: column; gap: 2px; } .ft-grid small, .ft-notes small { color: var(--soft, #6b6170); font-size: 12px; }
+.ft-notes { background: #faf8fb; border-radius: 10px; padding: 8px 10px; margin: 0 0 8px; } .ft-note-l { display: flex; gap: 8px; align-items: center; font-size: 14px; }
+.ft-note-l input { flex: 1; font: inherit; padding: 8px 10px; border: 1px solid var(--line, #e7e3ef); border-radius: 10px; }
+.fam-tl-row.move .fam-tl-dot { background: #2563eb; } .fam-tl-row.credit .fam-tl-dot { background: #15803d; }
+.cl-away td { color: #9ca3af; } .cl-away td b { color: #9ca3af; font-weight: 600; } .mv-note.away { color: #b91c1c; }
+tr.wk-away td:not(.no-print), tr.wk-away td:not(.no-print) input { text-decoration: line-through; text-decoration-color: #9ca3af; }   /* (crossed out; the last cell, with the reason and Undo, stays readable) */
+.fam-cgrp-list { margin: 0 0 6px 18px; border-left: 3px solid #eadcc8; padding-left: 10px; }
+.fam-cgrp-item .fam-what b { font-weight: 600; }
+.inbox-links { font-size: 12.5px; font-weight: 600; margin-left: 4px; white-space: nowrap; } .inbox-links a { color: var(--accent, #c8232c); }
+.inbox-why { width: 100%; box-sizing: border-box; font: inherit; font-size: 12.5px; padding: 5px 8px; border: 1px solid #e3dccd; border-radius: 8px; margin: 4px 0; }
+.ws-tag.shut { background: #fde8e8; color: #9b1c1c; font-size: 12px; padding: 3px 10px; }
+.ws-row.ws-shut { border-style: dashed; border-color: #e3b4b4; background: #fbf6f6; } .ws-row.ws-shut .t { color: #9b1c1c; text-decoration: line-through; }
+.plan-viewtgl { display: inline-flex; } .plan-viewtgl .ho-btn { border-radius: 0; } .plan-viewtgl .ho-btn:first-child { border-radius: 999px 0 0 999px; } .plan-viewtgl .ho-btn:last-child { border-radius: 0 999px 999px 0; }
+.pb-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; } .pb-head .spacer { flex: 1; }
+.pb-key { font-size: 12px; color: #666; display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; } .pb-key i { display: inline-block; width: 14px; height: 10px; border-radius: 3px; border: 1px solid #bbb; margin-left: 6px; }
+.pb-board { background: #fff; border: 1px solid #e6dfd0; border-radius: 12px; overflow: hidden; }
+.pb-row { display: flex; border-bottom: 1px solid #efe9dd; } .pb-row:last-child { border-bottom: 0; }
+.pb-who { width: 140px; flex: none; padding: 8px 10px; border-right: 1px solid #efe9dd; background: #fbfaf6; font-size: 13px; } .pb-who small { display: block; color: #777; font-size: 11.5px; }
+.pb-lane { position: relative; flex: 1; min-width: 0; } .pb-lane.over { background: #eef7f0; }
+.pb-hl { position: absolute; top: 0; bottom: 0; width: 1px; background: #f0ebe1; } .pb-hr { position: absolute; top: 3px; font-size: 11px; color: #888; transform: translateX(-50%); }
+.pb-shift { position: absolute; top: 4px; bottom: 4px; background: #f3efe6; border-radius: 8px; }
+.pb-blk { position: absolute; height: 34px; box-sizing: border-box; border: 1.5px solid #aaa; border-radius: 8px; padding: 2px 6px; font-size: 11.5px; line-height: 1.25; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; background: #fff; min-width: 26px; touch-action: none; }
+.pb-blk b { display: block; overflow: hidden; text-overflow: ellipsis; } .pb-blk span { color: #555; }
+.pb-blk.move { cursor: grab; touch-action: none; -webkit-user-select: none; user-select: none; } .pb-blk.auto { border-style: dashed; } .pb-blk.bad { box-shadow: 0 0 0 2px #d33; }
+.pb-blk.kids, .pb-key i.kids { background: #e3f3e8; border-color: #7cbf8f; } .pb-blk.wheel, .pb-key i.wheel { background: #f6e9dc; border-color: #c99868; }
+.pb-blk.party, .pb-key i.party { background: #fbe4ee; border-color: #d9779f; } .pb-blk.demo, .pb-key i.demo { background: #e5edfb; border-color: #7f9bd6; }
+.pb-blk.brk, .pb-key i.brk { background: repeating-linear-gradient(135deg, #ececec 0 4px, #f7f7f7 4px 8px); border-color: #9a9a9a; color: #555; }
+.pb-ghost { position: fixed; z-index: 3000; pointer-events: none; opacity: .9; box-shadow: 0 6px 18px rgba(0,0,0,.2); }
+.pb-pick { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.cust-box { border: 1px solid #ecdfc6; background: #fffaf0; border-radius: 12px; padding: 10px 12px; margin: 6px 0 10px; }
+.cust-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; } .cust-head .spacer { flex: 1; }
+.cust-row { padding: 6px 0; border-top: 1px dashed #ecdfc6; font-size: 13.5px; } .cust-row.today { background: #fff3d6; border-radius: 8px; padding: 6px 8px; }
+.cust-st { display: inline-block; font-size: 11.5px; font-weight: 800; padding: 1px 8px; border-radius: 999px; background: #eee; margin-right: 6px; }
+.cust-held { background: #fff0c2; color: #6b4b00; } .cust-requested { background: #e5edfb; color: #23406e; } .cust-booked { background: #e3f3e8; color: #1f5130; }
+.cust-acts { display: inline-flex; gap: 6px; margin-left: 6px; flex-wrap: wrap; }
+.cu-hits { display: flex; flex-direction: column; gap: 4px; margin: -4px 0 8px; } .cu-hit { text-align: left; background: #fff; border: 1px solid #e3dccd; border-radius: 8px; padding: 6px 10px; cursor: pointer; font: inherit; } .cu-hit:hover { background: #fff7e6; }
+/* (Nov 9 2026) the field trip table: a scrollbar along the bottom that's always visible (Mac hides them otherwise) */
+.ft-wrap { overflow-x: scroll !important; scrollbar-width: auto; scrollbar-color: #c9b99a #f4efe5; padding-bottom: 2px; }
+.ft-wrap::-webkit-scrollbar { height: 14px; -webkit-appearance: none; }
+.ft-wrap::-webkit-scrollbar-track { background: #f4efe5; border-radius: 8px; }
+.ft-wrap::-webkit-scrollbar-thumb { background: #c9b99a; border-radius: 8px; border: 3px solid #f4efe5; } .ft-wrap::-webkit-scrollbar-thumb:hover { background: #a8946f; }
+.ft-inv { white-space: nowrap; } .fti-act { font: inherit; font-size: 12.5px; padding: 3px 6px; border: 1px solid #ddd3c2; border-radius: 8px; background: #fff; margin-left: 4px; }
+.ft-topscroll { overflow-x: scroll; overflow-y: hidden; height: 16px; margin: 0 0 4px; scrollbar-width: auto; scrollbar-color: #c9b99a #f4efe5; }
+.ft-topscroll > div { height: 1px; } .ft-topscroll::-webkit-scrollbar { height: 14px; -webkit-appearance: none; }
+.ft-topscroll::-webkit-scrollbar-track { background: #f4efe5; border-radius: 8px; } .ft-topscroll::-webkit-scrollbar-thumb { background: #c9b99a; border-radius: 8px; border: 3px solid #f4efe5; }
+.wu-card { border: 1px solid var(--border, #e6dfd1); border-radius: 14px; background: #fff; padding: 12px 14px; margin: 8px 0 4px; }
+.wu-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
+.wu-sec { border-top: 1px dashed #eadfca; padding: 10px 0 6px; } .wu-h { font-weight: 800; font-size: 13px; letter-spacing: .03em; color: #6b5a3a; text-transform: uppercase; margin-bottom: 6px; }
+.wu-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px 10px; }
+.wu-f { display: grid; gap: 3px; font-size: 12.5px; font-weight: 600; color: #555; } .wu-f.wide { margin-top: 8px; }
+.wu-f input, .wu-f select, .wu-f textarea { font: inherit; font-size: 15px; font-weight: 400; color: #1f2a24; padding: 8px 10px; border: 1px solid #ddd3c2; border-radius: 10px; background: #fff; }
+.wu-calc { max-width: 560px; } .wu-owe span:last-child { color: #b91c1c; } .wu-credit span:last-child { color: #15803d; }
+.wu-acts { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 4px; } .wu-foot { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; border-top: 1px solid #eee5d6; padding-top: 10px; margin-top: 6px; } .wu-foot .spacer { flex: 1; }
+.chg-inv { border: 1px dashed #e3d6bd; border-radius: 12px; padding: 8px 10px; margin: 8px 0; background: #fffaf0; }
+/* (Nov 9 2026) the party form: a light pink card, fields that fit their columns */
+.wu-card { border: 2px solid #f6c6d6 !important; background: #fffafc !important; border-radius: 16px !important; padding: 0 16px 14px !important; box-shadow: 0 2px 10px rgba(195, 9, 80, .06); }
+.wu-head { background: #fde7ef; margin: 0 -16px 4px !important; padding: 10px 16px; border-radius: 14px 14px 0 0; }
+.wu-sec { border-top: 1px dashed #f3cad8 !important; } .wu-h { color: #b03a64 !important; }
+.wu-grid { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)) !important; gap: 10px 12px !important; }
+.wu-f { min-width: 0; } .wu-f input, .wu-f select, .wu-f textarea { width: 100%; box-sizing: border-box; min-width: 0; border-color: #ecd3dc !important; }
+.wu-f input:focus, .wu-f select:focus, .wu-f textarea:focus { outline: 2px solid #f6c6d6; border-color: #e58aaa !important; }
+.wu-foot { border-top-color: #f3cad8 !important; } .wu-calc { background: #fff; border: 1px solid #f3dce4; border-radius: 12px; padding: 6px 12px; }
+.wu-extras { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; margin: 10px 0 2px; padding: 8px 12px; background: #fff; border: 1px solid #f3dce4; border-radius: 12px; } .wu-chk { display: flex; gap: 6px; align-items: center; font-size: 14px; }
+.pb-blk.open { background: #fff !important; border: 1.5px solid #d9d2c4 !important; color: #555 !important; box-shadow: none !important; } .pb-openrow .pb-who b { color: #888; }
+.oc-alert { background: #fdecec; border: 1.5px solid #f3b4b4; color: #7f1d1d; border-radius: 14px; padding: 10px 14px; margin: 0 0 10px; font-size: 14.5px; line-height: 1.45; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.hero-hours { display: inline-block; margin-left: 10px; padding: 2px 10px; border-radius: 999px; background: rgba(255,255,255,.22); font-weight: 600; white-space: nowrap; }
+.pb-blk.open.booked { background: #f4f1ea !important; border-color: #cfc6b4 !important; color: #333 !important; } .pb-blk.open { cursor: pointer; } .pb-blk:not(.move) { cursor: pointer; }
+.pb-det { background: #fbf8f2; border-radius: 10px; padding: 8px 12px; margin: 0 0 8px; }
+/* (Nov 9 2026) Suggestions: thinner rows; Date added folded */
+.idea-row { padding: 8px 12px !important; margin: 0 0 6px !important; border-radius: 12px !important; gap: 10px !important; }
+.idea-row .idea-top { gap: 5px !important; margin-bottom: 3px !important; } .idea-row .idea-top > span, .idea-row .idea-dates span { font-size: 11px !important; padding: 1px 8px !important; }
+.idea-row .idea-dates { margin: 2px 0 !important; padding-bottom: 3px !important; } .idea-row .idea-person { margin: 2px 0 !important; padding: 0 !important; }
+.idea-row .idea-who { font-size: 14px !important; } .idea-row .idea-when { font-size: 12px !important; margin-left: 6px; display: inline !important; }
+.idea-row .idea-text { font-size: 13px !important; padding: 4px 9px !important; margin: 3px 0 !important; } .idea-row .idea-line { font-size: 12.5px !important; margin: 2px 0 !important; }
+.idea-row .idea-acts { gap: 5px !important; } .idea-row .idea-acts .ho-btn { padding: 5px 12px !important; font-size: 12.5px !important; min-height: 0 !important; }
+.idea-grp { margin: 12px 0 6px !important; font-size: 16px !important; }
+.idea-fold > summary { list-style: none; cursor: pointer; } .idea-fold > summary::-webkit-details-marker { display: none; }
+.idea-fold > summary .idea-grp::before { content: '▸ '; color: #888; } .idea-fold[open] > summary .idea-grp::before { content: '▾ '; }
+/* (Nov 9 2026) Suggestions: at most 2 lines each. Line 1: tags, date, family, when. Line 2: their note (one line; click for all), status, buttons. */
+.idea-row { display: flex !important; flex-wrap: wrap !important; align-items: center !important; padding: 6px 10px !important; gap: 4px 10px !important; }
+.idea-row .idea-main { flex: 1 1 520px; min-width: 0; display: flex !important; flex-direction: row !important; flex-wrap: wrap; align-items: center !important; justify-content: flex-start !important; text-align: left !important; gap: 2px 8px; }
+.idea-row .idea-main > *, .idea-row .idea-person > * { width: auto !important; }
+.idea-row .idea-top, .idea-row .idea-dates { display: inline-flex !important; flex-wrap: wrap; gap: 4px !important; margin: 0 !important; padding: 0 !important; border: 0 !important; }
+.idea-row .idea-person { display: contents !important; }
+.idea-row .idea-who { font-size: 13.5px !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 420px; }
+.idea-row .idea-when { font-size: 11.5px !important; margin: 0 !important; }
+.idea-row .idea-line { font-size: 12px !important; margin: 0 !important; }
+.idea-row .idea-text { flex: 1 1 320px; order: 5; min-width: 0; margin: 0 !important; padding: 2px 8px !important; font-size: 12.5px !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.idea-row .idea-text.full { white-space: pre-wrap; }
+.idea-row .idea-text + .idea-line, .idea-row .idea-line.soft { flex: 0 1 auto; order: 6; }
+.idea-row .idea-main::after { content: ''; order: 4; flex-basis: 100%; height: 0; }   /* (line 2 starts here: the note, the status) */
+.idea-row .idea-acts { flex: 0 0 auto; display: flex !important; flex-direction: row !important; flex-wrap: wrap; gap: 4px !important; align-items: center; margin: 0 !important; }
+.idea-row .idea-acts .ho-btn { padding: 3px 10px !important; font-size: 12px !important; }
+.idea-row .idea-add { flex: 1 1 100%; }
+.glz-multi { margin-top: 4px; font-size: 12.5px; font-weight: 700; color: #92400e; background: #fff7e6; border: 1px solid #f0d49a; border-radius: 8px; padding: 3px 8px; display: inline-block; cursor: help; }
+.bo-list { display: flex; flex-direction: column; gap: 8px; } .bo-row { display: flex; gap: 12px; flex-wrap: wrap; background: #fff; border: 1px solid #ece7dc; border-radius: 12px; padding: 10px 12px; }
+.bo-row.bo-new { border-color: #f3cf7a; background: #fffbef; } .bo-main { flex: 1 1 480px; min-width: 0; display: grid; gap: 3px; font-size: 14px; } .bo-facts { font-size: 13.5px; }
+.bo-notes { font-size: 13px; background: #faf8f2; border-radius: 8px; padding: 4px 9px; white-space: pre-wrap; } .bo-side { flex: 0 0 220px; display: grid; gap: 6px; align-content: start; }
+.bo-side select, .bo-side input { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid #ddd3c2; border-radius: 8px; } .bo-side label { display: grid; gap: 2px; }
+.infl-card { background: #fff; border: 1px solid #ece7dc; border-radius: 14px; padding: 10px 14px; margin: 0 0 12px; display: grid; gap: 6px; }
+.infl-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; } .infl-head .ho-btn { margin-left: auto; }
+.infl-row { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; font-size: 13.5px; border-top: 1px solid #f2eee6; padding-top: 5px; }
+.infl-shots { display: flex; gap: 8px; flex-wrap: wrap; } .infl-shot { position: relative; } .infl-shot img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; border: 1px solid #ddd; }
+.infl-shot button { position: absolute; top: -6px; right: -6px; border: none; background: #c3090c; color: #fff; border-radius: 50%; width: 20px; height: 20px; cursor: pointer; line-height: 1; }
+
+/* 📰 staff newsletter: phone-first */
+.sn-issue { font-size: 16px; line-height: 1.55; color: #1f2a24; } .sn-cover { width: 100%; border-radius: 16px; display: block; aspect-ratio: 16/10; object-fit: cover; }
+.sn-kicker { margin: 12px 0 2px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: #c3090c; font-weight: 700; }
+.sn-title { margin: 0 0 10px; font-size: 26px; line-height: 1.2; } .sn-note { background: #fdf6e9; border-radius: 14px; padding: 12px 14px; } .sn-by { margin-top: 6px; font-weight: 700; }
+.sn-toc { display: flex; gap: 6px; overflow-x: auto; padding: 12px 0 4px; -webkit-overflow-scrolling: touch; } .sn-toc a { flex: 0 0 auto; background: #f2f0ea; border-radius: 999px; padding: 6px 12px; font-size: 13px; color: inherit; text-decoration: none; white-space: nowrap; }
+.sn-sec { margin-top: 22px; scroll-margin-top: 12px; } .sn-sec h3 { font-size: 20px; margin: 0 0 8px; } .sn-p { margin: 0 0 6px; } .sn-intro { color: #555; }
+.sn-items { display: grid; gap: 10px; } .sn-card { background: #fff; border: 1px solid #ece7dc; border-radius: 14px; overflow: hidden; }
+.sn-img { width: 100%; display: block; max-height: 300px; object-fit: cover; } .sn-cbody { padding: 10px 14px 12px; } .sn-cbody h4 { margin: 0 0 4px; font-size: 17px; }
+.sn-link { display: inline-block; margin-top: 4px; font-weight: 700; color: #c3090c; text-decoration: none; }
+.sn-more .sn-p { display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; } .sn-more.open .sn-p { display: block; }
+.sn-morebtn { border: none; background: none; padding: 0; color: #c3090c; font-weight: 700; font-size: 14px; cursor: pointer; }
+.sn-date { display: flex; gap: 12px; align-items: baseline; border-bottom: 1px solid #f0ece3; padding: 6px 0; } .sn-when { flex: 0 0 74px; font-weight: 800; color: #c3090c; font-size: 14px; } .sn-sub { display: block; font-size: 14px; color: #666; }
+.sn-quote { margin: 0; background: #f5f8f6; border-left: 4px solid #6aa784; border-radius: 10px; padding: 10px 14px; font-style: italic; } .sn-quote cite { display: block; font-style: normal; font-size: 13px; color: #666; margin-top: 4px; }
+.sn-photo { margin: 0; } .sn-photo img { width: 100%; border-radius: 14px; display: block; } .sn-photo figcaption { font-size: 14px; color: #555; margin-top: 6px; }
+.sn-foot { margin: 26px 0 8px; display: grid; gap: 12px; justify-items: center; } .sn-reacts { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.sn-react { border: 1px solid #e4dfd3; background: #fff; border-radius: 999px; padding: 8px 12px; font-size: 20px; cursor: pointer; } .sn-react span { font-size: 13px; font-weight: 700; } .sn-react.on { background: #fdecef; border-color: #f2a7b5; }
+.sn-readbtn { background: #1f6b3a; color: #fff; border: none; border-radius: 999px; padding: 12px 26px; font-size: 16px; font-weight: 700; cursor: pointer; } .sn-done { color: #1f6b3a; font-weight: 700; }
+.sn-empty { color: #888; text-align: center; margin: 30px 0; }
+.sn-banner { display: flex; gap: 10px; align-items: center; width: calc(100% - 24px); margin: 8px 12px 0; border: none; background: #fdf0dd; border-radius: 14px; padding: 12px 14px; font-size: 15px; text-align: left; cursor: pointer; } .sn-banner-go { margin-left: auto; font-weight: 800; color: #c3090c; }
+.sn-li { display: flex; gap: 12px; align-items: center; width: 100%; text-align: left; border: 1px solid #ece7dc; background: #fff; border-radius: 14px; padding: 8px; margin-bottom: 8px; cursor: pointer; font-size: 15px; }
+.sn-li img, .sn-row img { width: 64px; height: 64px; object-fit: cover; border-radius: 10px; flex: 0 0 auto; } .sn-li > span:nth-child(2) { display: grid; } .sn-row-ic { width: 64px; height: 64px; display: grid; place-items: center; font-size: 28px; background: #f6f2e9; border-radius: 10px; flex: 0 0 auto; }
+.sn-li-new { margin-left: auto; background: #c3090c; color: #fff; border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 700; } .sn-li-read { margin-left: auto; color: #1f6b3a; font-weight: 800; }
+.sn-reader { max-width: 640px; margin: 0 auto; }
+.sn-list { display: grid; gap: 8px; } .sn-row { display: flex; gap: 12px; align-items: center; background: #fff; border: 1px solid #ece7dc; border-radius: 12px; padding: 8px 12px; flex-wrap: wrap; }
+.sn-row-main { flex: 1 1 260px; display: grid; gap: 3px; } .sn-row-acts { display: flex; gap: 6px; flex-wrap: wrap; }
+.sn-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 18px; align-items: start; } @media (max-width: 1100px) { .sn-wrap { grid-template-columns: 1fr; } }
+.sn-box { background: #fff; border: 1px solid #ece7dc; border-radius: 12px; padding: 12px 14px; margin-bottom: 12px; } .sn-box h3 { margin: 0 0 8px; }
+.sn-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px 10px; } .sn-f { display: grid; gap: 3px; font-size: 12px; color: #666; margin-bottom: 6px; } .sn-f.wide, .sn-grid .wide { grid-column: 1 / -1; }
+.sn-f input, .sn-f textarea, .sn-sechead input { font: inherit; font-size: 14px; color: #1f2a24; padding: 7px 9px; border: 1px solid #ddd3c2; border-radius: 8px; width: 100%; box-sizing: border-box; }
+.sn-sechead { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; } .sn-sechead .sn-emo { width: 52px; text-align: center; font-size: 18px; } .sn-sechead .sn-sectitle { flex: 1; font-weight: 700; font-size: 16px; }
+.sn-item { background: #faf8f2; border-radius: 10px; padding: 8px 10px; margin: 6px 0; } .sn-item-head { display: flex; gap: 6px; align-items: center; font-size: 13px; margin-bottom: 4px; }
+.sn-imgf { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; } .sn-imgf img { width: 90px; height: 64px; object-fit: cover; border-radius: 8px; } .sn-upl { cursor: pointer; }
+.sn-addrow { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; } .sn-addsec { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.sn-sugg { background: #f3f7ff; border-radius: 10px; padding: 8px 10px; margin-top: 6px; font-size: 13px; display: grid; gap: 4px; } .sn-sugg-row { display: flex; gap: 8px; justify-content: space-between; align-items: center; }
+.sn-prevwrap { position: sticky; top: 12px; } .sn-phone { width: 380px; max-width: 100%; margin: 0 auto; border: 10px solid #1f2a24; border-radius: 36px; overflow: hidden; background: #fbf8f2; }
+.sn-screen { height: 72vh; overflow-y: auto; padding: 14px; } .sn-readers { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
+.sn-stat { font-size: 12.5px; font-weight: 700; border-radius: 999px; padding: 4px 10px; margin-left: 8px; } .sn-stat.draft { background: #fff4d6; color: #8a5a00; } .sn-stat.pub { background: #e6f4ea; color: #1e6b34; }
+.sn-grp { margin: 16px 0 6px; font-size: 16px; }
+.rpc-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; margin-top: 10px; }
+.rpc-card { display: flex; flex-direction: column; gap: 4px; text-align: left; background: #fff; border: 1px solid var(--line, #e5e5e5); border-radius: 14px; padding: 12px; cursor: pointer; font: inherit; }
+.rpc-card:hover { border-color: #bbb; }
+.rpc-pics { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 6px; }
+.rpc-pics img { width: 100%; height: 70px; object-fit: cover; border-radius: 8px; }
+.rpc-h { margin: 16px 0 6px; font-size: 15px; }
+.rpc-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.rpc-tile { position: relative; }
+.rpc-tile > button:first-child { display: flex; flex-direction: column; gap: 3px; width: 100%; text-align: left; background: #fff; border: 1px solid var(--line, #e5e5e5); border-radius: 12px; padding: 8px; cursor: pointer; font: inherit; }
+.rpc-tile img, .rpc-nopic { width: 100%; height: 110px; object-fit: cover; border-radius: 8px; }
+.rpc-nopic { display: flex; align-items: center; justify-content: center; text-align: center; background: #fff3e0; color: #b45309; font-size: 12px; font-weight: 600; }
+.rpc-tile .fd-x { position: absolute; top: 4px; right: 4px; background: #fff; border-radius: 50%; }
+.rpc-sec { display: grid; grid-template-columns: 1fr 1.3fr auto auto auto; gap: 6px; margin-bottom: 6px; align-items: center; }
+</style>
+</head>
+<body>
+
+<!-- ============================ ACCESS GATE ============================ -->
+<div id="dashboard-gate" class="dashboard-gate">
+  <div class="gate-card">
+    <img class="gate-logo-img" src="https://cdn.shopify.com/s/files/1/1451/3756/files/soup_can_logo_500x814_83667c43-de3b-4690-891e-dfd527e947ca.png?v=1767622073" alt="4Cats">
+    <div class="gate-title">4Cats Hub</div>
+    <div id="dashboard-gate-body"></div>
+  </div>
+</div>
+
+<!-- Coordinator PIN prompt (opens over the studio view) -->
+<div id="pin-modal" class="dashboard-gate" style="display:none">
+  <div class="gate-card">
+    <div class="gate-logo">🔓</div>
+    <div class="gate-title">Coordinator view</div>
+    <div id="pin-modal-body"></div>
+    <button class="gate-schedule-btn" onclick="closePinModal()">Cancel</button>
+  </div>
+</div>
+
+<!-- Supplies → a store category (Clay / Ditto / Snacks & Drinks) → its items -->
+<div id="inv-modal" class="prize-modal" style="display:none" onclick="if (event.target === this) invCloseGroup()">
+  <div class="prize-modal-card">
+    <div class="prize-modal-head"><div id="inv-modal-title"></div>
+      <button type="button" class="pm-close" onclick="invCloseGroup()" aria-label="Close">✕</button></div>
+    <div id="inv-modal-body"></div>
+  </div>
+</div>
+
+<!-- A project's tools and materials (Today at 4Cats → tap a project) -->
+<div id="ps-modal" class="prize-modal" style="display:none" onclick="if (event.target === this) closeProjectSupplies()">
+  <div class="prize-modal-card">
+    <div class="prize-modal-head"><div id="ps-modal-title">What's needed</div>
+      <button type="button" class="pm-close" onclick="closeProjectSupplies()" aria-label="Close">✕</button></div>
+    <div id="ps-modal-body"></div>
+  </div>
+</div>
+
+<!-- One prize tier's prizes (My Points → Prize tiers → a tier) -->
+<div id="prize-modal" class="prize-modal" style="display:none" onclick="if (event.target === this) closePrizeModal()">
+  <div class="prize-modal-card">
+    <div class="prize-modal-head"><div id="prize-modal-title"></div>
+      <button type="button" class="pm-close" onclick="closePrizeModal()" aria-label="Close">✕</button></div>
+    <div id="prize-modal-body"></div>
+  </div>
+</div>
+
+<!-- Personal staff login: my shifts, time off, availability, sick calls.
+     Everything comes from hub_staff_portal.sql functions, which only ever
+     return or change the signed-in person's own things. -->
+<div id="staff-shell" class="staff-shell" style="display:none">
+  <header class="me-head">
+    <span id="me-avatar" onclick="meTab('profile')" style="cursor:pointer" title="Your profile"></span>
+    <div class="me-hello"><div class="me-hi" id="me-hi">Hi!</div><div class="me-sub">Your 4Cats schedule</div></div>
+    <button class="ho-btn me-ann-btn" onclick="meAnnSheet()" title="Announcements">📣<span class="nav-badge" id="me-ann-badge" style="display:none"></span></button>
+    <button class="ho-btn hub-concern-link" onclick="concernOpenSheet()" title="Report a concern anonymously">🛡️</button>
+    <button class="ho-btn" onclick="meSignOut()">Sign out</button>
+  </header>
+  <div id="me-ann-banner"></div>
+  <div id="me-news-banner"></div>
+  <nav class="me-tabs" role="tablist">
+    <button class="me-tab on" id="me-tab-shifts" onclick="meTab('shifts')">Shifts</button>
+    <button class="me-tab" id="me-tab-news" onclick="_meNews.open=null;meTab('news')" style="display:none">📰 News <span class="nav-badge" id="me-news-badge" style="display:none"></span></button>
+    <button class="me-tab" id="me-tab-hours" onclick="meTab('hours')">Hours</button>
+    <button class="me-tab" id="me-tab-off" onclick="meTab('off')">Time off</button>
+    <button class="me-tab" id="me-tab-avail" onclick="meTab('avail')">Availability</button>
+    <button class="me-tab" id="me-tab-chat" onclick="meTab('chat')">Chat <span class="nav-badge" id="me-chat-badge" style="display:none"></span></button>
+    <button class="me-tab" id="me-tab-acks" onclick="meTab('acks')" style="display:none">Sign-offs <span class="nav-badge" id="me-acks-badge" style="display:none"></span></button>
+    <button class="me-tab" id="me-tab-profile" onclick="meTab('profile')">Profile</button>
+    <button class="me-tab" id="me-tab-team" onclick="meTab('team')" style="display:none">Team <span class="nav-badge" id="me-team-badge" style="display:none"></span></button>
+  </nav>
+  <main class="me-body" id="me-body"></main>
+</div>
+
+<div class="shell" id="dashboard-shell" style="display:none">
+
+  <!-- ============================ SIDEBAR ============================ -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <img class="mark-img" src="https://cdn.shopify.com/s/files/1/1451/3756/files/soup_can_logo_500x814_83667c43-de3b-4690-891e-dfd527e947ca.png?v=1767622073" alt="4Cats">
+      <div class="word hub">4Cats Hub</div>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-label">Today</div>
+      <button class="nav-item active" id="nav-dashboard" onclick="goToDashboard()"><span class="ic">🏠</span> Today</button>
+      <button class="nav-item" id="nav-plan" onclick="openPlanAhead()"><span class="ic">🗓️</span> Schedule</button>
+      <button class="nav-item studio-only" id="nav-punch" onclick="openPunch()"><span class="ic">⏱</span> Punch in / out</button>
+      <button class="nav-item" id="nav-fd" onclick="openFrontDesk()" title="Being tested: please don’t use it for real bookings yet"><span class="ic">🛒</span> Front desk <span class="nav-test">Testing</span></button>
+      <button class="nav-item" id="nav-families" onclick="openFamiliesPane()"><span class="ic">👪</span> Families</button>
+      <button class="nav-item studio-only" id="nav-acks" onclick="openAcksPane()"><span class="ic">✍️</span> Sign policies <span class="nav-badge" id="acks-badge" style="display:none"></span></button>
+      <button class="nav-item" id="nav-duties" onclick="openDuties()"><span class="ic">✅</span> Today’s duties <span class="nav-badge" id="duties-badge" style="display:none"></span></button>
+      <button class="nav-item" id="nav-tickets" onclick="openTicketsPane()"><span class="ic">📬</span> Tickets <span class="nav-badge" id="tickets-unread-badge" style="display:none"></span></button>
+      <button class="nav-item" id="nav-moments" onclick="openMomentsPane()"><span class="ic">✨</span> Magical Moments</button>
+      <button class="nav-item" id="nav-chat" onclick="openChatPane()"><span class="ic">💬</span> Chat <span class="nav-badge" id="chat-badge" style="display:none"></span></button>
+      <button class="nav-item" id="nav-ann" onclick="openAnnPane()"><span class="ic">📣</span> Announcements <span class="nav-badge" id="ann-badge" style="display:none"></span></button>
+      <button class="nav-item hub-concern-link" id="nav-concern" onclick="openConcernPane()"><span class="ic">🛡️</span> Report a concern</button>
+      <button class="nav-item" id="nav-info" onclick="openInfoPane()"><span class="ic">ℹ️</span> Studio info</button>
+    </div>
+
+    <!-- Supplies: studio level (everyone). INVENTORY_LIVE = false makes it admin preview only -->
+    <div class="nav-group dev-only">
+      <div class="nav-label">Studio</div>
+      <button class="nav-item" id="nav-inventory" onclick="openInventory()"><span class="ic">📦</span> Supplies <span class="nav-badge" id="inv-badge" style="display:none"></span></button>
+    </div>
+
+    <!-- Home office: admin logins only (studio_users role = admin), and only the
+         pages their admin access allows (admin_can, same as admin.html). -->
+    <div class="nav-group" id="nav-group-homeoffice" style="display:none">
+      <div class="nav-label">Home office</div>
+      <button class="nav-item" id="nav-mydash" onclick="openMyDash()" title="Your own dashboard: blocks you pick, saved to your login"><span class="ic">🏠</span> My dashboard</button>
+      <button class="nav-item" id="nav-announce" onclick="openAnnouncePane()"><span class="ic">📢</span> Announcements</button>
+      <button class="nav-item" id="nav-snotes" onclick="openSnotesPane()" title="The little notes on each studio's World home page: all studios, scheduled ahead"><span class="ic">✍️</span> Studio notes</button>
+      <button class="nav-item" id="nav-ideas" onclick="openIdeasPane()"><span class="ic">🗓️</span> Suggestions <span class="nav-badge" id="ideas-badge" style="display:none"></span></button>
+      <button class="nav-item" id="nav-interest" onclick="openInterestPane()"><span class="ic">💡</span> Project interest</button>
+      <button class="nav-item" id="nav-bulk" onclick="openBulkPane()"><span class="ic">➕</span> Bulk add</button>
+      <button class="nav-item" id="nav-ct" onclick="openCtPane()"><span class="ic">📚</span> Class times</button>
+      <button class="nav-item" id="nav-sessions-table" onclick="window.open('sessions.html', '_blank')" title="Every class time in a table: sort, filter, delete several at once (opens in a new tab)"><span class="ic">🗂️</span> Class times table</button>
+<button class="nav-item" id="nav-day-board" onclick="window.open('day-board.html?view=week' + (_sessionStudioId ? '&studio=' + encodeURIComponent(_sessionStudioId) : ''), '_blank')" title="One studio's day or week by person: who teaches, demos and takes breaks, coverage, shifts and times to decide (opens in a new tab)"><span class="ic">🗓️</span> Day &amp; week board</button>
+<button class="nav-item" id="nav-curriculum" onclick="window.open('curriculum.html', '_blank')" title="Kids class curriculum: the class library, lessons, the shared bank and one-pagers (opens in a new tab)"><span class="ic">📚</span> Curriculum</button>
+      <button class="nav-item" id="nav-don" onclick="openDonPane()"><span class="ic">🎁</span> Donations & giveaways</button>
+      <button class="nav-item" id="nav-ft" onclick="openFtPane()"><span class="ic">🏫</span> Field trips <span class="nav-badge" id="ft-badge" style="display:none"></span></button>
+      <button class="nav-item" id="nav-bo" onclick="openBoPane()"><span class="ic">🏢</span> Studio buyouts <span class="nav-badge" id="bo-badge" style="display:none"></span></button>
+      <button class="nav-item" id="nav-pb" onclick="openPbPane()" title="Every party: what was paid, the after-party form, and what's owing"><span class="ic">🎉</span> Party balances</button>
+      <button class="nav-item" id="nav-act" onclick="openActPane()"><span class="ic">🕘</span> Activity log</button>
+      <button class="nav-item" id="nav-news" onclick="openNewsPane()"><span class="ic">📧</span> Newsletters</button>
+      <button class="nav-item" id="nav-sn" onclick="openStaffNewsPane()"><span class="ic">📰</span> Staff newsletter</button>
+      <button class="nav-item" id="nav-se" onclick="openStaffEmailPane()"><span class="ic">✉️</span> Email staff</button>
+      <button class="nav-item" id="nav-as" onclick="openAsPane()"><span class="ic">🗓️</span> Auto-schedule</button>
+      <button class="nav-item" id="nav-stf" onclick="openStfPane()"><span class="ic">👥</span> Studio staffing</button>
+      <button class="nav-item" id="nav-wsm" onclick="openWsmPane()"><span class="ic">🖼️</span> Workshops</button>
+      <button class="nav-item" id="nav-rp" onclick="openRpPane()"><span class="ic">🛍️</span> Products</button>
+      <button class="nav-item" id="nav-sup" onclick="openSupPane()" title="Studio supplies: names, groups, units, par levels, pack sizes, order rules"><span class="ic">🧺</span> Supplies list</button>
+      <button class="nav-item" id="nav-memb" onclick="openMembPane()" style="display:none" title="Find a membership or gift membership; refund or end one (exceptions)"><span class="ic">⭐</span> Memberships</button>
+      <button class="nav-item" id="nav-mv" onclick="openM2wPane()"><span class="ic">🔁</span> Move to World</button>
+      <button class="nav-item" id="nav-camps" onclick="window.open('camps-manager.html','_blank')" title="Camp programs, camp and PA/PD days for every studio, and families' PA/PD day requests"><span class="ic">🏕️</span> Camps manager</button>
+      <button class="nav-item" id="nav-oc-overview" onclick="openOcOverview()"><span class="ic">✅</span> Open & close</button>
+      <button class="nav-item" id="nav-sick" onclick="openSickPane()"><span class="ic">🤒</span> Sick calls</button>
+      <button class="nav-item" id="nav-hist" onclick="openHistPane()"><span class="ic">🕘</span> Shift history</button>
+      <button class="nav-item" id="nav-ts" onclick="openTsPane()"><span class="ic">🕒</span> Timesheets</button>
+      <button class="nav-item" id="nav-ack-ho" onclick="openAckCompliance('ho')"><span class="ic">✍️</span> Policy sign-offs</button>
+      <button class="nav-item" id="nav-rules" onclick="openRulesPane()"><span class="ic">📋</span> Staff request rules</button>
+      <button class="nav-item" id="nav-concerns" onclick="openConcernsAdmin()"><span class="ic">🛡️</span> Concerns <span class="nav-badge" id="concerns-badge" style="display:none"></span></button>
+      <button class="nav-item" id="nav-swaps" onclick="openSwapsPane()"><span class="ic">🔁</span> Shift swaps <span class="nav-badge" id="swaps-badge" style="display:none"></span></button>
+      <button class="nav-item" id="nav-devices" onclick="openDevicesPane()"><span class="ic">🖥</span> Devices <span class="nav-badge" id="devices-badge" style="display:none"></span></button>
+    </div>
+
+    <!-- Coordinator section. Locked: one button that asks for the PIN.
+         Unlocked: the coordinator pages (the server enforces the PIN too). -->
+    <div class="nav-group coord">
+      <div class="nav-label">Coordinator</div>
+      <button class="nav-item locked-teaser" onclick="openPinModal()"><span class="ic">🔒</span> Unlock coordinator view</button>
+      <button class="nav-item sc-only admin-ok" id="nav-parties" onclick="openPartiesPane()"><span class="ic">🎉</span> Parties <span class="nav-badge" id="parties-badge" style="display:none"></span></button>
+      <button class="nav-item sc-only admin-ok" id="nav-notif" onclick="openNotifPane()"><span class="ic">🔔</span> Notifications <span class="nav-badge" id="notif-badge" style="display:none"></span></button>
+      <button class="nav-item sc-only admin-ok" id="nav-etpl" onclick="openEmailTplPane()"><span class="ic">✉️</span> Email templates</button>
+      <button class="nav-item sc-only admin-ok" id="nav-dm" onclick="openDutyManage()"><span class="ic">📋</span> Manage duties</button>
+      <button class="nav-item sc-only" id="nav-ack-coord" onclick="openAckCompliance('coord')"><span class="ic">✍️</span> Policy sign-offs</button>
+      <button class="nav-item sc-only" id="nav-points" onclick="openPoints()"><span class="ic">⭐</span> My Points</button>
+      <button class="nav-item sc-only" id="nav-occupancy" onclick="openOccupancy()"><span class="ic">📊</span> Fill Rates</button>
+      <button class="nav-item sc-only" id="nav-instagram" onclick="openInstagram()"><span class="ic">📷</span> Instagram</button>
+    </div>
+
+    <div class="sidebar-spacer"></div>
+
+  </aside>
+
+  <!-- ============================ MAIN ============================ -->
+  <!-- Schedule tab: schedule.html in a frame, signed in with the studio login.
+       Lives outside the manager PIN so staff can use it all day. -->
+  <section class="schedule-pane" id="schedule-pane" style="display:none"></section>
+
+  <main class="main" id="dashboard-main">
+
+    <!-- View bar: who's signed in, and the coordinator unlock / lock button. -->
+    <div class="view-bar" id="view-bar"></div>
+
+    <!-- (Nov 12 2026) 🌤️ Weather: now + the forecast pills, for every view (drawn by renderWeatherCard in hub/stats.js). -->
+    <div id="weather-strip" class="weather-strip"></div>
+
+    <!-- Flash Challenges: coordinator view only (sc-only). Hidden when
+         nothing is running. community-flash-data; refreshes every 2 minutes. -->
+    <div id="flash-strip" class="sc-only" style="display:none"></div>
+    <!-- (Nov 9 2026) 📣 Influencer posts: coordinator view only. influencer_reports.sql -->
+    <div id="infl-strip" class="sc-only" style="display:none"></div>
+
+    <!-- 🎁 Make the Gift — coordinator view, top of the dashboard (same card
+         as the one on the Fill Rates page; filled by renderMakeTheGift). -->
+    <div class="sc-only" id="mtg-top" style="display:none"></div>
+
+    <!-- Greeting hero — live for everyone. Greeting text/time-of-day is
+         computed client-side from the viewer's own device clock (matches
+         whoever's actually looking at the screen, no server timezone
+         guessing needed for this part). -->
+    <!-- Announcements from home office: urgent unread ones as a banner at the very top,
+         plus a one-line nudge for the rest. Read in full on 📣 Announcements (sidebar). -->
+    <div id="hub-announcements"></div>
+
+    <div class="card hero-card" id="card-daily-hero"></div>
+    <!-- 📊 Labour today (hub_day_labour.sql): labour ÷ the revenue of today's bookings. Admin only while it's being built. -->
+    <div id="card-labour" class="labour-card" style="display:none"></div>
+    <!-- 📋 Auto-schedule notes assigned to whoever's signed in (autosched_assign.sql) -->
+    <div id="card-mynotes" class="labour-card" style="display:none"></div>
+
+    <!-- Week info bar — theme name, Friday event, next week preview.
+         Informational only for now, no real links (per explicit request). -->
+    <div id="week-info-bar" class="week-info-bar" style="display:none"></div>
+
+    <!-- On stage today — every staff member. Today's sessions and how many
+         are booked, from community-daily-snapshot (studio login is enough).
+         Who's teaching each one comes later, with the staff schedule. -->
+    <div class="today-row">
+      <div class="card floor-card" id="card-floor-today" style="display:none"></div>
+
+      <!-- Who's working today — every staff member. From the staff schedule
+           (staff_shifts, approved/posted only — never Sling) via the
+           hub_today_team() SQL function, which decides the studio from the
+           login on the server. Avatars from staff-avatars (admin → Staff). -->
+      <div class="today-side">
+        <div class="card team-card" id="card-team-today" style="display:none"></div>
+        <!-- Kiln status (hub_kiln_status.sql): shown to customers on 4Cats World. -->
+        <div class="card kiln-card" id="card-kiln" style="display:none"></div>
+        <!-- Opening / closing lists (hub_checklists.sql). Tap a ring to open the list. -->
+        <div id="oc-alerts"></div>
+        <div class="card oc-card" id="card-open-close" style="display:none"></div>
+      </div>
+    </div>
+
+
+    <!-- Today's Projects — live for everyone. Company-wide (same plan at every
+         studio), so it doesn't change with the admin studio switcher. Reads
+         get_projects_for_date(), which only returns published days and only
+         photo + name — safe for the anon key. Date = viewer's device date,
+         same as the greeting. -->
+    <div class="card projects-card" id="card-todays-projects" style="display:none"></div>
+
+    <!-- Suggested marketing emails — live for everyone. Weather tag reused
+         from the weather card fetch above, not a second API call. -->
+    <div class="section-head ops sc-only">✉️ Suggested Emails</div>
+    <div class="card sc-only" id="card-marketing-suggestions"></div>
+
+    <!-- (Weather shows in the "Today at 4Cats" forecast pills; current
+         conditions are still fetched for the email suggestions.) -->
+
+    <!-- Sales Goals — coordinator view only (the function refuses a studio
+         login without a PIN). Friday fill, Kids Parties and Team Building
+         live on the 📊 Fill Rates page. -->
+    <!-- Sales goals — percentages only, never dollars (enforced server-side
+         in community-goal-progress). Built to be safe for studio-mode /
+         staff logins later. -->
+    <div class="section-head ops sc-only">🎯 Sales Goals</div>
+    <div class="card sales-card sc-only" id="card-sales-goals"></div>
+
+    <!-- No dollar amounts anywhere on this page (Sales Goals is % only). -->
+
+    <!-- Daily Check-Ins — LIVE for everyone now, same manager scoping
+         enforced server-side as Sales/Kids Parties/Team Building.
+         Provisional simple count, not a compliance % — that comes once
+         real staff schedule/time-punch data exists. -->
+    <div class="section-head ops sc-only">📋 Daily Check-Ins</div>
+    <div class="card sales-card sc-only" id="card-checkins"></div>
+
+    <!-- Instagram — moved here from the old Community Hub in index.html.
+         Served by community-instagram-data (PIN-checked, own studio only). -->
+
+  </main>
+
+  <!-- My Points — its own page (sidebar → ⭐ My Points), coordinator view only.
+       community-points-data checks the PIN server-side; an SC sees and
+       redeems from their own wallet, an admin PIN gets a read-only view. -->
+  <!-- Instagram — its own page (sidebar → 📷 Instagram), coordinator view only. -->
+  <main class="main" id="instagram-pane" style="display:none">
+    <div class="view-bar" id="instagram-bar"></div>
+    <div class="card sales-card" id="card-instagram"></div>
+  </main>
+
+  <!-- Fill Rates — the studio's seat occupancy by day (same data as admin's
+       Fill Rates tab, community-occupancy-data), coordinator view only and
+       only their own studio (the server enforces both). -->
+  <main class="main" id="occupancy-pane" style="display:none">
+    <div class="view-bar" id="occupancy-bar"></div>
+    <div class="pts-page-title" id="occ-title">📊 Fill Rates</div>
+    <div class="goal-note" style="margin:-6px 0 12px">How full your studio's seats are each day, from every booking and drop-in. Tap a day to see it hour by hour. Friday nights, kids parties and team building are further down.</div>
+    <div class="card" id="occ-days"></div>
+    <div id="occ-detail"></div>
+
+    <!-- 🎁 Make the Gift (temporary, Nov 2026): filled by renderFridayFillRateBody
+         from community-dashboard-data's makeTheGift. Hidden when not set up. -->
+    <div class="section-head ops sc-only" id="mtg-head" style="display:none">🎁 Make the Gift — Fill Rate</div>
+    <div class="card sc-only" id="card-make-the-gift" style="display:none"></div>
+
+    <!-- Moved from the dashboard: same cards, same loading (they load with the
+         coordinator view and refresh as before, wherever they sit). -->
+    <div class="section-head ops sc-only">🎨 Friday Night — Fill Rate</div>
+    <div class="card friday-card sc-only" id="card-friday-fillrate"></div>
+
+    <div class="section-head ops sc-only">🎉 Kids Parties</div>
+    <div class="card sales-card sc-only" id="card-kids-parties"></div>
+
+    <div class="section-head ops sc-only">🏢 Team Building</div>
+    <div class="card sales-card sc-only" id="card-team-building"></div>
+  </main>
+
+  <!-- Home office → Announcements. Writes the same announcements table admin.html
+       uses; the database only lets home office with Studio Ops edit access change it
+       (hub_announcements_write_access.sql). -->
+  <main class="main" id="announce-pane" style="display:none">
+    <div class="ho-head">
+      <div class="pts-page-title" style="margin:0">📢 Announcements</div>
+      <span class="spacer"></span>
+      <button class="ho-btn primary" id="ho-new-btn" onclick="hoEditAnnouncement(null)">+ New announcement</button>
+    </div>
+    <p class="ho-intro">Shown at the top of the Hub at the studios you choose, between the dates you set. Studios tap “Got it,” and you can see which have.</p>
+    <div id="ho-view-only" class="ho-intro" style="display:none"><b>View only.</b> Your admin access lets you see announcements but not change them.</div>
+    <div id="ho-editor"></div>
+    <div id="ho-list"></div>
+  </main>
+
+  <!-- Coordinator → Plan ahead: roles, party/wheel teachers and breaks for the
+       next two weeks. Writes the same fields as the schedule's Day view. -->
+  <!-- Studio computer → punch clock. Each person: their face, their own punch PIN. -->
+  <main class="main" id="punch-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">⏱ Punch in / out</div><span class="spacer"></span>
+      <button class="ho-btn" onclick="goToDashboard()">← Today</button></div>
+    <p class="ho-intro">Click your name, then type your own punch PIN. No PIN yet? Set one in the Hub on your phone (My shifts).</p>
+    <div id="punch-body"></div>
+  </main>
+
+  <!-- Studio computer → ✍️ Sign policies. Each person: their face, their own punch PIN. -->
+  <main class="main" id="acks-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">✍️ Sign policies</div><span class="spacer"></span>
+      <button class="ho-btn" onclick="goToDashboard()">← Today</button></div>
+    <p class="ho-intro">Policies home office needs you to read and sign. Click your name, then type your punch PIN. You can also sign on your phone (Hub → Sign-offs).</p>
+    <div id="acks-body"></div>
+  </main>
+
+  <!-- ✍️ Policy sign-offs: home office (all studios) and coordinator view (their studio) -->
+  <main class="main" id="ackc-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">✍️ Policy sign-offs</div><span class="spacer"></span>
+      <span id="ackc-studio"></span><button class="ho-btn" onclick="goToDashboard()">← Today</button></div>
+    <p class="ho-intro">Who has read and signed each policy. Signed policies also show on each person’s training record.</p>
+    <div id="ackc-body"></div>
+  </main>
+
+  <!-- Today's duties — its own page (sidebar). Same tasks as index.html
+       (task_templates + studio_tasks; admin → Studio Ops → Tasks).
+       Ticking one off asks who did it, from today's team. -->
+  <!-- Tickets / Moments / Studio info: the Day view's own code (index.html), each on its own page -->
+  <main class="main" id="tickets-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">📬 Tickets</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+    <div class="ho-card copied-view"><div id="tickets-view-content"></div></div>
+  </main>
+  <main class="main" id="moments-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">✨ Magical Moments</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+    <div class="ho-card copied-view"><div id="moments-view-content"></div></div>
+  </main>
+  <main class="main" id="info-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">ℹ️ Studio info</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+    <div class="ho-card" id="hours-card" style="margin-bottom:14px"></div>
+    <div class="ho-card copied-view"><div id="info-view-content"></div></div>
+    <div class="ho-card copied-view" style="margin-top:14px">
+      <div class="ho-head" style="margin-bottom:10px"><div class="ho-title" style="font-size:17px">📱 iPad setup</div><span class="spacer"></span>
+        <button class="ho-btn" onclick="hubPrintQr()">🖨 Print iPad setup sheet</button></div>
+      <div class="goal-note" style="margin-bottom:12px">Scan a code with the iPad’s camera to open that page on it. “Studio” codes are this studio’s own.</div>
+      <div id="qr-view-content"></div></div>
+  </main>
+  <div id="attach-lightbox" onclick="closeLightbox()">
+    <button id="attach-lightbox-close" onclick="closeLightbox()">&times;</button>
+    <img src="" alt="Attachment">
+  </div>
+
+  <!-- Coordinators: email customers from a template (camp artwork pickup, and the studio's templates) -->
+  <main class="main" id="etpl-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">✉️ Email templates</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+    <p class="ho-intro">Pick a template, choose who it goes to, check the message, then send. Every email is logged.</p>
+    <div id="etpl-body"></div>
+  </main>
+
+  <main class="main" id="devices-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">🖥 Studio computers</div><span class="spacer"></span><button class="ho-btn" onclick="loadDevicesPane()">Refresh</button></div>
+    <p class="ho-intro">A studio login only opens the Hub on the computers approved here. When a manager reads you the code on their screen, find it below, name the computer and approve it. Their screen opens by itself.</p>
+    <div id="devices-body"></div>
+  </main>
+
+  <!-- Manage duties: the regular duties list (coordinators: their studio's; home office: all),
+       send a duty to studios, and how studios are doing (home office) -->
+  <main class="main" id="dm-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">📋 Manage duties</div><span class="spacer"></span><button class="ho-btn" onclick="openDuties()">See today’s duties</button></div>
+    <div class="tsg-modes" id="dm-tabs" style="margin:6px 0 14px"></div>
+    <div id="dm-body"></div>
+  </main>
+
+  <main class="main" id="chat-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">💬 Chat</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+    <div id="hub-chat" class="chat-host"></div>
+  </main>
+
+  <main class="main" id="swaps-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">🔁 Shift swaps</div><span class="spacer"></span><button class="ho-btn" onclick="loadSwapsPane()">Refresh</button></div>
+    <p class="ho-intro">Staff offer a shift; someone at the same or a nearby studio takes it; you approve. Approving moves the shift to them and tells them both.</p>
+    <div id="swaps-body"></div>
+  </main>
+
+  <main class="main" id="hist-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">🕘 Shift history</div><span class="spacer"></span><button class="ho-btn" onclick="histLoad()">Refresh</button></div>
+    <p class="ho-intro">Every change to shifts and time punches: published, changed, moved, swapped, deleted, imported from Sling, clocked in and out, edited and removed. Who did it, and when. Changes made together (like publishing a week) are grouped.</p>
+    <div class="ho-card hist-filters" id="hist-filters"></div>
+    <div class="ho-card" id="hist-body" style="margin-top:12px"></div>
+  </main>
+
+  <main class="main" id="ann-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">📣 Announcements</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+    <div id="ann-list" class="ann-list"></div>
+  </main>
+
+  <main class="main" id="concern-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">🛡️ Report a concern</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+    <div class="ho-card" style="max-width:720px" id="concern-host"></div>
+  </main>
+  <main class="main" id="concerns-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">🛡️ Concerns</div><span class="spacer"></span><button class="ho-btn" onclick="loadConcernsAdmin()">Refresh</button></div>
+    <p class="ho-intro">Anonymous reports from staff. The Hub doesn’t record who sent them, only the day. A name is shown only if they chose to leave one.</p>
+    <div id="concerns-body"></div>
+  </main>
+
+  <main class="main" id="duties-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">✅ Today’s duties</div><span class="spacer"></span>
+      <button class="ho-btn" onclick="goToDashboard()">← Today</button></div>
+    <div class="card duties-card" id="card-duties" style="display:none"></div>
+  </main>
+
+  <main class="main" id="bulk-pane" style="display:none"></main>
+  <main class="main" id="ct-pane" style="display:none"></main>
+  <main class="main" id="don-pane" style="display:none"></main>
+  <main class="main" id="act-pane" style="display:none"></main>
+  <main class="main" id="ft-pane" style="display:none"></main>
+  <main class="main" id="bo-pane" style="display:none"></main>
+  <main class="main" id="pb-pane" style="display:none"></main>
+  <main class="main" id="sn-pane" style="display:none"></main>
+  <main class="main" id="news-pane" style="display:none"></main>
+  <main class="main" id="se-pane" style="display:none"></main>
+  <main class="main" id="fd-pane" style="display:none"></main>
+  <main class="main" id="wsm-pane" style="display:none"></main>
+  <main class="main" id="rp-pane" style="display:none"></main>
+  <main class="main" id="sup-pane" style="display:none"></main>
+  <main class="main" id="spots-pane" style="display:none"></main>
+  <main class="main" id="snotes-pane" style="display:none"></main>
+  <!-- 🏠 My dashboard (hub/dashboard.js): home office logins, blocks saved per person -->
+  <main class="main" id="mydash-pane" style="display:none"></main>
+  <main class="main" id="memb-pane" style="display:none"></main>
+  <main class="main" id="stf-pane" style="display:none"></main>
+  <main class="main" id="as-pane" style="display:none"></main>
+  <main class="main" id="mv-pane" style="display:none"></main>
+  <main class="main" id="plan-pane" style="display:none">
+    <div class="ho-head">
+      <div class="pts-page-title" style="margin:0">🗓️ Schedule</div>
+      <span id="plan-studio-wrap"></span>
+      <span class="spacer"></span>
+      <label class="plan-pick" title="Go to any date, ahead or in the past">Go to date <input type="date" id="plan-pick" onchange="if (this.value) loadPlanDay(this.value)"></label>
+      <span class="plan-viewtgl" role="group" aria-label="View"><button class="ho-btn" id="plan-v-list" onclick="planSetView('list')">☰ List</button><button class="ho-btn" id="plan-v-board" onclick="planSetView('board')">🗂️ Board</button></span>
+      <button class="ho-btn admin-only-spots" id="plan-spots-btn" onclick="openSpotsPane()" title="One table of this studio's times: booked and spots, change one or many at once">🎟️ Adjust spots</button>
+      <button class="ho-btn primary" onclick="loadPlanDay(localDateStr(new Date()))" title="Show today on the schedule">📅 Jump to today</button>
+      <button class="ho-btn" onclick="goToDashboard()" title="Back to the Today screen">← Today screen</button>
+    </div>
+    <p class="ho-intro" id="plan-intro"></p>
+    <div id="plan-labour"></div>
+    <div id="plan-dayboard" class="admin-only-link" style="display:none;margin:4px 0 8px"></div>
+    <div id="plan-custom"></div>
+    <div id="plan-idea-pin"></div>
+    <div class="plan-days" id="plan-days"></div>
+    <!-- Floor plan for the day (Day view's own code). Outside plan-body so redraws don't wipe it. -->
+    <div id="plan-floor" class="ho-card" style="display:none;margin-bottom:14px">
+      <div class="ho-head" style="margin-bottom:8px"><div class="ho-title" id="plan-floor-title" style="font-size:17px">🪑 Floor plan</div><span class="spacer"></span>
+        <button class="ho-btn" onclick="planToggleFloor(false)">Close</button></div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:1rem;flex-wrap:wrap">
+        <button id="fp-assign-btn" class="ho-btn primary" onclick="assignTablesForDay()">🪑 Assign tables for the day</button>
+        <button class="ho-btn" onclick="clearDayAssignments()" style="color:#b91c1c">🗑 Clear &amp; reassign</button>
+        <span id="fp-assign-status" class="goal-note"></span>
+      </div>
+      <div id="floor-view-content"><div class="goal-note">Loading…</div></div>
+    </div>
+    <!-- Read by the party code copied from the Day view (gift card + calculator). -->
+    <input type="hidden" id="date-picker" value=""><span id="studio-name" style="display:none"></span>
+    <div id="plan-body"></div>
+  </main>
+
+  <!-- Home office → timesheets: review and approve, by pay period -->
+  <main class="main" id="ts-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">🕒 Timesheets</div><span class="spacer"></span><button class="ho-btn" id="ts-refresh" onclick="tsRefresh()">↻ Refresh</button></div>
+    <p class="ho-intro">Everyone’s time punches, one row per day. Filter, tick rows (or select all), and approve. Tap ⋮ or 📝 on a row to fix punches or answer a note. Staff see each day’s status in the Hub.</p>
+    <div id="ts-body"></div>
+  </main>
+
+  <!-- Home office → every studio's sick calls and the managers' plans -->
+  <main class="main" id="sick-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">🤒 Sick calls</div><span class="spacer"></span><button class="ho-btn" onclick="loadSickPane()">Refresh</button></div>
+    <p class="ho-intro">Every studio, yesterday to 3 days ahead. Managers acknowledge each sick call and choose the plan (cover, cancel, or run the day as is), so you can see it’s handled.</p>
+    <div id="sick-body"></div>
+  </main>
+
+  <!-- Home office → rules for staff time off, unavailability and sick calls -->
+  <main class="main" id="rules-pane" style="display:none">
+    <div class="ho-head"><div class="pts-page-title" style="margin:0">📋 Staff request rules</div></div>
+    <p class="ho-intro">What staff can ask for from their own login. “Flagged” requests still go through, marked for whoever approves them in the staff schedule.</p>
+    <div id="rules-body"></div>
+  </main>
+
+  <!-- Coordinator → Families: find a family; managers set a child's "Can attend as" age (hub_families.sql). -->
+  <main class="main" id="families-pane" style="display:none">
+    <div class="ho-head">
+      <div class="pts-page-title" style="margin:0">👪 Families</div>
+    </div>
+    <p class="fam-sub">Every family who's booked in the last 2 years. Filter, sort by any column, and tap a family to open their card.</p>
+    <div class="fam-filters" id="fam-filters">
+      <input type="search" id="fam-q" placeholder="Search a parent, email or child" autocomplete="off" onkeydown="if(event.key==='Enter'){event.preventDefault();famList(true);}">
+      <select id="fam-studio" onchange="famList(true)" aria-label="Studio"></select>
+      <select id="fam-member" onchange="famList(true)" aria-label="Membership"><option value="any">Members and non-members</option><option value="yes">⭐ Members</option><option value="no">Not members</option></select>
+      <select id="fam-activity" onchange="famList(true)" aria-label="Activity"><option value="any">Any activity</option><option value="ahead">Booked ahead</option><option value="recent">Visited in the last 90 days</option><option value="lapsed90">Not seen in 90+ days</option><option value="lapsed180">Not seen in 6+ months</option></select>
+      <select id="fam-flagf" onchange="famList(true)" aria-label="Flag"><option value="">Any flag or none</option><option value="any">Has a flag</option><option value="allergy">⚕️ Allergy</option><option value="support">🤝 Needs extra support</option><option value="payment">💳 Ask about payment</option><option value="vip">⭐ VIP</option><option value="heads_up">👀 Heads up</option></select>
+      <button class="ho-btn" onclick="famList(true)">Search</button>
+      <button class="ho-btn primary" onclick="famAddOpen()" title="A family who hasn't booked yet">+ Add a customer</button>
+    </div>
+    <div id="fam-body"></div>
+  </main>
+
+  <!-- Coordinator → Parties: every upcoming party, by what needs doing. -->
+  <main class="main" id="parties-pane" style="display:none">
+    <div class="ho-head">
+      <div class="pts-page-title" style="margin:0">🎉 Parties</div>
+      <span class="spacer"></span>
+      <button class="ho-btn" onclick="loadPartiesPane()">Refresh</button>
+    </div>
+    <p class="ho-intro">Every party in the next 90 days. Contact each family, confirm the details, and close it out after the party. Parties in the next week that haven't been contacted are in red.</p>
+    <input type="hidden" id="pp-date" value="">
+    <div id="parties-body"></div>
+  </main>
+
+  <!-- Coordinator → Notifications: new party bookings, cancellations, recent bookings. -->
+  <main class="main" id="notif-pane" style="display:none">
+    <div class="ho-head">
+      <div class="pts-page-title" style="margin:0">🔔 Notifications</div>
+      <span class="spacer"></span>
+      <button class="ho-btn" onclick="loadNotifPane()">Refresh</button>
+    </div>
+    <div id="notif-body"></div>
+  </main>
+
+  <!-- Coordinator → Suggestions: "Suggest a date!" from 4Cats World -->
+  <main class="main" id="ideas-pane" style="display:none">
+    <div class="ho-head">
+      <div class="pts-page-title" style="margin:0">🗓️ Suggestions</div>
+      <span class="spacer"></span>
+      <span id="ideas-all-wrap" hidden><label class="ideas-all"><input type="checkbox" id="ideas-all" checked onchange="loadIdeasPane()"> All studios</label>
+        <select id="ideas-studio" class="ideas-filter" onchange="drawIdeas()"><option value="">Every studio</option></select></span>
+      <button class="ho-btn" onclick="loadIdeasPane()">Refresh</button>
+    </div>
+    <div id="ideas-body"></div>
+  </main>
+
+  <!-- Coordinator → Project interest: what families love, save and wait for (4Cats World → Inspire) -->
+  <main class="main" id="interest-pane" style="display:none">
+    <div class="ho-head">
+      <div class="pts-page-title" style="margin:0">💡 Project interest</div>
+      <span class="spacer"></span>
+      <button class="ho-btn" onclick="loadInterestPane()">Refresh</button>
+    </div>
+    <div id="interest-body"></div>
+  </main>
+
+  <!-- Opening / closing list, full page. Saves as you go. -->
+  <main class="main" id="checklist-pane" style="display:none">
+    <div id="cl-body"></div>
+  </main>
+
+  <!-- Home office → Open & close: every studio's list today. -->
+  <main class="main" id="oc-overview-pane" style="display:none">
+    <div class="ho-head">
+      <div class="pts-page-title" style="margin:0" id="oc-title">✅ Open & close today</div>
+      <div class="oc-tabs" id="oc-tabs"><button class="on" data-l="open" onclick="setOcList('open')">Opening</button><button data-l="close" onclick="setOcList('close')">Closing</button><button data-l="history" onclick="setOcList('history')">History</button></div>
+      <span class="spacer"></span>
+      <button class="ho-btn" onclick="loadOcOverview()">Refresh</button>
+    </div>
+    <p class="ho-intro" id="oc-intro">Every open studio's list for today: who did it, how long it took, problems flagged, and anything that needs attention.</p>
+    <div id="oc-overview"></div>
+  </main>
+
+  <main class="main" id="points-pane" style="display:none">
+    <div class="view-bar" id="points-bar"></div>
+    <div id="card-points"></div>
+  </main>
+
+  <!-- Supplies — its own page (sidebar → 📦 Supplies). Studio level: the
+       studio login can buy boxes and handle transfers; counts need a
+       coordinator/admin PIN. Served by community-inventory, which never
+       returns stock levels (blind counts). -->
+  <main class="main" id="inventory-pane" style="display:none">
+    <div class="view-bar" id="inventory-bar"></div>
+    <div id="inv-body"></div>
+  </main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.1"></script>
+<!-- QR codes for "Book for a family": qrcode-generator 1.4.4 (MIT, Kazuhiko Arase), built in so it never depends on another site -->
+<script>var qrcode=function(){var P=function(x,w){var g=236,l=17,n=x,s=O[w],t=null,r=0,h=null,i=[],v={},_=function(a,f){r=n*4+17,t=function(e){for(var u=new Array(e),o=0;o<e;o+=1){u[o]=new Array(e);for(var d=0;d<e;d+=1)u[o][d]=null}return u}(r),B(0,0),B(r-7,0),B(0,r-7),E(),T(),m(a,f),n>=7&&N(a),h==null&&(h=nr(n,s,i)),U(h,f)},B=function(a,f){for(var e=-1;e<=7;e+=1)if(!(a+e<=-1||r<=a+e))for(var u=-1;u<=7;u+=1)f+u<=-1||r<=f+u||(0<=e&&e<=6&&(u==0||u==6)||0<=u&&u<=6&&(e==0||e==6)||2<=e&&e<=4&&2<=u&&u<=4?t[a+e][f+u]=!0:t[a+e][f+u]=!1)},y=function(){for(var a=0,f=0,e=0;e<8;e+=1){_(!0,e);var u=k.getLostPoint(v);(e==0||a>u)&&(a=u,f=e)}return f},T=function(){for(var a=8;a<r-8;a+=1)t[a][6]==null&&(t[a][6]=a%2==0);for(var f=8;f<r-8;f+=1)t[6][f]==null&&(t[6][f]=f%2==0)},E=function(){for(var a=k.getPatternPosition(n),f=0;f<a.length;f+=1)for(var e=0;e<a.length;e+=1){var u=a[f],o=a[e];if(t[u][o]==null)for(var d=-2;d<=2;d+=1)for(var c=-2;c<=2;c+=1)d==-2||d==2||c==-2||c==2||d==0&&c==0?t[u+d][o+c]=!0:t[u+d][o+c]=!1}},N=function(a){for(var f=k.getBCHTypeNumber(n),e=0;e<18;e+=1){var u=!a&&(f>>e&1)==1;t[Math.floor(e/3)][e%3+r-8-3]=u}for(var e=0;e<18;e+=1){var u=!a&&(f>>e&1)==1;t[e%3+r-8-3][Math.floor(e/3)]=u}},m=function(a,f){for(var e=s<<3|f,u=k.getBCHTypeInfo(e),o=0;o<15;o+=1){var d=!a&&(u>>o&1)==1;o<6?t[o][8]=d:o<8?t[o+1][8]=d:t[r-15+o][8]=d}for(var o=0;o<15;o+=1){var d=!a&&(u>>o&1)==1;o<8?t[8][r-o-1]=d:o<9?t[8][15-o-1+1]=d:t[8][15-o-1]=d}t[r-8][8]=!a},U=function(a,f){for(var e=-1,u=r-1,o=7,d=0,c=k.getMaskFunction(f),p=r-1;p>0;p-=2)for(p==6&&(p-=1);;){for(var b=0;b<2;b+=1)if(t[u][p-b]==null){var C=!1;d<a.length&&(C=(a[d]>>>o&1)==1);var A=c(u,p-b);A&&(C=!C),t[u][p-b]=C,o-=1,o==-1&&(d+=1,o=7)}if(u+=e,u<0||r<=u){u-=e,e=-e;break}}},H=function(a,f){for(var e=0,u=0,o=0,d=new Array(f.length),c=new Array(f.length),p=0;p<f.length;p+=1){var b=f[p].dataCount,C=f[p].totalCount-b;u=Math.max(u,b),o=Math.max(o,C),d[p]=new Array(b);for(var A=0;A<d[p].length;A+=1)d[p][A]=255&a.getBuffer()[A+e];e+=b;var R=k.getErrorCorrectPolynomial(C),I=K(d[p],R.getLength()-1),S=I.mod(R);c[p]=new Array(R.getLength()-1);for(var A=0;A<c[p].length;A+=1){var X=A+S.getLength()-c[p].length;c[p][A]=X>=0?S.getAt(X):0}}for(var Z=0,A=0;A<f.length;A+=1)Z+=f[A].totalCount;for(var J=new Array(Z),Q=0,A=0;A<u;A+=1)for(var p=0;p<f.length;p+=1)A<d[p].length&&(J[Q]=d[p][A],Q+=1);for(var A=0;A<o;A+=1)for(var p=0;p<f.length;p+=1)A<c[p].length&&(J[Q]=c[p][A],Q+=1);return J},nr=function(a,f,e){for(var u=Y.getRSBlocks(a,f),o=G(),d=0;d<e.length;d+=1){var c=e[d];o.put(c.getMode(),4),o.put(c.getLength(),k.getLengthInBits(c.getMode(),a)),c.write(o)}for(var p=0,d=0;d<u.length;d+=1)p+=u[d].dataCount;if(o.getLengthInBits()>p*8)throw"code length overflow. ("+o.getLengthInBits()+">"+p*8+")";for(o.getLengthInBits()+4<=p*8&&o.put(0,4);o.getLengthInBits()%8!=0;)o.putBit(!1);for(;!(o.getLengthInBits()>=p*8||(o.put(g,8),o.getLengthInBits()>=p*8));)o.put(l,8);return H(o,u)};v.addData=function(a,f){f=f||"Byte";var e=null;switch(f){case"Numeric":e=$(a);break;case"Alphanumeric":e=W(a);break;case"Byte":e=V(a);break;case"Kanji":e=q(a);break;default:throw"mode:"+f}i.push(e),h=null},v.isDark=function(a,f){if(a<0||r<=a||f<0||r<=f)throw a+","+f;return t[a][f]},v.getModuleCount=function(){return r},v.make=function(){if(n<1){for(var a=1;a<40;a++){for(var f=Y.getRSBlocks(a,s),e=G(),u=0;u<i.length;u++){var o=i[u];e.put(o.getMode(),4),e.put(o.getLength(),k.getLengthInBits(o.getMode(),a)),o.write(e)}for(var d=0,u=0;u<f.length;u++)d+=f[u].dataCount;if(e.getLengthInBits()<=d*8)break}n=a}_(!1,y())},v.createTableTag=function(a,f){a=a||2,f=typeof f>"u"?a*4:f;var e="";e+='<table style="',e+=" border-width: 0px; border-style: none;",e+=" border-collapse: collapse;",e+=" padding: 0px; margin: "+f+"px;",e+='">',e+="<tbody>";for(var u=0;u<v.getModuleCount();u+=1){e+="<tr>";for(var o=0;o<v.getModuleCount();o+=1)e+='<td style="',e+=" border-width: 0px; border-style: none;",e+=" border-collapse: collapse;",e+=" padding: 0px; margin: 0px;",e+=" width: "+a+"px;",e+=" height: "+a+"px;",e+=" background-color: ",e+=v.isDark(u,o)?"#000000":"#ffffff",e+=";",e+='"/>';e+="</tr>"}return e+="</tbody>",e+="</table>",e},v.createSvgTag=function(a,f,e,u){var o={};typeof arguments[0]=="object"&&(o=arguments[0],a=o.cellSize,f=o.margin,e=o.alt,u=o.title),a=a||2,f=typeof f>"u"?a*4:f,e=typeof e=="string"?{text:e}:e||{},e.text=e.text||null,e.id=e.text?e.id||"qrcode-description":null,u=typeof u=="string"?{text:u}:u||{},u.text=u.text||null,u.id=u.text?u.id||"qrcode-title":null;var d=v.getModuleCount()*a+f*2,c,p,b,C,A="",R;for(R="l"+a+",0 0,"+a+" -"+a+",0 0,-"+a+"z ",A+='<svg version="1.1" xmlns="http://www.w3.org/2000/svg"',A+=o.scalable?"":' width="'+d+'px" height="'+d+'px"',A+=' viewBox="0 0 '+d+" "+d+'" ',A+=' preserveAspectRatio="xMinYMin meet"',A+=u.text||e.text?' role="img" aria-labelledby="'+F([u.id,e.id].join(" ").trim())+'"':"",A+=">",A+=u.text?'<title id="'+F(u.id)+'">'+F(u.text)+"</title>":"",A+=e.text?'<description id="'+F(e.id)+'">'+F(e.text)+"</description>":"",A+='<rect width="100%" height="100%" fill="white" cx="0" cy="0"/>',A+='<path d="',b=0;b<v.getModuleCount();b+=1)for(C=b*a+f,c=0;c<v.getModuleCount();c+=1)v.isDark(b,c)&&(p=c*a+f,A+="M"+p+","+C+R);return A+='" stroke="transparent" fill="black"/>',A+="</svg>",A},v.createDataURL=function(a,f){a=a||2,f=typeof f>"u"?a*4:f;var e=v.getModuleCount()*a+f*2,u=f,o=e-f;return er(e,e,function(d,c){if(u<=d&&d<o&&u<=c&&c<o){var p=Math.floor((d-u)/a),b=Math.floor((c-u)/a);return v.isDark(b,p)?0:1}else return 1})},v.createImgTag=function(a,f,e){a=a||2,f=typeof f>"u"?a*4:f;var u=v.getModuleCount()*a+f*2,o="";return o+="<img",o+=' src="',o+=v.createDataURL(a,f),o+='"',o+=' width="',o+=u,o+='"',o+=' height="',o+=u,o+='"',e&&(o+=' alt="',o+=F(e),o+='"'),o+="/>",o};var F=function(a){for(var f="",e=0;e<a.length;e+=1){var u=a.charAt(e);switch(u){case"<":f+="&lt;";break;case">":f+="&gt;";break;case"&":f+="&amp;";break;case'"':f+="&quot;";break;default:f+=u;break}}return f},ar=function(a){var f=1;a=typeof a>"u"?f*2:a;var e=v.getModuleCount()*f+a*2,u=a,o=e-a,d,c,p,b,C,A={"\u2588\u2588":"\u2588","\u2588 ":"\u2580"," \u2588":"\u2584","  ":" "},R={"\u2588\u2588":"\u2580","\u2588 ":"\u2580"," \u2588":" ","  ":" "},I="";for(d=0;d<e;d+=2){for(p=Math.floor((d-u)/f),b=Math.floor((d+1-u)/f),c=0;c<e;c+=1)C="\u2588",u<=c&&c<o&&u<=d&&d<o&&v.isDark(p,Math.floor((c-u)/f))&&(C=" "),u<=c&&c<o&&u<=d+1&&d+1<o&&v.isDark(b,Math.floor((c-u)/f))?C+=" ":C+="\u2588",I+=a<1&&d+1>=o?R[C]:A[C];I+=`
+`}return e%2&&a>0?I.substring(0,I.length-e-1)+Array(e+1).join("\u2580"):I.substring(0,I.length-1)};return v.createASCII=function(a,f){if(a=a||1,a<2)return ar(f);a-=1,f=typeof f>"u"?a*2:f;var e=v.getModuleCount()*a+f*2,u=f,o=e-f,d,c,p,b,C=Array(a+1).join("\u2588\u2588"),A=Array(a+1).join("  "),R="",I="";for(d=0;d<e;d+=1){for(p=Math.floor((d-u)/a),I="",c=0;c<e;c+=1)b=1,u<=c&&c<o&&u<=d&&d<o&&v.isDark(p,Math.floor((c-u)/a))&&(b=0),I+=b?C:A;for(p=0;p<a;p+=1)R+=I+`
+`}return R.substring(0,R.length-1)},v.renderTo2dContext=function(a,f){f=f||2;for(var e=v.getModuleCount(),u=0;u<e;u++)for(var o=0;o<e;o++)a.fillStyle=v.isDark(u,o)?"black":"white",a.fillRect(u*f,o*f,f,f)},v};P.stringToBytesFuncs={default:function(x){for(var w=[],g=0;g<x.length;g+=1){var l=x.charCodeAt(g);w.push(l&255)}return w}},P.stringToBytes=P.stringToBytesFuncs.default,P.createStringToBytes=function(x,w){var g=function(){for(var n=rr(x),s=function(){var T=n.read();if(T==-1)throw"eof";return T},t=0,r={};;){var h=n.read();if(h==-1)break;var i=s(),v=s(),_=s(),B=String.fromCharCode(h<<8|i),y=v<<8|_;r[B]=y,t+=1}if(t!=w)throw t+" != "+w;return r}(),l=63;return function(n){for(var s=[],t=0;t<n.length;t+=1){var r=n.charCodeAt(t);if(r<128)s.push(r);else{var h=g[n.charAt(t)];typeof h=="number"?(h&255)==h?s.push(h):(s.push(h>>>8),s.push(h&255)):s.push(l)}}return s}};var D={MODE_NUMBER:1,MODE_ALPHA_NUM:2,MODE_8BIT_BYTE:4,MODE_KANJI:8},O={L:1,M:0,Q:3,H:2},L={PATTERN000:0,PATTERN001:1,PATTERN010:2,PATTERN011:3,PATTERN100:4,PATTERN101:5,PATTERN110:6,PATTERN111:7},k=function(){var x=[[],[6,18],[6,22],[6,26],[6,30],[6,34],[6,22,38],[6,24,42],[6,26,46],[6,28,50],[6,30,54],[6,32,58],[6,34,62],[6,26,46,66],[6,26,48,70],[6,26,50,74],[6,30,54,78],[6,30,56,82],[6,30,58,86],[6,34,62,90],[6,28,50,72,94],[6,26,50,74,98],[6,30,54,78,102],[6,28,54,80,106],[6,32,58,84,110],[6,30,58,86,114],[6,34,62,90,118],[6,26,50,74,98,122],[6,30,54,78,102,126],[6,26,52,78,104,130],[6,30,56,82,108,134],[6,34,60,86,112,138],[6,30,58,86,114,142],[6,34,62,90,118,146],[6,30,54,78,102,126,150],[6,24,50,76,102,128,154],[6,28,54,80,106,132,158],[6,32,58,84,110,136,162],[6,26,54,82,110,138,166],[6,30,58,86,114,142,170]],w=1335,g=7973,l=21522,n={},s=function(t){for(var r=0;t!=0;)r+=1,t>>>=1;return r};return n.getBCHTypeInfo=function(t){for(var r=t<<10;s(r)-s(w)>=0;)r^=w<<s(r)-s(w);return(t<<10|r)^l},n.getBCHTypeNumber=function(t){for(var r=t<<12;s(r)-s(g)>=0;)r^=g<<s(r)-s(g);return t<<12|r},n.getPatternPosition=function(t){return x[t-1]},n.getMaskFunction=function(t){switch(t){case L.PATTERN000:return function(r,h){return(r+h)%2==0};case L.PATTERN001:return function(r,h){return r%2==0};case L.PATTERN010:return function(r,h){return h%3==0};case L.PATTERN011:return function(r,h){return(r+h)%3==0};case L.PATTERN100:return function(r,h){return(Math.floor(r/2)+Math.floor(h/3))%2==0};case L.PATTERN101:return function(r,h){return r*h%2+r*h%3==0};case L.PATTERN110:return function(r,h){return(r*h%2+r*h%3)%2==0};case L.PATTERN111:return function(r,h){return(r*h%3+(r+h)%2)%2==0};default:throw"bad maskPattern:"+t}},n.getErrorCorrectPolynomial=function(t){for(var r=K([1],0),h=0;h<t;h+=1)r=r.multiply(K([1,M.gexp(h)],0));return r},n.getLengthInBits=function(t,r){if(1<=r&&r<10)switch(t){case D.MODE_NUMBER:return 10;case D.MODE_ALPHA_NUM:return 9;case D.MODE_8BIT_BYTE:return 8;case D.MODE_KANJI:return 8;default:throw"mode:"+t}else if(r<27)switch(t){case D.MODE_NUMBER:return 12;case D.MODE_ALPHA_NUM:return 11;case D.MODE_8BIT_BYTE:return 16;case D.MODE_KANJI:return 10;default:throw"mode:"+t}else if(r<41)switch(t){case D.MODE_NUMBER:return 14;case D.MODE_ALPHA_NUM:return 13;case D.MODE_8BIT_BYTE:return 16;case D.MODE_KANJI:return 12;default:throw"mode:"+t}else throw"type:"+r},n.getLostPoint=function(t){for(var r=t.getModuleCount(),h=0,i=0;i<r;i+=1)for(var v=0;v<r;v+=1){for(var _=0,B=t.isDark(i,v),y=-1;y<=1;y+=1)if(!(i+y<0||r<=i+y))for(var T=-1;T<=1;T+=1)v+T<0||r<=v+T||y==0&&T==0||B==t.isDark(i+y,v+T)&&(_+=1);_>5&&(h+=3+_-5)}for(var i=0;i<r-1;i+=1)for(var v=0;v<r-1;v+=1){var E=0;t.isDark(i,v)&&(E+=1),t.isDark(i+1,v)&&(E+=1),t.isDark(i,v+1)&&(E+=1),t.isDark(i+1,v+1)&&(E+=1),(E==0||E==4)&&(h+=3)}for(var i=0;i<r;i+=1)for(var v=0;v<r-6;v+=1)t.isDark(i,v)&&!t.isDark(i,v+1)&&t.isDark(i,v+2)&&t.isDark(i,v+3)&&t.isDark(i,v+4)&&!t.isDark(i,v+5)&&t.isDark(i,v+6)&&(h+=40);for(var v=0;v<r;v+=1)for(var i=0;i<r-6;i+=1)t.isDark(i,v)&&!t.isDark(i+1,v)&&t.isDark(i+2,v)&&t.isDark(i+3,v)&&t.isDark(i+4,v)&&!t.isDark(i+5,v)&&t.isDark(i+6,v)&&(h+=40);for(var N=0,v=0;v<r;v+=1)for(var i=0;i<r;i+=1)t.isDark(i,v)&&(N+=1);var m=Math.abs(100*N/r/r-50)/5;return h+=m*10,h},n}(),M=function(){for(var x=new Array(256),w=new Array(256),g=0;g<8;g+=1)x[g]=1<<g;for(var g=8;g<256;g+=1)x[g]=x[g-4]^x[g-5]^x[g-6]^x[g-8];for(var g=0;g<255;g+=1)w[x[g]]=g;var l={};return l.glog=function(n){if(n<1)throw"glog("+n+")";return w[n]},l.gexp=function(n){for(;n<0;)n+=255;for(;n>=256;)n-=255;return x[n]},l}();function K(x,w){if(typeof x.length>"u")throw x.length+"/"+w;var g=function(){for(var n=0;n<x.length&&x[n]==0;)n+=1;for(var s=new Array(x.length-n+w),t=0;t<x.length-n;t+=1)s[t]=x[t+n];return s}(),l={};return l.getAt=function(n){return g[n]},l.getLength=function(){return g.length},l.multiply=function(n){for(var s=new Array(l.getLength()+n.getLength()-1),t=0;t<l.getLength();t+=1)for(var r=0;r<n.getLength();r+=1)s[t+r]^=M.gexp(M.glog(l.getAt(t))+M.glog(n.getAt(r)));return K(s,0)},l.mod=function(n){if(l.getLength()-n.getLength()<0)return l;for(var s=M.glog(l.getAt(0))-M.glog(n.getAt(0)),t=new Array(l.getLength()),r=0;r<l.getLength();r+=1)t[r]=l.getAt(r);for(var r=0;r<n.getLength();r+=1)t[r]^=M.gexp(M.glog(n.getAt(r))+s);return K(t,0).mod(n)},l}var Y=function(){var x=[[1,26,19],[1,26,16],[1,26,13],[1,26,9],[1,44,34],[1,44,28],[1,44,22],[1,44,16],[1,70,55],[1,70,44],[2,35,17],[2,35,13],[1,100,80],[2,50,32],[2,50,24],[4,25,9],[1,134,108],[2,67,43],[2,33,15,2,34,16],[2,33,11,2,34,12],[2,86,68],[4,43,27],[4,43,19],[4,43,15],[2,98,78],[4,49,31],[2,32,14,4,33,15],[4,39,13,1,40,14],[2,121,97],[2,60,38,2,61,39],[4,40,18,2,41,19],[4,40,14,2,41,15],[2,146,116],[3,58,36,2,59,37],[4,36,16,4,37,17],[4,36,12,4,37,13],[2,86,68,2,87,69],[4,69,43,1,70,44],[6,43,19,2,44,20],[6,43,15,2,44,16],[4,101,81],[1,80,50,4,81,51],[4,50,22,4,51,23],[3,36,12,8,37,13],[2,116,92,2,117,93],[6,58,36,2,59,37],[4,46,20,6,47,21],[7,42,14,4,43,15],[4,133,107],[8,59,37,1,60,38],[8,44,20,4,45,21],[12,33,11,4,34,12],[3,145,115,1,146,116],[4,64,40,5,65,41],[11,36,16,5,37,17],[11,36,12,5,37,13],[5,109,87,1,110,88],[5,65,41,5,66,42],[5,54,24,7,55,25],[11,36,12,7,37,13],[5,122,98,1,123,99],[7,73,45,3,74,46],[15,43,19,2,44,20],[3,45,15,13,46,16],[1,135,107,5,136,108],[10,74,46,1,75,47],[1,50,22,15,51,23],[2,42,14,17,43,15],[5,150,120,1,151,121],[9,69,43,4,70,44],[17,50,22,1,51,23],[2,42,14,19,43,15],[3,141,113,4,142,114],[3,70,44,11,71,45],[17,47,21,4,48,22],[9,39,13,16,40,14],[3,135,107,5,136,108],[3,67,41,13,68,42],[15,54,24,5,55,25],[15,43,15,10,44,16],[4,144,116,4,145,117],[17,68,42],[17,50,22,6,51,23],[19,46,16,6,47,17],[2,139,111,7,140,112],[17,74,46],[7,54,24,16,55,25],[34,37,13],[4,151,121,5,152,122],[4,75,47,14,76,48],[11,54,24,14,55,25],[16,45,15,14,46,16],[6,147,117,4,148,118],[6,73,45,14,74,46],[11,54,24,16,55,25],[30,46,16,2,47,17],[8,132,106,4,133,107],[8,75,47,13,76,48],[7,54,24,22,55,25],[22,45,15,13,46,16],[10,142,114,2,143,115],[19,74,46,4,75,47],[28,50,22,6,51,23],[33,46,16,4,47,17],[8,152,122,4,153,123],[22,73,45,3,74,46],[8,53,23,26,54,24],[12,45,15,28,46,16],[3,147,117,10,148,118],[3,73,45,23,74,46],[4,54,24,31,55,25],[11,45,15,31,46,16],[7,146,116,7,147,117],[21,73,45,7,74,46],[1,53,23,37,54,24],[19,45,15,26,46,16],[5,145,115,10,146,116],[19,75,47,10,76,48],[15,54,24,25,55,25],[23,45,15,25,46,16],[13,145,115,3,146,116],[2,74,46,29,75,47],[42,54,24,1,55,25],[23,45,15,28,46,16],[17,145,115],[10,74,46,23,75,47],[10,54,24,35,55,25],[19,45,15,35,46,16],[17,145,115,1,146,116],[14,74,46,21,75,47],[29,54,24,19,55,25],[11,45,15,46,46,16],[13,145,115,6,146,116],[14,74,46,23,75,47],[44,54,24,7,55,25],[59,46,16,1,47,17],[12,151,121,7,152,122],[12,75,47,26,76,48],[39,54,24,14,55,25],[22,45,15,41,46,16],[6,151,121,14,152,122],[6,75,47,34,76,48],[46,54,24,10,55,25],[2,45,15,64,46,16],[17,152,122,4,153,123],[29,74,46,14,75,47],[49,54,24,10,55,25],[24,45,15,46,46,16],[4,152,122,18,153,123],[13,74,46,32,75,47],[48,54,24,14,55,25],[42,45,15,32,46,16],[20,147,117,4,148,118],[40,75,47,7,76,48],[43,54,24,22,55,25],[10,45,15,67,46,16],[19,148,118,6,149,119],[18,75,47,31,76,48],[34,54,24,34,55,25],[20,45,15,61,46,16]],w=function(n,s){var t={};return t.totalCount=n,t.dataCount=s,t},g={},l=function(n,s){switch(s){case O.L:return x[(n-1)*4+0];case O.M:return x[(n-1)*4+1];case O.Q:return x[(n-1)*4+2];case O.H:return x[(n-1)*4+3];default:return}};return g.getRSBlocks=function(n,s){var t=l(n,s);if(typeof t>"u")throw"bad rs block @ typeNumber:"+n+"/errorCorrectionLevel:"+s;for(var r=t.length/3,h=[],i=0;i<r;i+=1)for(var v=t[i*3+0],_=t[i*3+1],B=t[i*3+2],y=0;y<v;y+=1)h.push(w(_,B));return h},g}(),G=function(){var x=[],w=0,g={};return g.getBuffer=function(){return x},g.getAt=function(l){var n=Math.floor(l/8);return(x[n]>>>7-l%8&1)==1},g.put=function(l,n){for(var s=0;s<n;s+=1)g.putBit((l>>>n-s-1&1)==1)},g.getLengthInBits=function(){return w},g.putBit=function(l){var n=Math.floor(w/8);x.length<=n&&x.push(0),l&&(x[n]|=128>>>w%8),w+=1},g},$=function(x){var w=D.MODE_NUMBER,g=x,l={};l.getMode=function(){return w},l.getLength=function(t){return g.length},l.write=function(t){for(var r=g,h=0;h+2<r.length;)t.put(n(r.substring(h,h+3)),10),h+=3;h<r.length&&(r.length-h==1?t.put(n(r.substring(h,h+1)),4):r.length-h==2&&t.put(n(r.substring(h,h+2)),7))};var n=function(t){for(var r=0,h=0;h<t.length;h+=1)r=r*10+s(t.charAt(h));return r},s=function(t){if("0"<=t&&t<="9")return t.charCodeAt(0)-48;throw"illegal char :"+t};return l},W=function(x){var w=D.MODE_ALPHA_NUM,g=x,l={};l.getMode=function(){return w},l.getLength=function(s){return g.length},l.write=function(s){for(var t=g,r=0;r+1<t.length;)s.put(n(t.charAt(r))*45+n(t.charAt(r+1)),11),r+=2;r<t.length&&s.put(n(t.charAt(r)),6)};var n=function(s){if("0"<=s&&s<="9")return s.charCodeAt(0)-48;if("A"<=s&&s<="Z")return s.charCodeAt(0)-65+10;switch(s){case" ":return 36;case"$":return 37;case"%":return 38;case"*":return 39;case"+":return 40;case"-":return 41;case".":return 42;case"/":return 43;case":":return 44;default:throw"illegal char :"+s}};return l},V=function(x){var w=D.MODE_8BIT_BYTE,g=x,l=P.stringToBytes(x),n={};return n.getMode=function(){return w},n.getLength=function(s){return l.length},n.write=function(s){for(var t=0;t<l.length;t+=1)s.put(l[t],8)},n},q=function(x){var w=D.MODE_KANJI,g=x,l=P.stringToBytesFuncs.SJIS;if(!l)throw"sjis not supported.";(function(t,r){var h=l(t);if(h.length!=2||(h[0]<<8|h[1])!=r)throw"sjis not supported."})("\u53CB",38726);var n=l(x),s={};return s.getMode=function(){return w},s.getLength=function(t){return~~(n.length/2)},s.write=function(t){for(var r=n,h=0;h+1<r.length;){var i=(255&r[h])<<8|255&r[h+1];if(33088<=i&&i<=40956)i-=33088;else if(57408<=i&&i<=60351)i-=49472;else throw"illegal char at "+(h+1)+"/"+i;i=(i>>>8&255)*192+(i&255),t.put(i,13),h+=2}if(h<r.length)throw"illegal char at "+(h+1)},s},j=function(){var x=[],w={};return w.writeByte=function(g){x.push(g&255)},w.writeShort=function(g){w.writeByte(g),w.writeByte(g>>>8)},w.writeBytes=function(g,l,n){l=l||0,n=n||g.length;for(var s=0;s<n;s+=1)w.writeByte(g[s+l])},w.writeString=function(g){for(var l=0;l<g.length;l+=1)w.writeByte(g.charCodeAt(l))},w.toByteArray=function(){return x},w.toString=function(){var g="";g+="[";for(var l=0;l<x.length;l+=1)l>0&&(g+=","),g+=x[l];return g+="]",g},w},z=function(){var x=0,w=0,g=0,l="",n={},s=function(r){l+=String.fromCharCode(t(r&63))},t=function(r){if(!(r<0)){if(r<26)return 65+r;if(r<52)return 97+(r-26);if(r<62)return 48+(r-52);if(r==62)return 43;if(r==63)return 47}throw"n:"+r};return n.writeByte=function(r){for(x=x<<8|r&255,w+=8,g+=1;w>=6;)s(x>>>w-6),w-=6},n.flush=function(){if(w>0&&(s(x<<6-w),x=0,w=0),g%3!=0)for(var r=3-g%3,h=0;h<r;h+=1)l+="="},n.toString=function(){return l},n},rr=function(x){var w=x,g=0,l=0,n=0,s={};s.read=function(){for(;n<8;){if(g>=w.length){if(n==0)return-1;throw"unexpected end of file./"+n}var r=w.charAt(g);if(g+=1,r=="=")return n=0,-1;if(r.match(/^\s$/))continue;l=l<<6|t(r.charCodeAt(0)),n+=6}var h=l>>>n-8&255;return n-=8,h};var t=function(r){if(65<=r&&r<=90)return r-65;if(97<=r&&r<=122)return r-97+26;if(48<=r&&r<=57)return r-48+52;if(r==43)return 62;if(r==47)return 63;throw"c:"+r};return s},tr=function(x,w){var g=x,l=w,n=new Array(x*w),s={};s.setPixel=function(i,v,_){n[v*g+i]=_},s.write=function(i){i.writeString("GIF87a"),i.writeShort(g),i.writeShort(l),i.writeByte(128),i.writeByte(0),i.writeByte(0),i.writeByte(0),i.writeByte(0),i.writeByte(0),i.writeByte(255),i.writeByte(255),i.writeByte(255),i.writeString(","),i.writeShort(0),i.writeShort(0),i.writeShort(g),i.writeShort(l),i.writeByte(0);var v=2,_=r(v);i.writeByte(v);for(var B=0;_.length-B>255;)i.writeByte(255),i.writeBytes(_,B,255),B+=255;i.writeByte(_.length-B),i.writeBytes(_,B,_.length-B),i.writeByte(0),i.writeString(";")};var t=function(i){var v=i,_=0,B=0,y={};return y.write=function(T,E){if(T>>>E)throw"length over";for(;_+E>=8;)v.writeByte(255&(T<<_|B)),E-=8-_,T>>>=8-_,B=0,_=0;B=T<<_|B,_=_+E},y.flush=function(){_>0&&v.writeByte(B)},y},r=function(i){for(var v=1<<i,_=(1<<i)+1,B=i+1,y=h(),T=0;T<v;T+=1)y.add(String.fromCharCode(T));y.add(String.fromCharCode(v)),y.add(String.fromCharCode(_));var E=j(),N=t(E);N.write(v,B);var m=0,U=String.fromCharCode(n[m]);for(m+=1;m<n.length;){var H=String.fromCharCode(n[m]);m+=1,y.contains(U+H)?U=U+H:(N.write(y.indexOf(U),B),y.size()<4095&&(y.size()==1<<B&&(B+=1),y.add(U+H)),U=H)}return N.write(y.indexOf(U),B),N.write(_,B),N.flush(),E.toByteArray()},h=function(){var i={},v=0,_={};return _.add=function(B){if(_.contains(B))throw"dup key:"+B;i[B]=v,v+=1},_.size=function(){return v},_.indexOf=function(B){return i[B]},_.contains=function(B){return typeof i[B]<"u"},_};return s},er=function(x,w,g){for(var l=tr(x,w),n=0;n<w;n+=1)for(var s=0;s<x;s+=1)l.setPixel(s,n,g(s,n));var t=j();l.write(t);for(var r=z(),h=t.toByteArray(),i=0;i<h.length;i+=1)r.writeByte(h[i]);return r.flush(),"data:image/gif;base64,"+r};return P}();(function(){qrcode.stringToBytesFuncs["UTF-8"]=function(P){function D(O){for(var L=[],k=0;k<O.length;k++){var M=O.charCodeAt(k);M<128?L.push(M):M<2048?L.push(192|M>>6,128|M&63):M<55296||M>=57344?L.push(224|M>>12,128|M>>6&63,128|M&63):(k++,M=65536+((M&1023)<<10|O.charCodeAt(k)&1023),L.push(240|M>>18,128|M>>12&63,128|M>>6&63,128|M&63))}return L}return D(P)}})(),function(P){typeof define=="function"&&define.amd?define([],P):typeof exports=="object"&&(module.exports=P())}(function(){return qrcode});
+</script>
+<script src="hub/core.js?v=20261112b"></script>
+<script>
+// ---------- Schedule: time off asked for this day (admin view only) ----------
+// Approved and waiting requests from people at this studio (their studios or home studio), under the day's shifts
+async function planTimeOffLoad(date) {
+  const el = document.getElementById('plan-timeoff'); if (!el || !(_studioData && _studioData.isAdmin) || !_sessionStudioId) { if (el) el.innerHTML = ''; return; }
   try {
-    if (typeof window[fn] !== 'function') { alert('That page isn’t available on this login.'); return; }
-    window[fn](arg);
-  } catch (e) { console.warn('My dashboard: couldn’t open', fn, e); }
+    const { data: rows, error } = await sb.from('staff_time_off').select('*').lte('start_date', date).gte('end_date', date);
+    if (error) throw error;
+    const live = (rows || []).filter(r => !/^(denied|declined|rejected|cancel)/i.test(String(r.status || '')));
+    if (!live.length) { el.innerHTML = ''; return; }
+    const ids = [...new Set(live.map(r => r.staff_id).filter(Boolean))];
+    let ppl = null;
+    { const r1 = await sb.from('staff_profiles').select('id, display_name, preferred_name, studio_ids, home_studio_id, avatar_key, leave_from, leave_until').in('id', ids);
+      ppl = r1.error ? (await sb.from('staff_profiles').select('id, display_name, preferred_name, studio_ids, home_studio_id, avatar_key').in('id', ids)).data : r1.data; }
+    // 🏖️ (Nov 10 2026) someone on leave that day isn't listed (staff_on_leave.sql)
+    const away = p => !!(p.leave_from && date >= p.leave_from && (!p.leave_until || date <= p.leave_until));
+    const here = {}; (ppl || []).forEach(p => { if (!away(p) && ((p.studio_ids || []).includes(_sessionStudioId) || p.home_studio_id === _sessionStudioId)) here[p.id] = p; });
+    const mine = live.filter(r => here[r.staff_id]);
+    if (!document.getElementById('plan-timeoff') || (_plan && _plan.date !== date)) return;
+    if (!mine.length) { el.innerHTML = ''; return; }
+    const nm = p => String(p.preferred_name || '').trim() || p.display_name || 'Someone';
+    const tm = t => t ? shortTime(String(t).slice(0, 5) + ':00') : '';
+    const fmt = d => new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' });
+    el.innerHTML = `<span class="pto-h">🌴 Time off asked for:</span>` + mine.map(r => {
+      const p = here[r.staff_id], ok = /approved/i.test(String(r.status || '')), part = r.start_time || r.end_time;
+      const span = r.start_date !== r.end_date ? ` (${fmt(r.start_date)}–${fmt(r.end_date)})` : '';
+      const kind = r.kind || r.type || r.reason_type || '';
+      return `<span class="pto ${ok ? 'ok' : 'wait'}" title="${escAttr([kind, r.reason || r.note || ''].filter(Boolean).join(' · '))}">${hubAvatarHtml({ name: nm(p), avatar_key: p.avatar_key, staff_id: p.id }, 20)}${esc(nm(p))}
+        <small>${part ? esc(`${tm(r.start_time) || 'start'}–${tm(r.end_time) || 'end'}`) : 'all day'}${esc(span)}${kind && !/time.?off/i.test(kind) ? ' · ' + esc(String(kind).replace(/_/g, ' ')) : ''}</small>
+        <b>${ok ? '✓ approved' : '⏳ waiting'}</b></span>`;
+    }).join('');
+  } catch (e) { el.innerHTML = `<span class="pto-h">🌴 Time off couldn’t load: ${esc(e.message || e)}</span>`; }
 }
-
-// ---------- The block library ----------
-// type: { name, group, area, level, size (default), sizes, opts (defaults), settings(b) → html, open: [fn, arg], load(b) → html }
-const DASH_GROUPS = ['Mine', 'Studio day', 'Customers', 'People', 'Money', 'Comms', 'World', 'Admin'];
-const DASH_ROWS_SETTING = b => `<label>Rows to show <select data-opt="rows">${[3, 5, 8, 12].map(n => `<option value="${n}"${+b.opts.rows === n ? ' selected' : ''}>${n}</option>`).join('')}</select></label>`;
-const DASH_BLOCKS = {
-  // ---- Mine ----
-  for_you: {
-    name: '📋 For you', group: 'Mine', area: null, size: 'm', opts: { rows: 5 }, settings: DASH_ROWS_SETTING, open: ['inboxPageOpen', ''],
-    desc: 'Items waiting on you, with their decide and note buttons.',
-    async load(b) {
-      const list = (await dashRpc('hub_inbox_mine')) || [];
-      try { if (typeof _inbox !== 'undefined') _inbox = list; } catch (e) { }   // (the inbox page's own buttons read this)
-      if (!list.length) return '<div class="dash-empty">Nothing waiting on you. ✓</div>';
-      const sorted = typeof inboxSorter === 'function' ? list.slice().sort(inboxSorter('soon')) : list;
-      const n = +b.opts.rows || 5;
-      const items = typeof inboxItemHtml === 'function' ? sorted.slice(0, n).map(inboxItemHtml).join('')
-        : sorted.slice(0, n).map(x => dashLine(esc(x.title || x.kind || 'Item'), esc(dashStudio(x.studio_id)))).join('');
-      dashGlanceSet(b, list.length + (list.length === 1 ? ' thing for you' : ' things for you'));
-      return dashBig(list.length, list.length === 1 ? 'to decide' : 'to decide') + items + (list.length > n ? `<div class="dash-more">+ ${list.length - n} more</div>` : '');
-    }
-  },
-  chat_unread: {
-    name: '💬 Unread chat', group: 'Mine', area: null, size: 's', open: ['openChatPane'],
-    desc: 'How many chat messages you haven’t read.',
-    async load(b) {
-      const n = +(await dashRpc('hub_chat_unread')) || 0; dashGlanceSet(b, n ? n + ' unread chat' : '');
-      return n ? dashBig(n, n === 1 ? 'unread message' : 'unread messages', 'warn') : '<div class="dash-empty">All caught up. ✓</div>';
-    }
-  },
-  quick_links: {
-    name: '🔗 Quick links', group: 'Mine', area: null, size: 'm', opts: { links: ['finance', 'pace', 'access', 'admin'] },
-    desc: 'Buttons for the pages and tools you use most.',
-    settings(b) {
-      const on = new Set(b.opts.links || []);
-      return '<div class="dash-ticks">' + DASH_LINKS.filter(l => dashCan(l.area, l.level)).map(l =>
-        `<label><input type="checkbox" data-link="${escAttr(l.key)}"${on.has(l.key) ? ' checked' : ''}> ${esc(l.name)}</label>`).join('') + '</div>';
-    },
-    load(b) {
-      const L = DASH_LINKS.filter(l => (b.opts.links || []).includes(l.key) && dashCan(l.area, l.level));
-      if (!L.length) return '<div class="dash-empty">No links yet. Choose some in ✏️ Customize → ⚙.</div>';
-      return '<div class="dash-links">' + L.map(l => `<button class="ho-btn sm" onclick="dashLinkGo('${escAttr(l.key)}')">${esc(l.name)}</button>`).join('') + '</div>';
-    }
-  },
-  sticky_note: {
-    name: '📝 Sticky note', group: 'Mine', area: null, size: 's', opts: { text: '' },
-    desc: 'A private note to yourself, saved with your layout.',
-    load(b) {
-      return `<textarea class="dash-note" maxlength="2000" placeholder="A note to yourself…" oninput="dashNoteInput('${escAttr(b.id)}', this.value)">${esc(b.opts.text || '')}</textarea>`;
-    }
-  },
-
-  // ---- Studio day ----
-  open_close: {
-    name: '✅ Open & close today', group: 'Studio day', area: 'duties_open_close', level: 'view', size: 'm', opts: { list: 'open', rows: 5 }, open: ['openOcOverview'],
-    desc: 'Which open studios haven’t started or finished their list today.',
-    settings: b => `<label>List <select data-opt="list"><option value="open"${b.opts.list === 'open' ? ' selected' : ''}>Opening</option><option value="close"${b.opts.list === 'close' ? ' selected' : ''}>Closing</option></select></label>` + DASH_ROWS_SETTING(b),
-    async load(b) {
-      const d = (await dashRpc('hub_checklist_overview', { p_list: b.opts.list === 'close' ? 'close' : 'open' })) || {};
-      const open = (d.studios || []).filter(r => r.run || !r.day || r.day.status === 'open');
-      const done = open.filter(r => r.run && r.run.finished_at), going = open.filter(r => r.run && !r.run.finished_at), not = open.filter(r => !r.run);
-      const word = b.opts.list === 'close' ? 'closing' : 'opening';
-      return dashBig(`${done.length} of ${open.length}`, `open studios finished their ${word} list`, done.length === open.length ? 'ok' : '') +
-        dashRows(not.map(r => [r, 'Not started']).concat(going.map(r => [r, 'In progress'])), +b.opts.rows || 5,
-          ([r, s]) => dashLine(esc(dashStudio(r.studio_id)), `<span class="dash-pill ${s === 'Not started' ? 'bad' : 'mid'}">${s}</span>`), 'Every open studio is done. ✓');
-    }
-  },
-  class_problems: {
-    name: '⚠️ Class bookings to fix', group: 'Studio day', area: 'class_times', level: 'view', size: 'm', opts: { rows: 5 }, settings: DASH_ROWS_SETTING, open: ['openAsPane'],
-    desc: 'Families missing a week of a class, weeks on the wrong day, paid but not booked.',
-    async load(b) {
-      const L = (await dashRpc('hub_class_problems')) || []; dashGlanceSet(b, L.length ? L.length + ' class bookings to fix' : '');
-      const W = { missing_week: '📚 Missing a week', off_day_week: '📅 Week on the wrong day', paid_not_booked: '💳 Paid, not booked' };
-      return (L.length ? dashBig(L.length, 'to look at', 'warn') : '') +
-        dashRows(L, +b.opts.rows || 5, x => dashLine(`<b>${esc(W[x.problem] || x.problem)}</b> · ${esc(dashStudio(x.studio_id))}`, esc(dashDay(x.day) + (x.detail ? ' · ' + x.detail : ''))), 'Every family is on all their weeks. ✓');
-    }
-  },
-  nightly_run: {
-    name: '🌙 Nightly run', group: 'Studio day', area: 'class_times', level: 'manage', size: 'm', opts: { rows: 5 }, settings: DASH_ROWS_SETTING, open: ['openAsPane'],
-    desc: 'What the nightly auto-schedule changed this week.',
-    async load(b) {
-      const L = ((await dashRpc('hub_autosched_nightly_log', { p_days: 7 })) || []).filter(a => !/^(staff_|class_)/.test(a.action) && a.action !== 'keep_no_history');
-      const A = typeof ASN_ACT !== 'undefined' ? ASN_ACT : {};
-      return dashBig(L.length, L.length === 1 ? 'change this week' : 'changes this week') +
-        dashRows(L, +b.opts.rows || 5, a => dashLine(`<b>${esc(A[a.action] || a.action)}</b> · ${esc(dashStudio(a.studio_id))}`, esc(dashDay(a.day) + (a.undone_at ? ' · undone' : ''))), 'Nothing changed this week.');
-    }
-  },
-  devices: {
-    name: '🖥 Computers waiting', group: 'Studio day', area: 'users_access', level: 'edit', size: 's', open: ['openDevicesPane'],
-    desc: 'Studio computers waiting for approval.',
-    async load() {
-      const P = ((await dashRpc('hub_devices_list')) || []).filter(d => d.status === 'pending');
-      return P.length ? dashBig(P.length, 'waiting', 'warn') + dashRows(P, 4, d => dashLine(esc(dashStudio(d.studio_id)), esc(relTime(d.requested_at)))) : '<div class="dash-empty">Nothing waiting. ✓</div>';
-    }
-  },
-
-  // ---- Customers ----
-  field_trips: {
-    name: '🏫 Field trip follow-ups', group: 'Customers', area: 'parties_events', level: 'view', size: 's', opts: { rows: 5 }, settings: DASH_ROWS_SETTING, open: ['openFtPane'],
-    desc: 'Requests with a follow-up due today or earlier, and new requests.',
-    async load(b) {
-      const R = (await dashRpc('hub_field_trips', { p_status: 'open' })) || [], t = dashToday();
-      const due = R.filter(r => r.follow_up && r.follow_up <= t && !['booked', 'declined'].includes(r.status)), fresh = R.filter(r => r.status === 'new');
-      const list = due.concat(fresh.filter(r => !due.includes(r)));
-      return `<div class="dash-chips"><span class="dash-pill ${due.length ? 'bad' : 'ok'}">${due.length} to follow up</span><span class="dash-pill">${fresh.length} new</span></div>` +
-        dashRows(list, +b.opts.rows || 5, r => dashLine(esc(r.school || r.contact_name || 'Request'), esc([dashStudio(r.studio_id), r.follow_up && r.follow_up <= t ? 'follow up ' + dashDay(r.follow_up) : 'new'].filter(Boolean).join(' · '))), 'Nothing to follow up. ✓');
-    }
-  },
-  buyouts: {
-    name: '🏢 Buyout requests', group: 'Customers', area: 'parties_events', level: 'view', size: 's', opts: { rows: 5 }, settings: DASH_ROWS_SETTING, open: ['openBoPane'],
-    desc: 'New studio buyout requests and ones still open.',
-    async load(b) {
-      const R = (await dashRpc('hub_buyout_requests', { p_status: 'open' })) || [];
-      const fresh = R.filter(r => r.status === 'new');
-      return `<div class="dash-chips"><span class="dash-pill ${fresh.length ? 'mid' : 'ok'}">${fresh.length} new</span><span class="dash-pill">${R.length} open</span></div>` +
-        dashRows(fresh.concat(R.filter(r => r.status !== 'new')), +b.opts.rows || 5, r => dashLine(esc((r.name || 'Request') + ' · ' + dashStudio(r.studio_id)), esc((r.status === 'new' ? 'new' : r.status) + ' · ' + relTime(r.created_at))), 'No open requests.');
-    }
-  },
-  unpaid_invoices: {
-    name: '🧾 Unpaid invoices', group: 'Customers', area: 'parties_events', level: 'view', size: 's', opts: { rows: 5 }, settings: DASH_ROWS_SETTING, open: ['openFtPane'],
-    desc: 'Field trip and buyout invoices sent but not paid, past due first.',
-    async load(b) {
-      const [ft, bo] = await Promise.all([dashRpc('hub_ft_invoices', { p_studio: null }).catch(() => []), dashRpc('hub_buyouts', { p_studio: null }).catch(() => [])]);
-      const due = i => i.status === 'balance_sent' ? i.balance_due : i.pay_by;
-      const L = [].concat((ft || []).map(i => Object.assign({ kind: '🏫' }, i)), (bo || []).map(i => Object.assign({ kind: '🏢' }, i)))
-        .filter(i => i.status === 'sent' || i.status === 'balance_sent').sort((a, b) => String(due(a) || '').localeCompare(String(due(b) || '')));
-      const t = dashToday(), late = L.filter(i => due(i) && String(due(i)).slice(0, 10) < t); dashGlanceSet(b, late.length ? late.length + ' invoices past due' : '');
-      return `<div class="dash-chips"><span class="dash-pill ${late.length ? 'bad' : 'ok'}">${late.length} past due</span><span class="dash-pill">${L.length} unpaid</span></div>` +
-        dashRows(L, +b.opts.rows || 5, i => dashLine(`${i.kind} ${esc(i.school || i.name || dashStudio(i.studio_id))}`,
-          esc((i.status === 'sent' ? 'deposit' : 'balance') + ' due ' + dashDay(due(i))), due(i) && String(due(i)).slice(0, 10) < t ? 'late' : ''), 'Everything sent is paid. ✓');
-    }
-  },
-  date_suggestions: {
-    name: '🗓️ Date suggestions', group: 'Customers', area: 'class_times', level: 'view', size: 's', open: ['openIdeasPane'],
-    desc: 'New “Suggest a date!” requests from World, all studios.',
-    async load() {
-      const n = +(await dashRpc('hub_ideas_new_count', { p_studio: (typeof _sessionStudioId !== 'undefined' && _sessionStudioId) || null, p_all: true })) || 0;
-      return n ? dashBig(n, n === 1 ? 'new suggestion' : 'new suggestions', 'warn') : '<div class="dash-empty">No new suggestions.</div>';
-    }
-  },
-
-  // ---- People ----
-  sick_calls: {
-    name: '🤒 Sick calls', group: 'People', area: 'staff_scheduling', level: 'view', size: 's', opts: { rows: 5 }, settings: DASH_ROWS_SETTING, open: ['openSickPane'],
-    desc: 'Sick calls in the next 3 days, the ones still needing a plan first.',
-    async load(b) {
-      const L = (await dashRpc('hub_all_sick_calls', { p_days: 3 })) || [];
-      const needs = c => (typeof sickNeedsPlan === 'function' ? sickNeedsPlan(c) : !c.plan);
-      const wait = L.filter(needs); dashGlanceSet(b, wait.length ? wait.length + (wait.length === 1 ? ' sick call needs' : ' sick calls need') + ' a plan' : '');
-      return `<div class="dash-chips"><span class="dash-pill ${wait.length ? 'bad' : 'ok'}">${wait.length} need a plan</span><span class="dash-pill">${L.length - wait.length} handled</span></div>` +
-        dashRows(wait.concat(L.filter(c => !needs(c))), +b.opts.rows || 5, c => dashLine(esc(c.name + ' · ' + (c.studio_name || dashStudio(c.studio_id))),
-          esc(dashDay(c.shift_date) + ' · ' + shortTime(c.start_time) + '–' + shortTime(c.end_time)), needs(c) ? 'late' : ''), 'No sick calls. ✓');
-    }
-  },
-  swaps: {
-    name: '🔁 Shift swaps', group: 'People', area: 'staff_scheduling', level: 'edit', size: 's', opts: { rows: 5 }, settings: DASH_ROWS_SETTING, open: ['openSwapsPane'],
-    desc: 'Give-away shifts someone has taken, waiting for approval.',
-    async load(b) {
-      const W = ((await dashRpc('hub_offers_admin')) || []).filter(o => o.status === 'taken'); dashGlanceSet(b, W.length ? W.length + ' shift swaps to approve' : '');
-      return (W.length ? dashBig(W.length, 'waiting for you', 'warn') : '') +
-        dashRows(W, +b.opts.rows || 5, o => dashLine(esc(o.from_name + ' → ' + o.taker_name), esc(dashDay(o.shift_date) + ' · ' + shortTime(o.start_time) + ' · ' + (o.studio_name || ''))), 'Nothing waiting. ✓');
-    }
-  },
-  sign_offs: {
-    name: '✍️ Policy sign-offs', group: 'People', area: 'hr_policies', level: 'view', size: 's', open: ['openAckCompliance', 'ho'],
-    desc: 'Overdue, due and signed policy sign-offs across all studios.',
-    async load() {
-      const R = (await dashRpc('kb_ack_compliance', { p_studio_id: null })) || [];
-      const n = s => R.filter(r => r.status === s).length;
-      if (!R.length) return '<div class="dash-empty">No policies need signing right now.</div>';
-      return `<div class="dash-stats"><div><b class="bad">${n('overdue')}</b>Overdue</div><div><b>${n('due')}</b>To sign</div><div><b>${n('due_soon')}</b>Due soon</div><div><b class="ok">${n('signed')}</b>Signed</div></div>`;
-    }
-  },
-  concerns: {
-    name: '🛡️ Concerns', group: 'People', area: 'hr_policies', level: 'edit', size: 's', open: ['openConcernsAdmin'],
-    desc: 'New and open concerns: counts and age only. Details stay on the Concerns page.',
-    async load() {
-      const L = (await dashRpc('hub_concerns_list')) || [];
-      const fresh = L.filter(c => c.status === 'new'); dashGlanceSet(b, fresh.length ? fresh.length + ' new concerns' : ''); const looking = L.filter(c => c.status === 'reviewing');
-      const oldest = fresh.map(c => c.created_at).filter(Boolean).sort()[0];
-      return `<div class="dash-stats"><div><b class="${fresh.length ? 'bad' : 'ok'}">${fresh.length}</b>New</div><div><b>${looking.length}</b>Looking into it</div></div>` +
-        (oldest ? `<div class="dash-sub">Oldest new one: ${esc(relTime(oldest))}</div>` : '');
-    }
-  },
-
-  // ---- Money ----
-  sales_pace: {   // (the type is still "sales_pace" so dashboards that already have it get the new version)
-    name: '🏁 Studio pace', group: 'Money', area: 'sales_stats', level: 'view', size: 'm', opts: { order: 'best' }, open: ['dashOpenUrl', 'pace.html'],
-    desc: 'Every studio’s month-to-date pace toward its goal, like the Studio Pace page. Scroll to see them all.',
-    settings: b => `<label>Order <select data-opt="order"><option value="best"${b.opts.order !== 'worst' ? ' selected' : ''}>Best first</option><option value="worst"${b.opts.order === 'worst' ? ' selected' : ''}>Needs help first</option></select></label>`,
-    async load(b) {
-      const day = new Date().toLocaleDateString('en-CA', { timeZone: 'Etc/GMT+7' });   // (as pace.html: BC time)
-      const R = (await dashRpc('get_pace_leaderboard', { p_day: day })) || [], by = {};
-      R.forEach(r => { by[r.studio_id] = r; });
-      const num = v => v == null || isNaN(Number(v)) ? null : Number(v);
-      const L = Object.keys(STUDIO_NAMES).map(id => ({ id, pace: num(by[id] && by[id].month_pace_pct), goal: num(by[id] && by[id].month_goal_pct) }));
-      const ranked = L.filter(r => r.pace != null).sort((x, y) => y.pace - x.pace), rank = {};
-      ranked.forEach((r, i) => { rank[r.id] = i && ranked[i - 1].pace === r.pace ? rank[ranked[i - 1].id] : i + 1; });
-      const dir = b.opts.order === 'worst' ? 1 : -1;
-      L.sort((x, y) => x.pace == null ? (y.pace == null ? dashStudio(x.id).localeCompare(dashStudio(y.id)) : 1) : y.pace == null ? -1 : (x.pace - y.pace) * dir);
-      const counts = {}; ranked.forEach(r => { const t = dashPaceTier(r.pace); counts[t.label] = (counts[t.label] || 0) + 1; });
-      return `<div class="dash-chips">${DASH_PACE_TIERS.slice().reverse().filter(t => counts[t.label]).map(t => `<span class="dash-pill" style="background:${t.bg};color:${t.fg}">${counts[t.label]} ${esc(t.label)}</span>`).join('')}</div>` +
-        '<div class="dash-pace">' + L.map(r => { const t = dashPaceTier(r.pace), k = rank[r.id];
-          return `<div class="dash-pace-row"><span class="dash-rank">${k === 1 ? '🥇' : k === 2 ? '🥈' : k === 3 ? '🥉' : (k || '—')}</span>
-            <span class="dash-pace-name">${esc(dashStudio(r.id))}${r.goal != null ? `<small>${esc(r.goal)}% of the month’s goal</small>` : ''}</span>
-            <i><em style="width:${r.pace == null ? 0 : Math.max(2, Math.min(100, r.pace / 1.5))}%;background:${t ? t.bg : 'transparent'}"></em></i>
-            <b style="${t ? `background:${t.bg};color:${t.fg}` : 'color:var(--ink-soft)'}">${r.pace == null ? '—' : esc(r.pace) + '%'}</b></div>`; }).join('') +
-        `</div><div class="dash-sub">Month to date compared with where each studio needs to be today. 100% = on track.</div>`;
-    }
-  },
-  sched_check: {
-    name: '🗓️ Weekly schedule check', group: 'People', area: 'staff_scheduling', level: 'view', size: 'm', opts: { show: 'all' }, poll: 30000, open: ['dashOpenUrl', 'day-board.html?view=week'],
-    desc: 'Tick each studio once its week (Monday to Sunday) has been looked over. Shared: everyone sees who ticked what.',
-    settings: b => `<label>Show <select data-opt="show"><option value="all"${b.opts.show !== 'todo' ? ' selected' : ''}>Every studio</option><option value="todo"${b.opts.show === 'todo' ? ' selected' : ''}>Only studios not ticked yet</option></select></label>`,
-    async load(b) {
-      const off = (_dash.week && _dash.week[b.id]) || 0, wk = dashMonday(off);
-      const d = (await dashRpc('hub_sched_check_list', { p_week: wk })) || {}, C = {};
-      (d.checks || []).forEach(c => { C[c.studio_id] = c; });
-      if (!off) dashGlanceSet(b, (d.checks || []).length + ' of ' + Object.keys(STUDIO_NAMES).length + ' schedules checked');
-      return dashSchedHtml(b, wk, off, C);
-    }
-  },
-  orders: {
-    name: '🧾 New orders', group: 'Money', area: 'sales_stats', level: 'view', size: 'm', opts: { days: '3' }, poll: 60000,
-    desc: 'Shopify and World orders as they come in. ✓ hides one from your list (only yours).',
-    settings: b => `<label>Go back <select data-opt="days">${[['1', '1 day'], ['3', '3 days'], ['7', 'A week'], ['14', '2 weeks']].map(([v, l]) => `<option value="${v}"${String(b.opts.days) === v ? ' selected' : ''}>${l}</option>`).join('')}</select></label>`,
-    async load(b) {
-      const d = (await dashRpc('hub_dash_orders', { p_days: +b.opts.days || 3, p_limit: 40 })) || {}, O = d.orders || [];
-      (_dash.orders = _dash.orders || {})[b.id] = O; dashGlanceSet(b, +d.waiting ? d.waiting + ' new orders' : '');
-      if (!O.length) return '<div class="dash-empty">No new orders. ✓</div>';
-      const money = v => v == null ? '' : '$' + Number(v).toFixed(2);
-      return `<div class="dash-head-row"><span class="dash-big"><b>${esc(d.waiting)}</b> <span>new</span></span><button class="ho-btn sm" onclick="dashOrdersAckAll('${b.id}')">✓ All shown</button></div>` +
-        '<div class="dash-list">' + O.map((o, i) => `<div class="dash-order" id="dash-o-${b.id}-${i}">
-          <button class="dash-tick" title="Seen it: hide from my list" onclick="dashOrderAck('${b.id}', ${i})">✓</button>
-          <div class="dash-order-main"><div class="dash-main">${esc(o.name || '')} <span class="dash-o-amt">${esc(money(o.total))}</span></div>
-            <div class="dash-sub">${esc([o.customer, dashStudio(o.studio_id), o.channel, relTime(o.at)].filter(Boolean).join(' · '))}</div>
-            ${o.items ? `<div class="dash-o-items">${esc(o.items)}</div>` : ''}</div></div>`).join('') + '</div>' +
-        (+d.waiting > O.length ? `<div class="dash-more">+ ${esc(+d.waiting - O.length)} older, after these</div>` : '');
-    }
-  },
-
-  health: {
-    name: '🚨 System health', group: 'Admin', area: 'users_access', level: 'view', size: 'm', opts: { show: 'problems' }, poll: 300000,
-    desc: 'Are orders still coming in, did the scheduled jobs run, are web calls failing. Turns red when something goes quiet.',
-    settings: b => `<label>Show jobs <select data-opt="show"><option value="problems"${b.opts.show !== 'all' ? ' selected' : ''}>Only ones with a problem</option><option value="all"${b.opts.show === 'all' ? ' selected' : ''}>Every job</option></select></label>`,
-    async load(b) {
-      const d = (await dashRpc('hub_dash_health')) || {}, now = Date.now(), J = d.jobs || [];
-      const mins = t => t ? Math.round((now - new Date(t)) / 60000) : null;
-      const hr = new Date().getHours(), open = hr >= 8 && hr < 21;   // (studio hours, the viewer's clock)
-      const sm = mins(d.shopify && d.shopify.last), wm = mins(d.world && d.world.last);
-      const shopTone = sm == null ? 'bad' : open ? (sm > 120 ? 'bad' : sm > 60 ? 'mid' : 'ok') : (sm > 720 ? 'mid' : 'ok');
-      const worldTone = wm == null ? 'mid' : wm > 2880 ? 'mid' : 'ok';
-      const probs = J.map(j => ({ j, p: dashJobProblem(j, now) })).filter(x => x.p);
-      const web = d.web, webBad = web ? +web.bad || 0 : 0;
-      const issues = (shopTone === 'bad' ? 1 : 0) + probs.length + (webBad > 5 ? 1 : 0);
-      dashGlanceSet(b, issues ? '⚠ ' + issues + (issues === 1 ? ' system problem' : ' system problems') : '');
-      const feed = (lbl, tone, m, n) => `<div class="dash-hl ${tone}"><b>${lbl}</b><span>${m == null ? 'No orders on record' : 'Last one ' + esc(dashAgo(m))}</span><small>${esc(n || 0)} in the last 24 hours</small></div>`;
-      const shown = b.opts.show === 'all' ? J.map(j => ({ j, p: dashJobProblem(j, now) })) : probs;
-      return `<div class="dash-chips"><span class="dash-pill ${issues ? 'bad' : 'ok'}">${issues ? '⚠ ' + issues + ' to look at' : '✓ All good'}</span><span class="dash-pill">${J.length} scheduled jobs</span></div>
-        <div class="dash-hls">${feed('🛒 Shopify orders', shopTone, sm, d.shopify && d.shopify.day)}${feed('🌍 World orders', worldTone, wm, d.world && d.world.day)}</div>` +
-        (shown.length ? '<div class="dash-list">' + shown.map(({ j, p }) => dashLine(`${p ? '⚠️' : '✓'} ${esc(j.name)}`,
-          esc([p || (j.last_start ? 'ran ' + dashAgo(mins(j.last_start)) : 'not run yet'), j.last_msg].filter(Boolean).join(' · ')), p ? 'late' : '')).join('') + '</div>'
-          : '<div class="dash-empty">Every scheduled job ran on time. ✓</div>') +
-        (web ? `<div class="dash-sub" style="margin-top:8px">Web calls from scheduled jobs (last 24h): ${esc(web.total)} made, <b class="${webBad ? 'dash-red' : ''}">${esc(webBad)} failed</b>${webBad && web.latest_bad ? ' · latest: ' + esc(web.latest_bad.slice(0, 2).map(x => (x.code ? 'HTTP ' + x.code : x.msg || 'no answer') + ' ' + dashAgo(mins(x.at))).join(', ')) : ''}</div>` : '');
-    }
-  },
-  party_owing: {
-    name: '🎉 Party balances owing', group: 'Customers', area: 'parties_events', level: 'view', size: 's', opts: { rows: 6 }, settings: DASH_ROWS_SETTING, open: ['openPbPane'],
-    desc: 'Parties in the last 45 days with the after-party form not filled in, or money still owing.',
-    async load(b) {
-      const t = dashToday(), f = new Date(); f.setDate(f.getDate() - 45);
-      const R = (await dashRpc('hub_party_balances', { p_from: localDateStr(f), p_to: t, p_studio: null })) || [];
-      const st = r => typeof pbState === 'function' ? pbState(r, t) : (r.date > t ? 'upcoming' : !r.filled ? 'missing' : (r.owing != null && +r.owing > 0.004 ? 'owing' : 'ok'));
-      const miss = R.filter(r => st(r) === 'missing'), owe = R.filter(r => st(r) === 'owing'), sum = owe.reduce((x, r) => x + (+r.owing || 0), 0);
-      dashGlanceSet(b, miss.length + owe.length ? dashPl(miss.length + owe.length, 'party balance', 'party balances') + ' to sort' : '');
-      const K = typeof PB_KIND !== 'undefined' ? PB_KIND : {};
-      const list = miss.concat(owe).sort((x, y) => String(x.date).localeCompare(String(y.date)));
-      return `<div class="dash-chips"><span class="dash-pill ${miss.length ? 'bad' : 'ok'}">${dashPl(miss.length, 'form', 'forms')} not filled in</span><span class="dash-pill ${owe.length ? 'mid' : 'ok'}">${owe.length} owing · $${sum.toFixed(2)}</span></div>` +
-        dashRows(list, +b.opts.rows || 6, r => `<div class="dash-row${st(r) === 'missing' ? ' late' : ''}"><div class="dash-main">${esc(K[r.kind] || 'Party')} · ${esc(r.customer || '')}${st(r) === 'owing' ? ` <span class="dash-o-amt">$${(+r.owing).toFixed(2)}</span>` : ''}</div>
-          <div class="dash-sub">${esc(dashStudio(r.studio_id))} · ${esc(dashDay(r.date))} · ${st(r) === 'missing' ? 'form not filled in' : 'owing'}${typeof pbOpen === 'function' && r.session_id ? ` · <a href="#" onclick="pbOpen('${escAttr(r.session_id)}','${escAttr(r.studio_id)}','${escAttr(r.date)}');return false">Open</a>` : ''}</div></div>`, 'Every party is settled. ✓');
-    }
-  },
-  paylinks: {
-    name: '💳 Pay links not paid', group: 'Customers', area: 'front_desk', level: 'view', size: 's', opts: { rows: 6 }, settings: DASH_ROWS_SETTING, poll: 120000,
-    desc: 'Front desk pay links, QR checkouts and invoices across every studio: not paid, paid but not acknowledged, and still waiting.',
-    async load(b) {
-      const d = (await dashRpc('hub_dash_paylinks')) || {}, L = d.list || [];
-      const k = o => o.status === 'paid' ? 'paid' : o.status === 'pending' && (!o.expires || new Date(o.expires) > new Date()) ? 'wait' : 'unpaid';
-      const un = L.filter(o => k(o) === 'unpaid'), pd = L.filter(o => k(o) === 'paid'), wt = L.filter(o => k(o) === 'wait');
-      (_dash.pay = _dash.pay || {})[b.id] = L;
-      dashGlanceSet(b, un.length ? dashPl(un.length, 'pay link', 'pay links') + ' not paid' : '');
-      const money = v => '$' + (Number(v) || 0).toFixed(2);
-      const row = o => { const s = k(o), i = L.indexOf(o);
-        const acts = s === 'paid' ? `<button class="ho-btn sm primary" onclick="dashPayAck('${b.id}',${i},'paid')">Acknowledge</button>`
-          : s === 'unpaid' && o.status !== 'pending' ? `<button class="ho-btn sm" onclick="dashPayAck('${b.id}',${i},'paid_other')">Paid another way</button><button class="ho-btn sm" onclick="dashPayAck('${b.id}',${i},'written_off')">Write off</button>` : '';
-        return `<div class="dash-row${s === 'unpaid' ? ' late' : ''}"><div class="dash-main">${esc(o.name || o.order || 'Order')} <span class="dash-o-amt">${money(o.total)}</span></div>
-          <div class="dash-sub">${esc([dashStudio(o.studio_id), s === 'paid' ? '✓ paid' : s === 'wait' ? 'waiting' : '⚠ not paid', o.mode === 'invoice' ? 'invoice' : o.mode === 'link' ? 'link' : o.mode ? o.mode : '', o.at ? relTime(o.at) : '', o.by ? 'by ' + String(o.by).split('@')[0] : ''].filter(Boolean).join(' · '))}</div>
-          ${o.what ? `<div class="dash-o-items">${esc(o.what)}</div>` : ''}${acts ? `<div class="dash-acts">${acts}</div>` : ''}</div>`; };
-      return `<div class="dash-chips"><span class="dash-pill ${un.length ? 'bad' : 'ok'}">${un.length} not paid</span><span class="dash-pill ${pd.length ? 'mid' : ''}">${pd.length} paid, to acknowledge</span><span class="dash-pill">${wt.length} waiting</span></div>` +
-        dashRows(un.concat(pd, wt), +b.opts.rows || 6, row, 'Nothing sent to pay right now. 🎉') +
-        (+d.skipped ? `<div class="dash-sub">${esc(d.skipped)} studios couldn’t be read.</div>` : '');
-    }
-  },
-  unattributed: {
-    name: '❓ Sales with no studio', group: 'Money', area: 'finance', level: 'view', size: 'm', opts: { rows: 6, month: 'this' }, open: ['dashOpenUrl', 'finance.html'],
-    desc: 'Sales this month that couldn’t be matched to a studio (assign one right here), and how much store credit was used.',
-    settings: b => `<label>Month <select data-opt="month"><option value="this"${b.opts.month !== 'last' ? ' selected' : ''}>This month</option><option value="last"${b.opts.month === 'last' ? ' selected' : ''}>Last month</option></select></label>` + DASH_ROWS_SETTING(b),
-    async load(b) {
-      const d = new Date(); d.setDate(1); if (b.opts.month === 'last') d.setMonth(d.getMonth() - 1);
-      const m = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
-      const [R, C] = await Promise.all([dashRpc('get_unattributed_sales', { p_month: m }), dashRpc('hub_dash_store_credit', { p_month: m }).catch(() => null)]);
-      const N = (R || []).filter(r => r.item_type === 'NEEDS A STUDIO'), sum = N.reduce((t, r) => t + (+r.net_amount || 0), 0);
-      (_dash.unat = _dash.unat || {})[b.id] = N;
-      dashGlanceSet(b, N.length ? (N.length === 1 ? '1 sale needs a studio' : N.length + ' sales need a studio') : '');
-      const can = dashCan('finance', 'edit'), opts = Object.keys(STUDIO_NAMES).sort((x, y) => STUDIO_NAMES[x].localeCompare(STUDIO_NAMES[y])).map(id => `<option value="${id}">${esc(STUDIO_NAMES[id])}</option>`).join('');
-      return `<div class="dash-chips"><span class="dash-pill ${N.length ? 'mid' : 'ok'}">${N.length === 1 ? '1 sale needs' : N.length + ' sales need'} a studio · $${sum.toFixed(2)}</span>` +
-          (C ? `<span class="dash-pill" title="Shopify orders paid partly with store credit">🎟 Store credit: ${esc(C.orders)} orders · $${(+C.credit || 0).toFixed(2)}${+C.unknown ? ` (+${esc(C.unknown)} lines, amount unknown)` : ''}</span>` : '') + '</div>' +
-        dashRows(N, +b.opts.rows || 6, (r, i) => `<div class="dash-row"><div class="dash-main">${esc(r.shopify_order_name)} · ${esc(r.product_title || '')}${r.variant_title ? ' · ' + esc(r.variant_title) : ''} <span class="dash-o-amt">$${(+r.net_amount || 0).toFixed(2)}</span></div>
-          <div class="dash-sub">${esc(dashDay(r.sale_day))}${r.category ? ' · ' + esc(r.category) : ''}</div>
-          ${can ? `<select class="dash-assign" onchange="dashAssign('${b.id}',${N.indexOf(r)},this)"><option value="">Assign to a studio…</option>${opts}</select>` : ''}</div>`, 'Every sale has a studio. ✓');
-    }
-  },
-
-  // ---- Comms ----
-  newsletters: {
-    name: '📧 Newsletters', group: 'Comms', area: 'newsletters', level: 'view', size: 's', open: ['openNewsPane'],
-    desc: 'Drafts, scheduled and recently sent customer newsletters.',
-    async load() {
-      const L = (await dashRpc('news_issues_list', { p_templates: false })) || [];
-      const n = s => L.filter(i => i.status === s).length;
-      const last = L.filter(i => i.status === 'sent').sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))[0];
-      return `<div class="dash-stats"><div><b>${n('draft')}</b>Drafts</div><div><b>${n('scheduled') + n('sending')}</b>Scheduled</div><div><b>${n('sent')}</b>Sent</div></div>` +
-        (last ? `<div class="dash-sub">Last sent: <b>${esc(last.title)}</b> · ${esc(relTime(last.updated_at))}</div>` : '');
-    }
-  },
-  announcements: {
-    name: '📢 Announcements', group: 'Comms', area: 'staff_comms', level: 'view', size: 'm', opts: { rows: 4 }, settings: DASH_ROWS_SETTING, open: ['openAnnouncePane'],
-    desc: 'Announcements showing now, and how many studios have read each.',
-    async load(b) {
-      const [a, r] = await Promise.all([sb.from('announcements').select('id, title, priority, show_from, show_until, studio_ids').order('created_at', { ascending: false }),
-        sb.from('announcement_reads').select('announcement_id, studio_id')]);
-      if (a.error) throw a.error;
-      const t = dashToday(), live = (a.data || []).filter(x => !(x.show_from > t) && !(x.show_until && x.show_until < t));
-      const reads = {}; (r.data || []).forEach(x => { (reads[x.announcement_id] = reads[x.announcement_id] || new Set()).add(x.studio_id); });
-      return dashRows(live, +b.opts.rows || 4, x => { const tg = x.studio_ids && x.studio_ids.length ? x.studio_ids : Object.keys(STUDIO_NAMES);
-        const n = tg.filter(s => reads[x.id] && reads[x.id].has(s)).length;
-        return dashLine(`${x.priority === 'urgent' ? '❗ ' : ''}${esc(String(x.title || 'Announcement').replace(/[*_#`]/g, ''))}`, r.error ? '' : `read at ${n} of ${tg.length} studios`); }, 'No announcements showing now.');
-    }
-  },
-  staff_news: {
-    name: '📰 Staff newsletter', group: 'Comms', area: 'staff_comms', level: 'view', size: 's', open: ['openStaffNewsPane'],
-    desc: 'The latest staff newsletter: draft or published, and how many have read it.',
-    async load() {
-      const L = (await dashRpc('hub_staffnews_list')) || [];
-      if (!L.length) return '<div class="dash-empty">No staff newsletters yet.</div>';
-      const pub = L.filter(x => x.status === 'published').sort((a, b) => String(b.month).localeCompare(String(a.month)))[0], drafts = L.filter(x => x.status === 'draft').length;
-      return (pub ? dashLine(`<b>${esc(pub.title)}</b>`, `read by ${esc(pub.read || 0)} of ${esc(pub.staff || 0)} staff`) : '') +
-        `<div class="dash-sub">${drafts} draft${drafts === 1 ? '' : 's'}</div>`;
-    }
-  },
-
-  // ---- World ----
-  studio_notes: {
-    name: '✍️ Studio notes', group: 'World', area: 'world_site_deals', level: 'view', size: 's', opts: { rows: 5 }, settings: DASH_ROWS_SETTING, open: ['openSnotesPane'],
-    desc: 'Studios with no note showing on World, and notes ending this week.',
-    async load(b) {
-      const d = (await dashRpc('hub_studio_notes_all')) || {}, N = d.notes || [], t = dashToday();
-      const wk = localDateStr(new Date(Date.now() + 7 * 86400000));
-      const live = N.filter(n => n.show_from <= t && (!n.show_until || n.show_until >= t));
-      const has = new Set(live.map(n => n.studio_id)), none = Object.keys(STUDIO_NAMES).filter(s => !has.has(s));
-      const ending = new Set(live.filter(n => n.show_until && n.show_until <= wk).map(n => n.studio_id));
-      return `<div class="dash-chips"><span class="dash-pill ${none.length ? 'mid' : 'ok'}">${none.length} with no note</span><span class="dash-pill">${ending.size} ending this week</span></div>` +
-        dashRows(none, +b.opts.rows || 5, s => dashLine(esc(dashStudio(s)), 'no note showing'), 'Every studio has a note showing. ✓');
-    }
-  },
-  donations: {
-    name: '🎁 Donations & giveaways', group: 'World', area: 'world_site_deals', level: 'view', size: 's', open: ['openDonPane'],
-    desc: 'Giveaway codes handed out and how many have been used.',
-    async load() {
-      const R = (await dashRpc('hub_donations_list', { p_search: null, p_from: null, p_to: null })) || [];
-      const codes = R.reduce((t, d) => t.concat(d.code_status || []), []), used = codes.filter(c => c.used === true).length;
-      return `<div class="dash-stats"><div><b>${R.length}</b>Entries</div><div><b>${codes.length}</b>Codes given</div><div><b class="ok">${used}</b>Used</div></div>`;
-    }
-  },
-
-  // ---- Admin ----
-  activity: {
-    name: '🕘 Recent activity', group: 'Admin', area: 'users_access', level: 'view', size: 'm', opts: { rows: 8 }, settings: DASH_ROWS_SETTING, open: ['openActPane'],
-    desc: 'The latest changes in the Activity log.',
-    async load(b) {
-      const n = +b.opts.rows || 8, L = (await dashRpc('staff_activity_list', { p: { limit: n } })) || [];
-      return dashRows(L, n, x => dashLine(esc(x.label || x.action || ''), esc([String(x.actor_email || '').split('@')[0], dashStudio(x.studio_id), relTime(x.at)].filter(Boolean).join(' · '))), 'Nothing logged yet.');
-    }
+let _heroHours = { studio: null, data: undefined };
+function heroHoursHtml(st) {
+  if (_heroHours.studio !== st) {
+    _heroHours = { studio: st, data: undefined };
+    sb.rpc('hub_studio_hours_get', { p_studio: st }).then(r => { _heroHours.data = r.error ? null : (r.data || null); if (_lastHeroData) renderDailyHero(_lastHeroData); }, () => { _heroHours.data = null; });
+    return '';
   }
-};
+  const H = _heroHours.data; if (!H) return '';
+  const now = new Date(), todayStr = localDateStr(now), dayNo = (now.getDay() + 6) % 7 + 1;
+  const sp = (H.special || []).find(x => x.date === todayStr), d = sp || (H.week || []).find(x => x.day === dayNo);
+  if (!d) return '';
+  const t = x => { if (!x) return ''; const [h, m] = String(x).split(':').map(Number); return (h % 12 || 12) + (m ? ':' + String(m).padStart(2, '0') : '') + (h >= 12 ? 'pm' : 'am'); };
+  return `<span class="hero-hours" title="Studio hours (as families see them on 4Cats World)">🕒 ${d.closed ? 'Closed today' : 'Open today ' + t(d.open) + '–' + t(d.close)}${sp && sp.label ? ' · ' + esc(sp.label) : ''}</span>`;
+}
+function renderDailyHero(data) {
+  _lastHeroData = data;
+  try { myNotesLoad(); } catch (e) {}
+  try { labourCardLoad(); } catch (e) {}
+  const container = document.getElementById('card-daily-hero');
+  if (!container) return;
 
-// Quick links: Hub pages (by their sidebar button) and tool pages (new tab)
-const DASH_LINKS = [
-  { key: 'finance', name: '💵 Finance', url: 'finance.html', area: 'finance', level: 'view' },
-  { key: 'pace', name: '📈 Studio pace', url: 'pace.html', area: null },
-  { key: 'access', name: '🔐 Access', url: 'access.html', area: 'users_access', level: 'view' },
-  { key: 'admin', name: '🛠 Admin', url: 'admin.html', area: null },
-  { key: 'world', name: '🌍 World settings', url: 'world-settings.html', area: 'world_site_deals', level: 'view' },
-  { key: 'staffsched', name: '🗓️ Staff schedule', url: 'staff-schedule.html', area: 'staff_scheduling', level: 'view' },
-  { key: 'sessions', name: '🗂️ Class times table', url: 'sessions.html', area: 'class_times_table', level: 'view' },
-  { key: 'camps', name: '🏕️ Camps', url: 'camps-manager.html', area: 'camps', level: 'view' },
-  { key: 'kb', name: '📘 Knowledge base', url: 'knowledge.html', area: 'support', level: 'view' },
-  { key: 'curriculum', name: '📚 Curriculum', url: 'curriculum.html', area: 'programs_curriculum', level: 'view' },
-  { key: 'n_announce', name: '📢 Announcements', nav: 'nav-announce', area: 'staff_comms', level: 'view' },
-  { key: 'n_ft', name: '🏫 Field trips', nav: 'nav-ft', area: 'parties_events', level: 'view' },
-  { key: 'n_bo', name: '🏢 Buyouts', nav: 'nav-bo', area: 'parties_events', level: 'view' },
-  { key: 'n_ts', name: '🕒 Timesheets', nav: 'nav-ts', area: 'timesheets', level: 'view' },
-  { key: 'n_stf', name: '👥 Staffing', nav: 'nav-stf', area: 'staff_scheduling', level: 'view' },
-  { key: 'n_news', name: '📧 Newsletters', nav: 'nav-news', area: 'newsletters', level: 'view' },
-  { key: 'n_rp', name: '🛍️ Products', nav: 'nav-rp', area: 'retail_products', level: 'view' }
-];
-function dashLinkGo(key) {
-  const l = DASH_LINKS.find(x => x.key === key); if (!l) return;
-  if (l.url) { window.open(l.url, '_blank'); return; }
-  const b = document.getElementById(l.nav);
-  if (b) b.click(); else alert('That page isn’t on this login.');
+  if (!data || data.error || !data.studioId) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const studioName = STUDIO_NAMES[data.studioId] || data.studioId;
+  const evTitles = new Set(_todayEvents.map(e => String(e.title || '').trim().toLowerCase()));
+  const n = Array.isArray(data.sessions) ? data.sessions.filter(x => !evTitles.has(String(x.title || '').trim().toLowerCase()))
+    .filter(x => {
+      if (!_classInfo || Number(x.bookingCount || 0) > 0) return true;
+      const info = _classInfo.byKey[String(x.time || '').slice(0, 8) + '|' + x.title];
+      return !(info && info.spaces !== null && info.spaces !== undefined && Number(info.spaces) <= 0 && !(info.type === 'class' || info.type === 'series' || /class \d+ of \d+|week session/i.test(x.title || '')));
+    }).length : null;
+  const evText = _todayEvents.length ? `${_todayEvents.length === 1 ? 'an event' : _todayEvents.length + ' events'}` : '';
+  const people = _teamCount ? ` and ${_teamCount} ${_teamCount === 1 ? 'person' : 'people'} on the team` : '';
+  const sub = n === null ? `Here's what's happening at ${esc(studioName)} today`
+    : n === 0 && evText ? `${evText.charAt(0).toUpperCase() + evText.slice(1)}${people} at ${esc(studioName)} today`
+    : n === 0 ? `Nothing booked at ${esc(studioName)} today${people ? ` · ${_teamCount} on the team` : ''}`
+    : `${n} session${n === 1 ? '' : 's'}${evText ? ', ' + evText : ''}${people} at ${esc(studioName)} today`;
+  // (Nov 9 2026) the studio's open hours today (Studio hours: the week, or today's special day)
+  const hrs = heroHoursHtml(data.studioId);
+  container.innerHTML = `
+    <div class="hero-greeting">${heroGreetingHtml(data.firstName)}</div>
+    <div class="hero-sub">${sub}${hrs}</div><div id="next-pa"></div><div id="party-missing"></div><div id="studio-note-card"></div>`;
+  renderFloorToday(data);
+  nextPaLoad(data.studioId);
+  partyMissingLoad(data.studioId);
+  studioNoteLoad(data.studioId);
 }
 
-// ---------- Studio pace, weekly schedule check, orders: helpers ----------
-const DASH_PACE_TIERS = [   // (the same five bands as pace.html)
-  { label: 'Closed', bg: '#d32f2f', fg: '#fff' }, { label: 'SOS', bg: '#f57c00', fg: '#fff' }, { label: 'Action plan', bg: '#75fcfd', fg: '#000' },
-  { label: 'Planned growth', bg: '#75fc4c', fg: '#000' }, { label: 'All good', bg: '#e0218a', fg: '#fff' }];
-function dashPaceTier(v) { if (v == null) return null; return DASH_PACE_TIERS[v > 100 ? 4 : v >= 80 ? 3 : v >= 50 ? 2 : v >= 10 ? 1 : 0]; }
-function dashOpenUrl(u) { window.open(u, '_blank'); }
-function dashMonday(off) {   // this week's Monday (local), moved by whole weeks
-  const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7) + 7 * (off || 0));
-  return localDateStr(d);
+// (Nov 10 2026) 📅 Next PA/PD day: the studio's next PA/PD day camp (in the next 4 months), so it never sneaks up on anyone.
+// Amber within 2 weeks, red within a week. Hidden when there isn't one coming up.
+let _nextPa = { sid: null, at: 0, html: '' }, _nextPaCache = {}, _nextPaSeq = 0;
+async function nextPaLoad(sid) {
+  const el = () => document.getElementById('next-pa');
+  if (!sid) return;
+  // (Nov 10 2026) one answer per studio, kept 10 minutes; a slower, older lookup never overwrites a newer one (that made it flick between days)
+  const hit = _nextPaCache[sid];
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) { if (el()) el().innerHTML = hit.html; return; }
+  const seq = ++_nextPaSeq;
+  const d0 = new Date(), ymd = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const to = new Date(d0.getTime() + 120 * 86400000);
+  const { data, error } = await sb.from('sessions').select('id, session_date, session_time, title, capacity, spaces_left_cache, show')
+    .eq('studio_id', sid).gte('session_date', ymd(d0)).lte('session_date', ymd(to))
+    .or('title.ilike.*pa day*,title.ilike.*pd day*,title.ilike.*pa/pd*,title.ilike.*no school*').order('session_date').limit(40);
+  if (error) { console.error('next PA/PD day:', error.message); return; }
+  // (Nov 10 2026) only a PA/PD day that's running: spots open, or kids booked. A closed one (0 spots, nobody booked) is skipped.
+  const shown = (data || []).filter(x => x.show !== false);   // (hidden placeholder days don't count)
+  const paBk = {};
+  if (shown.length) { try { const pb = await sb.from('bookings').select('session_id, qty').in('session_id', shown.map(x => x.id)).gt('qty', 0).is('returned_at', null);
+    (pb.data || []).forEach(b => { paBk[b.session_id] = (paBk[b.session_id] || 0) + (Number(b.qty) || 0); }); } catch (e) { } }
+  const list = shown.filter(x => (Number(x.spaces_left_cache) || 0) > 0 || x.spaces_left_cache == null || paBk[x.id] > 0);
+  const day = list.length ? list[0].session_date : null;
+  let html = '';
+  if (day) {
+    const same = list.filter(x => x.session_date === day);
+    const booked = same.reduce((t, x) => t + (paBk[x.id] || 0), 0);   // (kids booked at the day camp itself)
+    const days = Math.round((new Date(day + 'T12:00:00') - new Date(ymd(d0) + 'T12:00:00')) / 86400000);
+    const when = new Date(day + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' });
+    // (Nov 10 2026) kids booked but nobody on the schedule that day yet: red and glowing
+    // (anything booked at the studio that day counts: the PA/PD camp, classes, glazing…)
+    let noStaff = false, dayBooked = booked;
+    try {
+      const bk = await sb.from('bookings').select('qty, sessions!inner(studio_id, session_date)').eq('sessions.studio_id', sid).eq('sessions.session_date', day).gt('qty', 0).is('returned_at', null);
+      if (bk.error) console.warn('next PA/PD day: bookings', bk.error.message); else dayBooked = Math.max(booked, (bk.data || []).reduce((t, x) => t + (Number(x.qty) || 0), 0));
+    } catch (e) { }
+    let drafts = 0;   // (draft shifts don't count as scheduled: staff can't see them yet)
+    try { const sh = await sb.from('staff_shifts').select('id, start_time, status').eq('studio_id', sid).eq('shift_date', day).not('start_time', 'is', null);
+      if (sh.error) console.warn('next PA/PD day: shifts', sh.error.message);
+      else { const all = sh.data || []; drafts = all.filter(x => x.status === 'draft').length; noStaff = !all.some(x => x.status !== 'draft'); } } catch (e) { }
+    const glow = noStaff && dayBooked > 0;   // (red and glowing only when people are booked)
+    const soon = glow || days <= 7 ? '#c0392b' : days <= 14 ? '#b45309' : '#2e7d32', bg = glow || days <= 7 ? '#fdecea' : days <= 14 ? '#fff3e0' : '#eef7ee';
+    html = `<div class="${glow ? 'pa-glow' : ''}" style="display:inline-flex;align-items:center;gap:10px;margin-top:10px;padding:8px 14px;border-radius:12px;background:${bg};border:1px solid ${soon}${glow ? '' : '33'};color:#1a1a1a;font-size:14px">
+      <span style="font-size:20px">🎒</span><span><b>Next PA/PD day:</b> ${esc(when)} <b style="color:${soon}">· ${days === 0 ? 'today' : days === 1 ? 'tomorrow' : 'in ' + days + ' days'}</b> · ${dayBooked ? `<b>${dayBooked} booked that day</b>${booked && booked < dayBooked ? ` (${booked} at the day camp)` : ''}` : 'nothing booked yet'}${noStaff ? ` · <b style="color:#c0392b">${glow ? '⚠ ' : ''}${drafts ? `shifts not published yet (${drafts} draft${drafts === 1 ? '' : 's'})` : 'nobody scheduled yet'}</b>` : ' · ✓ staff scheduled'}</span></div>`;
+  }
+  _nextPaCache[sid] = { at: Date.now(), html }; _nextPa = { sid, at: Date.now(), html };
+  if (seq !== _nextPaSeq || sid !== _sessionStudioId) return;   // (a newer lookup, or another studio, is showing now)
+  if (el()) el().innerHTML = html;
 }
-function dashSchedHtml(b, wk, off, C) {
-  const ids = Object.keys(STUDIO_NAMES), done = ids.filter(id => C[id]).length;
-  const end = new Date(wk + 'T12:00:00'); end.setDate(end.getDate() + 6);
-  const f = d => d.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' });
-  const label = (off === 0 ? 'This week' : off === 1 ? 'Next week' : off === -1 ? 'Last week' : '') + ` · ${f(new Date(wk + 'T12:00:00'))} – ${f(end)}`;
-  const list = ids.filter(id => b.opts.show !== 'todo' || !C[id]);
-  return `<div class="dash-wk"><button class="ho-btn sm" onclick="dashSchedWeek('${b.id}',-1)" title="Week before">◀</button><b>${esc(label)}</b><button class="ho-btn sm" onclick="dashSchedWeek('${b.id}',1)" title="Week after">▶</button>
-      ${off ? `<button class="ho-btn sm" onclick="dashSchedWeek('${b.id}',0)">This week</button>` : ''}</div>
-    <div class="dash-prog"><i><em style="width:${Math.round(done / ids.length * 100)}%"></em></i><span><b>${done} of ${ids.length}</b> studios checked</span></div>` +
-    (list.length ? '<div class="dash-list">' + list.map(id => { const c = C[id];
-      return `<label class="dash-check${c ? ' on' : ''}"><input type="checkbox" ${c ? 'checked' : ''} onchange="dashSchedTick('${b.id}','${wk}','${id}',this.checked)">
-        <span class="dash-main">${esc(dashStudio(id))}</span>
-        <span class="dash-sub">${c ? '✓ ' + esc(c.by || 'Someone') + ' · ' + esc(dashWhen(c.at)) : 'Not checked yet'}</span>
-        <a href="day-board.html?view=week&studio=${encodeURIComponent(id)}&date=${wk}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="Open this studio's week board">📅</a></label>`; }).join('') + '</div>'
-      : '<div class="dash-empty">Every studio is checked for this week. ✓</div>');
+
+// (Nov 10 2026) 🎉 Parties in the next 3 days still missing details (what they're celebrating, the project, how many guests), and
+// 🎁 promo parties not finished yet: on the studio's Today screen, with who to call
+// open that day on the Schedule, with the party's form open (the details to fill in)
+async function pmOpenParty(day, bookingId) {
+  await inboxGoDay(_sessionStudioId, day);
+  if (!bookingId || !_plan || !_plan.parties) return;
+  const i = _plan.parties.findIndex(p => p.booking_id === bookingId);
+  if (i < 0) return;
+  if (!_plan.partyForms[bookingId]) togglePartyForm(i);
+  setTimeout(() => { const el = document.querySelector(`.pf-wrap[data-pf="${bookingId}"]`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 300);
 }
-function dashWhen(t) { const d = new Date(t); return isNaN(d) ? '' : d.toLocaleDateString('en-CA', { weekday: 'short' }) + ' ' + d.toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' }).replace(/\s?([ap])\.?m\.?/i, (m, x) => x.toLowerCase() + 'm'); }
-function dashSchedWeek(id, step) { _dash.week = _dash.week || {}; _dash.week[id] = step === 0 ? 0 : (_dash.week[id] || 0) + step; dashLoadBlock(id, true); }
-async function dashSchedTick(id, wk, studio, on) {
-  const b = _dash.layout.blocks[dashIdx(id)]; if (!b) return;
+async function partyMissingLoad(sid) {
+  const el = document.getElementById('party-missing'); if (!el || !sid) return;
+  let rows = [];
   try {
-    const d = await dashRpc('hub_sched_check_set', { p_week: wk, p_studio: studio, p_on: !!on }), C = {};
-    (d.checks || []).forEach(c => { C[c.studio_id] = c; });
-    const off = (_dash.week && _dash.week[id]) || 0, html = dashSchedHtml(b, wk, off, C);
-    _dash.cache[id] = html; const el = document.getElementById('dash-body-' + id); if (el) el.innerHTML = html;
-  } catch (e) { alert('Couldn’t save that tick: ' + (e.message || e)); dashLoadBlock(id, true); }
+    const { list } = await fetchPartyData(sid);
+    (list || []).forEach(pt => {
+      const dd = daysUntil(pt.session.session_date); if (dd < 0 || dd > 3) return;
+      const b = pt.booking || {}, d = pt.detail || {}, miss = [];
+      const ft = /field\s*trip|team\s*building|get.?together/i.test(pt.session.title || '');   // (no "celebrating" for these)
+      if (!ft && !String(b.reason_for_gathering || '').trim()) miss.push('what they’re celebrating');
+      if (!String(b.project_preference || '').trim() || /undecided/i.test(b.project_preference || '')) miss.push('the project');
+      if (!(Number(b.estimated_attendance) > 0) && !(Number(d.guests) > 0) && !(Number(d.expected_guests) > 0)) miss.push('how many guests');
+      if (miss.length) rows.push({ day: pt.session.session_date, time: pt.session.session_time, who: b.customer_name, phone: b.customer_phone, email: b.customer_email, miss, title: pt.session.title, booking_id: pt.booking_id });
+    });
+  } catch (e) { }
+  try {
+    const { data } = await sb.rpc('hub_custom_holds', { p_studio: sid });
+    (data || []).filter(h => h.status === 'held' && h.promo).forEach(h => { const dd = daysUntil(String(h.day).slice(0, 10)); if (dd >= 0 && dd <= 3)
+      rows.push({ day: String(h.day).slice(0, 10), time: h.at, who: h.customer_name, phone: h.customer_phone, email: h.customer_email, miss: ['all of it (free promo party not finished on World)'], title: '🎁 Promo party' }); });
+  } catch (e) { }
+  if (!rows.length) { el.innerHTML = ''; return; }
+  rows.sort((a, b) => (a.day + a.time).localeCompare(b.day + b.time));
+  el.innerHTML = `<div class="pm-box"><b>🎉 ${rows.length} part${rows.length === 1 ? 'y' : 'ies'} in the next 3 days missing details: please call</b>${rows.map(r => `<div class="pm-row"><span><b>${esc(ptyDayLabel(r.day))} ${esc(shortTime(r.time))}</b> · ${esc(r.who || 'Customer')}${r.title && /promo/i.test(r.title) ? ' · 🎁 promo' : ''}</span>
+    <span class="fd-sm">Missing: ${esc(r.miss.join(', '))}</span><a href="#" class="pm-open" onclick="event.preventDefault();pmOpenParty('${escAttr(r.day)}','${escAttr(r.booking_id || '')}')">🎉 Open the party →</a><span class="fd-sm">${r.phone ? `📞 <a href="tel:${escAttr(r.phone)}">${esc(r.phone)}</a>` : ''}${r.email ? ` · ${esc(r.email)}` : ''}</span></div>`).join('')}</div>`;
 }
-async function dashOrderAck(id, i) {
-  const o = ((_dash.orders || {})[id] || [])[i]; if (!o) return;
-  const row = document.getElementById('dash-o-' + id + '-' + i); if (row) row.classList.add('gone');
-  try { await dashRpc('hub_dash_order_ack', { p_orders: [{ source: o.source, ref: o.ref }] }); }
-  catch (e) { if (row) row.classList.remove('gone'); alert('Couldn’t mark that one: ' + (e.message || e)); return; }
-  setTimeout(() => dashLoadBlock(id, false), 250);
-}
-async function dashOrdersAckAll(id) {
-  const O = (_dash.orders || {})[id] || []; if (!O.length) return;
-  if (O.length > 5 && !confirm('Mark all ' + O.length + ' orders shown as seen?')) return;
-  document.querySelectorAll('[id^="dash-o-' + id + '-"]').forEach(r => r.classList.add('gone'));
-  try { await dashRpc('hub_dash_order_ack', { p_orders: O.map(o => ({ source: o.source, ref: o.ref })) }); }
-  catch (e) { alert('Couldn’t mark them: ' + (e.message || e)); }
-  dashLoadBlock(id, false);
+// ---------- Home office → Announcements ----------
+// Admin logins only. Access follows admin.html's per-person Studio Ops access
+// (admin_can): view → can look; edit → can write. The database enforces the
+// same rule for writes (hub_announcements_write_access.sql).
+let _hoCan = { view: false, edit: false };
+let _hubOwner = false;     // Renée and Joey (admin_owners)
+let _hubMemberFix = false; // can use "Mark as member": owners, or "Can fix memberships" ticked in admin (hub_member_fixers.sql)
+let _hoAnns = [], _hoReadsBy = {}, _hoReadsOk = true, _hoEditing = null;
+
+async function setupHomeOffice(data) {
+  const g = document.getElementById('nav-group-homeoffice');
+  _hoCan = { view: false, edit: false }; _hubOwner = false; _hubMemberFix = false;
+  if (!data || !data.isAdmin) { if (g) g.style.display = 'none'; return; }
+  const [v, e] = await Promise.all([
+    sb.rpc('admin_can', { p_section: 'ops', p_level: 'view' }),
+    sb.rpc('admin_can', { p_section: 'ops', p_level: 'edit' })
+  ]);
+  _hoCan = { view: v.data === true, edit: e.data === true };
+  if (g) g.style.display = _hoCan.view ? '' : 'none';
+  try { const o = await sb.rpc('hub_is_owner'); _hubOwner = o.data === true; } catch (x) { _hubOwner = false; }
+  try { const m = await sb.rpc('hub_can_fix_members'); _hubMemberFix = m.error ? _hubOwner : m.data === true; } catch (x) { _hubMemberFix = _hubOwner; }
+  const nm = document.getElementById('nav-memb'); if (nm) nm.style.display = _hubMemberFix ? '' : 'none';
 }
 
-// ---------- System health, pay links, sales with no studio: helpers ----------
-function dashPl(n, one, many) { return n + ' ' + (+n === 1 ? one : many); }
-function dashAgo(m) { if (m == null) return ''; if (m < 1) return 'just now'; if (m < 60) return m + ' min ago'; if (m < 1440) return Math.round(m / 60) + ' h ago'; return Math.round(m / 1440) + ' days ago'; }
-function dashJobProblem(j, now) {   // a scheduled job that failed, or hasn't run when its schedule says it should have
-  if (j.error) return j.error;
-  if (j.active === false) return '';
-  if (j.last_status === 'failed') return 'last run failed';
-  if (+j.fails_24h > 0) return j.fails_24h + ' failed runs in the last day';
-  const sc = String(j.schedule || '').trim().split(/\s+/), age = j.last_start ? (now - new Date(j.last_start)) / 60000 : null;
-  let every = null;   // minutes between runs, for the common shapes
-  if (sc.length === 5 && sc.slice(1).every(x => x === '*')) every = sc[0] === '*' ? 1 : /^\*\/\d+$/.test(sc[0]) ? +sc[0].slice(2) : 60;
-  else if (sc.length === 5 && /^\d+$/.test(sc[0]) && sc[1] === '*' && sc.slice(2).every(x => x === '*')) every = 60;
-  else if (sc.length === 5 && /^\d+$/.test(sc[0]) && /^\d+$/.test(sc[1]) && sc.slice(2).every(x => x === '*')) every = 1440;
-  else if (sc.length === 5 && /^\d+$/.test(sc[0]) && /^\d+$/.test(sc[1]) && sc[2] === '*' && sc[3] === '*' && /^\d$/.test(sc[4])) every = 10080;
-  if (age == null) return every && every <= 1440 ? 'hasn’t run yet' : '';
-  if (every && age > Math.max(every * 3, every + 120)) return 'late: last ran ' + dashAgo(Math.round(age));
-  return '';
+// ---------- Coordinator → Plan ahead ----------
+// The next 14 days: who's on shift (hub_team_on_date), Director / Demoers /
+// Circlers with break times, wheel teachers and party teachers. Saves to the
+// same fields the schedule's Day view uses (session_staff, party_details), so
+// both always agree. "Fill blanks" runs the automatic roles for that day.
+const PLAN_ROLES = [['director', 'Director'], ['teacher', 'Demoer 1'], ['teacher2', 'Demoer 2'],
+                    ['circler', 'Circler 1'], ['circler2', 'Circler 2'], ['circler3', 'Circler 3']];
+let _plan = null;   // { date, team, sessions, roles, wheel: {sid: name}, party: {bookingId: [n1, n2]}, ... }
+
+// Adjust spots: admin logins, or a coordinator whose staff profile has
+// "Can adjust spaces" (checked on the server by staff-pin, like the Day view).
+let _adjustStaff = null;   // { id, display_name, role } once the PIN passes
+function planCanAdjust() { return !!(_studioData && _studioData.isAdmin) || !!_adjustStaff; }
+async function checkAdjustPower() {
+  _adjustStaff = null;
+  if (!_sessionPin) return;
+  try {
+    const res = await fetch(SUPABASE_URL + '/functions/v1/staff-pin', {
+      method: 'POST',
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'adjust_spaces', pin: _sessionPin, studio_id: _sessionStudioId || '' })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.ok && !body.error && body.match) _adjustStaff = body.match;
+  } catch (e) { /* no power */ }
+  if (paneVisible('plan-pane') && _plan) renderPlanDay();
 }
-async function dashPayAck(id, i, kind) {
-  const o = ((_dash.pay || {})[id] || [])[i]; if (!o) return;
-  let note = null;
-  if (kind === 'paid_other') { note = prompt(`How did ${o.name || 'they'} pay $${(+o.total || 0).toFixed(2)}? (e.g. cash, paid at the counter)`, ''); if (note === null) return; note = note || 'Paid another way'; }
-  if (kind === 'written_off') { note = prompt(`Not paid: ${o.what || ''}. Why? (kept with the order)`, ''); if (!note || !note.trim()) return; note = note.trim(); }
-  try { await dashRpc('hub_pos_ack', { p_order: o.id, p_kind: kind, p_note: note }); } catch (e) { alert('Couldn’t save that: ' + (e.message || e)); return; }
-  dashLoadBlock(id, false);
+function planCanEdit() { return !!_sessionPin || !!(_studioData && _studioData.isAdmin); }
+// Admins: the studio dropdown on the Schedule too (the same as on Today; changing either changes both)
+function renderPlanStudioPick() {
+  const w = document.getElementById('plan-studio-wrap'); if (!w) return;
+  const d = _studioData || {};
+  if (!d.isAdmin || !(d.studios || []).length) { w.innerHTML = ''; return; }
+  w.innerHTML = `<label class="plan-studio" title="See another studio's schedule">👁️ Studio <select onchange="changeAdminStudio(this.value)">${d.studios.map(id =>
+    `<option value="${escAttr(id)}"${id === _sessionStudioId ? ' selected' : ''}>${esc(STUDIO_NAMES[id] || id)}</option>`).join('')}</select></label>`;
 }
-async function dashAssign(id, i, sel) {
-  const r = ((_dash.unat || {})[id] || [])[i], st = sel.value; if (!r || !st) return;
-  if (!confirm(`Assign ${r.shopify_order_name} to ${STUDIO_NAMES[st]}? It will count toward that studio's sales.`)) { sel.value = ''; return; }
-  sel.disabled = true;
-  try { const n = await dashRpc('set_sales_line_studio', { p_order_name: r.shopify_order_name, p_line_item_id: r.shopify_line_item_id || null, p_studio_id: st }); if (!n) throw new Error('Nothing was updated (already assigned?)'); }
-  catch (e) { alert(e.message || e); sel.disabled = false; sel.value = ''; return; }
-  dashLoadBlock(id, false);
+function openPlanAhead() {
+  showOnlyPane('plan-pane');
+  setActiveNav('nav-plan');
+  renderPlanStudioPick();
+  loadPlanDay((_plan && _plan.date) || localDateStr(new Date()));
+}
+// Which days in the strip have anything running (looked up once per studio).
+// Running = a session with spots or bookings (capacity above 0, or not set),
+// a kids class week, a catch-up class, or an event. Hidden sessions don't count.
+let _planRunDays = null;   // { studio, days: Set }
+async function loadPlanRunDays(win) {
+  const st = _sessionStudioId;
+  win = win || planStripWindow(_planStripSel || localDateStr(new Date()));
+  if (_planRunDays && _planRunDays.studio === st && _planRunDays.from === win.from) return;
+  const from = planDateOf(win.from), to = planDateOf(win.to);
+  const { data, error } = await sb.from('sessions').select('session_date, capacity, show, session_type, title, held_until')
+    .eq('studio_id', st).gte('session_date', localDateStr(from)).lte('session_date', localDateStr(to));
+  if (error) return;
+  const days = new Set(), extra = new Set();
+  // (Nov 11 2026) a held time (field trip, custom or promo party) or anything booked: never shown as an idle day
+  (data || []).forEach(x => { if (x.held_until) extra.add(x.session_date); });
+  try {
+    const bk = await sb.from('bookings').select('qty, sessions!inner(studio_id, session_date)').eq('sessions.studio_id', st)
+      .gte('sessions.session_date', localDateStr(from)).lte('sessions.session_date', localDateStr(to)).gt('qty', 0).is('returned_at', null);
+    (bk.data || []).forEach(b => { if (b.sessions && b.sessions.session_date) extra.add(b.sessions.session_date); });
+  } catch (e) { }
+  (data || []).forEach(x => {
+    if (x.show === false) return;
+    if (x.session_type === 'festival' || x.capacity === null || x.capacity > 0 ||
+        /\bclass\s+\d+\s+of\s+\d+/i.test(x.title || '') || x.title === 'Catch Up Class') days.add(x.session_date);
+  });
+  _planRunDays = { studio: st, days, extra, from: win.from };
+  if (_planStripSel) planDayStrip(_planStripSel);
+}
+// The strip shows a week back to four weeks ahead of TODAY, or, for a date picked
+// outside that, a week before to four weeks after that date.
+function planDateOf(ds) { const [y, m, d] = ds.split('-').map(Number); return new Date(y, m - 1, d); }
+function planStripWindow(sel) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const lo = new Date(today); lo.setDate(lo.getDate() - 7);
+  const hi = new Date(today); hi.setDate(hi.getDate() + 28);
+  const s = planDateOf(sel);
+  const start = (s < lo || s > hi) ? new Date(s.getFullYear(), s.getMonth(), s.getDate() - 7) : lo;
+  const end = new Date(start); end.setDate(end.getDate() + 35);
+  return { from: localDateStr(start), to: localDateStr(end), start };
+}
+let _planStripSel = null;
+function planDayStrip(sel) {
+  _planStripSel = sel;
+  const el = document.getElementById('plan-days');
+  const win = planStripWindow(sel);
+  if (!_planRunDays || _planRunDays.studio !== _sessionStudioId || _planRunDays.from !== win.from) loadPlanRunDays(win);
+  const run = _planRunDays && _planRunDays.studio === _sessionStudioId && _planRunDays.from === win.from ? _planRunDays.days : null;
+  const extra = run ? (_planRunDays.extra || new Set()) : new Set();
+  const pick = document.getElementById('plan-pick'); if (pick && pick.value !== sel) pick.value = sel;
+  const todayStr = localDateStr(new Date());
+  const out = [];
+  for (let k = 0; k <= 35; k++) {
+    const d = new Date(win.start); d.setDate(d.getDate() + k);
+    const ds = localDateStr(d);
+    const i = Math.round((planDateOf(ds) - planDateOf(todayStr)) / 86400000);   // days from today
+    const booked = extra.has(ds), idle = run && !run.has(ds) && !booked;
+    out.push(`<button class="plan-day${ds === sel ? ' on' : ''}${i === 0 ? ' today' : ''}${i < 0 ? ' past' : ''}${idle ? ' idle' : ''}${booked && run && !run.has(ds) ? ' plan-day-booked' : ''}" title="${idle ? 'Nothing running' : booked && run && !run.has(ds) ? 'Usually closed, but something is booked or held this day' : ''}" onclick="loadPlanDay('${ds}')">${k === 0 || d.getDate() === 1 ? `<div class="dm">${d.toLocaleDateString(undefined, { month: 'short' })}${d.getFullYear() !== new Date().getFullYear() ? ' ’' + String(d.getFullYear()).slice(2) : ''}</div>` : '<div class="dm">&nbsp;</div>'}<div class="dw">${i === 0 ? 'Today' : d.toLocaleDateString(undefined, { weekday: 'short' })}</div><div class="dn">${d.getDate()}</div></button>`);
+  }
+  el.innerHTML = out.join('');
+  const on = el.querySelector('.plan-day.on');
+  if (on) el.scrollLeft = Math.max(0, on.offsetLeft - el.offsetLeft - 120);
+}
+const planWriteName = p => p.nickname || p.full_name || p.name;   // the way the Day view writes names
+// (Nov 11 2026) a kids class counts as running even with nobody enrolled yet, EXCEPT the fall drawing classes
+// (Lawren Harris, Drawing Class): those are hidden until someone enrols
+function planKidsRuns(x, P) {
+  P = P || _plan; if (!planIsKids(x)) return false;
+  if (((P.booked || {})[x.id] || 0) > 0) return true;
+  if (x.capacity === 0 && /week session/i.test(x.title || '')) return false;   // (empty sign-up rows)
+  return !/lawren\s*harris|drawing\s*class/i.test(x.title || '');
+}
+function planIsKids(x) { if (planIsCamp(x)) return false;   // camps and PA/PD days are camps, even when set up as type "class"
+  return x.session_type === 'class' || x.session_type === 'series' || /class \d+ of \d+|week session/i.test(x.title || ''); }
+
+async function loadPlanDay(date) {
+  if (date) hubRemember({ date });
+  if (!_plan || _plan.date !== date) { const fl = document.getElementById('plan-floor'); if (fl) fl.style.display = 'none'; }   // a new day: close the floor plan
+  planDayStrip(date);
+  const body = document.getElementById('plan-body');
+  body.innerHTML = '<div class="ho-intro">Loading…</div>';
+  const st = _sessionStudioId;
+  try {
+    const [team, sess] = await Promise.all([
+      sb.rpc('hub_team_on_date', { p_studio_id: st, p_date: date }),
+      sb.from('sessions').select('id, title, session_date, session_time, session_type, duration_minutes, capacity, spaces_left_cache, show, world_item_id, world_party, held_until').eq('studio_id', st).eq('session_date', date).order('session_time')
+        .then(r => r.error && /world_party/.test(r.error.message) ? sb.from('sessions').select('id, title, session_date, session_time, session_type, duration_minutes, capacity, spaces_left_cache, show, world_item_id').eq('studio_id', st).eq('session_date', date).order('session_time') : r)
+    ]);
+    if (team.error) throw team.error;
+    if (sess.error) throw sess.error;
+    const events = (sess.data || []).filter(x => x.session_type === 'festival');
+    let sessions = (sess.data || []).filter(x => x.session_type !== 'festival');
+    const ids = sessions.map(x => x.id);
+    const partyIds = sessions.filter(x => x.session_type === 'party').map(x => x.id);
+    const [ss, pb, allB] = await Promise.all([
+      ids.length ? sb.from('session_staff').select('*').in('session_id', ids) : Promise.resolve({ data: [] }),
+      partyIds.length ? sb.from('bookings').select('id, session_id, customer_name, customer_email, customer_phone, shopify_order_name, qty, estimated_attendance, raw_payload, booked_at, project_preference, reason_for_gathering, customer_booking_number').in('session_id', partyIds).gt('qty', 0).is('returned_at', null) : Promise.resolve({ data: [] }),
+      ids.length ? sb.from('bookings').select('session_id, qty, hot_chocolate_qty, candy_bag_qty').in('session_id', ids).gt('qty', 0).is('returned_at', null) : Promise.resolve({ data: [] })
+    ]);
+    // Checked in on the studio's sign-in iPad (signin.html), same count as the Day view's ✅ (drop-ins left out)
+    const signins = {};
+    if (ids.length) {
+      const si = await sb.from('signin_entries').select('id, session_id, name, mode, signed_in_at').in('session_id', ids);
+      (si.data || []).filter(e => e.mode !== 'dropin').forEach(e => { (signins[e.session_id] = signins[e.session_id] || []).push(e); });
+    }
+    const booked = {}, extras = {};
+    (allB.data || []).forEach(b => {
+      booked[b.session_id] = (booked[b.session_id] || 0) + (b.qty || 0);
+      if (b.hot_chocolate_qty || b.candy_bag_qty) {
+        const e = extras[b.session_id] = extras[b.session_id] || { hc: 0, cb: 0 };
+        e.hc += b.hot_chocolate_qty || 0; e.cb += b.candy_bag_qty || 0;
+      }
+    });
+    // Kids classes from week 2 on: the week's roster, same database function the Day view uses.
+    const week2 = sessions.filter(x => /\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(x.title || ''));
+    const rosters = await Promise.all(week2.map(x => sb.rpc('get_class_week_bookings', { p_session_id: x.id })));
+    week2.forEach((x, i) => { const r = rosters[i]; if (!r.error) booked[x.id] = (r.data || []).reduce((n, b) => n + (b.qty || 0), 0); });
+    // Catch-up classes: one per catch-up student (same as the Day view).
+    const cuIds = sessions.filter(x => x.title === 'Catch Up Class').map(x => x.id);
+    if (cuIds.length) {
+      const cu = await sb.from('class_catchups').select('target_session_id').in('target_session_id', cuIds);
+      (cu.data || []).forEach(r => { booked[r.target_session_id] = (booked[r.target_session_id] || 0) + 1; });
+    }
+    const pbIds = (pb.data || []).map(b => b.id);
+    const pd = pbIds.length ? await sb.from('party_details').select('*').in('booking_id', pbIds) : { data: [] };
+    const staffBy = {}; (ss.data || []).forEach(r => { staffBy[r.session_id] = r; });
+    const dayRow = sessions.filter(x => !planIsKids(x)).map(x => staffBy[x.id]).find(r => r && PLAN_ROLES.some(([f]) => String(r[f] || '').trim())) || {};
+    const roles = {};
+    PLAN_ROLES.forEach(([f]) => { roles[f] = dayRow[f] || ''; roles['break_' + f] = dayRow['break_' + f] || ''; });
+    const wheel = {};
+    sessions.filter(x => /wheel/i.test(x.title) && !planIsKids(x)).forEach(x => { wheel[x.id] = (staffBy[x.id] || {}).wheel_teacher || ''; });
+    const parties = (pb.data || []).map(b => {
+      const d = (pd.data || []).find(z => z.booking_id === b.id) || {};
+      const sx = sessions.find(z => z.id === b.session_id) || {};
+      return { booking_id: b.id, session: sx, guests: d.expected_guests || b.estimated_attendance || null, t1: d.party_teacher1 || '', t2: d.party_teacher2 || '',
+               booking: b, detail: d.booking_id ? d : null };
+    });
+    // Same rows as the Day view: hidden sessions only if someone's booked, and
+    // capacity-0 rows only if booked (kids class weeks and catch-ups always).
+    const isWeek2 = x => /\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(x.title || '');
+    sessions = sessions.filter(x => (x.show !== false || booked[x.id] > 0 || x.held_until) &&
+      // closed sessions (0 or negative spots) stay, under "Not running", so they can be reopened;
+      // empty kids class sign-up rows ("6 Week Session") stay hidden, like the Day view
+      (booked[x.id] > 0 || x.capacity === null || x.capacity > 0 || isWeek2(x) || x.title === 'Catch Up Class' || !/week session/i.test(x.title || '')));
+    // "Part 2 | 6 Week Session" sign-up rows are the same class as "Class 7 of 12"
+    // at the same time (their kids are in its roster), so show the class only.
+    // Only a "Part N" row of the SAME class (same name before the first "|") is folded in;
+    // a different class's first week at that time (e.g. "Make the Gift | 3 Week Session"
+    // beside "Clay Wheel | Class 2 of 5") is its own class and always shows.
+    const seriesBase = t => String(t || '').split('|')[0].toLowerCase().replace(/[^a-z0-9]+/g, '');
+    const classKeys = new Set(sessions.filter(isWeek2).map(x => x.session_time + '~' + seriesBase(x.title)));
+    sessions = sessions.filter(x => !(/\|\s*part\s*\d+\s*\|/i.test(x.title || '') && /\|\s*\d+\s*week\s*session/i.test(x.title || '') &&
+      classKeys.has(x.session_time + '~' + seriesBase(x.title))));
+    // Parties: every party TYPE (Kids Party, Splatter Party, Party Time Slot…) is its own product,
+    // but they share the studio's party room slot. Booked parties show as themselves; unbooked
+    // party products become ONE "Open party slot" row per time, only where the party slot
+    // schedule (party_slot_schedule, what the booking widgets offer) has room left.
+    try {
+      const [y0, m0, d0] = date.split('-').map(Number), dow = new Date(y0, m0 - 1, d0).getDay();
+      const ps = await sb.from('party_slot_schedule').select('time_slot, slots').eq('studio_id', st).eq('day_of_week', dow);
+      if (!ps.error && (ps.data || []).length) {
+        const slotsAt = {}; ps.data.forEach(r => { slotsAt[String(r.time_slot).slice(0, 5)] = Number(r.slots) || 0; });
+        // Only the party ROOM products follow the slot schedule; team building, adult
+        // get-togethers and field trips have their own times and show as before.
+        const isRoomParty = x => x.session_type === 'party' && /^(kids party|splatter party|party time slot|splatter party time slot)( · reserved \w*)?$/i.test(String(x.title || '').trim());   // (" · reserved …": a time held for one customer)
+        const party = sessions.filter(isRoomParty);
+        const bookedAt = {};
+        party.filter(x => booked[x.id] > 0).forEach(x => { const t = String(x.session_time).slice(0, 5); bookedAt[t] = (bookedAt[t] || 0) + (Number(booked[x.id]) || 1); });
+        // (Nov 10 2026) a time held for one customer (a custom or 🎁 promo party, not booked yet) takes a room too, and shows as its own row
+        const heldParty = x => !!x.held_until && !(booked[x.id] > 0);
+        party.filter(heldParty).forEach(x => { const t = String(x.session_time).slice(0, 5); bookedAt[t] = (bookedAt[t] || 0) + 1; });
+        const openRows = [];
+        // every party time in the slot schedule (or with a party product): rooms there minus parties booked there.
+        // (A Kids Party with 2 spots and 1 booked still has a room open, even with no unbooked product left at that time.)
+        [...new Set(Object.keys(slotsAt).filter(t => party.some(x => String(x.session_time).slice(0, 5) === t)))].forEach(t => {
+          const open = (slotsAt[t] || 0) - (bookedAt[t] || 0);
+          // the party products customers can book at this time (old leftovers with no Shopify product, like "Party Time Slot", don't count)
+          const products = party.filter(x => String(x.session_time).slice(0, 5) === t && buildShopifyTitle(x.session_date, x.session_time || '00:00:00', x.title) && (x.capacity == null || Number(x.capacity) > 0));   // (not 0-spot leftovers)
+          if (!products.length) return;   // (only 0-spot leftovers here: no party offered at this time)
+          // closed from the Schedule (every party product here set to 0 spots left)
+          const closed = products.length > 0 && products.every(x => x.spaces_left_cache !== null && x.spaces_left_cache !== undefined && Number(x.spaces_left_cache) <= 0);
+          const live = closed ? 0 : Math.min(open, Math.max(0, ...products.map(x => x.spaces_left_cache == null ? open : Number(x.spaces_left_cache) || 0)));   // (rooms closed one at a time)
+          if (open > 0) openRows.push({ id: 'slot-' + t, title: closed ? 'Party slot (closed)' : live < open ? `Open party slot (${open - live} of ${open} closed)` : 'Open party slot', session_date: date, session_time: t + ':00', session_type: 'party',
+            capacity: closed ? 0 : live, spaces_left_cache: closed ? 0 : live, show: true, partySlot: true, slotClosed: closed, slotProducts: products, slotOpenRooms: open, slotLive: live,
+            slotRooms: slotsAt[t] || 0, slotBooked: bookedAt[t] || 0,
+            slotKinds: [...new Set(products.filter(x => (Number(x.spaces_left_cache) || 0) > 0).map(x => /splatter/i.test(x.title) ? 'Splatter' : 'Kids'))] });
+        });
+        sessions = sessions.filter(x => !isRoomParty(x) || booked[x.id] > 0 || heldParty(x)).concat(openRows)
+          .sort((a, b) => String(a.session_time).localeCompare(String(b.session_time)));
+      }
+    } catch (e) { /* no slot schedule: show party products as before */ }
+    const kidsTeacher = {};
+    sessions.filter(planIsKids).forEach(x => { kidsTeacher[x.id] = (staffBy[x.id] || {}).teacher || ''; });
+    // "Can't make it?" → skip + 15 min early (world_class_weeks.sql): a little 15-minute catch-up row before the class they're coming early to
+    const early = [];
+    if (ids.length) {
+      try {
+        const ec = await sb.from('class_week_changes').select('booking_id, next_session, note, customer_name, qty').in('next_session', ids).eq('kind', 'early_next').is('undone_at', null);
+        if (!ec.error && (ec.data || []).length) {
+          const bc = await sb.from('booking_children').select('booking_id, child_index, child_name').in('booking_id', ec.data.map(c => c.booking_id)).order('child_index');
+          const kidsOf = {}; ((bc.data) || []).forEach(k => { if (k.child_name) (kidsOf[k.booking_id] = kidsOf[k.booking_id] || []).push(k.child_name); });
+          const by = {};
+          ec.data.forEach(c => {
+            const sx = (sess.data || []).find(z => z.id === c.next_session); if (!sx) return;
+            const e = by[sx.id] = by[sx.id] || { session: sx, kids: [] };
+            const nm = (kidsOf[c.booking_id] || []).join(', ') || c.customer_name || 'A student';
+            e.kids.push(nm + (c.note ? ' (' + c.note + ')' : ''));
+          });
+          Object.keys(by).forEach(k => early.push(by[k]));
+        }
+      } catch (e) { /* table not there yet: no catch-up rows */ }
+    }
+    // Workshop times a customer set up from World's "Suggest a date" (hub_ws_suggested.sql): the little "S"
+    const suggested = {};
+    if (ids.length) {
+      try {
+        const sg = await sb.rpc('hub_ws_suggested', { p_sessions: ids, p_pin: _sessionPin || null });
+        if (!sg.error) (sg.data || []).forEach(x => { suggested[x.session_id] = x; });
+      } catch (e) { /* not set up yet: no S */ }
+    }
+    // Camp teams (hub_camp_team.sql): one lead + teachers per camp day
+    let campTeam = {};
+    const campIds = sessions.filter(planIsCamp).map(x => x.id);
+    if (campIds.length) { try { const ct = await sb.rpc('hub_camp_team', { p_session_ids: campIds }); if (!ct.error) campTeam = ct.data || {}; } catch (e) {} }
+    // Party forms already open stay open (and keep what's typed) when the day reloads.
+    const keepForms = (_plan && _plan.date === date && _plan.partyForms) || {};
+    const keepLists = (_plan && _plan.date === date && _plan.classLists) || {};
+    // World workshops (admins): this day's times and the workshops to choose from (world_workshop_planner.sql)
+    let ws = null;
+    if (planCanShifts()) {
+      const w = await sb.rpc('hub_ws_range', { p_studio: st, p_from: date, p_to: date }); ws = w.error ? { error: w.error.message } : w.data;
+      if (!_wsProjects || _wsProjectsErr) { const pr = await sb.rpc('hub_ws_projects'); _wsProjects = pr.error ? [] : (pr.data || []); _wsProjectsErr = pr.error ? pr.error.message : ''; if (pr.error) console.warn('hub_ws_projects:', pr.error); }
+    }
+    _plan = { ws, date, early, suggested, team: team.data || [], sessions, events, staffBy, booked, extras, signins, kidsTeacher, campTeam, partyForms: keepForms, classLists: keepLists, roles, wheel, parties, dirty: false, msg: '' };
+    renderPlanDay();
+  } catch (e) {
+    body.innerHTML = `<div class="ho-card">Couldn't load that day: ${esc(e.message || e)}</div>`;
+  }
 }
 
-// ---------- Role starter layouts (blocks not in the library yet, or not allowed, are skipped) ----------
-const DASH_STARTERS = [
-  { key: 'owner', name: 'Owner', blocks: [['for_you', 'm'], ['health', 'm'], ['sales_pace', 'm'], ['orders', 'm'], ['sched_check', 'm'], ['unattributed', 'm'], ['month_glance', 'm'], ['fill_rates', 'm'], ['open_close', 's'], ['sick_calls', 's'], ['concerns', 's'], ['unpaid_invoices', 's'], ['activity', 'm'], ['quick_links', 'm']] },
-  { key: 'home_office_ops', name: 'Home office ops', blocks: [['for_you', 'm'], ['orders', 'm'], ['paylinks', 's'], ['party_owing', 's'], ['open_close', 'm'], ['class_problems', 'm'], ['sick_calls', 's'], ['swaps', 's'], ['field_trips', 's'], ['buyouts', 's'], ['devices', 's'], ['retail_stock', 's'], ['announcements', 'm']] },
-  { key: 'hr', name: 'HR', blocks: [['for_you', 'm'], ['sched_check', 'm'], ['sick_calls', 'm'], ['swaps', 's'], ['time_off', 's'], ['timesheets', 'm'], ['sign_offs', 'm'], ['concerns', 's'], ['missing_pins', 's'], ['staff_news', 'm']] },
-  { key: 'registration', name: 'Registration', blocks: [['for_you', 'm'], ['find_family', 'm'], ['party_owing', 's'], ['paylinks', 's'], ['find_membership', 's'], ['family_changes', 's'], ['date_suggestions', 's'], ['parties_chase', 's'], ['field_trips', 's'], ['unpaid_invoices', 's'], ['class_problems', 'm'], ['chat_unread', 's']] },
-  { key: 'marketing', name: 'Marketing', blocks: [['for_you', 'm'], ['newsletters', 'm'], ['studio_notes', 'm'], ['project_interest', 's'], ['donations', 's'], ['points', 's'], ['sales_pace', 's'], ['fill_rates', 'l']] }
-];
-function dashAllowed(type) { const t = DASH_BLOCKS[type]; return !!t && dashCan(t.area, t.level); }
-function dashStarterBlocks(st) { return st.blocks.filter(([t]) => dashAllowed(t)); }
-function dashBestStarter() {
-  const roles = (_dash.me && _dash.me.roles) || [];
-  const byRole = DASH_STARTERS.find(s => roles.includes(s.key)); if (byRole) return byRole.key;
-  let best = DASH_STARTERS[1], score = -1;
-  DASH_STARTERS.filter(s => s.key !== 'owner').forEach(s => { const n = dashStarterBlocks(s).length / s.blocks.length; if (n > score) { score = n; best = s; } });
-  return best.key;
+// ================= World workshops in the day planner (admins; world_workshop_planner.sql) =================
+// Workshop times sold on World (no Shopify products): add, change spots, swap, hide or remove
+// on this day, and bulk-add across studios and weeks. Changes show on World straight away.
+let _wsProjects = null, _wsProjectsErr = '';   // every project (hub_ws_projects), loaded once
+// The workshop picker: a search box. On World first, then projects running now (next 60 days), then everything else.
+const _wsPick = {};   // pre → { list: [{ v, name, group }], hi }
+function wsPickList(items) {
+  const onWorld = new Set(items.map(i => i.id));
+  const others = (_wsProjects || []).filter(p => !p.item_id || !onWorld.has(p.item_id));
+  return items.map(i => ({ v: i.id, name: i.title, group: 'On World' }))
+    .concat(others.filter(p => p.current).map(p => ({ v: p.item_id || 'p:' + p.id, name: p.name, group: 'Running now (first time on World)' })))
+    .concat(others.filter(p => !p.current).map(p => ({ v: p.item_id || 'p:' + p.id, name: p.name, group: 'All other projects (first time on World)' })));
 }
-function dashBuild(keys) {
-  const out = [], seen = new Set();
-  keys.forEach(k => { const st = DASH_STARTERS.find(s => s.key === k); if (!st) return;
-    dashStarterBlocks(st).forEach(([type, size]) => { if (seen.has(type)) return; seen.add(type);
-      out.push({ id: dashNewId(), type, size, opts: Object.assign({}, DASH_BLOCKS[type].opts || {}) }); }); });
-  if (!out.length) ['for_you', 'quick_links'].forEach(type => out.push({ id: dashNewId(), type, size: 'm', opts: Object.assign({}, DASH_BLOCKS[type].opts || {}) }));
-  return { v: 1, start: false, starter: keys[0] || '', blocks: out };
+function wsPickerHtml(pre, items) {
+  _wsPick[pre] = { list: wsPickList(items), hi: 0 };
+  return `<span class="ws-pick"><input type="text" id="${pre}-find" placeholder="Type to search workshops…" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="${pre}-list"
+      onfocus="wsPickShow('${pre}')" oninput="wsPickShow('${pre}')" onkeydown="wsPickKey(event, '${pre}')" onblur="setTimeout(() => wsPickHide('${pre}'), 150)">
+    <input type="hidden" id="${pre}-item" value=""><div class="ws-pick-list" id="${pre}-list" role="listbox" hidden></div></span>`;
+}
+function wsPickMatches(pre) {
+  const q = (document.getElementById(pre + '-find').value || '').trim().toLowerCase();
+  const L = _wsPick[pre].list;
+  return (q ? L.filter(x => x.name.toLowerCase().includes(q)) : L).slice(0, 60);
+}
+function wsPickShow(pre) {
+  const box = document.getElementById(pre + '-list'), inp = document.getElementById(pre + '-find'), M = wsPickMatches(pre);
+  if (inp.value !== (_wsPick[pre].chosenName || '')) { document.getElementById(pre + '-item').value = ''; wsSetupToggle(pre); }   // typing again: nothing chosen yet
+  _wsPick[pre].hi = Math.min(_wsPick[pre].hi, Math.max(0, M.length - 1)); _wsPick[pre].shown = M;
+  let last = '';
+  box.innerHTML = M.length ? M.map((x, i) => (x.group !== last ? `<div class="ws-pick-g">${esc(last = x.group)}</div>` : '') +
+    `<div class="ws-pick-o${i === _wsPick[pre].hi ? ' hi' : ''}" role="option" onmousedown="event.preventDefault(); wsPickChoose('${pre}', ${i})">${esc(x.name)}</div>`).join('')
+    : '<div class="ws-pick-g">No match</div>';
+  box.hidden = false; inp.setAttribute('aria-expanded', 'true');
+}
+function wsPickHide(pre) { const box = document.getElementById(pre + '-list'); if (box) box.hidden = true; const inp = document.getElementById(pre + '-find'); if (inp) inp.setAttribute('aria-expanded', 'false'); }
+function wsPickChoose(pre, i) {
+  const x = (_wsPick[pre].shown || [])[i]; if (!x) return;
+  document.getElementById(pre + '-item').value = x.v; document.getElementById(pre + '-find').value = x.name; _wsPick[pre].chosenName = x.name;
+  wsPickHide(pre); wsSetupToggle(pre);
+  const go = document.getElementById(pre + '-go'); if (go && go.disabled !== undefined && pre === 'wsb') { go.disabled = true; const m = document.getElementById('wsb-msg'); if (m) m.textContent = ''; }
+}
+function wsPickKey(e, pre) {
+  const P = _wsPick[pre], n = (P.shown || []).length;
+  if (e.key === 'ArrowDown') { e.preventDefault(); if (document.getElementById(pre + '-list').hidden) wsPickShow(pre); else { P.hi = Math.min(n - 1, P.hi + 1); wsPickShow(pre); } }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); P.hi = Math.max(0, P.hi - 1); wsPickShow(pre); }
+  else if (e.key === 'Enter') { e.preventDefault(); if (n) wsPickChoose(pre, P.hi); }
+  else if (e.key === 'Escape') wsPickHide(pre);
+  else P.hi = 0;
+}
+function wsSetupHtml(pre) {
+  return `<div class="ws-setup" id="${pre}-setup" hidden><b>First time on World</b> <span class="goal-note">· it books through Shopify checkout (no product needed)</span>
+    <div class="ws-setup-row">
+      <label>Kind<select id="${pre}-kind"><option value="workshop">Workshop</option><option value="mini_make">Mini Make</option></select></label>
+      <label>Regular $<input type="number" id="${pre}-price" min="1" step="0.01" value="39"></label>
+      <label class="wide">Member prices<input type="text" id="${pre}-tiers" value="1 for 29, 2 for 39, 3 for 49, 4 for 59"></label>
+      <label>Ages from<input type="number" id="${pre}-age" min="0" max="99" value="6"></label>
+      <label>Minutes<input type="number" id="${pre}-min" min="15" step="15" value="90"></label>
+    </div></div>`;
+}
+function wsSetupToggle(pre) {
+  const v = document.getElementById(pre + '-item').value, box = document.getElementById(pre + '-setup');
+  if (box) box.hidden = !v.startsWith('p:');
+  const go = document.getElementById(pre + '-go'); if (go && go.dataset.label) go.textContent = v.startsWith('p:') ? 'Set up and add' : go.dataset.label;
+}
+// The workshop to use: an existing one, or a project set up now (its first time on World)
+async function wsEnsureItem(pre) {
+  const v = document.getElementById(pre + '-item').value;
+  if (!v) throw new Error('Choose a workshop (type to search).');
+  if (!v.startsWith('p:')) return v;
+  const tiers = []; String(document.getElementById(pre + '-tiers').value || '').replace(/(\d+)\s*(?:for|=|:)\s*\$?\s*([\d.]+)/gi, (_, n, pr) => { tiers.push([+n, +pr]); });
+  const { data, error } = await sb.rpc('hub_ws_setup', { p_project: v.slice(2), p_kind: document.getElementById(pre + '-kind').value, p_min_age: +document.getElementById(pre + '-age').value,
+    p_price: +document.getElementById(pre + '-price').value, p_tiers: tiers.sort((a, b) => a[0] - b[0]), p_minutes: +document.getElementById(pre + '-min').value });
+  if (error) throw error;
+  _wsProjects = null;   // reload: it's on World now
+  return data;
+}
+// Reopen a time closed to bookings (e.g. on the day board): its open spots back (hub_board_session_close)
+async function wsReopen(id) {
+  const { error } = await sb.rpc('hub_board_session_close', { p_id: id, p_close: false });
+  if (error) { alert(/hub_board_session_close/.test(error.message) ? 'Run week_board.sql in Supabase first.' : error.message); return; }
+  await loadPlanDay(_plan.date); _plan.msg = 'Reopened to bookings.'; renderPlanDay();
+}
+function wsTime(t) { const [h, m] = String(t).split(':').map(Number); return `${h % 12 || 12}${m ? ':' + String(m).padStart(2, '0') : ''}${h >= 12 ? 'pm' : 'am'}`; }
+function wsDayHtml() {
+  const W = _plan.ws;
+  if (!W) return '';
+  if (W.error) return `<div class="ho-section-head">🎨 World workshops</div><div class="ho-intro">${/function|does not exist/i.test(W.error) ? 'Run world_workshop_planner.sql in Supabase to switch this on.' : esc(W.error)}</div>`;
+  const items = W.items || [], times = W.times || [];
+  const today = localDateStr(new Date()), soon = (() => { const d = new Date(); d.setDate(d.getDate() + 5); return localDateStr(d); })();
+  const itemOpts = sel => items.map(i => `<option value="${escAttr(i.id)}"${i.id === sel ? ' selected' : ''}>${esc(i.title)}</option>`).join('');
+  const shown = new Set((_plan.sessions || []).filter(z => !planNotRunning(z)).map(z => String(z.id)));   // the ones in the day's list above
+  const rows = times.filter(t => !shown.has(String(t.session_id))).map(t => {   // the others have their controls on their own row above   // the others have their controls on their own row above
+    // (Nov 9 2026) closed (no spots open: e.g. closed on the day board) or hidden, said clearly, with the way back
+    const ses = (_plan.sessions || []).find(z => String(z.id) === String(t.session_id));
+    const closed = t.show && !t.booked && ses && ses.spaces_left_cache !== null && ses.spaces_left_cache !== undefined && Number(ses.spaces_left_cache) <= 0;
+    const quiet = !closed && t.show && t.spots > 0 && t.date >= today && t.date <= soon && t.booked / t.spots < 0.3;
+    return `<div class="plan-sess ws-row${t.show && !closed ? '' : ' off ws-shut'}${quiet ? ' ws-quiet' : ''}">
+      <span class="t">${esc(wsTime(t.time))}</span>
+      <span class="nm">${t.booked ? esc(t.title) : `<select class="ws-swap" onchange="wsUpdate('${escAttr(t.session_id)}', { p_item: this.value })" title="Swap the workshop (nobody's booked yet)">${itemOpts(t.item_id)}</select>`}
+        ${quiet ? '<span class="ws-tag">Quiet</span>' : ''}${!t.show ? '<span class="ws-tag shut">🙈 Hidden: not on World</span>' : closed ? '<span class="ws-tag shut">🔒 Closed: not taking bookings</span>' : ''}</span>
+      <span class="ws-count"><b>${t.booked}</b> / <input type="number" min="${Math.max(1, t.booked)}" max="200" value="${t.spots}" onchange="wsUpdate('${escAttr(t.session_id)}', { p_spots: +this.value })" aria-label="Spots"> booked</span>
+      ${closed ? `<button class="ho-btn primary" onclick="wsReopen('${escAttr(t.session_id)}')" title="Open it to bookings again">Reopen</button>`
+        : `<button class="ho-btn${t.show ? '' : ' primary'}" onclick="wsUpdate('${escAttr(t.session_id)}', { p_show: ${!t.show} })">${t.show ? 'Hide' : 'Show'}</button>`}
+      ${t.booked ? '' : `<button class="ho-btn" onclick="wsRemove('${escAttr(t.session_id)}')">Remove</button>`}
+    </div>`;
+  }).join('');
+  return `<div class="ho-section-head">🎨 Add a World workshop <span class="goal-note" style="font-weight:400">· sold on World, no Shopify products. This day\u2019s are in the list above, with their controls.</span></div>
+    ${rows ? `<div class="goal-note" style="margin:2px 0 4px"><b>Closed or hidden this day</b> (not in the list above): reopen or show them here.</div>${rows}` : ''}
+    ${items.length || (_wsProjects || []).length ? `${wsSetupHtml('ws')}<div class="ws-add">
+      ${wsPickerHtml('ws', items)}
+      <input type="time" id="ws-time" step="900" aria-label="Time">
+      <label class="ws-spots">Spots <input type="number" id="ws-spots" min="1" max="200" value="12"></label>
+      <label class="ws-spots">Who <select id="ws-who" title="Kids only = drop-off, children only"><option value="">Workshop’s default</option><option value="family">Families</option><option value="kids">Kids only (drop-off)</option></select></label>
+      <button class="ho-btn primary" id="ws-go" data-label="+ Add to this day" onclick="wsAdd()">+ Add to this day</button>
+      <button class="ho-btn" onclick="wsBulkOpen()">Bulk add…</button>
+      <button class="ho-btn" onclick="wsKidsSettings('ws')" title="Kids-only settings for the chosen workshop: default, ages, price">🧒 Kids-only settings…</button>
+      <span class="plan-msg" id="ws-msg"></span>
+    </div>
+    <div class="ws-add ws-glz"><b>🎨 Add a glazing time</b>
+      <label class="ws-spots">Time <input type="time" id="glz-time" step="900"></label>
+      <label class="ws-spots">Spots <input type="number" id="glz-spots" min="1" max="200" value="12"></label>
+      <label class="ws-spots">Length <input type="number" id="glz-min" min="15" max="600" step="15" value="90"> min</label>
+      <button class="ho-btn primary" id="glz-go" onclick="glzAdd()">+ Add glazing</button><span class="goal-note" id="glz-msg"></span></div>
+      ${_wsProjectsErr ? `<div class="pp-note" style="color:#a33">Only World workshops are listed: the project list didn’t load (${esc(_wsProjectsErr)}).</div>` : ''}`
+    : '<div class="ho-intro">No projects found in the Projects library.</div>'}`;
+}
+async function wsReload(msg) {
+  const w = await sb.rpc('hub_ws_range', { p_studio: _sessionStudioId, p_from: _plan.date, p_to: _plan.date });
+  _plan.ws = w.error ? { error: w.error.message } : w.data;
+  // the day's session list too (so "Everything on this day" shows the change)
+  await loadPlanDay(_plan.date);
+  if (msg) { const m = document.getElementById('ws-msg'); if (m) m.textContent = msg; }
+}
+async function wsAdd() {
+  const time = document.getElementById('ws-time').value, spots = +document.getElementById('ws-spots').value, m = document.getElementById('ws-msg');
+  if (!time) { m.textContent = 'Choose the time.'; alert('Choose the time first.'); return; }
+  let item; try { item = await wsEnsureItem('ws'); } catch (e) { m.textContent = e.message || String(e); alert('Not added: ' + (e.message || String(e))); return; }
+  const who = (document.getElementById('ws-who') || {}).value || '';
+  const { error } = await sb.rpc('hub_ws_add', { p_item: item, p_studio: _sessionStudioId, p_date: _plan.date, p_time: time, p_spots: spots, p_kids: who === 'kids' ? true : who === 'family' ? false : null });
+  if (error) { m.textContent = error.message; alert('Not added: ' + error.message); console.error('hub_ws_add', error); return; }   // (a pop-up too, so it can't be missed)
+  wsReload('Added ✓ It’s on World now.');
+}
+// 🔁 Change workshop (home office only): a booked time keeps its date, time, spots and bookings; only the workshop changes
+function wsChangeBooked(id) {
+  const W = _plan.ws || {}, t = (W.times || []).find(z => String(z.session_id) === String(id)); if (!t) return;
+  const cur = (W.items || []).find(i => i.id === t.item_id) || {};
+  const opts = (W.items || []).filter(i => i.kind !== 'glazing' && i.id !== t.item_id).sort((a, b) => String(a.title).localeCompare(String(b.title)))
+    .map(i => `<option value="${escAttr(i.id)}">${esc(i.title)}${i.kind === 'mini_make' ? ' (Mini Make)' : ''}</option>`).join('');
+  openDutySheet(`<h3>🔁 Change the workshop</h3>
+    <p class="ho-intro">${esc(STUDIO_NAMES[_sessionStudioId] || '')} · ${esc(new Date(t.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))}${t.time ? ' · ' + esc(shortTime(t.time)) : ''}</p>
+    <p><b>${esc(cur.title || 'This workshop')}</b> has <b>${t.booked}</b> booked. The time, spots and every booking stay as they are; only the workshop changes. Prices aren't touched.</p>
+    <div class="ba-form"><label class="f">Change it to<select id="wscb-item"><option value="">Choose a workshop…</option>${opts}</select></label>
+    <p class="goal-note">⚠ The families aren’t emailed automatically. A note is added to Auto-schedule’s 📋 To-do to let them know.</p><p class="fd-msg" id="wscb-msg"></p></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="wsChangeBookedGo('${escAttr(id)}')">Change it</button></div>`);
+}
+async function wsChangeBookedGo(id) {
+  const item = (document.getElementById('wscb-item') || {}).value, m = document.getElementById('wscb-msg');
+  if (!item) { m.textContent = 'Choose the workshop to change it to.'; return; }
+  const { data, error } = await sb.rpc('hub_ws_change_booked', { p_session: id, p_item: item });
+  if (error) { m.textContent = 'Not changed: ' + (/hub_ws_change_booked/.test(error.message) ? 'run ws_change_booked.sql first.' : error.message); return; }
+  closeDutySheet();
+  wsReload(data && data.to ? `Changed to ${data.to} ✓ (let the ${data.families} famil${data.families === 1 ? 'y' : 'ies'} know)` : 'Saved ✓');
+}
+async function wsUpdate(id, change) {
+  const { error } = await sb.rpc('hub_ws_update', Object.assign({ p_session: id }, change));
+  if (error) { alert(error.message); }
+  wsReload(error ? '' : 'Saved ✓');
+}
+// One glazing time on this day at this studio (World-only, like Bulk add's glazing times; world_bulk_times.sql)
+async function glzAdd() {
+  const v = id => (document.getElementById(id) || {}).value || '', m = document.getElementById('glz-msg'), time = v('glz-time');
+  if (!time) { m.textContent = 'Choose the time.'; return; }
+  const dow = ((new Date(_plan.date + 'T12:00:00').getDay() + 6) % 7) + 1, b = document.getElementById('glz-go'); b.disabled = true; m.textContent = 'Adding…';
+  const { data, error } = await sb.rpc('hub_bulk_glazing', { p: { studios: [_sessionStudioId], from: _plan.date, to: _plan.date, days: [dow], times: [time], skip: [],
+    spots: +v('glz-spots') || 12, minutes: +v('glz-min') || 90, price: null, member_price: null, preview: false } });
+  b.disabled = false;
+  if (error) { m.textContent = ''; alert('Not added: ' + (/hub_bulk_glazing/i.test(error.message) ? 'run world_bulk_times.sql in Supabase first.' : error.message)); return; }
+  if (!data || !data.made) { m.textContent = 'There\u2019s already a glazing time then.'; return; }
+  wsReload('Glazing added \u2713');
+}
+async function wsKids(id, on) {
+  const { error } = await sb.rpc('hub_ws_kids', { p_session: id, p_on: on });
+  if (error) { alert(/hub_ws_kids/i.test(error.message) ? 'Run world_kids_only.sql in Supabase first.' : error.message); return; }
+  wsReload(on ? 'Kids only ✓' : 'Open to families ✓');
+}
+// A workshop's kids-only settings: the default for new times, ages, and its own price (e.g. Mini Make $20 / members $15)
+function wsKidsSettings(pre) {
+  const id = (document.getElementById(pre + '-item') || {}).value || '';
+  if (!id) { alert('Choose the workshop first (type to search).'); return; }
+  if (id.startsWith('p:')) { alert('Add a time for this workshop first (that sets it up on World), then its kids-only settings can be changed.'); return; }
+  const it = ((_plan.ws && _plan.ws.items) || []).find(x => x.id === id) || {}, mm = it.kind === 'mini_make';
+  openDutySheet(`<h3>🧒 Kids-only settings: ${esc(it.title || 'this workshop')}</h3>
+    <p class="ho-intro">Kids-only times are drop-off: children only, and booking asks who’s picking up.</p>
+    <div class="me-form"><label class="check" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="wk-def"${it.kids_default ? ' checked' : ''}> New times start as kids only</label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><label>Ages from<input type="number" id="wk-min" min="3" max="17" value="${escAttr(it.kids_min_age ?? '')}" placeholder="${mm ? 5 : 6}"></label>
+        <label>to<input type="number" id="wk-max" min="3" max="17" value="${escAttr(it.kids_max_age ?? '')}" placeholder="12"></label></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><label>Kids-only price ($)<input type="number" id="wk-price" min="0" step="0.01" value="${escAttr(it.kids_price ?? '')}" placeholder="Same as usual"></label>
+        <label>Member price ($)<input type="number" id="wk-mem" min="0" step="0.01" value="${escAttr(it.kids_member_price ?? '')}" placeholder="Same as usual"></label></div>
+      <p class="goal-note">Empty ages: ${mm ? '5' : '6'}–12. Empty prices: the workshop’s usual prices.</p><div id="wk-msg" class="goal-note"></div></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="wsKidsSave('${escAttr(id)}')">Save</button></div>`);
+}
+async function wsKidsSave(id) {
+  const n = k => { const v = document.getElementById(k).value; return v === '' ? null : +v; };
+  const { error } = await sb.rpc('hub_ws_kids_settings', { p_item: id, p_default: document.getElementById('wk-def').checked, p_min: n('wk-min'), p_max: n('wk-max'), p_price: n('wk-price'), p_member: n('wk-mem') });
+  if (error) { document.getElementById('wk-msg').textContent = /hub_ws_kids_settings/i.test(error.message) ? 'Run world_kids_only.sql in Supabase first.' : error.message; return; }
+  closeDutySheet(); wsReload('Kids-only settings saved ✓');
+}
+async function wsRemove(id) {
+  if (!confirm('Remove this workshop time from World?')) return;
+  const { error } = await sb.rpc('hub_ws_remove', { p_session: id });
+  if (error) { alert(error.message); return; }
+  wsReload('Removed ✓');
+}
+// ---- Bulk add: a workshop at several studios, on chosen days of the week, at one or more times ----
+function wsBulkOpen() {
+  const items = (_plan.ws && _plan.ws.items) || [];
+  const d = _plan.date, to = (() => { const x = planDateOf(d); x.setDate(x.getDate() + 27); return localDateStr(x); })();
+  const days = [['1', 'Mon'], ['2', 'Tue'], ['3', 'Wed'], ['4', 'Thu'], ['5', 'Fri'], ['6', 'Sat'], ['7', 'Sun']];
+  const wd = String(((planDateOf(d).getDay() + 6) % 7) + 1);
+  let el = document.getElementById('ws-bulk');
+  if (!el) { el = document.createElement('dialog'); el.id = 'ws-bulk'; el.className = 'ws-dlg'; document.body.appendChild(el); }
+  el.innerHTML = `<div class="ho-title" style="font-size:18px">Bulk add World workshops</div>
+    <div class="ws-f">Workshop${wsPickerHtml('wsb', items)}</div>${wsSetupHtml('wsb')}
+    <div class="ws-f">Studios<div class="ws-studios">${Object.keys(STUDIO_NAMES).map(id => `<label><input type="checkbox" value="${escAttr(id)}"${id === _sessionStudioId ? ' checked' : ''}> ${esc(STUDIO_NAMES[id])}</label>`).join('')}</div></div>
+    <div class="ws-two"><label class="ws-f">From<input type="date" id="wsb-from" value="${d}"></label><label class="ws-f">To<input type="date" id="wsb-to" value="${to}"></label></div>
+    <div class="ws-f">Days<div class="ws-days">${days.map(x => `<label><input type="checkbox" value="${x[0]}"${x[0] === wd ? ' checked' : ''}> ${x[1]}</label>`).join('')}</div></div>
+    <div class="ws-two"><label class="ws-f">Times<input type="text" id="wsb-times" placeholder="11:00, 14:00"><small>24-hour, comma between (e.g. 11:00, 14:00, 18:30)</small></label>
+      <label class="ws-f">Spots each<input type="number" id="wsb-spots" min="1" max="200" value="12"></label></div>
+    <div class="ws-f"><label class="ws-spots" style="display:inline-flex;gap:6px;align-items:center">Who <select id="wsb-who" title="Kids only = drop-off, children only"><option value="">Workshop’s default</option><option value="family">Families</option><option value="kids">Kids only (drop-off)</option></select></label> <button class="ho-btn" onclick="wsKidsSettings('wsb')">🧒 Kids-only settings…</button></div>
+    <p class="plan-msg" id="wsb-msg" style="margin:8px 0"></p>
+    <div style="display:flex;gap:8px;justify-content:flex-end"><button class="ho-btn" onclick="document.getElementById('ws-bulk').close()">Close</button>
+      <button class="ho-btn" onclick="wsBulk(true)">Preview</button><button class="ho-btn primary" id="wsb-go" onclick="wsBulk(false)" disabled>Create</button></div>`;
+  el.querySelectorAll('input, select').forEach(x => x.addEventListener('change', () => { document.getElementById('wsb-go').disabled = true; document.getElementById('wsb-msg').textContent = ''; }));
+  el.showModal();
+}
+async function wsBulk(dry) {
+  const el = document.getElementById('ws-bulk'), m = document.getElementById('wsb-msg');
+  const studios = [...el.querySelectorAll('.ws-studios input:checked')].map(x => x.value);
+  const weekdays = [...el.querySelectorAll('.ws-days input:checked')].map(x => +x.value);
+  const times = (document.getElementById('wsb-times').value || '').split(/[\s,]+/).filter(Boolean).map(t => /^\d{1,2}$/.test(t) ? t + ':00' : t);
+  if (times.some(t => !/^([01]?\d|2[0-3]):[0-5]\d$/.test(t))) { m.textContent = 'Check the times (24-hour, e.g. 11:00, 14:00, 18:30).'; return; }
+  let item = document.getElementById('wsb-item').value;
+  if (!item) { m.textContent = 'Choose a workshop (type to search).'; return; }
+  if (item.startsWith('p:')) {
+    if (dry) { item = null; }   // first time on World: it's set up when you press Create
+    else { try { item = await wsEnsureItem('wsb'); } catch (e) { m.textContent = e.message || String(e); return; } }
+  }
+  if (dry && !item) {
+    // preview without a workshop yet: count the dates and times (nothing can be there already)
+    const from = planDateOf(document.getElementById('wsb-from').value), to = planDateOf(document.getElementById('wsb-to').value);
+    let n = 0; for (const d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) if (weekdays.includes(((d.getDay() + 6) % 7) + 1)) n++;
+    const total = n * times.length * studios.length;
+    m.textContent = total ? `This sets the project up on World and makes ${total} time${total === 1 ? '' : 's'} at ${studios.length} studio${studios.length === 1 ? '' : 's'}.` : 'Nothing to add: check the days, dates and times.';
+    document.getElementById('wsb-go').disabled = !total; return;
+  }
+  const args = { p_item: item, p_studios: studios, p_from: document.getElementById('wsb-from').value, p_to: document.getElementById('wsb-to').value,
+    p_weekdays: weekdays, p_times: times, p_spots: +document.getElementById('wsb-spots').value, p_dry: dry,
+    p_kids: (w => w === 'kids' ? true : w === 'family' ? false : null)((document.getElementById('wsb-who') || {}).value || '') };
+  const { data, error } = await sb.rpc('hub_ws_bulk', args);
+  if (error) { m.textContent = error.message; return; }
+  if (dry) {
+    m.textContent = data.times ? `This makes ${data.times} time${data.times === 1 ? '' : 's'} at ${studios.length} studio${studios.length === 1 ? '' : 's'}${data.skipped ? ` (${data.skipped} already there, skipped)` : ''}.` : `Nothing new to add${data.skipped ? ` (all ${data.skipped} are already there)` : ''}.`;
+    document.getElementById('wsb-go').disabled = !data.times;
+  } else {
+    m.textContent = `Created ${data.times} ✓ They’re on World now.`; document.getElementById('wsb-go').disabled = true;
+    wsReload();
+  }
 }
 
-// ---------- Open, load, save ----------
-async function openMyDash() {
-  showOnlyPane('mydash-pane'); setActiveNav('nav-mydash');
-  dashStyles();
-  if (!_dash.me) { dashDraw(); await dashLoadMe(); }
-  dashDraw(); dashStartRefresh();
+function planOptions(current) {
+  const opts = _plan.team.map(p => {
+    const v = planWriteName(p);
+    return `<option value="${escAttr(v)}"${v === current ? ' selected' : ''}>${esc(p.name)} · ${esc(shortTime(p.start_time))}–${esc(shortTime(p.end_time))}</option>`;
+  });
+  const known = _plan.team.some(p => planWriteName(p) === current);
+  if (current && !known) opts.unshift(`<option value="${escAttr(current)}" selected>${esc(current)} (not on the schedule)</option>`);
+  return `<option value="">—</option>${opts.join('')}`;
 }
-const DASH_PERSONAL = ['theme', 'avatar', 'name', 'greet', 'start'];   // (a person's own choices: a starting dashboard never overwrites them)
-function dashNormalize(L) {
-  if (!L || !Array.isArray(L.blocks)) return null;
-  const out = { v: 1, start: !!L.start, starter: L.starter || '', blocks: L.blocks.filter(b => b && DASH_BLOCKS[b.type]).map(b => Object.assign({ id: b.id || dashNewId(), type: b.type, size: ['s', 'm', 'l'].includes(b.size) ? b.size : 'm', opts: Object.assign({}, DASH_BLOCKS[b.type].opts || {}, b.opts || {}) }, dashHeightOk(b.h) ? { h: dashHeightOk(b.h) } : {})) };
-  if (L.theme && DASH_THEMES.some(t => t.key === L.theme)) out.theme = L.theme;
-  if (L.avatar && typeof L.avatar === 'object' && (L.avatar.key || L.avatar.emoji)) out.avatar = { key: L.avatar.key ? String(L.avatar.key).slice(0, 300) : undefined, emoji: L.avatar.emoji ? String(L.avatar.emoji).slice(0, 16) : undefined };
-  if (L.name) out.name = String(L.name).slice(0, 40);
-  if (L.greet === false) out.greet = false;
-  if (L.note) { out.note = String(L.note).slice(0, 600); if (L.note_by) out.note_by = String(L.note_by).slice(0, 60); }
+// 0 booked and 0 spaces left = not running (kids classes and catch-ups are
+// counted differently, so they always show).
+function planNotRunning(x) {
+  if (planIsKids(x) || x.title === 'Catch Up Class' || x.held_until) return false;   // (a held custom time or field trip: always shown)
+  return !(_plan.booked[x.id] > 0) && x.spaces_left_cache !== null && x.spaces_left_cache !== undefined && Number(x.spaces_left_cache) <= 0;
+}
+// Pre-orders, note and class list bits shown on every session row.
+function planRowExtras(x) {
+  const e = (_plan.extras || {})[x.id], sg = (_plan.suggested || {})[x.id];
+  return (sg ? `<button type="button" class="sug-s" title="A customer suggested this date" aria-label="Suggested date: who suggested it" onclick="event.stopPropagation();planSugPop(this,'${escAttr(x.id)}')">S</button>` : '') +
+    (e ? `${e.hc ? `<span class="pp-chip ex sm">☕ ${e.hc}</span>` : ''}${e.cb ? `<span class="pp-chip ex sm">🍬 ${e.cb}</span>` : ''}` : '');
+}
+// The "S" pop-up: who suggested this workshop time, and a tap through to their Families card
+async function planSugPop(btn, sid) {
+  document.querySelectorAll('.sug-pop').forEach(p => p.remove());
+  const sg = (_plan.suggested || {})[sid]; if (!sg) return;
+  const pop = document.createElement('div'); pop.className = 'sug-pop'; pop.setAttribute('role', 'dialog');
+  pop.onclick = ev => ev.stopPropagation();
+  const when = sg.at ? new Date(sg.at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '';
+  pop.innerHTML = '<b>Suggested date</b><div class="sub">A customer set this workshop up on World' + (when ? ' (' + esc(when) + ')' : '') + '.</div><div class="who">Loading…</div>';
+  btn.insertAdjacentElement('afterend', pop);
+  setTimeout(() => document.addEventListener('click', function off() { pop.remove(); document.removeEventListener('click', off); }), 0);
+  const who = pop.querySelector('.who');
+  if (!sg.email) { who.innerHTML = coordOrAdmin() ? 'They weren’t signed in, so there’s no name.' : 'Enter the coordinator PIN to see who.'; return; }
+  let fam = null;
+  try { const r = await sb.rpc('hub_family_list', { p_q: sg.email, p_limit: 1, p_pin: _sessionPin || null }); fam = (r.data || [])[0] || null; } catch (e) {}
+  const name = (fam && fam.parent_name) || sg.email;
+  who.innerHTML = fam && fam.shopify_customer_id
+    ? `<button type="button" class="sug-name" onclick="planSugOpenFamily(${Number(fam.shopify_customer_id)}, '${escAttr(sg.email)}')">${esc(name)}</button><div class="sub">${esc(sg.email)}</div>`
+    : `${esc(name)}<div class="sub">No Families card yet.</div>`;
+}
+function planSugOpenFamily(cid, email) {
+  document.querySelectorAll('.sug-pop').forEach(p => p.remove());
+  openFamiliesPane();
+  const q = document.getElementById('fam-q'); if (q) q.value = email || '';
+  famOpen(cid);
+}
+function planNoteHtml(x) {
+  const n = String(((_plan.staffBy[x.id] || {}).notes) || '').trim();
+  return n ? `<div class="plan-note">📝 ${esc(n)}</div>` : '';
+}
+// World workshops (admins): their controls sit on their own row in the day's list, in time order
+function wsRowTools(x) {
+  const W = _plan.ws; if (!x.world_item_id || !W || W.error || !planCanShifts()) return '';
+  const t = (W.times || []).find(z => String(z.session_id) === String(x.id)); if (!t) return '';
+  const today = localDateStr(new Date()), soon = (() => { const d = new Date(); d.setDate(d.getDate() + 5); return localDateStr(d); })();
+  const quiet = t.show && t.spots > 0 && t.date >= today && t.date <= soon && t.booked / t.spots < 0.3;
+  const itemOpts = (W.items || []).map(i => `<option value="${escAttr(i.id)}"${i.id === t.item_id ? ' selected' : ''}>${esc(i.title)}</option>`).join('');
+  return `<span class="ws-inline"><span class="ws-tag world">World</span>${t.kids_only ? '<span class="ws-tag kids">Kids only</span>' : ''}${quiet ? '<span class="ws-tag">Quiet</span>' : ''}
+    ${t.booked ? '' : `<button class="ho-btn" onclick="wsKids('${escAttr(t.session_id)}', ${!t.kids_only})" title="${t.kids_only ? 'Open it to families' : 'Make it kids only (drop-off)'}">${t.kids_only ? 'Make family' : 'Make kids only'}</button>`}
+    ${t.booked ? '' : `<select class="ws-swap" onchange="wsUpdate('${escAttr(t.session_id)}', { p_item: this.value })" title="Swap the workshop (nobody's booked yet)" aria-label="Swap the workshop">${itemOpts}</select>`}
+    ${t.booked && typeof _hoCan !== 'undefined' && _hoCan.edit ? `<button class="ho-btn" onclick="wsChangeBooked('${escAttr(t.session_id)}')" title="Home office: change the workshop even though people are booked">🔁 Change workshop</button>` : ''}
+    <span class="ws-count">Spots <input type="number" min="${Math.max(1, t.booked)}" max="200" value="${t.spots}" onchange="wsUpdate('${escAttr(t.session_id)}', { p_spots: +this.value })" aria-label="Spots"></span>
+    <button class="ho-btn" onclick="wsUpdate('${escAttr(t.session_id)}', { p_show: ${!t.show} })">${t.show ? 'Hide' : 'Show'}</button>${t.show ? '' : '<span class="ws-tag off">Hidden</span>'}
+    ${t.booked ? '' : `<button class="ho-btn" onclick="wsRemove('${escAttr(t.session_id)}')">Remove</button>`}</span>`;
+}
+function planRowTools(x) {
+  const open = !!_plan.classLists[x.id];
+  return `${wsRowTools(x)}${planCanAdjust() && !x.world_item_id ? `<button class="ho-btn spots-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Spots</button>` : ''}<button class="icon-pencil" title="Add a note" aria-label="Add a note to ${escAttr(x.title)}" onclick="planEditNote('${escAttr(x.id)}')">✏️</button>
+    ${projBtnHtml(x.id, x.title, 'pf-btn')}<button class="pf-btn cl${open ? ' open' : ''}" onclick="toggleClassList('${escAttr(x.id)}')">${open ? 'Close list' : 'Class list'}</button>`;
+}
+function planCheckedIn(x) {
+  const n = ((_plan.signins || {})[x.id] || []).length;
+  return n ? ` <button class="plan-ci" onclick="event.stopPropagation(); planShowSignins('${escAttr(x.id)}')" title="Checked in on the sign-in iPad">✅ ${n} checked in</button>` : '';
+}
+function planShowSignins(id) {
+  const x = (_plan.sessions || []).find(z => z.id === id) || {}, list = ((_plan.signins || {})[id] || []).slice()
+    .sort((a, b) => String(a.signed_in_at).localeCompare(String(b.signed_in_at)));
+  openDutySheet(`<h3>✅ Checked in</h3><p>${esc(shortTime(x.session_time || ''))} ${esc(x.title || '')} · ${list.length} on the sign-in iPad</p>
+    <div style="max-height:55vh;overflow:auto">${list.map(e => `<div class="me-list-row si-row" id="si-${escAttr(e.id)}"><div class="what"><b>${esc(e.name || '—')}</b>
+        <span class="goal-note">${e.signed_in_at ? esc(new Date(e.signed_in_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })) : ''}</span></div>
+      <select id="si-to-${escAttr(e.id)}"><option value="">Move to…</option>${(_plan.sessions || []).filter(z => z.id !== id && !z.partySlot).map(z => `<option value="${escAttr(z.id)}">${esc(shortTime(z.session_time || ''))} ${esc(z.title)}</option>`).join('')}</select>
+      <button class="ho-btn" onclick="planMoveSignin('${escAttr(e.id)}', '${escAttr(id)}')">Move</button>
+      <button class="ho-btn" title="Remove this check-in" onclick="planDeleteSignin('${escAttr(e.id)}', '${escAttr(id)}')">✕</button></div>`).join('')}</div>
+    <div id="si-msg"></div>
+    <div class="sheet-actions"><button class="primary" onclick="closeDutySheet()">Close</button></div>`);
+}
+// Check-ins on the wrong class: move them (or remove them), same as the Day view
+async function planMoveSignin(entryId, fromId) {
+  const to = document.getElementById('si-to-' + entryId).value;
+  if (!to) { document.getElementById('si-msg').innerHTML = '<div class="me-msg err">Choose the class to move them to.</div>'; return; }
+  const { error } = await sb.from('signin_entries').update({ session_id: to }).eq('id', entryId);
+  if (error) { document.getElementById('si-msg').innerHTML = `<div class="me-msg err">${esc(error.message)}</div>`; return; }
+  const e = (_plan.signins[fromId] || []).find(z => String(z.id) === String(entryId));
+  _plan.signins[fromId] = (_plan.signins[fromId] || []).filter(z => String(z.id) !== String(entryId));
+  if (e) { e.session_id = to; (_plan.signins[to] = _plan.signins[to] || []).push(e); }
+  const x = (_plan.sessions || []).find(z => z.id === to) || {};
+  document.getElementById('si-' + entryId).innerHTML = `<span style="color:#15803d">✓ Moved to ${esc(shortTime(x.session_time || ''))} ${esc(x.title || '')}</span>`;
+  renderPlanDay();
+}
+async function planDeleteSignin(entryId, fromId) {
+  if (!confirm('Remove this check-in? This can’t be undone.')) return;
+  const { error } = await sb.from('signin_entries').delete().eq('id', entryId);
+  if (error) { document.getElementById('si-msg').innerHTML = `<div class="me-msg err">${esc(error.message)}</div>`; return; }
+  _plan.signins[fromId] = (_plan.signins[fromId] || []).filter(z => String(z.id) !== String(entryId));
+  const row = document.getElementById('si-' + entryId); if (row) row.remove();
+  renderPlanDay();
+}
+
+// Emails already sent to a class (email_sends, same as the Day view's history)
+async function planEmailHistory(sessionId) {
+  const x = (_plan.sessions || []).find(z => z.id === sessionId) || {};
+  openDutySheet('<h3>✉️ Emails sent</h3><div class="goal-note">Loading…</div>');
+  const { data, error } = await sb.from('email_sends').select('recipient_type, recipient_count, subject, sent_at, class_name, recipient_emails, message_html')
+    .eq('studio_id', _sessionStudioId).contains('session_ids', [sessionId]).order('sent_at', { ascending: false }).limit(50);
+  window._ehRows = data || [];
+  openDutySheet(`<h3>✉️ Emails sent</h3><p>${esc(shortTime(x.session_time || ''))} ${esc(x.title || '')}</p>
+    ${error ? `<div class="me-msg err">${esc(error.message)}</div>` : !(data || []).length ? '<div class="goal-note">Nothing sent to this class yet.</div>'
+      : `<div style="max-height:55vh;overflow:auto">${data.map((r, i) => `<div class="eh-row"><div class="me-list-row"><div class="what"><b>${esc(r.subject || '(no subject)')}</b>
+          <div class="goal-note">${esc(new Date(r.sent_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))} · ${esc(r.recipient_count || 0)} sent</div></div>
+          ${r.message_html || (r.recipient_emails || []).length ? `<button class="ho-btn" onclick="var d=document.getElementById('eh-d-${i}'); d.style.display = d.style.display === 'none' ? '' : 'none'">Show</button>` : ''}</div>
+        <div id="eh-d-${i}" class="eh-detail" style="display:none">${(r.recipient_emails || []).length ? `<div class="goal-note">To: ${esc(r.recipient_emails.join(', '))}</div>` : ''}
+          ${r.message_html ? `<div class="eh-msg">${planSafeEmailHtml(r.message_html)}</div>` : ''}</div></div>`).join('')}</div>`}
+    <div class="sheet-actions"><button class="primary" onclick="closeDutySheet()">Close</button></div>`);
+}
+// Sent messages are shown as text with line breaks (never as live HTML)
+function planSafeEmailHtml(html) {
+  const t = document.createElement('template');   // never runs or loads anything
+  t.innerHTML = String(html).replace(/<(script|style)[\s\S]*?<\/\1>/gi, '').replace(/<\/(p|div|h\d|li)>|<br\s*\/?>/gi, '\n');
+  return esc((t.content.textContent || '').replace(/\n{3,}/g, '\n\n').trim()).replace(/\n/g, '<br>');
+}
+
+function planCount(x) {
+  const b = _plan.booked[x.id] || 0, left = x.spaces_left_cache;
+  if (planIsKids(x)) return `<span class="plan-count"><b>${b}</b> enrolled</span>${planCheckedIn(x)}`;
+  return `<span class="plan-count"><b>${b}</b> booked${left !== null && left !== undefined ? (Number(left) < 0 ? ` · closed (${left})` : ` · ${left} left`) : ''}</span>${planCheckedIn(x)}`;
+}
+// Participants for the day, by kind. Parties count their expected guests
+// (a party is one booking), everything else counts people booked.
+function planParticipants() {
+  const P = _plan, groups = {};
+  let total = 0, missingGuests = 0;
+  const add = (label, n) => { groups[label] = (groups[label] || 0) + n; total += n; };
+  P.sessions.forEach(x => {
+    if (x.session_type === 'party') return;              // parties counted below
+    const n = P.booked[x.id] || 0;
+    if (!n) return;
+    add(planIsKids(x) ? 'Kids classes' : sessionKind(x.title)[0] === 'Workshop' ? 'Workshops' : sessionKind(x.title)[0], n);
+  });
+  let parties = 0;
+  P.parties.forEach(pt => {
+    parties++;
+    if (pt.guests) add('Party guests', Number(pt.guests) || 0); else missingGuests++;
+  });
+  return { total, groups, parties, missingGuests };
+}
+function renderPlanDay() {
+  const body = document.getElementById('plan-body');
+  const P = _plan;
+  setTimeout(() => { try { planTimeOffLoad(P.date); } catch (e) {} }, 0);
+  try { labourLineLoad('plan-labour', P.date); } catch (e) {}
+  // (Nov 9 2026) home office: this day on the day board (who teaches, demos and breaks; coverage; Close or keep)
+  try { const db = document.getElementById('plan-dayboard');
+    if (db) { const on = !!(_studioData && _studioData.isAdmin) && !!_sessionStudioId && !!P.date; db.style.display = on ? '' : 'none';
+      db.innerHTML = on ? `<button class="ho-btn" onclick="window.open('day-board.html?view=day&studio=${encodeURIComponent(_sessionStudioId)}&date=${P.date}','_blank')" title="Open this day on the day board (a new tab)">📅 Day board</button> <button class="ho-btn" onclick="window.open('day-board.html?view=week&studio=${encodeURIComponent(_sessionStudioId)}&date=${P.date}','_blank')" title="This week on the week board (a new tab)">🗓️ Week board</button>` : ''; } } catch (e) {}
+  const edit = planCanEdit();
+  document.getElementById('plan-intro').innerHTML = edit
+    ? 'Who’s doing what each day. Change roles, wheel and party teachers, and add break times. Roles start from the staff schedule; anything you set here wins.'
+    : 'Who’s doing what each day, from the staff schedule. Coordinators can change roles and breaks: <button class="ho-btn" style="min-height:30px;padding:0 12px" onclick="openPinModal()">🔒 Unlock coordinator view</button>';
+  const nameOfW = n => { const t = P.team.find(p => planWriteName(p) === n); return t ? t.name : n; };
+  const pick = (current, onchange) => edit
+    ? `<select onchange="${onchange}">${planOptions(current)}</select>`
+    : (current ? personChip(current, '') : '<span class="sub" title="No teacher assigned yet. Coordinators can pick one after unlocking with their PIN.">No teacher yet</span>');
+  const [y, m, d] = P.date.split('-').map(Number);
+  const when = new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+  const canShifts = planCanShifts();
+  const shifts = (P.team.length
+    ? P.team.map(p => canShifts
+        ? `<button class="role-chip shift-edit" onclick="planEditShift('${escAttr(p.staff_id)}')" title="Change or remove this shift">${hubAvatarHtml(p, 22)}${esc(p.name)} <small>${esc(shortTime(p.start_time))}–${esc(shortTime(p.end_time))}</small> <span aria-hidden="true">✏️</span></button>`
+        : `<span class="role-chip">${hubAvatarHtml(p, 22)}${esc(p.name)} <small>${esc(shortTime(p.start_time))}–${esc(shortTime(p.end_time))}</small></span>`).join('')
+    : '<span class="ho-intro" style="margin:0">No shifts posted for this day yet.</span>')
+    + (canShifts ? '<button class="ho-btn" style="min-height:32px" onclick="planEditShift(null)">+ Add shift</button>' : '');
+  const dplanR = planDemoPlan();
+  const breakClash = f => {
+    const b = String(P.roles['break_' + f] || '').match(/(\d{1,2}):(\d{2})\D+(\d{1,2}):(\d{2})/); if (!b || !P.roles[f]) return '';
+    const h = x => { x = +x; return x < 8 ? x + 12 : x; };
+    const a = h(b[1]) * 60 + +b[2], z = h(b[3]) * 60 + +b[4];
+    const hit = planBusyFor(P.roles[f], dplanR).find(([s0, s1]) => a < s1 && z > s0);
+    return hit ? `<div class="brk" style="color:#b45309">⚠ overlaps ${hit[2] === 'demo' ? 'a demo' : 'teaching'} ${esc(mHm(hit[0]))}–${esc(mHm(hit[1]))}</div>` : '';
+  };
+  // As many roles as there are people working: 1 → Director (who also demos), 2 → + Demoer, 3 → + Circler,
+  // 4 → + Circler 2, 5 → + Demoer 2, 6 → + Circler 3. A role someone's already in always shows. Nobody on the schedule yet: all of them.
+  const ROLE_FILL = ['director', 'teacher', 'circler', 'circler2', 'teacher2', 'circler3'], nStaff = (P.team || []).length;
+  const roleOn = f => !nStaff || ROLE_FILL.indexOf(f) < nStaff || !!P.roles[f];
+  const roleLabel = (f, label) => nStaff === 1 && f === 'director' ? 'Director & Demoer' : label;
+  const roleCards = PLAN_ROLES.filter(([f]) => roleOn(f) && (edit || P.roles[f])).map(([f, label]) => `<div class="plan-role"><label>${esc(roleLabel(f, label))}</label>
+      ${pick(P.roles[f], `planSet('${f}', this.value)`)}
+      ${edit ? `<div class="brk">Break <input type="text" value="${escAttr(P.roles['break_' + f])}" placeholder="e.g. 12:30–1:00" oninput="planSet('break_${f}', this.value, true)"></div>`
+        : (P.roles['break_' + f] ? `<div class="brk">Break ${esc(P.roles['break_' + f])}</div>` : '')}${breakClash(f)}</div>`).join('')
+    || '<div class="ho-intro">No roles set for this day yet.</div>';
+  const kids = P.sessions.filter(x => planKidsRuns(x, P));   // (0 enrolled: still shown, except Lawren Harris / Drawing Class)
+  const wheels = P.sessions.filter(x => P.wheel[x.id] !== undefined && !planNotRunning(x));
+  const partySessionIds = new Set(P.parties.map(pt => pt.session.id));
+  // Everything else (workshops, glazing, Mini Make, camps, parties with no booking yet):
+  // covered by the day's Demoers and Circlers.
+  const others = P.sessions.filter(x => !planIsKids(x) && P.wheel[x.id] === undefined && !partySessionIds.has(x.id) && !planNotRunning(x));
+  const notRunning = P.sessions.filter(planNotRunning);
+  const demoers = [P.roles.teacher, P.roles.teacher2].filter(Boolean);
+  const circlers = [P.roles.circler, P.roles.circler2, P.roles.circler3].filter(Boolean);
+  const nameOf = n => { const t = P.team.find(p => planWriteName(p) === n); return t ? t.name : n; };
+  // who demos what this day (same calculation as "On stage today")
+  const demoPlan = planDemoPlan();
+  const dayCover = demoers.length || circlers.length
+    ? `${demoers.length ? 'Demo: ' + demoers.map(nameOf).join(', ') : ''}${demoers.length && circlers.length ? ' · ' : ''}${circlers.length ? 'Circle: ' + circlers.map(nameOf).join(', ') : ''}`
+    : 'Covered by the day’s Demoers and Circlers (none set yet)';
+  const sessRows = [
+    ...wheels.map(x => [hmM(x.session_time), `<div class="plan-sess tap" data-open-cl="${escAttr(x.id)}" tabindex="0"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">Wheel teacher${edit ? ' (needs Wheel ready)' : ''}</div></span>
+        ${planRowExtras(x)}${planCount(x)}${pick(P.wheel[x.id], `planWheel('${escAttr(x.id)}', this.value)`)}${planRowTools(x)}</div>${planNoteHtml(x)}<div class="pf-wrap" data-cl="${escAttr(x.id)}"></div>`]),
+    ...P.parties.map((pt, i) => [hmM(pt.session.session_time), `<div class="plan-sess tap" data-open-pf="${i}" tabindex="0"><span class="t">${esc(shortTime(pt.session.session_time || ''))}</span><span class="nm">${esc(pt.session.title || 'Party')}${customTag(pt.session)}<div class="sub">${esc((pt.booking && pt.booking.customer_name) || '')}${pt.guests ? ' · ' + esc(pt.guests) + ' guests' : ''} · ${pt.guests > 15 ? '2 teachers' : '1 teacher'}</div></span>
+        ${pt.detail && pt.detail.actual_guests ? '<span class="pf-status ok">✓ Closed</span>' : !(pt.detail && pt.detail.contacted === 'Yes') ? '<span class="pf-status need">Not contacted yet</span>' : ''}
+        ${pick(pt.t1, `planParty(${i}, 1, this.value)`)}
+        ${edit || pt.t2 ? pick(pt.t2, `planParty(${i}, 2, this.value)`) : ''}
+        <button class="icon-pencil" title="Add a note" aria-label="Add a note" onclick="planEditNote('${escAttr(pt.session.id)}')">✏️</button>
+        ${planPartyCancelOk(pt) ? `<button class="ho-btn sm" title="${escAttr(_hoCan.edit ? 'Cancel or change this party (home office: any time)' : 'Cancel or change this party (up to 14 days before)')}" onclick="openBookingAdmin(['${escAttr(pt.booking_id)}'], ${escAttr(JSON.stringify((pt.booking && pt.booking.customer_name) || 'this party'))}, false)">Cancel…</button>` : ''}
+        <button class="pf-btn${P.partyForms[pt.booking_id] ? ' open' : ''}" onclick="togglePartyForm(${i})">${P.partyForms[pt.booking_id] ? 'Close form' : '🎉 Party form'}</button></div>
+        ${i === P.parties.findIndex(z => z.session.id === pt.session.id) ? planNoteHtml(pt.session) : ''}
+        <div class="pf-wrap" data-pf="${escAttr(pt.booking_id)}"></div>`]),
+    ...kids.map(x => [hmM(x.session_time), `<div class="plan-sess tap" data-open-cl="${escAttr(x.id)}" tabindex="0"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">Kids class teacher${!P.kidsTeacher[x.id] && demoPlan[x.id] && demoPlan[x.id].auto ? ` · none set, so <b>${esc(nameOf(demoPlan[x.id].teachers[0]))}</b> (the day’s demoer)` : ''}${edit ? ' · changes here are for this day only (the term teacher is set in the staff schedule)' : ''}</div></span>
+        ${planRowExtras(x)}${planCount(x)}${pick(P.kidsTeacher[x.id], `planKids('${escAttr(x.id)}', this.value)`)}${planRowTools(x)}</div>${planNoteHtml(x)}<div class="pf-wrap" data-cl="${escAttr(x.id)}"></div>`]),
+    ...others.map(x => [hmM(x.session_time), `<div class="plan-sess${x.session_type === 'party' ? '' : ' tap'}"${x.session_type === 'party' ? '' : ` data-open-cl="${escAttr(x.id)}" tabindex="0"`}><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}<div class="sub">${
+          x.partySlot ? (x.slotClosed ? 'Closed online: customers can’t book this time'
+            : `${(x.slotKinds || []).length ? x.slotKinds.join(' or ') + ' party · ' : ''}${x.slotBooked ? `${x.slotBooked} of ${x.slotRooms} booked · ` : ''}${x.spaces_left_cache} open`)
+          : x.session_type === 'party' ? (customHeldHtml(x) || 'Not booked yet')
+          : !(P.booked[x.id] > 0) ? 'No one booked yet'
+          : planIsCamp(x) ? planCampLine(x)
+          : (demoers.length || P.roles.director) && demoPlan[x.id] ? `<span class="floor-staff" style="margin-top:4px">${hubDemoChips(demoPlan[x.id])}</span>` : esc(dayCover)}</div></span>
+        ${planRowExtras(x)}${planCount(x)}<span class="kind-chip kind-${sessionKind(x.title)[1]}">${esc(sessionKind(x.title)[0])}</span>${x.session_type === 'party' ? (planCanAdjust() ? (x.partySlot
+          ? `${x.slotClosed ? '' : `<button class="ho-btn spots-btn" onclick="planBookParty('${escAttr(x.session_date)}', '${escAttr(String(x.session_time).slice(0, 5))}')" title="Book a party at this time (Front desk)">Book</button>`}${!x.slotClosed && x.slotLive < x.slotOpenRooms ? `<button class="ho-btn spots-btn" onclick="planSlotOpenClose('${escAttr(x.id)}', true)">Reopen one</button>` : ''}<button class="ho-btn spots-btn" onclick="planSlotOpenClose('${escAttr(x.id)}', ${x.slotClosed ? 'true' : 'false'})">${x.slotClosed ? 'Reopen' : 'Close slot'}</button>`
+          : `<button class="ho-btn spots-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Spots</button>`) : '') : planRowTools(x)}</div>${planNoteHtml(x)}<div class="pf-wrap" data-cl="${escAttr(x.id)}"></div>`]),
+    ...(P.early || []).map(e => { const m = hmM(e.session.session_time) - 15, t = String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+      return [m, `<div class="plan-sess cu15"><span class="t">${esc(shortTime(t))}</span><span class="nm">15-min catch-up · ${esc(e.session.title)}<div class="sub">Coming 15 minutes early to catch up on a missed class: <b>${esc(e.kids.join(' · '))}</b>. They stay for the ${esc(shortTime(e.session.session_time))} class.</div></span><span class="kind-chip">15 min</span></div>`]; }),
+    ...(P.events || []).map(x => [-1, `<div class="plan-sess" style="background:#fff4dd;border-color:#ffd998"><span class="t">🎪</span><span class="nm">${esc(x.title)}<div class="sub">Event · staffing is set on the event</div></span></div>`])
+  ].sort((a, b) => a[0] - b[0]).map(r => r[1]).join('');
+  // Party forms: keep the open forms' own elements (and anything typed) across redraws.
+  setTimeout(placePartyForms, 0);
+  if (edit) setTimeout(loadTimecards, 0);
+  try { customDraw(P.date); } catch (e) {}   // 🎉 custom party / get-together times (custom_party_times.sql)
+  try { planAutoFromBoard(P); } catch (e) {}   // 📅 nothing saved for this day yet: the day board's plan as the starting point (home office)
+  // (Nov 9 2026) 🗂️ Board view: the same day as a timeline by person; only moving teaching and demos between people
+  planViewButtons();
+  if (planView() === 'board') { body.innerHTML = planBoardHtml(); planBoardWire(); return; }
+  body.innerHTML = `
+    <div class="ho-card">
+      <div class="ho-title" style="font-size:18px;margin-bottom:8px">${esc(when)}</div>
+      <div class="plan-shifts">${shifts}</div>
+      ${_studioData && _studioData.isAdmin ? '<div id="plan-timeoff" class="plan-timeoff"></div>' : ''}
+      ${(() => {
+        const pp = planParticipants();
+        const chips = Object.keys(pp.groups).sort((a, b) => pp.groups[b] - pp.groups[a])
+          .map(k => `<span class="pp-chip">${esc(k)} <b>${pp.groups[k]}</b></span>`).join('');
+        return `<div class="pp-row"><div class="pp-total"><b>${pp.total}</b> participant${pp.total === 1 ? '' : 's'}</div>
+          <div class="pp-chips">${chips}${pp.parties ? `<span class="pp-chip">Parties <b>${pp.parties}</b></span>` : ''}${(P.events || []).length ? `<span class="pp-chip">Events <b>${P.events.length}</b></span>` : ''}</div>
+          ${(() => {
+            let hc = 0, cb = 0;
+            Object.values(P.extras || {}).forEach(e => { hc += e.hc; cb += e.cb; });
+            const glazing = P.sessions.some(x => x.session_type === 'glazing' && (P.booked[x.id] || 0) > 0);
+            return `<div class="pp-extras">
+              ${hc || cb ? `<span class="pp-chip ex">☕ Hot chocolate <b>${hc}</b></span><span class="pp-chip ex">🍬 Candy bags <b>${cb}</b></span>
+                <button class="ho-btn" onclick="planPrintExtras()">🖨 Print extras list</button>` : '<span class="goal-note">No hot chocolate or candy pre-orders.</span>'}
+              ${glazing ? '<button class="ho-btn" onclick="planPrintGlazing()">🖨 Print all glazing</button>' : ''}
+              <button class="ho-btn" onclick="planEmail(null)">✉️ Email everyone booked today</button>
+              <button class="ho-btn" onclick="planToggleFloor(true)">🪑 Floor plan</button></div>`;
+          })()}
+          ${pp.missingGuests ? `<div class="pp-note">${pp.missingGuests} part${pp.missingGuests === 1 ? 'y has' : 'ies have'}n't entered a guest count yet, so ${pp.missingGuests === 1 ? 'it isn’t' : 'they aren’t'} in the total.</div>` : ''}</div>`;
+      })()}
+    </div>
+    <div class="ho-section-head">👥 Staff today <span class="goal-note" style="font-weight:400">· role, break${edit ? ' and timecard' : ''} for each person</span>${edit ? ' <button class="ho-btn sm" style="margin-left:8px" onclick="planSuggestBreaks()">☕ Suggest breaks</button>' : ''}</div>
+    ${edit ? '<div id="tc-box"><div class="goal-note">Loading…</div></div>' : planStaffListHtml()}
+    <div class="ho-section-head">Everything on this day</div>${sessRows || '<div class="ho-intro">Nothing running this day.</div>'}
+    ${planCanShifts() ? wsDayHtml() : ''}
+    ${notRunning.length ? `<details class="plan-closed"><summary>Not running (${notRunning.length}) · 0 booked and no spots open</summary>
+      ${notRunning.map(x => `<div class="plan-sess off"><span class="t">${esc(shortTime(x.session_time))}</span><span class="nm">${esc(x.title)}</span>
+        ${planCanAdjust() ? (x.partySlot ? `<button class="ho-btn" onclick="planSlotOpenClose('${escAttr(x.id)}', true)">Reopen</button>`
+          : `<button class="ho-btn" onclick="planAdjustSpots('${escAttr(x.id)}')">Open spots</button>`) : ''}</div>`).join('')}</details>` : ''}
+    ${edit ? `<div class="plan-actions">
+      <span class="plan-msg" id="plan-msg">${esc(P.msg || (P.dirty ? 'Unsaved changes' : ''))}</span>
+      <button class="ho-btn" onclick="planFill()">Fill blanks from the schedule</button>
+      <button class="ho-btn" onclick="planSuggestBreaks()">Suggest breaks</button>
+      <button class="ho-btn primary" onclick="planSave()">Save</button>
+    </div>` : ''}`;
+}
+
+// =====================================================================================================================
+// 🗂️ Schedule BOARD view (Nov 9 2026): the day by person, like the day board: shifts, kids classes, wheel, party art time,
+// demos and breaks. The only change it makes: who teaches or demos something (drag it onto someone, or tap it and pick).
+// Same data and the same Save as the list (planSave); moving needs what the list needs (coordinator PIN, or home office).
+// =====================================================================================================================
+function planView() { try { return localStorage.getItem('hub_plan_view') === 'board' ? 'board' : 'list'; } catch (e) { return 'list'; } }
+function planSetView(v) { try { localStorage.setItem('hub_plan_view', v); } catch (e) {} if (_plan) renderPlanDay(); else planViewButtons(); }
+function planViewButtons() { const v = planView(), a = document.getElementById('plan-v-list'), b = document.getElementById('plan-v-board');
+  if (a) a.classList.toggle('primary', v === 'list'); if (b) b.classList.toggle('primary', v === 'board'); }
+let _pbBlocks = [];
+function planBoardCanMove() { return planCanEdit() || !!_sessionStudioId; }
+function planBoardBlocks() {
+  const P = _plan, dplan = planDemoPlan(), out = [];
+  const tl = x => String(x.title || '').split('|')[0].trim();
+  P.sessions.filter(planIsKids).filter(x => !planNotRunning(x) && (P.booked[x.id] || 0) > 0).forEach(x => { const o = dplan[x.id] || {}, a = hubMin(x.session_time);   // (0 enrolled: not running)
+    const asg = String(P.kidsTeacher[x.id] || (P.staffBy[x.id] || {}).teacher || '').trim(), onShift = asg && asg !== 'none' && (P.team || []).some(p => hubNameKey(planWriteName(p)) === hubNameKey(asg) || hubNameKey(p.name) === hubNameKey(asg));
+    const tWho = asg === 'none' ? ' · no teacher (not needed)' : asg ? ` · 👤 ${asg}${onShift ? '' : ' (not on shift)'}` : ' · 👤 no teacher set';   // (Nov 10 2026)
+    out.push({ id: 'k:' + x.id, kind: 'kids', sid: x.id, title: tl(x), sub: (P.booked[x.id] || 0) + ' enrolled' + tWho, start: a, end: a + Math.max(HUB_BUSY_MIN.kids, +x.duration_minutes || 0), who: (o.teachers || [])[0] || '', auto: !!o.auto }); });
+  P.sessions.filter(x => P.wheel[x.id] !== undefined && !planNotRunning(x) && (P.booked[x.id] || 0) > 0).forEach(x => { const a = hubMin(x.session_time);
+    out.push({ id: 'w:' + x.id, kind: 'wheel', sid: x.id, title: tl(x), sub: (P.booked[x.id] || 0) + ' at the wheel', start: a, end: a + Math.max(HUB_BUSY_MIN.wheel, +x.duration_minutes || 0), who: P.wheel[x.id] || '' }); });
+  P.parties.forEach((pt, i) => { const x = pt.session || {}, a = hubMin(x.session_time), len = hubPartyBusyMin(x.title, pt.booking && pt.booking.raw_payload, pt.detail) || 60;
+    // (Nov 10 2026) a second teacher: parties over 15 guests; field trips 1 teacher per 30 kids (so over 30)
+    const g = +pt.guests || 0, ft = /field\s*trip/i.test(String(x.title || '')), two = !!pt.t2 || g > (ft ? 30 : 15);
+    out.push({ id: 'p1:' + i, kind: 'party', pi: i, slot: 1, sid: x.id, title: tl(x), sub: (g ? g + ' guests · ' : '') + len + ' min', start: a, end: a + len, who: pt.t1 || '' });
+    if (two) out.push({ id: 'p2:' + i, kind: 'party', pi: i, slot: 2, sid: x.id, title: tl(x) + ' (2nd)', sub: 'second teacher', start: a, end: a + len, who: pt.t2 || '' }); });
+  const partyIds = new Set(P.parties.map(pt => pt.session && pt.session.id));
+  P.sessions.filter(x => !planIsKids(x) && !planIsCamp(x) && P.wheel[x.id] === undefined && !partyIds.has(x.id) && !planNotRunning(x) && x.session_type !== 'party' && (P.booked[x.id] || 0) > 0)
+    .forEach(x => { const o = dplan[x.id] || {}, a = hubMin(x.session_time);
+      out.push({ id: 'd:' + x.id, kind: 'demo', sid: x.id, title: tl(x), sub: (P.booked[x.id] || 0) + ' booked · demo', start: a, end: a + HUB_DEMO_MIN, who: (o.demo || [])[0] || '', auto: !o.set }); });
+  PLAN_ROLES.forEach(([f]) => { const who = String(P.roles[f] || '').trim(), m = String(P.roles['break_' + f] || '').match(/(\d{1,2}):(\d{2})\D+(\d{1,2}):(\d{2})/);
+    if (!who || !m) return; const h = v => { v = +v; return v < 8 ? v + 12 : v; };
+    out.push({ id: 'b:' + f, kind: 'brk', title: 'Break', sub: '', start: h(m[1]) * 60 + +m[2], end: h(m[3]) * 60 + +m[4], who, role: f }); });   // (Nov 9 2026: movable along its own row)
   return out;
 }
-function dashFromTemplate(T, keep) {   // a starting dashboard, keeping the person's own colour, picture, name and start choice
-  const L = dashNormalize(T); if (!L) return null;
-  L.blocks.forEach(b => { b.id = dashNewId(); });
-  L.start = false; delete L.avatar; delete L.name; delete L.greet;
-  if (keep) DASH_PERSONAL.forEach(k => { if (keep[k] !== undefined && keep[k] !== null && !(k === 'theme' && !keep.theme)) L[k] = keep[k]; });
-  return L;
+function planBoardHtml() {
+  const P = _plan, edit = planBoardCanMove(), blocks = _pbBlocks = planBoardBlocks();
+  const people = (P.team || []).map(p => ({ p, wn: planWriteName(p), keys: [hubNameKey(planWriteName(p)), hubNameKey(p.name)], a: hubMin(p.start_time), z: hubMin(p.end_time) }));
+  const laneOf = b => { const k = hubNameKey(b.who); return k ? people.find(x => x.keys.includes(k)) || null : null; };
+  // (Nov 9 2026) the times not booked yet, in white above the people (as on the day board): information only
+  const tl0 = x => String(x.title || '').split('|')[0].trim();
+  const ptIds = new Set((P.parties || []).map(pt => pt.session && pt.session.id));
+  const openTimes = P.sessions.filter(x => !planIsCamp(x) && !planNotRunning(x) && !ptIds.has(x.id) && !(planIsKids(x) && !planKidsRuns(x, P)))
+    .map(x => { const a = hubMin(x.session_time), n = P.booked[x.id] || 0; return { id: 'o:' + x.id, kind: n > 0 ? 'open booked' : 'open', sid: x.id, title: x.partySlot ? 'Party slot' : tl0(x),
+      sub: (x.held_until ? 'on hold' : x.partySlot ? (x.spaces_left_cache || 0) + ' open' : n > 0 ? n + (planIsKids(x) ? ' enrolled' : ' booked') : (x.spaces_left_cache != null ? x.spaces_left_cache + ' spots' : 'not booked'))
+        + (planIsKids(x) ? (t => t && t !== 'none' ? ' · 👤 ' + t : '')(String(P.kidsTeacher[x.id] || (P.staffBy[x.id] || {}).teacher || '').trim()) : ''),
+      start: a, end: a + (+x.duration_minutes || (x.session_type === 'party' ? 120 : 90)), fixed: true }; });
+  (P.parties || []).forEach(pt => { const x = pt.session || {}, a = hubMin(x.session_time);
+    openTimes.push({ id: 'o:p' + x.id, kind: 'open booked', sid: x.id, title: tl0(x) + (pt.booking && pt.booking.customer_name ? ' · ' + pt.booking.customer_name : ''), sub: (pt.guests ? pt.guests + ' guests' : 'booked'), start: a, end: a + (+x.duration_minutes || 120), fixed: true, party: pt }); });
+  _pbOpen = openTimes;
+  const all = people.map(x => x.a).concat(blocks.map(b => b.start), openTimes.map(b => b.start)), ends = people.map(x => x.z).concat(blocks.map(b => b.end), openTimes.map(b => b.end));
+  const lo = Math.floor((all.length ? Math.min(...all) : 9 * 60) / 60) * 60, hi = Math.ceil((ends.length ? Math.max(...ends) : 17 * 60) / 60) * 60, span = Math.max(60, hi - lo);
+  const pct = m => ((m - lo) / span * 100).toFixed(3) + '%', w = (a, z) => ((z - a) / span * 100).toFixed(3) + '%';
+  window._pbScale = { lo, span };
+  const hl = m => { const h = Math.floor(m / 60); return (h % 12 || 12) + (h >= 12 ? 'p' : 'a'); };
+  const hours = []; for (let m = lo; m <= hi; m += 60) hours.push(m);
+  const hourLines = hours.map(m => `<i class="pb-hl" style="left:${pct(m)}"></i>`).join('');
+  const lane = (key, label, sub, mine, shift) => {
+    const rows = []; mine.slice().sort((a, b) => a.start - b.start).forEach(b => { let r = 0; while ((rows[r] || []).some(c => b.start < c.end && c.start < b.end)) r++; (rows[r] = rows[r] || []).push(b); b._row = r; });
+    const n = Math.max(1, rows.length);
+    const bad = b => !!shift && ((b.start < shift[0] || b.end > shift[1]) || mine.some(c => c !== b && b.start < c.end && c.start < b.end));
+    return `<div class="pb-row"><div class="pb-who"><b>${esc(label)}</b>${sub ? `<small>${esc(sub)}</small>` : ''}</div>
+      <div class="pb-lane${edit ? ' drop' : ''}" data-who="${escAttr(key)}" style="height:${n * 40 + 10}px">${hourLines}
+        ${shift ? `<i class="pb-shift" style="left:${pct(shift[0])};width:${w(shift[0], shift[1])}"></i>` : ''}
+        ${mine.map(b => `<div class="pb-blk ${b.kind}${b.auto ? ' auto' : ''}${bad(b) ? ' bad' : ''}${edit && !b.fixed ? ' move' : ''}" data-id="${escAttr(b.id)}" style="left:${pct(b.start)};width:${w(b.start, b.end)};top:${5 + b._row * 40}px"
+            title="${escAttr(b.title + ' · ' + mHm(b.start) + '–' + mHm(b.end) + (b.sub ? ' · ' + b.sub : '') + (b.auto ? ' · suggested' : '') + (bad(b) ? ' · clashes or outside the shift' : ''))}"><b>${esc(b.kind === 'brk' ? 'Break ' + mHm(b.start) : b.title)}</b>${b.sub ? `<span>${esc(b.sub)}</span>` : ''}</div>`).join('')}
+      </div></div>`;
+  };
+  const lanes = people.map(x => lane(x.wn, x.p.name, shortTime(x.p.start_time) + '–' + shortTime(x.p.end_time), blocks.filter(b => laneOf(b) === x), [x.a, x.z])).join('');
+  const nobody = blocks.filter(b => !laneOf(b) && b.kind !== 'brk');
+  const [y, m, d] = P.date.split('-').map(Number);
+  return `<div class="pb-head"><b>${esc(new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }))}</b>
+      <span class="pb-key"><i class="kids"></i>Kids class <i class="wheel"></i>Wheel <i class="party"></i>Party (art time) <i class="demo"></i>Demo <i class="brk"></i>Break</span>
+      <span class="spacer"></span>${edit ? `<span class="plan-msg" id="plan-msg">${esc(P.msg || (P.dirty ? 'Unsaved changes' : ''))}</span>${planCanEdit() ? '<button class="ho-btn" onclick="planSuggestBreaks()">☕ Suggest breaks</button>' : ''}<button class="ho-btn primary" onclick="planSave()"${P.dirty ? '' : ' disabled'}>Save</button>` : `<button class="ho-btn" onclick="openPinModal()">🔒 Unlock to move</button>`}</div>
+    <p class="ho-intro" style="margin:4px 0 8px">${edit ? 'Drag a class, party, wheel time or demo onto someone to give it to them, or tap it and pick. Then Save. Dashed = suggested; red outline = a clash or outside their shift.' : 'Who’s teaching and demoing when. A coordinator can move things between people after unlocking with their PIN.'}</p>
+    <div class="pb-board"><div class="pb-row pb-times"><div class="pb-who"></div><div class="pb-lane" style="height:22px">${hours.map(m => `<span class="pb-hr" style="left:${pct(m)}">${hl(m)}</span>`).join('')}</div></div>
+      ${openTimes.length ? lane('', 'The day', 'every time · white = not booked yet', openTimes, null).replace('pb-lane drop', 'pb-lane').replace('class="pb-row"', 'class="pb-row pb-openrow"') : ''}
+      ${lanes || '<div class="ho-intro" style="padding:10px">No shifts posted for this day yet.</div>'}
+      ${nobody.length ? lane('', 'Nobody yet', 'needs someone', nobody, null) : ''}</div>`;
 }
-async function dashLoadMe() {
-  _dash.err = '';
-  try {
-    _dash.me = await dashRpc('hub_dash_me');
-    const L = dashNormalize(_dash.me.layout), T = _dash.me.template;
-    if (L) _dash.layout = L;
-    else if (T && dashNormalize(T)) { _dash.layout = dashFromTemplate(T, null); dashSaveSoon(); }   // (first visit: the one an owner set up)
-    else if (dashIsOwner()) { _dash.layout = dashBuild(['owner']); dashSaveSoon(); }
-    else { _dash.layout = null; _dash.choose = true; }
-  } catch (e) {
-    _dash.me = null;
-    _dash.err = /hub_dash_me/.test(e.message || '') ? 'Run My dashboard step 2 SQL in Supabase first.' : (e.message || 'Couldn’t load your dashboard.');
+// give a block to someone (the same fields the list's dropdowns change)
+function planBoardGive(id, wn) {
+  const P = _plan, b = _pbBlocks.find(z => z.id === id); if (!b || b.fixed) return;
+  if (b.kind === 'kids') { if (P.kidsTeacher[b.sid] !== wn) { planKids(b.sid, wn); return; } P.kidsTeacher[b.sid] = wn; }   // (Nov 10 2026) substitute or term teacher, as in the list
+  else if (b.kind === 'wheel') P.wheel[b.sid] = wn;
+  else if (b.kind === 'party') { const pt = P.parties[b.pi]; if (pt) pt['t' + b.slot] = wn; }
+  else if (b.kind === 'demo') { P.demoBy = P.demoBy || {}; P.demoBy[b.sid] = wn; }
+  P.dirty = true; P.msg = ''; renderPlanDay();
+}
+let _pbOpen = [];
+function planBoardDetails(b) {   // the full title, time, numbers, and for parties the art and party time
+  const x = (_plan.sessions || []).find(z => z.id === b.sid) || ((_plan.parties || []).find(p => p.session && p.session.id === b.sid) || {}).session || {};
+  const pt = b.party || (_plan.parties || []).find(p => p.session && p.session.id === b.sid);
+  let h = `<div class="pb-det"><div><b>${esc(String(x.title || b.title || '').split('|')[0].trim() || b.title)}</b></div><div class="goal-note">${esc(mHm(b.start))}–${esc(mHm(b.end))}${b.sub ? ' · ' + esc(b.sub) : ''}${b.who ? ' · ' + esc(b.who) : ''}</div>`;
+  if (pt) { const d = pt.detail || {}; let ad = {}; try { ad = parseAddonDetails(parsePartyAddons(pt.booking && pt.booking.raw_payload, getPartySubtype(x.title || '')), getPartySubtype(x.title || '')) || {}; } catch (e) {}
+    h += `<div class="goal-note">🎨 Art time: <b>${esc(d.actual_art_time || ad.artTime || (/get.?together/i.test(x.title || '') ? '90 min' : '60 min'))}</b> · 🎉 Party time after: <b>${esc((d.actual_party_time || ad.partyTime || 'none').replace(/^none$/, 'none'))}</b>${pt.guests ? ` · ${pt.guests} guests` : ''}${pt.booking && pt.booking.customer_name ? ` · ${esc(pt.booking.customer_name)}` : ''}</div>`; }
+  return h + '</div>';
+}
+function planBreakMove(b, startAt) {   // move a break (keeps its length) and mark the day changed (named apart from planBreakSet below)
+  const len = Math.max(15, b.end - b.start);
+  _plan.roles['break_' + b.role] = `${mHm(startAt)}–${mHm(startAt + len)}`;
+  renderPlanDay(); planTouched(`Break for ${b.who} moved to ${mHm(startAt)}. Save to keep it.`);
+}
+function planBoardPick(id) {
+  const b = _pbBlocks.find(z => z.id === id) || _pbOpen.find(z => z.id === id); if (!b) return;
+  if (b.kind === 'brk' && planBoardCanMove()) {
+    const p = (_plan.team || []).find(x => hubNameKey(planWriteName(x)) === hubNameKey(b.who) || hubNameKey(x.name) === hubNameKey(b.who));
+    const a = p ? hubMin(p.start_time) : b.start - 120, z = p ? hubMin(p.end_time) : b.end + 120, len = Math.max(15, b.end - b.start), opts = [];
+    for (let t = Math.ceil(a / 15) * 15 + 60; t + len <= z - 30; t += 15) opts.push(t);
+    window._pbBrk = b;
+    openDutySheet(`<h3>☕ ${esc(b.who)}’s break</h3><p class="ho-intro">Now ${esc(mHm(b.start))}–${esc(mHm(b.end))}. Choose when it starts (it stays ${len} minutes), then Save.</p>
+      <div class="pb-pick">${opts.map(t => `<button class="ho-btn${t === b.start ? ' primary' : ''}" onclick="closeDutySheet(); planBreakMove(window._pbBrk, ${t})">${esc(mHm(t))}</button>`).join('') || '<span class="goal-note">No other times fit their shift.</span>'}</div>
+      <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button></div>`);
+    return;
   }
-  if (!_dash.sessName) try {   // (the greeting's name, until someone types their own)
-    const r = await sb.auth.getSession(), u = r && r.data && r.data.session && r.data.session.user;
-    const n = u ? ((u.user_metadata && u.user_metadata.name) || String(u.email || '').split('@')[0]) : '';
-    _dash.sessName = n ? n.replace(/[._-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()).split(' ')[0] : '';
-  } catch (e) { }
+  if (b.fixed || !planBoardCanMove()) { openDutySheet(`<h3>${esc(b.title)}</h3>${planBoardDetails(b)}<div class="sheet-actions"><button onclick="closeDutySheet()">Close</button></div>`); return; }
+  window._pbPickId = id;
+  openDutySheet(`<h3>${esc(b.title)} · ${esc(mHm(b.start))}–${esc(mHm(b.end))}</h3>${planBoardDetails(b)}<p class="ho-intro">Who ${b.kind === 'demo' ? 'demos' : 'teaches'} it?</p>
+    <div class="pb-pick">${(_plan.team || []).map((p, i) => `<button class="ho-btn${hubNameKey(planWriteName(p)) === hubNameKey(b.who) ? ' primary' : ''}" onclick="closeDutySheet(); planBoardGive(window._pbPickId, planWriteName(_plan.team[${i}]))">${esc(p.name)} <small>${esc(shortTime(p.start_time))}–${esc(shortTime(p.end_time))}</small></button>`).join('')}
+      <button class="ho-btn" onclick="closeDutySheet(); planBoardGive(window._pbPickId, '')">Nobody (needs someone)</button></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button></div>`);
 }
-function dashSaveSoon() {
-  if (_dash.target) { _dash.dirty = true; _dash.saving = 'Not saved yet'; dashStatus(); return; }   // (set-up mode saves with its own buttons)
-  clearTimeout(_dash.saveTimer); _dash.saving = 'Saving…'; dashStatus();
-  _dash.saveTimer = setTimeout(dashSaveNow, 800);
-}
-async function dashSaveNow() {
-  if (!_dash.layout || _dash.target) return;
-  try { await dashRpc('hub_dash_save', { p_layout: _dash.layout }); _dash.saving = 'Saved ✓'; }
-  catch (e) { _dash.saving = 'Not saved: ' + (e.message || 'error'); }
-  dashStatus();
-  if (_dash.saving === 'Saved ✓') setTimeout(() => { if (_dash.saving === 'Saved ✓') { _dash.saving = ''; dashStatus(); } }, 2500);
-}
-function dashStatus() { const el = document.getElementById('dash-status'); if (el) { el.textContent = _dash.saving || ''; el.className = 'dash-status' + (/^Not saved/.test(_dash.saving) ? ' bad' : ''); } }
-
-// ---------- Drawing ----------
-function dashDraw(noLoad) {   // noLoad: redraw from blocks already loaded, without asking the database again
-  const el = document.getElementById('mydash-pane'); if (!el) return;
-  dashApplyTheme();
-  if (!noLoad) _dash.glance = {};
-  const L = _dash.layout, T = _dash.target;
-  const btns = `<span id="dash-status" class="dash-status"></span>
-    ${L ? `<button class="ho-btn" onclick="dashRefreshAll()" title="Refresh every block">↻</button>
-      <button class="ho-btn" onclick="dashPersonalize()" title="${T ? 'Colour' : 'Colour, picture and greeting'}">🎨</button>` : ''}
-    ${!T && _dash.me && _dash.me.can_set_up ? '<button class="ho-btn" onclick="dashSetupOpen()" title="Set up someone’s starting dashboard">👥 Set up for…</button>' : ''}
-    ${L ? `<button class="ho-btn${_dash.edit ? ' primary' : ''}" onclick="dashToggleEdit()">${_dash.edit ? '✓ Done' : '✏️ Customize'}</button>` : ''}`;
-  let head;
-  if (T) head = `<div class="ho-head"><div class="pts-page-title" style="margin:0">👥 ${esc(T.name)}’s starting dashboard</div><span class="spacer"></span>${btns}</div>` + dashSetupBar();
-  else if (L && L.greet !== false && _dash.me) {
-    const nm = dashMyName(), g = typeof heroGreetingHtml === 'function' ? heroGreetingHtml(nm || 'there') : esc((typeof timeOfDayGreeting === 'function' ? timeOfDayGreeting() : 'Hello') + ', ' + (nm || 'there') + '!');
-    head = `<div class="dash-hero">${dashAvatarHtml(L, 56)}<div class="dash-hello"><div class="dash-greet">${g}</div>
-      <div class="dash-date">${esc(new Date().toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' }))}<span id="dash-glance"></span></div></div>
-      <span class="spacer"></span><div class="dash-hero-btns">${btns}</div></div>`;
-  } else head = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🏠 My dashboard</div><span class="spacer"></span>${btns}</div>`;
-  if (!T && L && L.note) head += `<div class="dash-note-banner"><span>📌</span><div><b>${esc(L.note_by ? 'A note from ' + L.note_by : 'A note for you')}</b><div>${esc(L.note).replace(/\n/g, '<br>')}</div></div><button class="ho-btn sm" onclick="dashNoteDismiss()" title="Hide this note">✕</button></div>`;
-  if (_dash.err) { el.innerHTML = head + `<div class="ho-card"><div class="goal-note">${esc(_dash.err)}</div><button class="ho-btn" onclick="_dash.me=null;openMyDash()">Try again</button></div>`; return; }
-  if (!_dash.me) { el.innerHTML = head + '<div class="ho-intro">Loading…</div>'; return; }
-  if (_dash.choose || !_dash.layout) { el.innerHTML = head + dashChooserHtml(); return; }
-  const bar = _dash.edit ? `<div class="dash-editbar"><button class="ho-btn primary" onclick="dashAddOpen()">+ Add a block</button>
-      <button class="ho-btn" onclick="dashReset()">${!T && _dash.me.template ? '↺ Back to my starting dashboard' : '↺ Start again from a role’s layout'}</button>
-      ${T ? '' : `<label class="dash-start"><input type="checkbox" ${L.start ? 'checked' : ''} onchange="_dash.layout.start=this.checked;dashSaveSoon()"> Open My dashboard when the Hub starts</label>`}
-      <span class="fd-sm">Drag ⠿ to move, or use ◀ ▶. S, M and L change the width; drag a block’s bottom-right corner to change its height. Blocks stack up to fill gaps.</span></div>` : '';
-  el.innerHTML = head + bar + `<div class="dash-grid${_dash.edit ? ' editing' : ''}" id="dash-grid"${_dash.edit ? ' ondragover="dashDragOver(event)" ondrop="dashDrop(event)"' : ''}>${L.blocks.map(dashBlockShell).join('')}</div>` +
-    (!L.blocks.length ? `<div class="ho-card"><div class="goal-note">No blocks yet.</div><button class="ho-btn primary" onclick="${_dash.edit ? '' : 'dashToggleEdit();'}dashAddOpen()">+ Add a block</button></div>` : '');
-  dashStatus(); dashGlanceDraw();
-  dashPackStart();
-  L.blocks.forEach(b => { if (!noLoad || _dash.cache[b.id] === undefined) dashLoadBlock(b.id, false); });
-}
-function dashBlockShell(b, i) {
-  const t = DASH_BLOCKS[b.type], ed = _dash.edit, n = _dash.layout.blocks.length;
-  const sizes = ['s', 'm', 'l'].map(s => `<button class="dash-sz${b.size === s ? ' on' : ''}" onclick="dashSize('${b.id}','${s}')" title="${s === 's' ? 'Small' : s === 'm' ? 'Medium' : 'Full width'}">${s.toUpperCase()}</button>`).join('');
-  const tools = ed ? `<div class="dash-tools"><span class="dash-grip" title="Drag to move" draggable="true" ondragstart="dashDragStart(event,'${b.id}')" ondragend="dashDragEnd()">⠿</span>
-      <button onclick="dashMove('${b.id}',-1)" ${i === 0 ? 'disabled' : ''} title="Move back">◀</button><button onclick="dashMove('${b.id}',1)" ${i === n - 1 ? 'disabled' : ''} title="Move forward">▶</button>
-      ${sizes}${b.h ? `<button class="dash-hauto" onclick="dashHeightAuto('${b.id}')" title="Height: fit to what's in it">↕</button>` : ''}${t.settings ? `<button onclick="dashSettings('${b.id}')" title="Settings">⚙</button>` : ''}<button onclick="dashRemove('${b.id}')" title="Remove">✕</button></div>` : '';
-  const acts = !ed ? `${t.open ? `<button class="dash-open" onclick="dashOpen('${escAttr(t.open[0])}'${t.open[1] !== undefined ? `,'${escAttr(t.open[1])}'` : ''})">Open →</button>` : ''}
-      <button class="dash-ref" onclick="dashLoadBlock('${b.id}', true)" title="Refresh">↻</button>` : '';
-  return `<section class="dash-block sz-${b.size}${b.h ? ' fixed' : ''}" id="dash-${b.id}" data-id="${b.id}"${b.h ? ` style="height:${b.h}px"` : ''} ${ed ? `ondragover="dashDragOver(event,'${b.id}')" ondrop="dashDrop(event)"` : ''}>
-    <header><b title="${escAttr(t.name)}">${esc(t.name)}</b><span class="spacer"></span>${ed ? tools : acts}</header>
-    <div class="dash-body" id="dash-body-${b.id}">${_dash.cache[b.id] || '<div class="dash-empty">Loading…</div>'}</div></section>`;
-}
-async function dashLoadBlock(id, fresh) {
-  const b = _dash.layout && _dash.layout.blocks.find(x => x.id === id); if (!b) return;
-  const t = DASH_BLOCKS[b.type], el = document.getElementById('dash-body-' + id); if (!el) return;
-  if (fresh) el.innerHTML = '<div class="dash-empty">Loading…</div>';
-  let html;
-  try { html = await t.load(b); }
-  catch (e) {
-    const m = (e && (e.message || e.details)) || String(e);
-    html = (e && e.code === '42501') || /permission|not allowed|access|sign in/i.test(m)
-      ? '<div class="dash-empty">No access. Ask an owner on the Access page.</div>'
-      : `<div class="dash-empty bad">Couldn’t load: ${esc(m)}</div>`;
-  }
-  _dash.cache[id] = html;
-  const el2 = document.getElementById('dash-body-' + id);
-  if (el2 && !(b.type === 'sticky_note' && el2.querySelector('textarea:focus'))) el2.innerHTML = html;   // (never wipe a note while it's being typed)
-}
-function dashRefreshAll() { (_dash.layout ? _dash.layout.blocks : []).forEach(b => { if (b.type !== 'sticky_note') dashLoadBlock(b.id, true); }); }
-function dashStartRefresh() {
-  clearInterval(_dash.refreshTimer); clearInterval(_dash.pollTimer);
-  _dash.pollTimer = setInterval(() => {   // (shared blocks, like the schedule check and new orders, check back more often)
-    if (!paneVisible('mydash-pane')) { clearInterval(_dash.pollTimer); return; }
-    if (document.hidden || _dash.edit || _dash.drag) return;
-    const now = Date.now(); _dash.polled = _dash.polled || {};
-    (_dash.layout ? _dash.layout.blocks : []).forEach(b => { const t = DASH_BLOCKS[b.type];
-      if (t.poll && now - (_dash.polled[b.id] || 0) >= t.poll) { _dash.polled[b.id] = now; if (!document.querySelector('#dash-body-' + b.id + ' input:focus')) dashLoadBlock(b.id, false); } });
-  }, 10000);
-  _dash.refreshTimer = setInterval(() => {
-    if (!paneVisible('mydash-pane') || document.hidden) { if (!paneVisible('mydash-pane')) clearInterval(_dash.refreshTimer); return; }
-    if (!_dash.edit) (_dash.layout ? _dash.layout.blocks : []).forEach(b => { if (b.type !== 'sticky_note') dashLoadBlock(b.id, false); });
-  }, DASH_REFRESH_MS);
-}
-
-// ---------- First visit: pick a starting layout ----------
-function dashChooserHtml() {
-  const best = dashBestStarter();
-  const who = _dash.target ? esc(_dash.target.name) + '’s' : 'your';
-  return `<div class="ho-intro">Pick a layout to start from. It only shows the blocks ${who} access allows, and ${_dash.target ? 'you can still add, remove, move and resize them before saving' : 'you can add, remove, move and resize them afterwards'}.</div>
-    <div class="dash-starters">${DASH_STARTERS.map(s => { const B = dashStarterBlocks(s);
-      return `<label class="dash-starter${s.key === best ? ' best' : ''}"><input type="radio" name="dash-st" value="${s.key}" ${s.key === best ? 'checked' : ''}>
-        <b>${esc(s.name)}</b>${s.key === best ? ` <span class="dash-pill ok">Closest to ${_dash.target ? esc(_dash.target.name) + '’s' : 'your'} access</span>` : ''}
-        <div class="dash-sub">${B.length ? B.map(([t]) => esc(DASH_BLOCKS[t].name)).join(' · ') : 'Only For you and Quick links (nothing else matches your access)'}</div></label>`; }).join('')}</div>
-    <button class="ho-btn primary" onclick="dashChoose()">Start with this layout</button>`;
-}
-function dashChoose() {
-  const r = document.querySelector('input[name="dash-st"]:checked'); if (!r) return;
-  const keep = _dash.keep || _dash.layout; _dash.keep = null;
-  _dash.layout = dashBuild([r.value]); _dash.choose = false;
-  if (keep) ['theme', 'avatar', 'name', 'greet', 'start', 'note', 'note_by'].forEach(k => { if (keep[k] !== undefined) _dash.layout[k] = keep[k]; });
-  if (_dash.target) _dash.edit = true;
-  dashSaveSoon(); dashDraw();
-}
-function dashReset() {
-  const T = !_dash.target && _dash.me && _dash.me.template;
-  if (T) {   // (back to the starting dashboard an owner set up; their colour, picture and name stay)
-    if (!confirm('Go back to your starting dashboard? Your current blocks and their settings will be replaced (your colour and picture stay).')) return;
-    _dash.layout = dashFromTemplate(T, _dash.layout); _dash.cache = {}; _dash.edit = false; dashSaveSoon(); dashDraw(); return;
-  }
-  if (!confirm(_dash.target ? 'Start again from a role’s layout?' : 'Start again from a role’s layout? Your current blocks and their settings will be replaced.')) return;
-  _dash.keep = _dash.layout; _dash.choose = true; _dash.edit = false; _dash.cache = {}; dashDraw();
-}
-
-// ---------- Customize ----------
-function dashToggleEdit() { _dash.edit = !_dash.edit; dashDraw(); }
-function dashIdx(id) { return _dash.layout.blocks.findIndex(b => b.id === id); }
-function dashMove(id, step) {
-  const B = _dash.layout.blocks, i = dashIdx(id), j = i + step; if (i < 0 || j < 0 || j >= B.length) return;
-  const [x] = B.splice(i, 1); B.splice(j, 0, x); dashSaveSoon(); dashDraw();
-}
-function dashSize(id, s) { const b = _dash.layout.blocks[dashIdx(id)]; if (!b || b.size === s) return; b.size = s; dashSaveSoon(); dashDraw(); }
-function dashRemove(id) {
-  const i = dashIdx(id); if (i < 0) return;
-  _dash.layout.blocks.splice(i, 1); delete _dash.cache[id]; dashSaveSoon(); dashDraw();
-}
-// Dragging: the block being dragged stays in the grid as a faded placeholder, and as it passes over another block it's moved
-// in front of or behind it right away, so the others slide out of the way (animated). Letting go just saves the new order.
-function dashDragStart(e, id) {
-  _dash.drag = id; _dash.dragMoved = false; _dash.dragWait = 0;
-  try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', id); } catch (x) { }
-  const bl = e.currentTarget.closest('.dash-block');
-  if (bl) { try { e.dataTransfer.setDragImage(bl, 20, 20); } catch (x) { } setTimeout(() => bl.classList.add('dragging'), 0); }   // (after the drag picture is taken)
-}
-function dashDragOver(e, target) {
-  if (!_dash.drag) return;
-  e.preventDefault(); try { e.dataTransfer.dropEffect = 'move'; } catch (x) { }
-  if (!target || target === _dash.drag || Date.now() < _dash.dragWait) return;
-  const tEl = document.getElementById('dash-' + target), dEl = document.getElementById('dash-' + _dash.drag); if (!tEl || !dEl) return;
-  const r = tEl.getBoundingClientRect();
-  const after = (r.width > r.height * 1.4) ? e.clientX > r.left + r.width / 2 : e.clientY > r.top + r.height / 2;   // (wide blocks: left/right half; tall ones: top/bottom half)
-  const B = _dash.layout.blocks, from = dashIdx(_dash.drag);
-  const x = B.splice(from, 1)[0]; let to = dashIdx(target) + (after ? 1 : 0);
-  B.splice(to, 0, x);
-  if (B.indexOf(x) === from) return;   // (already there)
-  _dash.dragMoved = true; _dash.dragWait = Date.now() + 160;   // (a short pause so blocks sliding under the pointer don't bounce back)
-  dashFlip(() => { const g = document.getElementById('dash-grid'); g.insertBefore(dEl, after ? tEl.nextSibling : tEl); });
-}
-function dashFlip(change) {   // move blocks, then animate each from where it was to where it is now
-  const els = Array.from(document.querySelectorAll('#dash-grid .dash-block')), first = new Map(els.map(el => [el, el.getBoundingClientRect()]));
-  change();
-  els.forEach(el => {
-    const a = first.get(el), b = el.getBoundingClientRect(), dx = a.left - b.left, dy = a.top - b.top;
-    if (!dx && !dy) return;
-    el.style.transition = 'none'; el.style.transform = `translate(${dx}px, ${dy}px)`;
-    el.getBoundingClientRect();   // (apply before animating back)
-    el.style.transition = 'transform 180ms ease'; el.style.transform = '';
-    setTimeout(() => { el.style.transition = ''; }, 200);
+// drag (mouse, pen or finger) onto someone's row; a tap opens the picker
+function planBoardWire() {
+  // tap any fixed block (the day's times, breaks) for its details
+  document.querySelectorAll('#plan-body .pb-blk:not(.move)').forEach(el => el.addEventListener('click', () => planBoardPick(el.dataset.id)));
+  if (!planBoardCanMove()) return;
+  document.querySelectorAll('#plan-body .pb-blk.move').forEach(el => {
+    el.addEventListener('pointerdown', ev => {
+      if (ev.button > 0) return;
+      const id = el.dataset.id, x0 = ev.clientX, y0 = ev.clientY; let ghost = null;
+      const move = e => {
+        if (!ghost && Math.hypot(e.clientX - x0, e.clientY - y0) < 6) return;
+        if (!ghost) { ghost = el.cloneNode(true); ghost.classList.add('pb-ghost'); ghost.style.width = el.offsetWidth + 'px'; document.body.appendChild(ghost); el.style.opacity = '.35'; }
+        ghost.style.left = (e.clientX - 20) + 'px'; ghost.style.top = (e.clientY - 15) + 'px';
+        document.querySelectorAll('#plan-body .pb-lane.drop').forEach(l => l.classList.remove('over'));
+        ghost.style.display = 'none'; const under = document.elementFromPoint(e.clientX, e.clientY); ghost.style.display = '';
+        const ln = under && under.closest('.pb-lane.drop'); if (ln) ln.classList.add('over');
+        e.preventDefault();
+      };
+      const up = e => {
+        document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', up);
+        if (!ghost) { planBoardPick(id); return; }
+        ghost.style.display = 'none'; const under = document.elementFromPoint(e.clientX, e.clientY); ghost.remove(); el.style.opacity = '';
+        const ln = under && under.closest('.pb-lane.drop');
+        const bk = _pbBlocks.find(z => z.id === id);
+        if (bk && bk.kind === 'brk') {   // a break: same person, new time (where it was dropped along the row), in 15 minutes
+          const lane0 = el.closest('.pb-lane'), r = lane0 && lane0.getBoundingClientRect(), S = window._pbScale;
+          if (r && S && r.width) { const startAt = Math.round((S.lo + (e.clientX - r.left - 20) / r.width * S.span) / 15) * 15; planBreakMove(bk, startAt); } else renderPlanDay();
+          return;
+        }
+        if (ln) planBoardGive(id, ln.dataset.who || ''); else renderPlanDay();
+      };
+      const cancel = () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', up); document.removeEventListener('pointercancel', cancel); if (ghost) { ghost.remove(); el.style.opacity = ''; } };
+      document.addEventListener('pointermove', move, { passive: false }); document.addEventListener('pointerup', up); document.addEventListener('pointercancel', cancel);
+      try { el.setPointerCapture(ev.pointerId); } catch (e) {}   // (iPad: keep the drag on the block, not scrolling the page)
+    });
   });
 }
-function dashDrop(e) { e.preventDefault(); }
-function dashDragEnd() {
-  const moved = _dash.drag && _dash.dragMoved; _dash.drag = null; _dash.dragMoved = false;
-  document.querySelectorAll('.dash-block.dragging').forEach(x => x.classList.remove('dragging'));
-  if (moved) { dashSaveSoon(); dashDraw(true); }   // (redraw from what's already loaded, to refresh the ◀ ▶ buttons)
-}
-function dashAddOpen() {
-  const have = new Set(_dash.layout.blocks.map(b => b.type));
-  const html = `<h3 style="margin:0 0 4px">+ Add a block</h3><p class="fd-sm" style="margin:0 0 10px">Only blocks your access allows are listed.</p>` +
-    DASH_GROUPS.map(g => { const T = Object.keys(DASH_BLOCKS).filter(k => DASH_BLOCKS[k].group === g && dashAllowed(k)); if (!T.length) return '';
-      return `<div class="dash-addgrp"><b>${esc(g)}</b>${T.map(k => `<div class="dash-addrow"><div><div>${esc(DASH_BLOCKS[k].name)}${have.has(k) ? ' <span class="dash-pill">on your page</span>' : ''}</div><div class="dash-sub">${esc(DASH_BLOCKS[k].desc || '')}</div></div>
-        <button class="ho-btn sm${have.has(k) ? '' : ' primary'}" onclick="dashAdd('${k}')">${have.has(k) ? 'Add another' : 'Add'}</button></div>`).join('')}</div>`; }).join('') +
-    '<div style="text-align:right;margin-top:10px"><button class="ho-btn" onclick="closeDutySheet()">Close</button></div>';
-  openDutySheet(html);
-}
-function dashAdd(type) {
-  if (!dashAllowed(type)) return;
-  if (_dash.layout.blocks.length >= DASH_MAX_BLOCKS) { alert('That’s the most blocks one page can hold (' + DASH_MAX_BLOCKS + ').'); return; }
-  const t = DASH_BLOCKS[type];
-  _dash.layout.blocks.push({ id: dashNewId(), type, size: t.size || 'm', opts: Object.assign({}, t.opts || {}) });
-  closeDutySheet(); dashSaveSoon(); dashDraw();
-  const last = _dash.layout.blocks[_dash.layout.blocks.length - 1], el = document.getElementById('dash-' + last.id);
-  if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-}
-function dashSettings(id) {
-  const b = _dash.layout.blocks[dashIdx(id)]; if (!b) return; const t = DASH_BLOCKS[b.type];
-  openDutySheet(`<h3 style="margin:0 0 10px">⚙ ${esc(t.name)}</h3><div class="dash-set" id="dash-set">${t.settings(b)}</div>
-    <div style="text-align:right;margin-top:12px"><button class="ho-btn" onclick="closeDutySheet()">Cancel</button> <button class="ho-btn primary" onclick="dashSettingsSave('${b.id}')">Save</button></div>`);
-}
-function dashSettingsSave(id) {
-  const b = _dash.layout.blocks[dashIdx(id)], box = document.getElementById('dash-set'); if (!b || !box) return;
-  box.querySelectorAll('[data-opt]').forEach(x => { b.opts[x.getAttribute('data-opt')] = x.value; });
-  const ticks = box.querySelectorAll('[data-link]');
-  if (ticks.length) b.opts.links = Array.from(ticks).filter(x => x.checked).map(x => x.getAttribute('data-link'));
-  closeDutySheet(); delete _dash.cache[id]; dashSaveSoon(); dashDraw();
-}
-function dashNoteInput(id, text) {
-  const b = _dash.layout.blocks[dashIdx(id)]; if (!b) return;
-  b.opts.text = String(text).slice(0, 2000); _dash.cache[id] = DASH_BLOCKS.sticky_note.load(b); dashSaveSoon();
-}
 
-// ---------- Heights and stacking ----------
-// Each block spans as many 4px grid rows as its height needs, and the grid fills gaps (dense), so short blocks slide up
-// under shorter neighbours. In Customize, a block's own resize corner sets its height; it's saved as b.h (pixels).
-function dashHeightOk(h) { const n = Math.round(+h / 10) * 10; return n >= DASH_HMIN && n <= DASH_HMAX ? n : 0; }
-function dashSpan(el) {
-  const h = el.getBoundingClientRect().height;
-  el.style.gridRowEnd = 'span ' + Math.max(1, Math.ceil((h + DASH_GAP) / DASH_ROW));
-}
-function dashPackStart() {
-  if (_dash.ro) _dash.ro.disconnect();
-  const els = document.querySelectorAll('#dash-grid .dash-block');
-  els.forEach(dashSpan);
-  if (typeof ResizeObserver !== 'function') return;
-  _dash.ro = new ResizeObserver(entries => entries.forEach(en => {
-    const el = en.target; dashSpan(el);
-    if (!_dash.edit || !el.style.height) return;   // (only a drag of the corner, in Customize, changes the saved height)
-    const b = _dash.layout && _dash.layout.blocks.find(x => x.id === el.getAttribute('data-id')); if (!b) return;
-    const h = dashHeightOk(parseFloat(el.style.height)) || (parseFloat(el.style.height) < DASH_HMIN ? DASH_HMIN : DASH_HMAX);
-    if (h !== b.h) { b.h = h; el.classList.add('fixed'); dashSaveSoon(); dashHeightBtn(b); }
-  }));
-  els.forEach(el => _dash.ro.observe(el));
-}
-function dashHeightBtn(b) {   // (show ↕ Auto once a block has a height, without redrawing mid-drag)
-  const t = document.querySelector('#dash-' + b.id + ' .dash-tools');
-  if (t && !t.querySelector('.dash-hauto')) { const x = document.createElement('button'); x.className = 'dash-hauto'; x.textContent = '↕'; x.title = 'Height: fit to what’s in it'; x.onclick = () => dashHeightAuto(b.id); t.insertBefore(x, t.querySelector('[title="Settings"], [title="Remove"]')); }
-}
-function dashHeightAuto(id) { const b = _dash.layout.blocks[dashIdx(id)]; if (!b) return; delete b.h; dashSaveSoon(); dashDraw(); }
 
-// ---------- 📋 For you: its buttons come from today.js and refresh only the Today screen's card ----------
-// So: after any decision (they all finish with myNotesLoad), refresh For you blocks here too; and a "Why?" note typed on the
-// dashboard is saved first (the Today screen has a box with the same id, which would otherwise be the one read).
-function dashReloadType(type) { if (_dash.layout && paneVisible('mydash-pane')) _dash.layout.blocks.filter(b => b.type === type).forEach(b => dashLoadBlock(b.id, false)); }
-(function dashHookInbox() {
-  if (typeof myNotesLoad === 'function' && !myNotesLoad._dash) {
-    const load = myNotesLoad;
-    window.myNotesLoad = function () { const r = load.apply(this, arguments); try { dashReloadType('for_you'); } catch (e) { } return r; };
-    window.myNotesLoad._dash = true;
+// =====================================================================================================================
+// 🎉 Custom party and get-together times (custom_party_times.sql, custom-party-invite): a hidden World-run time held for one
+// customer until a pay-by date, with a secret link to World's normal party booking (paid on the usual invoice).
+// Home office makes them (and approves requests); coordinators request them.
+// =====================================================================================================================
+let _cust = { studio: null, rows: null, at: 0, err: '' };
+const CUST_KIND = { kids: 'Kids Party', splatter: 'Splatter Party', get_together: 'Adult Get-Together' };
+const CUST_ST = { requested: '📝 Requested', held: '⏳ Held', booked: '✓ Booked', released: 'Released (not paid)', cancelled: 'Cancelled', declined: 'Declined' };
+async function customLoad(force) {
+  const st = _sessionStudioId; if (!st) return;
+  if (!force && _cust.studio === st && _cust.rows && Date.now() - _cust.at < 60000) return;
+  const { data, error } = await sb.rpc('hub_custom_holds', { p_studio: st });
+  let ft = []; try { const f = await sb.rpc('hub_ft_invoices', { p_studio: st }); ft = f.error ? [] : (f.data || []); } catch (e) {}
+  let bo = []; try { const b = await sb.rpc('hub_buyouts', { p_studio: st }); bo = b.error ? [] : (b.data || []); } catch (e) {}
+  _cust = { studio: st, rows: error ? [] : (data || []), ft, bo, at: Date.now(), err: error ? (/hub_custom_holds/.test(error.message) ? 'Run custom_party_times.sql in Supabase first.' : error.message) : '' };
+}
+async function customDraw(date) {
+  const el = document.getElementById('plan-custom'); if (!el) return;
+  if (!_sessionStudioId) { el.innerHTML = ''; return; }
+  const first = !(_cust.studio === _sessionStudioId && _cust.rows);
+  await customLoad(false);
+  if (first && _plan && ((_cust.rows || []).some(h => (h.status === 'held' || h.status === 'booked') && h.day === _plan.date) || (_cust.ft || []).some(h => h.status === 'sent' && h.day === _plan.date) || (_cust.bo || []).some(h => h.status === 'sent' && h.day === _plan.date))) { renderPlanDay(); return; }
+  if (!planCanEdit()) { el.innerHTML = ''; return; }   // (everyone sees a held time's line; the box and its buttons are for coordinators and home office)
+  const admin = !!(_studioData && _studioData.isAdmin), live = (_cust.rows || []).filter(r => r.status === 'requested');   // (held times: their actions are on their own line in the day)
+  const dl = d => new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
+  const row = r => `<div class="cust-row${r.day === date ? ' today' : ''}"><span class="cust-st cust-${escAttr(r.status)}">${esc(CUST_ST[r.status] || r.status)}</span>
+      <b>${esc(CUST_KIND[r.kind] || r.kind)}</b> · ${esc(dl(r.day))} ${esc(shortTime(String(r.at).slice(0, 5)))} · ${esc(r.customer_name || '')} <span class="goal-note">${esc(r.customer_email || '')}</span>
+      ${r.status === 'held' ? `<span class="goal-note">· pay by ${esc(dl(r.pay_by))}${r.sent_at ? '' : ' · <b style="color:#b45309">link not sent</b>'}${r.closed_n ? ` · ${r.closed_n} workshop${r.closed_n === 1 ? '' : 's'} closed` : ''}</span>` : ''}
+      ${r.status === 'requested' && r.requested_by ? `<span class="goal-note">· requested by ${esc(r.requested_by)}</span>` : ''}
+      ${r.note ? `<div class="goal-note">📝 ${esc(r.note)}</div>` : ''}
+      <span class="cust-acts">${admin && r.status === 'requested' ? `<button class="ho-btn sm primary" onclick="customAct('${escAttr(r.id)}','approve')">Approve & send</button><button class="ho-btn sm" onclick="customAct('${escAttr(r.id)}','cancel')">Decline</button>` : ''}
+        ${admin && r.status === 'held' ? `<button class="ho-btn sm${r.sent_at ? '' : ' primary'}" onclick="customSend('${escAttr(r.id)}')">${r.sent_at ? 'Resend link' : 'Send link'}</button><button class="ho-btn sm" onclick="customAct('${escAttr(r.id)}','extend')">Extend</button><button class="ho-btn sm" onclick="customAct('${escAttr(r.id)}','cancel')">Cancel</button>` : ''}</span></div>`;
+  el.innerHTML = `<div class="cust-box"><div class="cust-head"><b>🎉 Custom party times</b><span class="goal-note">${admin ? 'held for one customer, booked through a private link' : 'ask home office for a party or get-together at another time'}</span>
+      <span class="spacer"></span><button class="ho-btn sm" onclick="customNew()">${admin ? '+ Custom party time' : '+ Request a custom time'}</button></div>
+    ${_cust.err ? `<div class="goal-note">${esc(_cust.err)}</div>` : live.length ? `<div class="goal-note" style="margin-top:6px">${admin ? 'Waiting for you to approve:' : 'Waiting for home office:'}</div>` + live.map(row).join('') : ''}</div>`;
+}
+// a booked party that started as a custom time: a small tag (hover for who set it up and when)
+function customTag(x) {
+  const r = (_cust.rows || []).find(h => h.session_id === (x && x.id) && h.status === 'booked'); if (!r) return '';
+  const made = r.created_at ? new Date(r.created_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '';
+  return ` <span class="cust-st" title="${escAttr('A custom time made' + (r.created_by ? ' by ' + r.created_by : '') + (made ? ' on ' + made : '') + (r.note ? ': ' + r.note : ''))}">🎉 Custom time</span>`;
+}
+// a held custom time's line on the Schedule: on hold, for whom, link sent when, pay by when
+function customHeldHtml(x) {
+  const bi = (_cust.bo || []).find(h => h.session_id === x.id && h.status === 'sent');
+  if (bi) {
+    const admin = !!(_studioData && _studioData.isAdmin);
+    return `<span class="cust-st cust-held" title="${escAttr(`Whole studio, ${bi.minutes} min · ${bi.guests} guests${bi.observers ? ' + ' + bi.observers + ' observers' : ''} · contact ${bi.contact_name || ''} ${bi.email || ''}${bi.phone ? ' ' + bi.phone : ''}${bi.closed_n ? ' · ' + bi.closed_n + ' times closed' : ''}`)}">⏳ On hold: studio buyout</span> for <b>${esc(bi.organization || bi.occasion || bi.contact_name || '')}</b>
+      · ${bi.sent_at ? 'invoice sent ' + esc(ftiDl(bi.sent_at)) : '<b style="color:#b45309">invoice not sent yet</b>'} · deposit due by <b>${esc(ftiDl(bi.pay_by))}</b>
+      ${admin ? `<span class="cust-acts"><button class="ho-btn sm" onclick="boInvAct('${escAttr(bi.id)}','send')">${bi.sent_at ? 'Resend' : 'Send'}</button><button class="ho-btn sm" onclick="boInvAct('${escAttr(bi.id)}','extend')">Extend</button><button class="ho-btn sm" onclick="boInvAct('${escAttr(bi.id)}','cancel')">Cancel</button></span>` : ''}`;
   }
-  if (typeof inboxDecide === 'function' && !inboxDecide._dash) {
-    const decide = inboxDecide;
-    window.inboxDecide = async function (id) {
-      const mine = document.querySelector('#mydash-pane [id="why-' + id + '"]');
-      if (mine && paneVisible('mydash-pane')) {
-        const row = mine.closest('.inbox-row'); if (row) row.style.opacity = '.45';   // (feedback straight away)
-        if (mine.value.trim()) { try { await sb.rpc('hub_inbox_note', { p_id: id, p_note: mine.value.trim() }); } catch (e) { } mine.value = ''; }
-      }
-      return decide.apply(this, arguments);
-    };
-    window.inboxDecide._dash = true;
+  const fi = (_cust.ft || []).find(h => h.session_id === x.id && h.status === 'sent');
+  if (fi) {
+    const admin = !!(_studioData && _studioData.isAdmin);
+    return `<span class="cust-st cust-held" title="${escAttr(`${fi.students} children · ${fi.project || 'project to choose'} · contact ${fi.contact_name || ''} ${fi.email || ''}${fi.phone ? ' ' + fi.phone : ''}`)}">⏳ On hold: field trip</span> for <b>${esc(fi.school || fi.contact_name || '')}</b>
+      · ${fi.sent_at ? 'invoice sent ' + esc(ftiDl(fi.sent_at)) : '<b style="color:#b45309">invoice not sent yet</b>'} · deposit due by <b>${esc(ftiDl(fi.pay_by))}</b>
+      ${admin ? `<span class="cust-acts"><button class="ho-btn sm" onclick="ftInvAct('${escAttr(fi.id)}','send')">${fi.sent_at ? 'Resend' : 'Send'}</button><button class="ho-btn sm" onclick="ftInvAct('${escAttr(fi.id)}','extend')">Extend</button><button class="ho-btn sm" onclick="ftInvAct('${escAttr(fi.id)}','cancel')">Cancel</button></span>` : ''}`;
   }
-})();
-
-// ---------- Personal header: name, picture, today at a glance ----------
-function dashMyName() { return (_dash.layout && _dash.layout.name) || _dash.sessName || ''; }
-function dashAvatarHtml(L, size) {
-  const A = L && L.avatar, nm = dashMyName() || '?';
-  if (A && A.key && typeof hubAvatarHtml === 'function') return hubAvatarHtml({ name: nm, avatar_key: A.key, staff_id: nm }, size);
-  if (A && A.emoji) return `<span class="dash-av" style="width:${size}px;height:${size}px;font-size:${Math.round(size * 0.55)}px">${esc(A.emoji)}</span>`;
-  return typeof hubAvatarHtml === 'function' ? hubAvatarHtml({ name: nm, staff_id: nm }, size) : `<span class="dash-av" style="width:${size}px;height:${size}px">${esc(nm.charAt(0).toUpperCase())}</span>`;
+  const r = (_cust.rows || []).find(h => h.session_id === x.id && h.status === 'held'); if (!r) return '';
+  const dl = d => new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
+  const sent = r.sent_at ? new Date(r.sent_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '';
+  const made = r.created_at ? new Date(r.created_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '';
+  const tip = 'A private custom time, not on World for anyone else' + (r.created_by ? '. Made by ' + r.created_by : '') + (made ? ' on ' + made : '') + (r.requested_by ? ' (requested by ' + r.requested_by + ')' : '') +
+    (r.customer_phone ? '. Phone: ' + r.customer_phone : '') + (r.closed_n ? '. ' + r.closed_n + ' workshop' + (r.closed_n === 1 ? '' : 's') + ' closed while held' : '') + (r.note ? '. Note: ' + r.note : '');
+  return `<span class="cust-st cust-held" title="${escAttr(tip + (r.promo ? '. Free promotional party' + (r.promo_reason ? ': ' + r.promo_reason : '') : ''))}">${r.promo ? '🎁 Promo party' : '⏳ On hold: custom time'}</span> for <b>${esc(r.customer_name || '')}</b> <span class="goal-note">${esc(r.customer_email || '')}</span>
+    · ${sent ? 'link sent ' + esc(sent) : '<b style="color:#b45309">link not sent yet</b>'} · ${r.promo ? (Math.round((new Date(String(r.day).slice(0, 10) + 'T12:00:00') - new Date(new Date().toDateString())) / 86400000) <= 3 ? `<b style="color:#b45309">⚠ details not finished: please call them${r.customer_phone ? ' (' + esc(r.customer_phone) + ')' : ''}</b>` : 'free: they finish the details on World') : `payment due by <b>${esc(dl(r.pay_by))}</b>`}
+    ${planCanEdit() ? `<span class="cust-acts"><button class="ho-btn sm${r.sent_at ? '' : ' primary'}" onclick="customSend('${escAttr(r.id)}')">${r.sent_at ? 'Resend link' : 'Send link'}</button>${_studioData && _studioData.isAdmin ? `<button class="ho-btn sm" onclick="customAct('${escAttr(r.id)}','extend')">Extend</button><button class="ho-btn sm" onclick="customAct('${escAttr(r.id)}','cancel')">Cancel</button>` : ''}</span>` : ''}`;
 }
-function dashGlanceSet(b, txt) { if (!b || !b.id) return; (_dash.glance = _dash.glance || {})[b.id] = txt || ''; dashGlanceDraw(); }
-function dashGlanceDraw() {
-  const el = document.getElementById('dash-glance'); if (!el || !_dash.layout) return;
-  const parts = _dash.layout.blocks.map(b => (_dash.glance || {})[b.id]).filter(Boolean);
-  el.textContent = parts.length ? ' · ' + parts.join(' · ') : '';
+function customNew() {
+  const admin = !!(_studioData && _studioData.isAdmin), d0 = (_plan && _plan.date) || localDateStr(new Date());
+  const pb = (() => { const d = new Date(); d.setDate(d.getDate() + 2); return localDateStr(d); })();
+  openDutySheet(`<h3>🎉 ${admin ? 'Custom party time' : 'Request a custom party time'}</h3>
+    <p class="ho-intro">${admin ? 'A private time held for one customer. They get a link to book it on 4Cats World (the normal party booking, paid as usual). Workshops in its 2 hours close while it\u2019s held; if it isn\u2019t booked by the pay-by date, it\u2019s released.' : 'Home office will check it and send the customer their private booking link.'}</p>
+    <div class="me-form">
+      ${admin ? `<label>Who can book it<select id="cu-who" onchange="customWho()">
+        <option value="hold">One customer: held for them, they pay as usual</option>
+        <option value="promo">🎁 One customer: a free promotional party (they pay only for extras)</option>
+        <option value="public">🌍 Anyone: a one-off party time, live on World</option></select></label>` : ''}
+      <label>What<select id="cu-kind" onchange="customSlots()"><option value="kids">Kids Party</option><option value="splatter">Splatter Party</option><option value="get_together">Adult Get-Together</option></select></label>
+      <label>Date<input type="date" id="cu-day" value="${escAttr(d0)}" onchange="customSlots()"></label>
+      <label id="cu-slotl">Party time<select id="cu-slot" onchange="customSlotPick()"><option value="">Loading…</option></select></label>
+      <label id="cu-atl">Start time<input type="time" id="cu-at" step="900"></label>
+      <div id="cu-public" class="goal-note" hidden>It goes live on World’s ${'Parties'} page straight away (Adult Get-Togethers: the Get-Togethers page), for anyone to book and pay as usual, like a regular party time. <label style="display:inline-flex;gap:6px;align-items:center;margin-left:6px">Rooms <select id="cu-rooms"><option>1</option><option>2</option><option>3</option></select></label></div>
+      <div id="cu-cust">
+      <label>Customer <span class="goal-note" style="font-weight:400">(type a name or email to find them, or a new name)</span><input id="cu-name" autocomplete="off" oninput="customFind(this.value)" placeholder="Start typing…"></label>
+      <div id="cu-hits" class="cu-hits"></div>
+      <label>Customer email<input id="cu-email" type="email" autocomplete="off"></label>
+      <label>Phone (optional)<input id="cu-phone" autocomplete="off"></label>
+      ${admin ? `<label id="cu-payl">Pay by<input type="date" id="cu-pay" value="${escAttr(pb)}"></label>` : ''}
+      <label id="cu-reasonl" hidden>Why it’s free (for us, not in the email)<input id="cu-reason" maxlength="200" placeholder="e.g. Instagram giveaway winner, donation, make-good"></label>
+      <label>Note (optional, in the email)<input id="cu-note" maxlength="300" placeholder="e.g. as discussed on the phone"></label>
+      </div>
+    </div><div id="cu-msg"></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="cu-go" onclick="customCreate()">${admin ? 'Hold it and email the link' : 'Send the request'}</button></div>`);
+  customSlots();   // (the regular party times open that day)
+  window._cuOverride = false;
 }
-function dashNoteDismiss() { if (!_dash.layout) return; delete _dash.layout.note; delete _dash.layout.note_by; dashSaveSoon(); dashDraw(true); }
-
-// ---------- 🎨 Colours (the dashboard page only) ----------
-const DASH_THEMES = [
-  { key: 'classic', name: '4Cats classic', mood: 'The Hub’s own colours' },
-  { key: 'buttercup', name: 'Buttercup', mood: 'Warm, happy, sunny', bg: '#fff8e1', card: '#ffffff', accent: '#d6a02a', soft: '#fbefc7', ink: '#2d2a22', inkSoft: '#7a7365', border: '#f1e6c4', on: '#fff' },
-  { key: 'sage', name: 'Sage Studio', mood: 'Calm, natural, organized', bg: '#eef3ec', card: '#ffffff', accent: '#6b8e6e', soft: '#dce8dc', ink: '#253027', inkSoft: '#6b7a6c', border: '#dde6dc', on: '#fff' },
-  { key: 'blush', name: 'Blush', mood: 'Soft, playful, welcoming', bg: '#fdf0f2', card: '#ffffff', accent: '#d9768f', soft: '#f9dbe2', ink: '#33252a', inkSoft: '#85707a', border: '#f3dde3', on: '#fff' },
-  { key: 'lavender', name: 'Lavender Haze', mood: 'Dreamy, gentle, modern', bg: '#f4f0fb', card: '#ffffff', accent: '#9a7fd4', soft: '#e6ddf6', ink: '#2b2540', inkSoft: '#776f8c', border: '#e7e0f3', on: '#fff' },
-  { key: 'sky', name: 'Sky Blue', mood: 'Fresh, clear, airy', bg: '#ecf5fc', card: '#ffffff', accent: '#4b8dc4', soft: '#d8e9f6', ink: '#1f2d3a', inkSoft: '#687888', border: '#d9e7f2', on: '#fff' },
-  { key: 'peachy', name: 'Peachy', mood: 'Warm, cheerful, friendly', bg: '#fff2eb', card: '#ffffff', accent: '#e2875e', soft: '#fcdccb', ink: '#35261f', inkSoft: '#85706a', border: '#f6e0d4', on: '#fff' },
-  { key: 'mint', name: 'Mint Condition', mood: 'Fresh, bright, clean', bg: '#eaf7f1', card: '#ffffff', accent: '#379a77', soft: '#d3eee2', ink: '#1e3129', inkSoft: '#64786f', border: '#d6ebe1', on: '#fff' },
-  { key: 'oat', name: 'Oat Milk', mood: 'Neutral, minimal, timeless', bg: '#f5f0e7', card: '#ffffff', accent: '#9a8166', soft: '#e9dfcf', ink: '#2f2a23', inkSoft: '#7d7468', border: '#e6ddcf', on: '#fff' },
-  { key: 'rosewood', name: 'Rosewood', mood: 'Rich, warm, sophisticated', bg: '#f8edee', card: '#ffffff', accent: '#a4515f', soft: '#eed5d9', ink: '#331f23', inkSoft: '#83686d', border: '#ecd9dc', on: '#fff' },
-  { key: 'midnight', name: 'Midnight', mood: 'Deep navy, professional', dark: 1, bg: '#111a2e', card: '#1a2640', accent: '#8ab4f8', soft: '#24365a', ink: '#e7edf8', inkSoft: '#9babc6', border: '#2a3b5e', on: '#0f1a2e' },
-  { key: 'charcoal', name: 'Charcoal', mood: 'Sleek, modern, focused', dark: 1, bg: '#1b1b1d', card: '#29292c', accent: '#e3b55a', soft: '#3a352a', ink: '#eeeeee', inkSoft: '#a3a3a8', border: '#3b3b40', on: '#1b1b1d' },
-  { key: 'plum', name: 'Plum Night', mood: 'Moody, colourful, creative', dark: 1, bg: '#1e1829', card: '#2b2340', accent: '#c7a2f2', soft: '#3b2f58', ink: '#f0eaf9', inkSoft: '#a99bc2', border: '#3e335a', on: '#1e1829' }
-];
-function dashApplyTheme() {
-  const el = document.getElementById('mydash-pane'); if (!el) return;
-  const t = DASH_THEMES.find(x => x.key === (_dash.layout && _dash.layout.theme)) || DASH_THEMES[0];
-  ['--dash-bg', '--card-bg', '--accent', '--accent-soft', '--ink', '--ink-soft', '--border', '--dash-on'].forEach(v => el.style.removeProperty(v));
-  el.classList.toggle('themed', !!t.bg); el.classList.toggle('dark', !!t.dark);
-  if (!t.bg) return;
-  [['--dash-bg', t.bg], ['--card-bg', t.card], ['--accent', t.accent], ['--accent-soft', t.soft], ['--ink', t.ink], ['--ink-soft', t.inkSoft], ['--border', t.border], ['--dash-on', t.on]].forEach(([k, v]) => el.style.setProperty(k, v));
+// find a customer as you type (the same search as the Front desk); picking one fills in their name, email and phone
+let _cuT = null, _cuHits = [];
+function customFind(q) {
+  clearTimeout(_cuT); const box = document.getElementById('cu-hits'); if (!box) return;
+  q = String(q || '').trim(); if (q.length < 2) { box.innerHTML = ''; return; }
+  _cuT = setTimeout(async () => {
+    const { data, error } = await sb.rpc('hub_family_list', { p_q: q, p_limit: 6, p_pin: _sessionPin || null });
+    const b = document.getElementById('cu-hits'); if (!b) return;
+    _cuHits = error ? [] : (data || []);
+    b.innerHTML = _cuHits.length ? _cuHits.map((r, i) => `<button type="button" class="cu-hit" onclick="customPick(${i})"><b>${esc(r.parent_name || 'Customer')}</b> <span class="goal-note">${esc(r.email || '')}${r.phone ? ' · ' + esc(r.phone) : ''}</span></button>`).join('')
+      + '<div class="goal-note" style="padding:2px 4px">Not them? Keep typing and add the email below for a new customer.</div>'
+      : '<div class="goal-note" style="padding:2px 4px">No customer found: a new one. Add their email below.</div>';
+  }, 300);
 }
-function dashThemeSwatch(t, on) {
-  const bg = t.bg || '#f5f4fb', card = t.card || '#ffffff', acc = t.accent || 'var(--accent)', line = t.border || '#eceaf6';
-  return `<button class="dash-sw${on ? ' on' : ''}" onclick="dashSetTheme('${t.key}')"><span class="dash-sw-pic" style="background:${bg}"><i style="background:${acc}"></i><i style="background:${card};border-color:${line}"></i><b style="background:${card};border-color:${line}"></b><b style="background:${card};border-color:${line}"></b></span>
-    <span class="dash-sw-name">${esc(t.name)}${on ? ' ✓' : ''}</span><span class="dash-sw-mood">${esc(t.mood)}</span></button>`;
+function customPick(i) {
+  const r = _cuHits[i]; if (!r) return;
+  const set = (id, v) => { const el = document.getElementById(id); if (el && v) el.value = v; };
+  set('cu-name', r.parent_name); set('cu-email', r.email); set('cu-phone', r.phone);
+  const b = document.getElementById('cu-hits'); if (b) b.innerHTML = `<div class="goal-note" style="padding:2px 4px">✓ ${esc(r.parent_name || 'Customer')} (existing customer)</div>`;
 }
-async function dashPersonalize() {
-  if (!_dash.layout) return;
-  const L = _dash.layout, cur = L.theme || 'classic', T = _dash.target;
-  let h = `<h3 style="margin:0 0 4px">🎨 ${T ? esc(T.name) + '’s colour' : 'Make it yours'}</h3><p class="fd-sm" style="margin:0 0 10px">${T ? 'The colour their dashboard starts with. They can change it any time.' : 'Only My dashboard changes colour; the rest of the Hub stays the same.'}</p>
-    <div class="dash-sws">${DASH_THEMES.map(t => dashThemeSwatch(t, t.key === cur)).join('')}</div>`;
-  if (!T) {
-    h += `<h4 class="dash-sh">Your picture</h4><div class="dash-avs" id="dash-avs">${dashAvatarChoicesHtml()}</div>
-      <h4 class="dash-sh">Greeting</h4><label class="dash-set-row">What should it call you? <input type="text" maxlength="40" value="${escAttr(L.name || '')}" placeholder="${escAttr(_dash.sessName || 'Your name')}" onchange="dashSetName(this.value)"></label>
-      <label class="dash-set-row"><input type="checkbox" ${L.greet !== false ? 'checked' : ''} onchange="dashSetGreet(this.checked)"> Show the greeting and “today at a glance” at the top</label>`;
+// (Nov 10 2026) home office: who can book it — one customer (held, they pay), 🎁 a free promotional party, or 🌍 anyone (live on World)
+// (Nov 10 2026) the regular party times open that day (one of them can be reserved instead of making a new time)
+async function customSlots() {
+  const sel = document.getElementById('cu-slot'); if (!sel) return;
+  const day = (document.getElementById('cu-day') || {}).value, kind = (document.getElementById('cu-kind') || {}).value, who = (document.getElementById('cu-who') || {}).value || 'hold';
+  if (who === 'public') { customSlotPick(); return; }
+  sel.innerHTML = '<option value="">Loading…</option>';
+  let L = [];
+  try { const { data } = await sb.rpc('hub_party_open_times', { p_studio: _sessionStudioId, p_day: day }); L = (data || []).filter(x => x.kind === kind); } catch (e) { L = []; }
+  const s2 = document.getElementById('cu-slot'); if (!s2) return;
+  s2.innerHTML = L.map(x => `<option value="${escAttr(x.session_id)}">${esc(x.label)} (a regular party time)</option>`).join('') + '<option value="">A new time (type it below)</option>';
+  customSlotPick();
+}
+function customSlotPick() {
+  const who = (document.getElementById('cu-who') || {}).value || 'hold', v = (document.getElementById('cu-slot') || {}).value;
+  const at = document.getElementById('cu-atl'), sl = document.getElementById('cu-slotl');
+  if (sl) sl.hidden = who === 'public';
+  if (at) at.hidden = who !== 'public' && !!v;
+}
+function customWho() {
+  const w = (document.getElementById('cu-who') || {}).value || 'hold', show = (id, on) => { const e = document.getElementById(id); if (e) e.hidden = !on; };
+  show('cu-cust', w !== 'public'); show('cu-public', w === 'public'); show('cu-payl', w === 'hold'); show('cu-reasonl', w === 'promo');
+  const k = document.getElementById('cu-kind'); if (k) Array.prototype.forEach.call(k.options, o => { if (o.value === 'get_together') { o.disabled = w === 'promo'; if (w === 'promo' && k.value === 'get_together') k.value = 'kids'; } });
+  const b = document.getElementById('cu-go'); if (b) b.textContent = w === 'public' ? 'Open it on World' : w === 'promo' ? 'Book it and email them' : 'Hold it and email the link';
+  customSlots();
+}
+// ⚠ (Nov 10 2026) home office: book a custom / promo / one-off party time even though the party room looks busy (party_override.sql)
+function customOverrideHtml(m) {
+  if (!(_studioData && _studioData.isAdmin) || !/party room|No party room/i.test(String(m || ''))) return '';
+  return `<div class="me-msg" style="background:#fff3e0;border:1px solid #f0c27a"><b>⚠ Override?</b> Book it anyway if you know both parties can run (e.g. the studio has room, or the times work).
+    <button class="ho-btn sm" style="margin-left:6px" onclick="window._cuOverride=true;customCreate()">Book it anyway</button></div>`;
+}
+async function customCreate() {
+  const v = id => (document.getElementById(id) || {}).value || '', msg = document.getElementById('cu-msg'), btn = document.getElementById('cu-go');
+  if (v('cu-who') === 'public') {   // 🌍 a one-off party time for anyone
+    if (!v('cu-day') || !v('cu-at')) { msg.innerHTML = '<div class="me-msg err">Choose the date and start time.</div>'; return; }
+    btn.disabled = true; btn.textContent = 'Saving…';
+    const { error } = await sb.rpc('hub_party_time_add', { p: { studio_id: _sessionStudioId, kind: v('cu-kind'), day: v('cu-day'), at: v('cu-at'), rooms: +v('cu-rooms') || 1, override: !!window._cuOverride } });
+    if (error) { btn.disabled = false; btn.textContent = 'Try again'; msg.innerHTML = `<div class="me-msg err">${esc(/hub_party_time_add/.test(error.message) ? 'Run party_times_promo_public.sql in Supabase first.' : error.message)}</div>` + customOverrideHtml(error.message); return; }
+    closeDutySheet(); alert('✓ It’s live on World now, for anyone to book.'); try { if (_plan && _plan.date) await loadPlanDay(_plan.date); } catch (e) { }
+    return;
   }
-  h += '<div style="text-align:right;margin-top:12px"><button class="ho-btn primary" onclick="closeDutySheet()">Done</button></div>';
-  openDutySheet(h);
-  if (!T && !_dash.avatars) { _dash.avatars = await dashAvatarList(); const box = document.getElementById('dash-avs'); if (box) box.innerHTML = dashAvatarChoicesHtml(); }
+  const p = { studio_id: _sessionStudioId, kind: v('cu-kind'), day: v('cu-day'), at: v('cu-at'), customer_name: v('cu-name').trim(), customer_email: v('cu-email').trim(),
+    customer_phone: v('cu-phone').trim(), pay_by: v('cu-who') === 'promo' ? null : (v('cu-pay') || null), note: v('cu-note').trim(),
+    promo: v('cu-who') === 'promo', promo_reason: v('cu-reason').trim(), session_id: v('cu-slot') || null, override: !!window._cuOverride };
+  if (!p.day || (!p.at && !p.session_id)) { msg.innerHTML = '<div class="me-msg err">Choose the date and the party time.</div>'; return; }
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const { data, error } = await sb.rpc('hub_custom_hold_create', { p });
+  if (error) { btn.disabled = false; btn.textContent = 'Try again'; msg.innerHTML = `<div class="me-msg err">${esc(/hub_custom_hold_create/.test(error.message) ? 'Run custom_party_times.sql in Supabase first.' : error.message)}</div>` + customOverrideHtml(error.message); return; }
+  let note = data.status === 'requested' ? 'Request sent to home office.' : 'Held.';
+  if (data.status === 'held') { const r = await customEmail(data.id); note = r.ok ? 'Held, and the link was emailed to ' + p.customer_email + '.' : 'Held, but the email didn\u2019t send: ' + r.error + ' (use Send link).'; }
+  closeDutySheet(); await customLoad(true); if (_plan) { await loadPlanDay(_plan.date); _plan.msg = note; renderPlanDay(); } else alert(note);
 }
-function dashSetTheme(k) {
-  if (!_dash.layout) return;
-  if (k === 'classic') delete _dash.layout.theme; else _dash.layout.theme = k;
-  dashApplyTheme(); dashSaveSoon();
-  const box = document.querySelector('.dash-sws'); if (box) box.innerHTML = DASH_THEMES.map(t => dashThemeSwatch(t, t.key === (_dash.layout.theme || 'classic'))).join('');
+async function customEmail(id) {
+  const ses = await sb.auth.getSession(), tk = ses && ses.data && ses.data.session && ses.data.session.access_token;
+  const r = await fetch(`${SUPABASE_URL}/functions/v1/custom-party-invite`, { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + (tk || SUPABASE_ANON_KEY) },
+    body: JSON.stringify({ hold_id: id }) }).catch(() => null);
+  const d = r ? await r.json().catch(() => ({})) : {};
+  return r && r.ok ? { ok: true, link: d.link } : { ok: false, error: d.error || 'please try again' };
 }
-function dashSetName(v) { v = String(v || '').trim().slice(0, 40); if (v) _dash.layout.name = v; else delete _dash.layout.name; dashSaveSoon(); dashDraw(true); }
-function dashSetGreet(on) { if (on) delete _dash.layout.greet; else _dash.layout.greet = false; dashSaveSoon(); dashDraw(true); }
-const DASH_EMOJI = ['🐱', '🦊', '🐻', '🐼', '🐨', '🦉', '🐸', '🐝', '🦋', '🌻', '🌈', '🎨', '🖌️', '🏺', '☕', '🌿', '⭐', '🍩'];
-async function dashAvatarList() {   // the staff avatar library (as on personal profiles), if this login can see it
-  try {
-    const st = sb.storage.from(typeof AVATAR_BUCKET !== 'undefined' ? AVATAR_BUCKET : 'staff-avatars'), out = [];
-    const top = await st.list('', { limit: 200, sortBy: { column: 'name', order: 'asc' } });
-    if (top.error || !top.data) return [];
-    const files = top.data.filter(f => f.id), folders = top.data.filter(f => !f.id).slice(0, 12);
-    files.forEach(f => out.push(f.name));
-    for (const fo of folders) { const r = await st.list(fo.name, { limit: 100 }); (r.data || []).filter(f => f.id).forEach(f => out.push(fo.name + '/' + f.name)); if (out.length > 300) break; }
-    return out.filter(k => /\.(png|jpe?g|webp|gif|svg)$/i.test(k));
-  } catch (e) { return []; }
+async function customSend(id) {
+  const r = await customEmail(id);
+  if (r.ok && r.link) { try { await navigator.clipboard.writeText(r.link); } catch (e) {} }
+  await customLoad(true); if (_plan) { _plan.msg = r.ok ? 'Link emailed (and copied, to paste into a message if you like).' : 'The email didn\u2019t send: ' + r.error; renderPlanDay(); }
 }
-function dashAvatarChoicesHtml() {
-  const A = (_dash.layout && _dash.layout.avatar) || {}, url = k => `${SUPABASE_URL}/storage/v1/object/public/${typeof AVATAR_BUCKET !== 'undefined' ? AVATAR_BUCKET : 'staff-avatars'}/${String(k).split('/').map(encodeURIComponent).join('/')}`;
-  const pics = _dash.avatars === undefined ? '<span class="fd-sm">Loading pictures…</span>' : (_dash.avatars || []).map(k => `<button class="dash-avc${A.key === k ? ' on' : ''}" onclick="dashSetAvatar('key', ${escAttr(JSON.stringify(k))})"><img loading="lazy" src="${escAttr(url(k))}" alt=""></button>`).join('');
-  return pics + DASH_EMOJI.map(e => `<button class="dash-avc emo${A.emoji === e ? ' on' : ''}" onclick="dashSetAvatar('emoji', '${e}')">${e}</button>`).join('') +
-    `<button class="dash-avc emo${!A.key && !A.emoji ? ' on' : ''}" onclick="dashSetAvatar('', '')" title="Just my first letter">${esc((dashMyName() || '?').charAt(0).toUpperCase())}</button>`;
-}
-function dashSetAvatar(kind, v) {
-  if (!kind) delete _dash.layout.avatar; else _dash.layout.avatar = kind === 'key' ? { key: v } : { emoji: v };
-  dashSaveSoon(); const box = document.getElementById('dash-avs'); if (box) box.innerHTML = dashAvatarChoicesHtml(); dashDraw(true);
+async function customAct(id, action) {
+  const r0 = (_cust.rows || []).find(x => x.id === id) || {};
+  let pay = null;
+  if (action === 'extend' || action === 'approve') {
+    const d = new Date(); d.setDate(d.getDate() + 2);
+    pay = prompt(action === 'extend' ? 'New pay-by date (YYYY-MM-DD):' : 'Pay by (YYYY-MM-DD):', action === 'extend' ? String(r0.pay_by || '') : localDateStr(d));
+    if (!pay) return; if (!/^\d{4}-\d{2}-\d{2}$/.test(pay)) { alert('Use a date like 2026-11-20.'); return; }
+  }
+  if (action === 'cancel' && !confirm(r0.status === 'requested' ? 'Decline this request?' : 'Cancel this held time? It closes, and the workshops it closed reopen.')) return;
+  const { error } = await sb.rpc('hub_custom_hold_action', { p_id: id, p_action: action, p_pay_by: pay });
+  if (error) { alert(error.message); return; }
+  let note = action === 'cancel' ? (r0.status === 'requested' ? 'Request declined.' : 'Cancelled: the time is released.') : action === 'extend' ? 'Pay-by date changed.' : 'Approved and held.';
+  if (action === 'approve') { const r = await customEmail(id); note = r.ok ? 'Approved, held, and the link emailed.' : 'Approved and held, but the email didn\u2019t send: ' + r.error; }
+  await customLoad(true); if (_plan) { await loadPlanDay(_plan.date); _plan.msg = note; renderPlanDay(); }
 }
 
-// ---------- 👥 Set up for… (owners): a person's starting dashboard ----------
-// The grid shows the owner's own numbers (data always loads as whoever is signed in); the block library and starting layouts
-// follow the person's access. Nothing saves until "Save"; ✏️ Customize works the same as on your own.
-async function dashSetupOpen() {
-  openDutySheet('<h3 style="margin:0 0 8px">👥 Set up a starting dashboard</h3><p class="fd-sm">Loading…</p>');
-  let P;
-  try { P = (await dashRpc('hub_dash_people')) || []; }
-  catch (e) { openDutySheet(`<h3 style="margin:0 0 8px">👥 Set up a starting dashboard</h3><p class="fd-msg">${esc(/hub_dash_people/.test(e.message || '') ? 'Run My dashboard step 4 SQL in Supabase first.' : e.message)}</p><div style="text-align:right"><button class="ho-btn" onclick="closeDutySheet()">Close</button></div>`); return; }
-  _dash.people = P;
-  const when = t => t ? new Date(t).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '';
-  openDutySheet(`<h3 style="margin:0 0 4px">👥 Set up a starting dashboard</h3>
-    <p class="fd-sm" style="margin:0 0 10px">Pick someone to arrange their blocks and colour. They can change it afterwards, and ↺ always takes them back to the one you set.</p>
-    ${P.map((x, i) => `<div class="dash-addrow"><div><div><b>${esc(x.name || x.email)}</b>${x.me ? ' <span class="dash-pill">you</span>' : ''} <span class="fd-sm">${esc(x.email || '')}</span></div>
-      <div class="dash-sub">${x.template_at ? `Starting dashboard set${x.template_by ? ' by ' + esc(x.template_by) : ''} ${esc(when(x.template_at))}` : 'No starting dashboard yet'}${x.arranged_at ? ` · arranged their own ${esc(when(x.arranged_at))}` : ' · hasn’t opened My dashboard yet'}</div></div>
-      <button class="ho-btn sm primary" onclick="dashSetupStart(${i})">${x.template_at ? 'Edit' : 'Set up'}</button></div>`).join('') || '<p class="fd-sm">No home office logins found.</p>'}
-    <div style="text-align:right;margin-top:10px"><button class="ho-btn" onclick="closeDutySheet()">Close</button></div>`);
+function planTouched(msg) { _plan.dirty = true; _plan.msg = ''; const m = document.getElementById('plan-msg'); if (m) m.textContent = msg || 'Unsaved changes'; }
+// ---- Staff today: each person's role and break (the roles are still saved per day, as before) ----
+function planRoleOf(wn) { const R = (_plan && _plan.roles) || {}; const r = PLAN_ROLES.find(([f]) => R[f] && R[f] === wn); return r ? r[0] : ''; }
+function planAssignRole(wn, f) {
+  const R = _plan.roles, old = planRoleOf(wn), brk = old ? R['break_' + old] || '' : '';
+  if (old) { R[old] = ''; R['break_' + old] = ''; }
+  if (f) { if (R[f] && R[f] !== wn) R['break_' + f] = ''; R[f] = wn; if (brk) R['break_' + f] = brk; }
+  planTouched(); renderPlanDay();
 }
-async function dashSetupStart(i) {
-  const x = (_dash.people || [])[i]; if (!x) return;
-  let R; try { R = await dashRpc('hub_dash_for', { p_user: x.user_id }); } catch (e) { alert(e.message || e); return; }
+function planBreakSet(wn, v) { const f = planRoleOf(wn); if (f) planSet('break_' + f, v, true); }
+function planStaffRoleHtml(wn, edit) {
+  const f = planRoleOf(wn), R = _plan.roles, label = f ? PLAN_ROLES.find(r => r[0] === f)[1] : '';
+  if (!edit) return `<span class="sr-role">${f ? esc(label) : '<span class="goal-note">No role</span>'}${f && R['break_' + f] ? ` · Break ${esc(R['break_' + f])}` : ''}</span>`;
+  const nameOf = n => { const t = (_plan.team || []).find(p => planWriteName(p) === n); return t ? t.name : n; };
+  return `<span class="sr-ctl"><label>Role <select onchange="planAssignRole(${escAttr(JSON.stringify(wn))}, this.value)"><option value="">—</option>${PLAN_ROLES.map(([rf, rl]) =>
+      `<option value="${rf}"${rf === f ? ' selected' : ''}>${esc(rl)}${R[rf] && R[rf] !== wn ? ' (' + esc(nameOf(R[rf])) + ')' : ''}</option>`).join('')}</select></label>
+    <label>Break <input type="text" value="${escAttr(f ? R['break_' + f] || '' : '')}" placeholder="${f ? 'e.g. 12:30–1:00' : 'pick a role first'}"${f ? '' : ' disabled'}
+      oninput="planBreakSet(${escAttr(JSON.stringify(wn))}, this.value)"></label></span>`;
+}
+// Studio logins (no timecards): who's working, with their role and break
+function planStaffListHtml() {
+  const T = (_plan && _plan.team) || [];
+  if (!T.length) return '<div class="ho-intro">No shifts posted for this day yet.</div>';
+  return `<div class="sr-list">${T.map(p => `<div class="sr-row">${hubAvatarHtml(p, 26)}<b>${esc(p.name)}</b><span class="goal-note">${esc(shortTime(p.start_time))}–${esc(shortTime(p.end_time))}</span>${planStaffRoleHtml(planWriteName(p), false)}</div>`).join('')}</div>`;
+}
+function planSet(f, v, typing) { _plan.roles[f] = v; planTouched(); if (!typing) renderPlanDay(); }
+function planWheel(id, v) { _plan.wheel[id] = v; planTouched(); }
+// ---------- Camp teachers: one Lead + teachers per camp day, 1 per 15 campers ----------
+const CAMP_RATIO = 15;
+function planCampNeed(x) { const n = (_plan.booked || {})[x.id] || 0; return n > 0 ? Math.ceil(n / CAMP_RATIO) : 0; }
+function planCampLine(x) {
+  const team = (_plan.campTeam || {})[x.id] || [], need = planCampNeed(x), have = team.length;
+  const day = (_plan.staffBy[x.id] || {}).camp_day;
+  const chips = team.map(t => personChip(t.full_name || t.name, t.role === 'lead' ? 'Lead' : 'Teacher')).join('');
+  const count = !need ? '' : have < need
+    ? `<span class="camp-short">⚠ ${have} of ${need} teacher${need === 1 ? '' : 's'}</span>`
+    : `<span class="camp-ok">✓ ${have} teacher${have === 1 ? '' : 's'} (${need} needed)</span>`;
+  return `Camp${day ? ' · ' + esc(day) : ''} ${count}
+    <div class="floor-staff" style="margin-top:4px">${chips}${planCanEdit() ? `<button class="ho-btn" style="min-height:30px" onclick="event.stopPropagation(); planCampTeam('${escAttr(x.id)}')">${team.length ? 'Change teachers' : '+ Teachers'}</button>` : (team.length ? '' : '<span class="sub">No teachers yet</span>')}</div>`;
+}
+function planCampTeam(id) {
+  const x = (_plan.sessions || []).find(z => z.id === id) || {}, team = (_plan.campTeam || {})[id] || [];
+  const lead = (team.find(t => t.role === 'lead') || {}).staff_id || '';
+  const on = new Set(team.filter(t => t.role !== 'lead').map(t => t.staff_id));
+  const people = (_plan.team || []).slice();
+  team.forEach(t => { if (!people.some(p => p.staff_id === t.staff_id)) people.push({ staff_id: t.staff_id, name: t.full_name || t.name, start_time: null }); });   // keep anyone already on it
+  const need = planCampNeed(x);
+  openDutySheet(`<h3>Camp teachers</h3><p>${esc(shortTime(x.session_time || ''))} ${esc(x.title || '')}${need ? ` · ${_plan.booked[id]} campers, so <b>${need}</b> teacher${need === 1 ? '' : 's'} (1 per ${CAMP_RATIO})` : ''}</p>
+    ${people.length ? `<div class="me-form"><label>Lead<select id="ct-lead"><option value="">— No lead —</option>${people.map(p => `<option value="${escAttr(p.staff_id)}"${p.staff_id === lead ? ' selected' : ''}>${esc(p.name)}${p.start_time ? ' · ' + esc(shortTime(p.start_time)) + '–' + esc(shortTime(p.end_time)) : ''}</option>`).join('')}</select></label>
+      <div class="me-sub-title">Teachers</div>
+      <div class="pe-list">${people.map(p => `<label><input type="checkbox" class="ct-t" value="${escAttr(p.staff_id)}"${on.has(p.staff_id) ? ' checked' : ''}> ${esc(p.name)}${p.start_time ? ` <span class="goal-note">${esc(shortTime(p.start_time))}–${esc(shortTime(p.end_time))}</span>` : ''}</label>`).join('')}</div></div>`
+      : '<div class="goal-note">No one is on the schedule this day yet. Post shifts first, then choose the camp teachers.</div>'}
+    <div id="ct-msg"></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button>${people.length ? `<button class="primary" onclick="planCampSave('${escAttr(id)}')">Save</button>` : ''}</div>`);
+}
+async function planCampSave(id) {
+  const lead = document.getElementById('ct-lead').value || null;
+  const teachers = [...document.querySelectorAll('.ct-t:checked')].map(c => c.value).filter(v => v !== lead);
+  const { error } = await sb.rpc('hub_set_camp_team', { p_session_id: id, p_lead: lead, p_teachers: teachers });
+  if (error) { document.getElementById('ct-msg').innerHTML = `<div class="me-msg err">${esc(/hub_set_camp_team/i.test(error.message) ? 'Camp teachers need hub_camp_team.sql' : error.message)}</div>`; return; }
+  const ct = await sb.rpc('hub_camp_team', { p_session_ids: [id] });
+  _plan.campTeam[id] = (ct.data || {})[id] || [];
+  closeDutySheet(); renderPlanDay();
+}
+
+// Kids class teacher: the same choice as staff-schedule — just this day (a substitute)
+// or from this day on (the term teacher). Saved straight away with hub_set_class_teacher,
+// so staff-schedule sees it too.
+function planKids(id, v) {
+  const x = (_plan.sessions || []).find(z => z.id === id) || {};
+  const person = (_plan.team || []).find(p => planWriteName(p) === v);
+  const who = v ? (person ? person.name : v) : 'No teacher';
+  openDutySheet(`<h3>${esc(who)} for…</h3><p>${esc(shortTime(x.session_time || ''))} ${esc(x.title || '')}</p>
+    <div class="pc-acts" style="margin-top:8px">
+      <button class="out" style="background:#6d4aff" onclick="planKidsSave('${escAttr(id)}', ${escAttr(JSON.stringify(v))}, 'day')">Just ${esc(ptyDayLabel(_plan.date))} (a substitute)</button>
+      <button class="in" style="background:#16a34a" onclick="planKidsSave('${escAttr(id)}', ${escAttr(JSON.stringify(v))}, 'term')">From ${esc(ptyDayLabel(_plan.date))} on (the term teacher)</button></div>
+    <div id="pk-msg"></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet(); renderPlanDay()">Cancel</button></div>`);
+}
+async function planKidsSave(id, v, scope) {
+  const person = (_plan.team || []).find(p => planWriteName(p) === v);
+  if (v && !person) { document.getElementById('pk-msg').innerHTML = '<div class="me-msg err">Pick someone on today’s team.</div>'; return; }
+  const { data, error } = await sb.rpc('hub_set_class_teacher', { p_session_id: id, p_staff_id: person ? person.staff_id : null, p_scope: scope });
+  if (error && /hub_set_class_teacher/i.test(error.message)) {   // before hub_class_teacher.sql: this day only, saved with the roles
+    _plan.kidsTeacher[id] = v; closeDutySheet(); planTouched(); return;
+  }
+  if (error) { document.getElementById('pk-msg').innerHTML = `<div class="me-msg err">${esc(error.message)}</div>`; return; }
+  _plan.kidsTeacher[id] = data.teacher || '';
+  _plan.staffBy[id] = Object.assign({}, _plan.staffBy[id] || {}, { teacher: data.teacher || '' });
   closeDutySheet();
-  _dash.own = { me: _dash.me, layout: _dash.layout, cache: _dash.cache, edit: _dash.edit, choose: _dash.choose };
-  _dash.target = { user_id: x.user_id, name: R.name || x.name || x.email, had: !!R.template };
-  _dash.me = { areas: R.areas || {}, roles: R.roles || [], actions: {} };
-  const L = dashNormalize(R.template) || (R.layout ? dashFromTemplate(R.layout, null) : null);
-  if (L && R.layout && !R.template && R.layout.theme) L.theme = R.layout.theme;
-  _dash.layout = L; _dash.choose = !L; _dash.cache = {}; _dash.edit = !!L; _dash.dirty = false; _dash.saving = '';
-  dashDraw();
+  _plan.msg = scope === 'term' ? `Term teacher saved for ${data.weeks} week${data.weeks === 1 ? '' : 's'}${data.skipped ? ` (${data.skipped} left as typed by the studio)` : ''}. Staff schedule shows it too.`
+                               : 'Substitute saved for this day. Staff schedule shows it too.';
+  renderPlanDay();
 }
-function dashSetupBar() {
-  const T = _dash.target, L = _dash.layout;
-  return `<div class="dash-setup"><div><b>You’re arranging ${esc(T.name)}’s starting dashboard.</b> The blocks show your numbers while you arrange them; the blocks you can add follow ${esc(T.name)}’s access.
-      ${T.had ? '' : ` ${esc(T.name)} gets this the first time they open My dashboard.`} They can change it afterwards, and ↺ takes them back to this one.</div>
-    ${L ? `<label class="dash-set-row" style="display:block;margin-top:8px">A welcome note for ${esc(T.name)} (optional; shows at the top of their dashboard until they close it)
-      <textarea class="dash-setup-note" maxlength="600" oninput="_dash.layout.note=this.value;_dash.dirty=true">${esc(L.note || '')}</textarea></label>
-    <div class="dash-setup-btns"><button class="ho-btn primary" onclick="dashSetupSave(false)">💾 Save as ${esc(T.name)}’s starting dashboard</button>
-      <button class="ho-btn" onclick="dashSetupSave(true)" title="Also replaces what they've arranged so far (their colour, picture and name stay)">Save and replace theirs now</button>
-      ${T.had ? `<button class="ho-btn danger" onclick="dashSetupDelete()">Remove their starting dashboard</button>` : ''}
-      <span class="spacer"></span><button class="ho-btn" onclick="dashSetupClose()">Close</button></div>` : `<div class="dash-setup-btns"><span class="spacer"></span><button class="ho-btn" onclick="dashSetupClose()">Close</button></div>`}</div>`;
+function planParty(i, n, v) { _plan.parties[i]['t' + n] = v; planTouched(); syncPartyTeacherInputs(); }
+
+function hmM(t) { const [h, m] = String(t || '0:0').split(':').map(Number); return h * 60 + (m || 0); }
+function mHm(min) { const h = Math.floor(min / 60), m = min % 60, ap = h >= 12 ? '' : ''; const h12 = h % 12 || 12; return `${h12}:${String(m).padStart(2, '0')}${ap}`; }
+// Suggest a 30-minute break for anyone in a role whose shift is over 5 hours,
+// near the middle of their shift, not while they're teaching a party, wheel
+// workshop or kids class, and not at the same time as anyone else's break.
+// Who teaches / demos what on the Schedule's day (kids classes, wheel, party art time, then demos)
+function planDemoPlan() {
+  const P = _plan;
+  const kids = P.sessions.filter(x => planKidsRuns(x, P)), wheels = P.sessions.filter(x => P.wheel[x.id] !== undefined && !planNotRunning(x));
+  const partyIds = new Set(P.parties.map(pt => pt.session.id));
+  const others = P.sessions.filter(x => !planIsKids(x) && !planIsCamp(x) && P.wheel[x.id] === undefined && !partyIds.has(x.id) && !planNotRunning(x));   // camps have their own staff
+  const partyBy = {}, partyBusy = {};
+  P.parties.forEach(pt => {
+    const l = partyBy[pt.session.id] = partyBy[pt.session.id] || [];
+    [pt.t1, pt.t2].forEach(n => { if (n && !l.includes(n)) l.push(n); });
+    partyBusy[pt.session.id] = Math.max(partyBusy[pt.session.id] || 0, hubPartyBusyMin(pt.session.title, pt.booking && pt.booking.raw_payload, pt.detail));
+  });
+  return hubDemoPlan([
+    ...kids.filter(x => !planNotRunning(x)).map(x => ({ key: x.id, start: hubMin(x.session_time), kind: 'kids', teachers: [P.kidsTeacher[x.id]] })),
+    ...wheels.map(x => ({ key: x.id, start: hubMin(x.session_time), kind: 'wheel', teachers: [P.wheel[x.id]] })),
+    // camp teachers: busy for the whole camp (its length, else 6 hours)
+    ...P.sessions.filter(planIsCamp).filter(x => ((P.campTeam || {})[x.id] || []).length).map(x => ({ key: x.id, start: hubMin(x.session_time), kind: 'camp',
+      busy: x.duration_minutes || 360,
+      teachers: P.campTeam[x.id].map(t => { const p = (P.team || []).find(z => z.staff_id === t.staff_id); return p ? planWriteName(p) : (t.full_name || t.name); }) })),
+    ...Object.keys(partyBy).map(id => { const x = P.sessions.find(z => z.id === id) || {}; return { key: id, start: hubMin(x.session_time), kind: 'party', teachers: partyBy[id], busy: partyBusy[id] }; }),
+    ...others.filter(x => x.session_type !== 'party' && P.booked[x.id] > 0).map(x => ({ key: x.id, start: hubMin(x.session_time), kind: 'other', teachers: [], demoBy: P.demoBy && P.demoBy[x.id] !== undefined ? P.demoBy[x.id] : (P.staffBy[x.id] || {}).demo_by || '' }))
+  ], P.roles);
 }
-async function dashSetupSave(replace) {
-  const T = _dash.target, L = _dash.layout; if (!T || !L) return;
-  if (replace && !confirm('Replace what ' + T.name + ' has arranged with this now? Their colour, picture and name stay.')) return;
-  const out = JSON.parse(JSON.stringify(L)); delete out.avatar; delete out.name; delete out.greet; delete out.start;
-  if (out.note && out.note.trim()) out.note_by = (_dash.own && _dash.own.layout && _dash.own.layout.name) || _dash.sessName || ''; else { delete out.note; delete out.note_by; }
-  try { await dashRpc('hub_dash_template_save', { p_user: T.user_id, p_layout: out, p_replace: !!replace }); }
-  catch (e) { alert('Couldn’t save: ' + (e.message || e)); return; }
-  T.had = true; _dash.dirty = false; _dash.saving = replace ? 'Saved, and replaced theirs ✓' : 'Saved as their starting dashboard ✓'; dashDraw(true);
+// A person's busy blocks: teaching (kids class 90 min, wheel 90, party art time, team building 15)
+// and the first 15 minutes of anything they demo
+function planBusyFor(name, plan) {
+  const k = hubNameKey(name);
+  return ((plan || planDemoPlan())._blocks || []).filter(b => b.name === k).map(b => [b.start, b.end, b.why]);
 }
-async function dashSetupDelete() {
-  const T = _dash.target; if (!T || !confirm('Remove ' + T.name + '’s starting dashboard? What they’ve arranged stays; ↺ will offer the role layouts again.')) return;
-  try { await dashRpc('hub_dash_template_delete', { p_user: T.user_id }); } catch (e) { alert(e.message || e); return; }
-  T.had = false; _dash.saving = 'Starting dashboard removed'; dashDraw(true);
-}
-function dashSetupClose() {
-  if (_dash.dirty && !confirm('Close without saving ' + _dash.target.name + '’s dashboard?')) return;
-  const o = _dash.own || {}; _dash.target = null; _dash.own = null; _dash.dirty = false; _dash.saving = '';
-  _dash.me = o.me; _dash.layout = o.layout; _dash.cache = o.cache || {}; _dash.edit = false; _dash.choose = !!o.choose;
-  dashDraw();
+function planSuggestBreaks() {
+  const P = _plan, taken = [];
+  const personFor = name => P.team.find(p => planWriteName(p) === name || p.name === name);
+  const dplan = planDemoPlan();
+  const busyFor = name => planBusyFor(name, dplan).map(([a, b]) => [a, b]);   // teaching + demo starts
+  // keep breaks people already typed (best effort: "12:30" or "12:30–1:00")
+  PLAN_ROLES.forEach(([f]) => { const b = String(P.roles['break_' + f] || '').match(/(\d{1,2}):(\d{2})/); if (b) { let h = +b[1]; if (h < 8) h += 12; taken.push([h * 60 + +b[2], h * 60 + +b[2] + 30]); } });
+  let added = 0, skipped = [];
+  PLAN_ROLES.forEach(([f, label]) => {
+    const name = P.roles[f];
+    if (!name || String(P.roles['break_' + f] || '').trim()) return;
+    const p = personFor(name);
+    if (!p) return;
+    const s0 = hmM(p.start_time), s1 = hmM(p.end_time);
+    if (s1 - s0 <= 300) return;                       // 5 hours or less: no break needed
+    const busy = busyFor(name);
+    const mid = Math.round(((s0 + s1) / 2) / 15) * 15;
+    const ok = t => t >= s0 + 90 && t + 30 <= s1 - 60 &&
+      !busy.some(([a, b]) => t < b && t + 30 > a) && !taken.some(([a, b]) => t < b && t + 30 > a);
+    let pick = null;
+    for (let k = 0; k <= 16 && pick === null; k++) {
+      for (const t of [mid - k * 15, mid + k * 15]) if (pick === null && ok(t)) pick = t;
+    }
+    if (pick === null) { skipped.push(p.name); return; }
+    taken.push([pick, pick + 30]);
+    P.roles['break_' + f] = `${mHm(pick)}–${mHm(pick + 30)}`;
+    added++;
+  });
+  renderPlanDay();
+  planTouched(added ? `Suggested ${added} break${added === 1 ? '' : 's'}${skipped.length ? ` · couldn't fit ${skipped.join(', ')}` : ''}. Save to keep them.`
+    : (skipped.length ? `Couldn't fit a break for ${skipped.join(', ')}.` : 'No breaks needed, or they’re already set.'));
 }
 
-// ---------- Open on start (called by hub.html once the Hub has started) ----------
-async function dashStartup(data) {
+// 🕐 Change time (admin): this workshop to another time the same day, with everyone booked on it (session_retime.sql)
+async function planRetime(id) {
+  const x = (_plan.sessions || []).find(z => z.id === id); if (!x) return;
+  const now = String(x.session_time || '').slice(0, 5);
+  const v = prompt(`${x.title}\nNow at ${shortTime(x.session_time)}. New time today (e.g. 3p or 3:30p)?\n\nEveryone booked moves with it (you can email them next).`, '');
+  if (!v) return;
+  const m = v.trim().toLowerCase().replace(/\s+/g, '').match(/^(\d{1,2})(?::(\d{2}))?([ap])m?$/);
+  if (!m) { alert('Use a time like 3p or 3:30p (with a or p).'); return; }
+  const h = (+m[1] % 12) + (m[3] === 'p' ? 12 : 0), t = String(h).padStart(2, '0') + ':' + (m[2] || '00');
+  if (t === now) return;
+  const { data, error } = await sb.rpc('hub_session_retime', { p_id: id, p_time: t });
+  if (error) { alert(/hub_session_retime/.test(error.message) ? 'Run session_retime.sql in Supabase first.' : error.message); return; }
+  // (Nov 9 2026) the families booked: an email with the new time (session-time-email)
+  let mailed = '';
+  if (data.bookings && confirm(`Email the ${data.bookings} booking${data.bookings === 1 ? '' : 's'} on ${x.title} about the new time (${data.from} \u2192 ${data.to})?`)) {
+    const note = prompt('A note in the email (optional), e.g. the earlier time was full:', '') || '';
+    const ses = await sb.auth.getSession(), tk = ses && ses.data && ses.data.session && ses.data.session.access_token;
+    const mr = await fetch(`${SUPABASE_URL}/functions/v1/session-time-email`, { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + (tk || SUPABASE_ANON_KEY) },
+      body: JSON.stringify({ session_id: id, from_time: now, note }) }).catch(() => null);
+    const md = mr ? await mr.json().catch(() => ({})) : {};
+    mailed = mr && mr.ok ? ` Emailed ${md.sent} famil${md.sent === 1 ? 'y' : 'ies'}${md.failed ? ` (${md.failed} didn't send)` : ''}.` : ` The emails didn't send: ${md.error || 'please email the families'}.`;
+  }
+  await loadPlanDay(_plan.date);
+  _plan.msg = `Moved ${x.title} from ${data.from} to ${data.to}${data.bookings ? ` (${data.bookings} booking${data.bookings === 1 ? '' : 's'} moved with it)` : ''}.${mailed}`; renderPlanDay();
+}
+async function planSave() {
+  if (!planCanEdit() && !(planView() === 'board' && planBoardCanMove())) { openPinModal(); return; }
+  const P = _plan;
+  const m = document.getElementById('plan-msg'); if (m) m.textContent = 'Saving…';
+  try {
+    const dayPatch = { updated_at: new Date().toISOString() };
+    PLAN_ROLES.forEach(([f]) => { dayPatch[f] = P.roles[f] || ''; dayPatch['break_' + f] = P.roles['break_' + f] || ''; });
+    // Day roles go on every class that isn't a kids class (same as the Day view).
+    for (const x of P.sessions.filter(z => !planIsKids(z) && !z.partySlot)) {   // "Open party slot" rows aren't real sessions
+      const patch = Object.assign({}, dayPatch);
+      if (P.wheel[x.id] !== undefined) patch.wheel_teacher = P.wheel[x.id] || '';
+      if (P.demoBy && P.demoBy[x.id] !== undefined) patch.demo_by = P.demoBy[x.id] || '';   // (a demo moved on the board)
+      const row = P.staffBy[x.id];
+      const r = row ? await sb.from('session_staff').update(patch).eq('session_id', x.id)
+                    : await sb.from('session_staff').insert(Object.assign({ session_id: x.id, studio_id: _sessionStudioId }, patch));
+      if (r.error) throw r.error;
+    }
+    // Kids class teacher, this day only (only when it was changed here)
+    for (const x of P.sessions.filter(planIsKids)) {
+      const was = (P.staffBy[x.id] || {}).teacher || '', now = P.kidsTeacher[x.id] || '';
+      if (was === now) continue;
+      const r = P.staffBy[x.id]
+        ? await sb.from('session_staff').update({ teacher: now, updated_at: new Date().toISOString() }).eq('session_id', x.id)
+        : await sb.from('session_staff').insert({ session_id: x.id, studio_id: _sessionStudioId, teacher: now, updated_at: new Date().toISOString() });
+      if (r.error) throw r.error;
+    }
+    for (const pt of P.parties) {
+      const { data: ex } = await sb.from('party_details').select('booking_id').eq('booking_id', pt.booking_id).maybeSingle();
+      const payload = { party_teacher1: pt.t1 || '', party_teacher2: pt.t2 || '', updated_at: new Date().toISOString() };
+      const r = ex ? await sb.from('party_details').update(payload).eq('booking_id', pt.booking_id)
+                   : await sb.from('party_details').insert(Object.assign({ booking_id: pt.booking_id, session_id: pt.session.id, studio_id: _sessionStudioId }, payload));   // party_details.session_id is required
+      if (r.error) throw r.error;
+    }
+    if (P.date === localDateStr(new Date())) loadClassStaff(_sessionStudioId);   // Today screen too
+    await loadPlanDay(P.date);
+    _plan.msg = 'Saved ✓'; renderPlanDay();
+  } catch (e) {
+    if (m) m.textContent = "Couldn't save: " + (e.message || e);
+  }
+}
+async function planFill() {
+  if (!planCanEdit()) { openPinModal(); return; }
+  if (_plan.dirty && !confirm('You have unsaved changes on this day. Fill blanks anyway? (Unsaved changes will be lost.)')) return;
+  const { data, error } = await sb.rpc('hub_fill_roles', { p_studio_id: _sessionStudioId, p_date: _plan.date, p_force: true });
+  if (error) { alert("Couldn't fill roles: " + error.message); return; }
+  await loadPlanDay(_plan.date);
+  _plan.msg = data && data.skipped === 'no shifts posted yet' ? 'No shifts posted for this day yet.' : 'Filled the blanks from the schedule. Anything already set was kept.';
+  renderPlanDay();
+}
+
+// Bring a 0/0 session back: set its live Shopify spots (same Edge Function and
+// title rules as the Day view's adjust spaces, copied as-is), then the session.
+function buildShopifyTitle(sessionDate, sessionTime, sessionTitle) {
+  const d = new Date(sessionDate + 'T12:00:00')
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  const day = days[d.getDay()], month = months[d.getMonth()], date = d.getDate()
+  const suffix = date===1||date===21||date===31?'st':date===2||date===22?'nd':date===3||date===23?'rd':'th'
+  const [h, m] = sessionTime.split(':').map(Number)
+  const hour = h===0?12:h>12?h-12:h
+  const ampm = h<12?'am':'pm'
+  const timeStr = m===0?`${hour}${ampm}`:`${hour}:${String(m).padStart(2,'0')}${ampm}`
+  const starPrefix = (h===9&&m===0)?'*':''
+  const titleLower = sessionTitle.toLowerCase().trim()
+  const TITLE_MAP = {
+    // New clean titles (Supabase = Shopify)
+    'kids party':'Kids Party','splatter party':'Splatter Party','field trip':'Field Trip',
+    'thursday clay night':'Thursday Clay Night',
+    // Legacy mappings for backward compatibility
+    'party time slot':null,'splatter party time slot':null,'field trip time slot':null,
+    'adult get-together time slot':'Adult Get Togethers, Parties & Group Booking',
+    'wheel workshop (adult & teen)':'Wheel Workshop','wheel workshop':'Wheel Workshop',
+    'friday night mixer':'Friday Night Mixer','friday night mixer (ages 16+)':'Friday Night Mixer',
+    'sunday morning family time mixer':'Sunday Morning Family Time Mixer',
+    'sunday early bird workshop':'Sunday Early Bird Workshop',
+    'mixed media class for kids ($10 for members)':'Mixed Media Class',
+    'thursdays: clay night':'Thursday Clay Night','natureware mugs':'Natureware Mug',
+    'summer camp half day morning':'Summer Camp Half Day','summer camp half day afternoon':'Summer Camp Half Day',
+    'no school day camp (ages 6-12)':'PA/PD Day','pd day':'PA/PD Day','pa day':'PA/PD Day','pa/pd day':'PA/PD Day',
+    "mother's day celebration":"Mother's Day",'afternoon art meetup':'Afternoon Art Meetup',
+    'saturday early bird workshop':'Saturday Early Bird Workshop',
+    'dragons session (ages 5-12) class 1 of 5':'Dragons 5 Week Kids Session',
+    'early drop off (mixed media class)':null,
+  }
+  if (/\b(class|week|session|part)\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(sessionTitle)) return null
+  if (titleLower in TITLE_MAP && TITLE_MAP[titleLower] === null) return null
+  if (titleLower === 'weekend workshop') return null
+  if (/^weekend workshop:\s*/i.test(sessionTitle)) return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${sessionTitle.replace(/^weekend workshop:\s*/i,'').trim()}`
+  if (titleLower.includes('wednesday paint night')) return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | Wednesday Paint Night`
+  if (TITLE_MAP[titleLower]) return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${TITLE_MAP[titleLower]}`
+  const seriesMatch = sessionTitle.match(/(\|\s*\d+\s+Week\s+Session.*)/i)
+  const seriesSuffix = seriesMatch ? ` ${seriesMatch[1].trim()}` : ''
+  let cleanTitle = sessionTitle.replace(/\s*\|.*$/, '').trim()
+  return `${starPrefix}${timeStr} ${day} ${month} ${date}${suffix} | ${cleanTitle}${seriesSuffix}`
+}
+
+const STUDIO_VARIANT_MAP = {
+  'AB-YYC-ING':'AB / CALGARY - INGLEWOOD','AB-STA-STA':'AB / ST ALBERT',
+  'BC-RICH-GC':'BC / RICHMOND - GARDEN CITY','BC-RICH-STV':'BC / RICHMOND - STEVESTON',
+  'BC-SUR-SSR':'BC / SURREY - SOUTH','BC-YVR-KIT':'BC / VANCOUVER - KITSILANO',
+  'BC-YVR-MS':'BC / VANCOUVER - MAIN STREET','BC-YVR-UBC':'BC / VANCOUVER - UBC',
+  'BC-YYJ-CSV':'BC / VICTORIA - COOK STREET VILLAGE','BC-YYJ-ESQ':'BC / VICTORIA - ESQUIMALT',
+  'BC-YYJ-OB':'BC / VICTORIA - OAK BAY','BC-YYJ-VIC':'BC / VICTORIA - UPTOWN',
+  'ON-BRL-BRL':'ON / BURLINGTON - SOUTH','ON-CMB-GLT':'ON / CAMBRIDGE - GALT',
+  'ON-ERN-ERN':'ON / ERIN','ON-HAM-OS':'ON / HAMILTON - OTTAWA STREET',
+  'ON-HAM-WD':'ON / HAMILTON - WATERDOWN','ON-HAM-WH':'ON / HAMILTON - WEST HARBOUR',
+  'ON-KGN-AP':'ON / KINGSTON - ARLINGTON PARK','ON-LDN-BYR':'ON / LONDON - BYRON',
+  'ON-LDN-WVG':'ON / LONDON - WORTLEY VILLAGE','ON-MIS-PC':'ON / MISSISSAUGA - PORT CREDIT',
+  'ON-OAK-OAK':'ON / OAKVILLE - NORTH','ON-OAK-WST':'ON / OAKVILLE - WEST',
+  'ON-YOW-GLB':'ON / OTTAWA - THE GLEBE','ON-STC-STC':'ON / ST CATHARINES',
+  'ON-YYZ-AVE':'ON / TORONTO - AVENUE ROAD','ON-YYZ-BP':'ON / TORONTO - BABY POINT',
+  'ON-YYZ-LEA':'ON / TORONTO - LEASIDE','ON-YYZ-BEA':'ON / TORONTO - THE BEACHES',
+  'ON-WTR-WTR':'ON / WATERLOO - UPTOWN'
+}
+async function planAdjustSpots(sessionId) {
+  if (!planCanAdjust()) { alert('Adjusting spots needs an admin login, or a coordinator whose staff profile has “Can adjust spaces”.'); return; }
+  const x = _plan.sessions.find(z => z.id === sessionId);
+  if (!x) return;
+  const title = buildShopifyTitle(x.session_date, x.session_time || '00:00:00', x.title);
+  openDutySheet(`<h3>Spots</h3><p>${esc(shortTime(x.session_time || ''))} · ${esc(x.title)}</p>
+    <div id="spots-live" class="ho-intro" style="margin:0 0 10px">${title ? 'Checking Shopify…' : 'This session has no Shopify product of its own (for example, kids class weeks after the first), so its spots can’t be changed here.'}</div>
+    ${title ? `<label class="f">Spots left (what customers can still book online). Use 0 or a negative number to close it.<input type="number" id="plan-spots" min="-100" max="500" style="font:inherit;font-size:16px;border:1px solid var(--border);border-radius:10px;padding:9px 11px"></label>
+    <div id="plan-spots-msg" class="ho-intro" style="margin:0"></div>` : ''}
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button>${title ? `<button class="primary" id="plan-spots-go" onclick="planAdjustSpotsGo('${escAttr(sessionId)}')" disabled>Save</button>` : ''}</div>`);
+  if (!title) return;
+  const call = async body => (await fetch(`${SUPABASE_URL}/functions/v1/shopify-inventory`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify(body) })).json();
+  let v = null;
+  try { const d = await call({ action: 'get_all', product_title: title }); if (!d.error && d.variants) v = d.variants.find(z => z.variant_title === STUDIO_VARIANT_MAP[_sessionStudioId]) || null; } catch (e) {}
+  const live = document.getElementById('spots-live');
+  if (!live) return;
+  if (!v) { live.textContent = 'Couldn’t find this studio on the Shopify product, so nothing can be changed here.'; return; }
+  _plan.spotVariant = { sessionId, v };
+  const booked = _plan.booked[x.id] || 0;
+  live.innerHTML = `<b>${booked}</b> booked · <b>${Number(v.inventory_quantity || 0)}</b> spot${Number(v.inventory_quantity) === 1 ? '' : 's'} left on Shopify right now.`;
+  const inp = document.getElementById('plan-spots');
+  inp.value = Number(v.inventory_quantity || 0); inp.focus(); inp.select();
+  document.getElementById('plan-spots-go').disabled = false;
+}
+async function planAdjustSpotsGo(sessionId) {
+  const x = _plan.sessions.find(z => z.id === sessionId);
+  const sv = _plan.spotVariant;
+  const qty = parseInt(document.getElementById('plan-spots').value, 10);
+  const msg = document.getElementById('plan-spots-msg'), btn = document.getElementById('plan-spots-go');
+  if (!x || !sv || sv.sessionId !== sessionId) return;
+  if (isNaN(qty) || qty < -100 || qty > 500) { msg.textContent = 'Enter how many spots should be left (0 or a negative number closes it).'; return; }
+  btn.disabled = true; msg.textContent = 'Saving…';
+  const old = Number(sv.v.inventory_quantity || 0);
+  let setData = null;
+  try { setData = await (await fetch(`${SUPABASE_URL}/functions/v1/shopify-inventory`, { method: 'POST', headers: await fnHeaders(),
+    body: JSON.stringify({ action: 'set', inventory_item_id: sv.v.inventory_item_id, quantity: qty,
+      pin: _sessionPin || null, studio_id: _sessionStudioId, product_title: buildShopifyTitle(x.session_date, x.session_time || '00:00:00', x.title) }) })).json(); } catch (e) {}
+  if (!setData || !setData.inventory_level) { msg.textContent = (setData && setData.error) ? setData.error : 'Shopify didn’t accept the change. Try again.'; btn.disabled = false; return; }
+  const reg = _plan.booked[x.id] || 0;
+  const up = await sb.from('sessions').update({ capacity: reg + qty, spaces_left_cache: qty }).eq('id', x.id);
+  // Same log as the Day view's adjust spaces (best effort)
+  try {
+    await sb.from('spaces_adjustment_log').insert({ session_id: x.id, studio_id: _sessionStudioId, session_title: x.title, session_date: x.session_date,
+      session_time: x.session_time, staff_id: _adjustStaff ? _adjustStaff.id : null,
+      staff_name: _adjustStaff ? _adjustStaff.display_name : 'Home office (Hub)',
+      made_by_role: _adjustStaff ? (_adjustStaff.role || 'coordinator') : 'admin', old_spaces_left: old, new_spaces_left: qty });
+  } catch (e) {}
+  if (up.error) { msg.textContent = 'Saved on Shopify, but the schedule didn’t update. Refresh to check.'; return; }
+  closeDutySheet();
+  await loadPlanDay(_plan.date);
+  _plan.msg = qty <= 0 ? `${x.title} at ${shortTime(x.session_time)} is closed online (spots set to ${qty}, was ${old}).` : `${x.title} at ${shortTime(x.session_time)}: ${qty} spot${qty === 1 ? '' : 's'} left (was ${old}).`;
+  renderPlanDay();
+  _planRunDays = null; planDayStrip(_plan.date);
+  if (_plan.date === localDateStr(new Date()) && _lastHeroData) loadDailyHero(_sessionPin, _sessionStudioId);
+}
+function planOpenSpots(sessionId) { return planAdjustSpots(sessionId); }
+
+// Close (or reopen) an open party slot: every party product at that time (Kids Party,
+// Splatter Party, Party Time Slot…) is set to 0 spots on Shopify (reopen: 1 each).
+// Same Shopify step, permission and log as Spots. Booked parties aren't touched.
+function planSlotOpenClose(slotId, reopen) {
+  if (!planCanAdjust()) { alert('Closing a party slot needs an admin login, or a coordinator whose staff profile has “Can adjust spaces”.'); return; }
+  const x = _plan.sessions.find(z => z.id === slotId); if (!x) return;
+  const names = (x.slotProducts || []).map(p => p.title);
+  openDutySheet(`<h3>${reopen ? 'Reopen' : 'Close'} the ${esc(shortTime(x.session_time))} party slot?</h3>
+    <p>${esc(ptyDayLabel(_plan.date))} · ${esc(STUDIO_NAMES[_sessionStudioId] || '')}</p>
+    <div class="ho-intro" style="margin:0">${reopen ? 'Customers will be able to book a party at this time again.' : 'Customers won’t be able to book a party at this time online.'}
+      ${(x.slotProducts || []).some(p => p.world_party) ? 'This changes the party times on World (booked parties stay booked).' : `This changes ${names.length} product${names.length === 1 ? '' : 's'} on Shopify: ${esc(names.join(', '))}.`}</div>
+    <div id="slot-msg" class="ho-intro" style="margin:8px 0 0"></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button>${!reopen && (x.slotLive || 0) > 1 ? `<button id="slot-go1" onclick="planSlotGo('${escAttr(slotId)}', false, 1)">Close 1 of the ${x.slotLive} rooms</button><button class="primary" id="slot-go" onclick="planSlotGo('${escAttr(slotId)}', false)">Close all ${x.slotLive}</button>`
+      : reopen && !x.slotClosed ? `<button class="primary" id="slot-go" onclick="planSlotGo('${escAttr(slotId)}', true, 1)">Reopen one room</button>`
+      : `<button class="primary" id="slot-go" onclick="planSlotGo('${escAttr(slotId)}', ${reopen ? 'true' : 'false'})">${reopen ? 'Reopen it' : 'Close it'}</button>`}</div>`);
+}
+async function planSlotGo(slotId, reopen, one) {
+  const x = _plan.sessions.find(z => z.id === slotId); if (!x) return;
+  const msg = document.getElementById('slot-msg'), btn = document.getElementById('slot-go');
+  btn.disabled = true; const b1 = document.getElementById('slot-go1'); if (b1) b1.disabled = true;
+  if (one && (x.slotProducts || []).some(p => p.world_party)) {   // one room (World-run): hub_party_slot_rooms (hub_fixes_nov9.sql)
+    msg.textContent = 'Updating…';
+    const { error } = await sb.rpc('hub_party_slot_rooms', { p_studio: _sessionStudioId, p_date: x.session_date, p_time: x.session_time, p_delta: reopen ? 1 : -1 });
+    if (error) { msg.textContent = /hub_party_slot_rooms/i.test(error.message) ? 'Run hub_fixes_nov9.sql in Supabase first.' : error.message; btn.disabled = false; if (b1) b1.disabled = false; return; }
+    closeDutySheet(); await loadPlanDay(_plan.date);
+    _plan.msg = `${shortTime(x.session_time)}: one party room ${reopen ? 'reopened' : 'closed'} on World`; renderPlanDay(); return;
+  }
+  if ((x.slotProducts || []).some(p => p.world_party)) {   // World-run party times: no Shopify step
+    msg.textContent = 'Updating…';
+    const { data, error } = await sb.rpc('hub_party_slot_set', { p_studio: _sessionStudioId, p_date: x.session_date, p_time: x.session_time, p_open: !!reopen, p_pin: _sessionPin || null });
+    if (error) { msg.textContent = /hub_party_slot_set/i.test(error.message) ? 'Run world_party_move.sql in Supabase first.' : error.message; btn.disabled = false; return; }
+    closeDutySheet(); await loadPlanDay(_plan.date);
+    _plan.msg = `${shortTime(x.session_time)} party slot ${reopen ? 'reopened on World' : 'closed on World'}`; renderPlanDay(); return;
+  }
+  msg.textContent = 'Updating Shopify…';
+  const call = async body => (await fetch(`${SUPABASE_URL}/functions/v1/shopify-inventory`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify(body) })).json();
+  const qty = reopen ? 1 : 0, done = [], skipped = [];
+  for (const p of (x.slotProducts || [])) {
+    const title = buildShopifyTitle(p.session_date, p.session_time || '00:00:00', p.title);
+    if (!title) continue;   // no Shopify product: nothing customers can book
+    try {
+      const d = await call({ action: 'get_all', product_title: title });
+      const v = d && !d.error && d.variants ? d.variants.find(z => z.variant_title === STUDIO_VARIANT_MAP[_sessionStudioId]) : null;
+      if (!v) { skipped.push(p.title); continue; }
+      const old = Number(v.inventory_quantity || 0);
+      const qtyNow = one ? Math.max(0, Math.min(x.slotOpenRooms || 1, old + (reopen ? 1 : -1))) : qty;   // (one room at a time)
+      const set = await call({ action: 'set', inventory_item_id: v.inventory_item_id, quantity: qtyNow, pin: _sessionPin || null, studio_id: _sessionStudioId, product_title: title });
+      if (!set || !set.inventory_level) { skipped.push(p.title + (set && set.error ? ` (${set.error})` : '')); continue; }
+      await sb.from('sessions').update(one ? { spaces_left_cache: qtyNow } : { capacity: qty, spaces_left_cache: qty }).eq('id', p.id);
+      try {
+        await sb.from('spaces_adjustment_log').insert({ session_id: p.id, studio_id: _sessionStudioId, session_title: p.title, session_date: p.session_date,
+          session_time: p.session_time, staff_id: _adjustStaff ? _adjustStaff.id : null, staff_name: _adjustStaff ? _adjustStaff.display_name : 'Home office (Hub)',
+          made_by_role: _adjustStaff ? (_adjustStaff.role || 'coordinator') : 'admin', old_spaces_left: old, new_spaces_left: qtyNow });
+      } catch (e) {}
+      done.push(p.title);
+    } catch (e) { skipped.push(p.title); }
+  }
+  if (!done.length) { msg.textContent = 'Nothing changed on Shopify' + (skipped.length ? `: ${skipped.join(', ')}` : '') + '. Try again.'; btn.disabled = false; return; }
+  closeDutySheet();
+  await loadPlanDay(_plan.date);
+  _plan.msg = `${shortTime(x.session_time)} party slot ${reopen ? 'reopened' : 'closed online'} (${done.length} product${done.length === 1 ? '' : 's'})` + (skipped.length ? `. Couldn’t change: ${skipped.join(', ')}.` : '.');
+  renderPlanDay();
+  _planRunDays = null; planDayStrip(_plan.date);
+}
+
+// ---------- Admin: shifts on the Schedule ----------
+// Admin logins can add, change or remove the day's shifts here. They save to
+// the staff schedule (staff_shifts) as APPROVED — what Who's working and labour
+// use. One shift per person, per studio, per day (same rule as staff-schedule).
+function planCanShifts() { return !!(_studioData && _studioData.isAdmin); }
+async function planLoadShiftRows() {
+  const { data } = await sb.from('staff_shifts').select('*').eq('studio_id', _sessionStudioId).eq('shift_date', _plan.date).order('start_time');
+  return data || [];
+}
+async function planEditShift(staffId) {
+  if (!planCanShifts()) return;
+  const rows = await planLoadShiftRows();
+  const cur = staffId ? rows.find(r => r.staff_id === staffId) : null;
+  const { data: people } = await sb.from('staff_profiles').select('id, display_name, preferred_name, nickname, studio_ids, is_active, termination_date').eq('is_active', true).order('display_name');
+  const here = (people || []).filter(p => (!p.studio_ids || !p.studio_ids.length || p.studio_ids.includes(_sessionStudioId)) &&
+    (!p.termination_date || p.termination_date >= _plan.date));
+  if (cur && !here.some(p => p.id === cur.staff_id)) here.unshift((people || []).find(p => p.id === cur.staff_id) || { id: cur.staff_id, display_name: 'Staff member' });
+  const nm = p => (p.preferred_name || '').trim() || p.display_name;
+  const hm = t => t ? String(t).slice(0, 5) : '';
+  openDutySheet(`<h3>${cur ? 'Change shift' : 'Add a shift'}</h3>
+    <p>${esc(STUDIO_NAMES[_sessionStudioId] || '')} · ${esc(ptyDayLabel(_plan.date))}. Saves to the staff schedule as approved.</p>
+    <label class="f">Who<select id="sh-who" ${cur ? 'disabled' : ''}>${cur ? '' : '<option value="">Choose…</option>'}${here.map(p => `<option value="${escAttr(p.id)}"${cur && p.id === cur.staff_id ? ' selected' : ''}>${esc(nm(p))}</option>`).join('')}</select></label>
+    <div style="display:flex;gap:10px"><label class="f" style="flex:1">Start<input type="time" id="sh-start" step="900" value="${escAttr(hm(cur && cur.start_time) || '08:30')}" style="font:inherit;font-size:15px;border:1px solid var(--border);border-radius:10px;padding:8px 10px"></label>
+      <label class="f" style="flex:1">End<input type="time" id="sh-end" step="900" value="${escAttr(hm(cur && cur.end_time) || '17:00')}" style="font:inherit;font-size:15px;border:1px solid var(--border);border-radius:10px;padding:8px 10px"></label></div>
+    <div id="sh-warn" class="ho-intro" style="margin:0"></div>
+    <div class="sheet-actions">${cur ? `<button class="danger" onclick="planRemoveShift('${escAttr(cur.staff_id)}')">Remove shift</button><span style="flex:1"></span>` : ''}
+      <button onclick="closeDutySheet()">Cancel</button><button class="primary" id="sh-go" onclick="planSaveShift(${cur ? `'${escAttr(cur.staff_id)}'` : 'null'})">Save</button></div>`);
+  const who = document.getElementById('sh-who');
+  if (who) who.addEventListener('change', () => planShiftWarnings(who.value));
+  if (cur) planShiftWarnings(cur.staff_id);
+}
+// Warnings, not blocks: approved time off that day, or a shift at another studio.
+async function planShiftWarnings(staffId) {
+  const box = document.getElementById('sh-warn');
+  if (!box || !staffId) { if (box) box.textContent = ''; return; }
+  const [other, off] = await Promise.all([
+    sb.from('staff_shifts').select('studio_id, start_time, end_time, status').eq('staff_id', staffId).eq('shift_date', _plan.date).neq('studio_id', _sessionStudioId),
+    sb.from('staff_time_off').select('start_date, end_date, start_time, end_time, status').eq('staff_id', staffId).eq('status', 'approved').lte('start_date', _plan.date).gte('end_date', _plan.date)
+  ]);
+  const w = [];
+  (other.data || []).filter(r => r.status !== 'draft').forEach(r => w.push(`Already working at ${STUDIO_NAMES[r.studio_id] || r.studio_id} that day (${shortTime(r.start_time)}–${shortTime(r.end_time)}).`));
+  (off.data || []).forEach(r => w.push(`Has approved time off that day${r.start_time ? ` (${shortTime(r.start_time)}–${shortTime(r.end_time)})` : ''}.`));
+  box.innerHTML = w.length ? `<div class="duty-note" style="margin-bottom:8px">⚠️ ${w.map(esc).join('<br>⚠️ ')}</div>` : '';
+}
+async function planSaveShift(existingStaffId) {
+  const staffId = existingStaffId || document.getElementById('sh-who').value;
+  const start = document.getElementById('sh-start').value, end = document.getElementById('sh-end').value;
+  if (!staffId) { alert('Choose who the shift is for.'); return; }
+  if (!start || !end || end <= start) { alert('The end time needs to be after the start time.'); return; }
+  const btn = document.getElementById('sh-go'); btn.disabled = true; btn.textContent = 'Saving…';
+  const row = { staff_id: staffId, studio_id: _sessionStudioId, shift_date: _plan.date,
+                start_time: start + ':00', end_time: end + ':00', status: 'approved' };
+  const { error } = await sb.from('staff_shifts').upsert(row, { onConflict: 'staff_id,studio_id,shift_date' });
+  if (error) { btn.disabled = false; btn.textContent = 'Save'; alert("Couldn't save the shift: " + error.message); return; }
+  closeDutySheet();
+  await planAfterShiftChange('Shift saved to the staff schedule.');
+}
+async function planRemoveShift(staffId) {
+  if (!confirm('Remove this shift from the staff schedule?')) return;
+  const { error } = await sb.from('staff_shifts').delete().eq('staff_id', staffId).eq('studio_id', _sessionStudioId).eq('shift_date', _plan.date);
+  if (error) { alert("Couldn't remove it: " + error.message); return; }
+  closeDutySheet();
+  await planAfterShiftChange('Shift removed from the staff schedule.');
+}
+async function planAfterShiftChange(msg) {
+  fnHeaders().then(h => fetch(`${SUPABASE_URL}/functions/v1/hub-push`, { method: 'POST', headers: h, body: JSON.stringify({ action: 'shifts' }) })).catch(() => {});   // schedule notifications
+  await loadPlanDay(_plan.date);
+  _plan.msg = msg; renderPlanDay();
+  if (_plan.date === localDateStr(new Date())) loadTeamToday(_sessionStudioId);
+}
+
+// Tap (or Enter) on a session row: class list, or the party form for a party.
+// Taps on the row's own buttons, dropdowns and links do their own thing.
+function sessionRowOpen(e) {
+  const row = e.target.closest('[data-open-cl], [data-open-pf], [data-open-today]');
+  if (!row || e.target.closest('button, select, input, textarea, a, label')) return;
+  if (e.type === 'keydown' && e.key !== 'Enter') return;
+  if (row.dataset.openCl) toggleClassList(row.dataset.openCl);
+  else if (row.dataset.openPf !== undefined) togglePartyForm(Number(row.dataset.openPf));
+  else if (row.dataset.openToday) openTodayClassList(row.dataset.openToday);
+}
+document.addEventListener('click', sessionRowOpen);
+document.addEventListener('keydown', sessionRowOpen);
+
+// ---------- Move a booking to another time, same day ----------
+// hub_move_booking.sql enforces: same studio, same day, same kind of session,
+// never parties / kids classes / camps / events. Moving into a full time asks
+// for an OK first. Then live Shopify spots are adjusted for both times.
+function planMovable(x) {
+  return !planIsKids(x) && !['party', 'festival', 'camp'].includes(x.session_type) &&
+    !/camp|pa day|pd day|pa\/pd|no school|catch up/i.test(x.title || '');
+}
+let _mv = null;
+async function planMoveBooking(bookingId, fromSessionId, name) {
+  const { data, error } = await sb.rpc('hub_move_options', { p_booking_id: bookingId });
+  if (error) { alert(/hub_move_options/i.test(error.message) ? 'Moving bookings needs hub_move_booking.sql run in Supabase first.' : error.message); return; }
+  _mv = { bookingId, fromSessionId, name, data, who: '' };
+  const opts = data.options || [];
+  const people = _teamPeople.map(p => `<option value="${escAttr(p.name)}">${esc(p.name)}</option>`).join('');
+  openDutySheet(`<h3>Move ${esc(name)}</h3>
+    <p>${esc(data.qty)} ${data.qty === 1 ? 'person' : 'people'} · now at ${esc(shortTime(data.from.session_time))} ${esc(data.from.title)}. Same day only.</p>
+    ${opts.length ? `<div class="mv-opts">${opts.map(o => {
+        const left = o.spaces_left === null || o.spaces_left === undefined ? null : Number(o.spaces_left);
+        const full = left !== null && left < data.qty;
+        return `<button class="mv-opt${full ? ' full' : ''}" onclick="planMoveTo('${escAttr(o.id)}')">
+          <b>${esc(shortTime(o.session_time))}</b><span>${left === null ? '' : left <= 0 ? 'Full' : left + ' spot' + (left === 1 ? '' : 's') + ' left'}${full && left > 0 ? ' · not enough' : ''}</span></button>`;
+      }).join('')}</div>` : '<div class="ho-intro">There’s no other time for this on the same day.</div>'}
+    ${opts.length && people ? `<label class="f" style="margin-top:12px">Who’s moving it?<select id="mv-who"><option value="">—</option>${people}</select></label>` : ''}
+    ${opts.length ? `<label style="display:flex;gap:8px;align-items:center;margin-top:10px;font-weight:600"><input type="checkbox" id="mv-mail" ${_mv.mail === false ? '' : 'checked'}> Email them about the new time</label>` : ''}
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button></div>`);
+}
+async function planMoveTo(toId, allowFull) {
+  const who = (document.getElementById('mv-who') || {}).value || _mv.who || '';
+  _mv.who = who;
+  const mb = document.getElementById('mv-mail'); if (mb) _mv.mail = mb.checked;   // (kept through the "nearly full" step)
+  const { data, error } = await sb.rpc('hub_move_booking', { p_booking_id: _mv.bookingId, p_to_session_id: toId, p_allow_full: !!allowFull, p_staff_name: who || null });
+  if (error) { alert("Couldn't move it: " + error.message); return; }
+  if (data && data.needs_ok) {
+    const o = (_mv.data.options || []).find(z => String(z.id) === String(toId)) || {};
+    const over = data.qty - Math.max(0, data.spaces_left);
+    openDutySheet(`<h3>⚠️ ${esc(shortTime(o.session_time || ''))} is ${data.spaces_left > 0 ? 'nearly full' : 'full'}</h3>
+      <p>It has ${Math.max(0, data.spaces_left)} spot${data.spaces_left === 1 ? '' : 's'} left. Moving ${data.qty} ${data.qty === 1 ? 'person' : 'people'} puts it <b>${over} over</b>. Make sure the studio can fit them (tables, materials, staff) before you say yes.</p>
+      <div class="sheet-actions"><button onclick="planMoveBooking('${escAttr(_mv.bookingId)}','${escAttr(_mv.fromSessionId)}',${escAttr(JSON.stringify(_mv.name))})">Back</button>
+        <button class="primary" onclick="planMoveTo('${escAttr(toId)}', true)">Move anyway</button></div>`);
+    return;
+  }
+  closeDutySheet();
+  // (Nov 9 2026) the family: "You've been moved to a new time" (session-time-email)
+  let mailMsg = '';
+  if (_mv.mail !== false) {
+    const ses = await sb.auth.getSession(), tk = ses && ses.data && ses.data.session && ses.data.session.access_token;
+    const mr = await fetch(`${SUPABASE_URL}/functions/v1/session-time-email`, { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + (tk || SUPABASE_ANON_KEY) },
+      body: JSON.stringify({ booking_id: _mv.bookingId, from_session_id: String(data.from.id) }) }).catch(() => null);
+    const md = mr ? await mr.json().catch(() => ({})) : {};
+    mailMsg = mr && mr.ok ? (md.sent ? ' Emailed them the new time.' : ' (No email on the booking.)') : ` The email didn't send: ${md.error || 'please let them know'}.`;
+  }
+  // Live Shopify spots: give the earlier time its spot(s) back, take them from the new time.
+  const shopMsg = await planMoveShopify(data.from, data.to, data.qty, data.move_id);
+  const fromId = String(data.from.id), toSid = String(data.to.id);
+  delete _plan.classLists[fromId]; delete _plan.classLists[toSid];
+  await loadPlanDay(_plan.date);
+  _plan.msg = `Moved ${_mv.name} to ${shortTime(data.to.session_time)}.${data.over_capacity ? ' (Over the limit.)' : ''}${mailMsg}${shopMsg ? ' ' + shopMsg : ''}`;
+  renderPlanDay();
+  const m = document.getElementById('plan-msg');
+  if (!m) alert(_plan.msg);
+  if (shopMsg) alert(shopMsg);
+  if (_plan.date === localDateStr(new Date()) && _lastHeroData) loadDailyHero(_sessionPin, _sessionStudioId);
+}
+async function planMoveShopify(from, to, qty, moveId) {
+  // Newer inventory function: adjust both times for this exact move, on the server
+  if (moveId) {
+    try {
+      const r = await (await fetch(`${SUPABASE_URL}/functions/v1/shopify-inventory`, { method: 'POST', headers: await fnHeaders(),
+        body: JSON.stringify({ action: 'apply_move', move_id: moveId,
+          from_title: buildShopifyTitle(from.session_date, from.session_time || '00:00:00', from.title),
+          to_title: buildShopifyTitle(to.session_date, to.session_time || '00:00:00', to.title) }) })).json();
+      if (r && r.ok) return '';
+      if (r && r.error !== 'unknown action') return `Moved, but please check Shopify spots by hand: ${(r.problems || []).join('; ') || r.error || 'unknown problem'}.`;
+    } catch (e) { return 'Moved, but Shopify spots couldn’t be updated. Please check both times in Shopify.'; }
+  }
+  const variantName = STUDIO_VARIANT_MAP[_sessionStudioId];
+  const call = async body => (await fetch(`${SUPABASE_URL}/functions/v1/shopify-inventory`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify(body) })).json();
+  const adjust = async (sess, delta) => {
+    const title = buildShopifyTitle(sess.session_date, sess.session_time || '00:00:00', sess.title);
+    if (!title) return `no Shopify product for ${shortTime(sess.session_time)}`;
+    const d = await call({ action: 'get_all', product_title: title });
+    const v = d && d.variants && d.variants.find(x => x.variant_title === variantName);
+    if (!v) return `couldn't find ${shortTime(sess.session_time)} on Shopify`;
+    const r = await call({ action: 'set', inventory_item_id: v.inventory_item_id, quantity: Math.max(0, Number(v.inventory_quantity || 0) + delta) });
+    return r && r.inventory_level ? null : `Shopify didn't update ${shortTime(sess.session_time)}`;
+  };
+  try {
+    const problems = [await adjust(from, qty), await adjust(to, -qty)].filter(Boolean);
+    return problems.length ? `Moved, but please check Shopify spots by hand: ${problems.join('; ')}.` : '';
+  } catch (e) { return 'Moved, but Shopify spots couldn’t be updated. Please check both times in Shopify.'; }
+}
+
+// Today screen → "Class list": open today on the Schedule with that class's list open.
+async function openTodayClassList(key) {
+  const info = _classInfo && _classInfo.byKey[key];
+  showOnlyPane('plan-pane'); setActiveNav('nav-plan');
+  await loadPlanDay(localDateStr(new Date()));
+  if (!info || !_plan) return;
+  if (info.type === 'party') {
+    const i = _plan.parties.findIndex(pt => pt.session.id === info.id);
+    if (i >= 0 && !_plan.partyForms[_plan.parties[i].booking_id]) togglePartyForm(i);
+  } else if (_plan.sessions.some(x => x.id === info.id) && !_plan.classLists[info.id]) {
+    await toggleClassList(info.id);
+  }
+  const slot = document.querySelector(`#plan-body [data-cl="${info.id}"], #plan-body [data-pf]`);
+  if (slot && slot.previousElementSibling) slot.previousElementSibling.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+// Glazing: save what someone is glazing (hub_glazing_pieces.sql). Empty = back to the customer's choice.
+async function planSaveGlazing(bookingId) {
+  const el = document.getElementById('glz-' + bookingId), msg = document.getElementById('glz-msg-' + bookingId);
+  if (!el) return;
+  const { error } = await sb.rpc('hub_set_glazing_piece', { p_booking_id: String(bookingId), p_piece: el.value });
+  if (msg) msg.innerHTML = error ? `<span style="color:#b91c1c">${esc(/hub_set_glazing_piece/i.test(error.message) ? 'Saving needs hub_glazing_pieces.sql' : error.message)}</span>` : '<span style="color:#15803d">Saved ✓</span>';
+  if (!error) setTimeout(() => { if (msg) msg.innerHTML = ''; }, 2500);
+}
+
+// ---------- Class lists, notes and prints on the Schedule ----------
+// Class list: the same people as the Day view's list (kids class weeks 2+ come
+// from get_class_week_bookings; same order-and-line-item de-dupe).
+// (Nov 9 2026) who's coming on a booking: the "Participant 1, 2…" names on its order line (World, Shopify), or a kids/people list
+// (4Cats checkout), without birthdates; guests booked by age without names show as e.g. "2 adults"
+function clParticipants(b) {
+  let raw = b && b.raw_payload; if (!raw) return [];
+  try { if (typeof raw === 'string') raw = JSON.parse(raw); } catch (e) { return []; }
+  const names = [], clean = v => String(v || '').split('|')[0].trim();
+  const fromProps = props => (props || []).forEach(pr => { const n = String((pr && (pr.name || pr.key)) || ''), v = pr && pr.value;
+    if (/^participant\s*\d+/i.test(n) && clean(v)) names.push(clean(v));
+    else if (/^(adults?|kids?|children|guests?|youth|teens?)\b/i.test(n) && +v > 0 && !/^_/.test(n)) names.push(`${+v} ${n.toLowerCase()}`); });
+  const items = Array.isArray(raw.line_items) ? raw.line_items : [];
+  const mine = items.filter(li => String(li.id) === String(b.shopify_line_item_id));
+  (mine.length ? mine : items.length === 1 ? items : []).forEach(li => fromProps(li.properties || li.customAttributes));
+  if (!names.length) ['kids', 'people', 'participants'].forEach(k => { if (Array.isArray(raw[k])) raw[k].forEach(p => { const n = clean(p && (p.name || p.child_name)); if (n) names.push(n); }); });
+  return [...new Set(names)];
+}
+// (Nov 9 2026) a glazing note that looks like more than one person (the same check World makes before checkout)
+function glazeTextMulti(t) {
+  t = String(t || '');
+  if (/\b(\d+|two|three|four|five|six)\s*(people|persons|kids|children|of us|adults|friends|girls|boys)\b/i.test(t)) return true;
+  if (/\bfor\s*(\d+|two|three|four|both)\b|\bx\s*\d\b|\b\d\s*x\b/i.test(t)) return true;
+  if (/\b(my|our)\s+(kids|children|daughters|sons|friends|family|girls|boys|grandkids)\b|\bboth\b|\beach\b|\bwe\b|\bus\b/i.test(t)) return true;
+  // (Nov 9 2026) also: bringing someone, "also / too / plus", two pieces ("my plate and my mug"), names in any case
+  if (/\b(bring|bringing|with|and)\s+(my\s+)?(friend|husband|wife|partner|son|daughter|mom|mum|dad|sister|brother|kid|child)\b/i.test(t)) return true;
+  if (/\b(i'?ll|will|i'?m|am)\s+(bring|bringing)\b|\bbring(ing)?\s+[a-z]+\s+(too|along|with)\b|\bwith\s+[a-z]+\s+too\b/i.test(t)) return true;
+  if (/\b(also|too|plus)\b/i.test(t)) return true;
+  var PC = '(mug|plate|bowl|cup|vase|tile|ornament|piece|dish|planter|box|figure|figurine|tray|platter|jar|pot|sculpture|coaster)';
+  if (new RegExp('\\b' + PC + 's?\\b[^.]*?\\s(and|&|\\+|,)\\s[^.]*?\\b' + PC + 's?\\b', 'i').test(t)) return true;
+  if (new RegExp('\\b(\\d+|two|three|four|both)\\s+([a-z]+\\s+)?' + PC + 's\\b', 'i').test(t)) return true;
+  if (/\bmy\s+[a-z]+(\s+[a-z]+)?\s+(and|&|\+|,)\s+(my\s+|a\s+|the\s+)?[a-z]+/i.test(t)) return true;
+  return /[A-Z][a-z]+(\s+[A-Z][a-z]+)?\s*(,|&|\+|\band\b)\s*[A-Z][a-z]+/.test(t);
+}
+async function toggleClassList(sessionId) {
+  if (_plan.classLists[sessionId]) { delete _plan.classLists[sessionId]; renderPlanDay(); return; }
+  const x = _plan.sessions.find(z => z.id === sessionId);
+  if (!x) return;
+  const el = document.createElement('div');
+  el.className = 'cl-list'; el.innerHTML = '<div class="goal-note" style="padding:10px">Loading class list…</div>';
+  _plan.classLists[sessionId] = el;
+  renderPlanDay();
+  if (planIsCamp(x)) { await buildCampList(x, el); return; }
+  if (planIsKids(x)) { await buildKidsClassList(x, el); return; }
+  try {
+    let q = sb.from('bookings').select('id, customer_name, customer_email, customer_phone, qty, shopify_order_name, shopify_line_item_id, booked_at, raw_payload, event_date, order_note, returned_at, hot_chocolate_qty, candy_bag_qty, aftercare, early_arrival');
+    if (/\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(x.title || '')) {
+      const r = await sb.rpc('get_class_week_bookings', { p_session_id: x.id });
+      const ids = ((r.data) || []).map(z => z.booking_id).filter(Boolean);
+      q = q.in('id', ids.length ? ids : ['00000000-0000-0000-0000-000000000000']);
+    } else q = q.eq('session_id', x.id);
+    let { data, error } = await q.order('booked_at');
+    if (error) throw error;
+    // move notes (hub_move_booking.sql); quietly skipped if that column isn't there yet
+    const ids0 = (data || []).map(b => b.id);
+    if (ids0.length) {
+      const mv = await sb.from('bookings').select('id, move_note').in('id', ids0);
+      if (!mv.error) { const m = {}; (mv.data || []).forEach(r => { m[r.id] = r.move_note; }); data = data.map(b => Object.assign({}, b, { move_note: m[b.id] || null })); }
+      // Kids' age groups for seating (booking_age_groups.sql); quietly skipped if not there yet
+      const ag = await sb.from('bookings').select('id, kids_under_8, kids_8_11, kids_12_15, youngest_age').in('id', ids0);
+      if (!ag.error) { const m = {}; (ag.data || []).forEach(r => { m[r.id] = r; }); data = data.map(b => Object.assign({}, b, { ages: m[b.id] || null })); }
+    }
+    const seen = new Set();
+    const rows = (data || []).filter(b => (b.qty || 0) > 0 && !b.returned_at).filter(b => {
+      if (!b.shopify_order_name) return true;
+      const k = b.shopify_order_name + '|' + (b.shopify_line_item_id || b.id);
+      if (seen.has(k)) return false; seen.add(k); return true;
+    });
+    // "Can't make it?" (world_class_weeks.sql): kids away from this class today: joining another class (still listed here, greyed) or skipping
+    const away = {}, ghosts = [];
+    try {
+      const wc = await sb.from('class_week_changes').select('booking_id, kind, note, to_session, customer_name, qty').eq('from_session', x.id).is('undone_at', null);
+      if (!wc.error && (wc.data || []).length) {
+        const toIds = [...new Set(wc.data.map(c => c.to_session).filter(Boolean))];
+        const ts = toIds.length ? await sb.from('sessions').select('id, session_date, session_time').in('id', toIds) : { data: [] };
+        const tsMap = {}; ((ts.data) || []).forEach(t => { tsMap[t.id] = t; });
+        wc.data.forEach(c => {
+          const t = tsMap[c.to_session], why = c.kind === 'swap' ? 'joining ' + (t ? ptyDayLabel(t.session_date) + ' ' + shortTime(t.session_time || '') : 'another class') : c.kind === 'early_next' ? 'skipping, 15 min early next class' : 'skipping';
+          const line = 'Not coming today: ' + why + (c.note ? ' (' + c.note + ')' : '');
+          if (c.kind === 'swap') ghosts.push({ id: c.booking_id, customer_name: c.customer_name, qty: c.qty, line }); else away[c.booking_id] = line;
+        });
+      }
+    } catch (e) {}
+    const kidsQ = rows.length || ghosts.length ? await sb.from('booking_children').select('booking_id, child_index, child_name').in('booking_id', rows.map(b => b.id).concat(ghosts.map(g => g.id))).order('child_index') : { data: [] };
+    const kids = {}; ((kidsQ.data) || []).forEach(k => { if (k.child_name) (kids[k.booking_id] = kids[k.booking_id] || []).push(k.child_name); });
+    const glazing = x.session_type === 'glazing';
+    // What each person is glazing: the studio's saved version (hub_glazing_pieces.sql), else the customer's choice
+    let glz = {};
+    if (glazing && rows.length) { try { const g = await sb.rpc('hub_glazing_pieces', { p_booking_ids: rows.map(b => String(b.id)) }); if (!g.error) glz = g.data || {}; } catch (e) {} }
+    const awayN = rows.reduce((n, b) => n + (away[b.id] ? (b.qty || 0) : 0), 0) + ghosts.reduce((n, g) => n + (g.qty || 0), 0);
+    const total = rows.reduce((n, b) => n + (away[b.id] ? 0 : (b.qty || 0)), 0);
+    // Age groups across the class: under 8 (need one adult each), 8–11, 12–15.
+    const agSum = rows.reduce((t, b) => { const a = b.ages || {}; t.u8 += a.kids_under_8 || 0; t.k811 += a.kids_8_11 || 0; t.k1215 += a.kids_12_15 || 0; return t; }, { u8: 0, k811: 0, k1215: 0 });
+    const agBits = [agSum.u8 ? `<span class="age-pill u8">👶 Under 8: ${agSum.u8}</span>` : '', agSum.k811 ? `<span class="age-pill k811">8–11: ${agSum.k811}</span>` : '', agSum.k1215 ? `<span class="age-pill k1215">12–15: ${agSum.k1215}</span>` : ''].filter(Boolean).join('');
+    el.innerHTML = `<div class="cl-head"><b>${total}</b> ${planIsKids(x) ? 'enrolled' : 'booked'}${awayN ? ` <span class="goal-note">(+ ${awayN} away today)</span>` : ''}${agBits ? `<span class="age-sum">${agBits}</span>` : ''}
+        <span class="spacer"></span>${!planIsKids(x) && _studioData && _studioData.isAdmin ? `<button class="ho-btn" onclick="planRetime('${escAttr(x.id)}')" title="Move this workshop to another time today (contact the families first)">🕐 Change time</button>` : ''}<button class="ho-btn" onclick="planEmail('${escAttr(x.id)}')">✉️ Email this class</button><button class="ho-btn" onclick="planEmailHistory('${escAttr(x.id)}')">Sent</button><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button>
+</div>
+      ${rows.length || ghosts.length ? `<div class="oc-wrap"><table class="oc-table cl-table"><thead><tr><th>Name</th><th>Qty</th>${glazing ? '<th>Glazing</th>' : ''}<th>Extras</th><th>Phone</th><th>Order</th><th>Notes</th>${planMovable(x) || _hoCan.edit ? '<th></th>' : ''}</tr></thead><tbody>
+      ${rows.map(b => {
+        const ex = [b.hot_chocolate_qty ? `☕ ${b.hot_chocolate_qty}` : '', b.candy_bag_qty ? `🍬 ${b.candy_bag_qty}` : '', b.aftercare ? 'Aftercare' : '', b.early_arrival ? 'Early arrival' : ''].filter(Boolean).join(' · ');
+        const note = esc((typeof getOrderNote === 'function' ? getOrderNote(b) : b.order_note) || '');
+        const a = b.ages || {};
+        const ageRow = [a.kids_under_8 ? `<span class="age-pill u8">👶 ${a.kids_under_8} under 8${a.youngest_age != null && a.youngest_age < 8 ? ` (youngest ${a.youngest_age})` : ''}</span>` : '',
+          a.kids_8_11 ? `<span class="age-pill k811">${a.kids_8_11} aged 8–11</span>` : '', a.kids_12_15 ? `<span class="age-pill k1215">${a.kids_12_15} aged 12–15</span>` : ''].filter(Boolean).join('');
+        const pick = (() => { try { const raw = typeof b.raw_payload === 'string' ? JSON.parse(b.raw_payload) : (b.raw_payload || {}); const pr = ((raw.line_items || [])[0] || {}).properties || [];
+          const f = k => (pr.find(x => x && x.name === k) || {}).value; return f('Pickup') ? { who: f('Pickup'), kids: !!f('Kids only') } : null; } catch (e) { return null; } })();
+        return `<tr${away[b.id] ? ' class="cl-away"' : ''}><td><b>${esc(b.customer_name || '—')}</b>${pick ? `<div class="cl-pickup">🚗 Pickup: ${esc(pick.who)}${pick.kids ? ' <span class="ws-tag kids">Kids only</span>' : ''}</div>` : ''}${(kids[b.id] || []).length ? `<div class="cl-kids">🧒 ${esc(kids[b.id].join(', '))}</div>` : (() => { const ps = clParticipants(b); return ps.length ? `<div class="cl-kids">👥 ${esc(ps.join(', '))}</div>` : ''; })()}${ageRow ? `<div class="age-row">${ageRow}</div>` : ''}</td>
+          <td>${esc(b.qty)}</td>${glazing ? (() => {
+            const orig = getGlazingPiece(b.raw_payload, b.event_date) || '', saved = glz[String(b.id)];
+            return `<td class="glz-cell"><div class="glz-edit"><input id="glz-${escAttr(b.id)}" value="${escAttr(saved != null ? saved : orig)}" placeholder="What are they glazing?" maxlength="300">
+              <button class="ho-btn" onclick="planSaveGlazing('${escAttr(b.id)}')">Save</button></div>
+              ${saved != null && saved !== orig ? `<div class="goal-note">changed · customer chose: ${esc(orig || 'nothing')}</div>` : ''}<div class="glz-msg" id="glz-msg-${escAttr(b.id)}"></div>
+              ${(+b.qty || 1) < 2 && glazeTextMulti(saved != null ? saved : orig) ? `<div class="glz-multi" title="One spot booked, but the note looks like more than one person. Check at the door: extra people can be charged with 💳 Charge.">⚠️ May be more than one person or piece (1 spot booked)</div>` : ''}</td>`; })() : ''}
+          <td>${esc(ex)}</td><td>${esc(b.customer_phone || '')}</td><td>${b.shopify_order_name ? shopifyOrderLink(esc(b.shopify_order_name)) : ''}</td>
+          <td>${note}${away[b.id] ? `<div class="mv-note away">🚫 ${esc(away[b.id])}</div>` : b.move_note ? `<div class="mv-note">↪ ${esc(b.move_note)}</div>` : ''}</td>
+          ${planMovable(x) || _hoCan.edit ? `<td>${planMovable(x) ? `<button class="ho-btn mv-btn" onclick="planMoveBooking('${escAttr(b.id)}', '${escAttr(x.id)}', ${escAttr(JSON.stringify(b.customer_name || 'this booking'))})">Move</button>` : ''}${_hoCan.edit ? `<button class="ho-btn ba-btn" onclick="openBookingAdmin(['${escAttr(b.id)}'], ${escAttr(JSON.stringify(b.customer_name || 'this booking'))}, true)">Change / Cancel</button>` : ''}</td>` : ''}</tr>`;
+      }).join('')}${ghosts.map(g => `<tr class="cl-away"><td><b>${esc(g.customer_name || '—')}</b>${(kids[g.id] || []).length ? `<div class="goal-note">${esc(kids[g.id].join(', '))}</div>` : ''}</td><td>${esc(g.qty || '')}</td>${glazing ? '<td></td>' : ''}<td></td><td></td><td></td>
+          <td><div class="mv-note away">🚫 ${esc(g.line)}</div></td>${planMovable(x) || _hoCan.edit ? '<td></td>' : ''}</tr>`).join('')}</tbody></table></div>` : '<div class="goal-note" style="padding:8px 2px">No one booked yet.</div>'}`;
+    el.dataset.title = x.title; el.dataset.time = x.session_time || '';
+  } catch (e) {
+    el.innerHTML = `<div class="goal-note" style="padding:10px">Couldn't load the class list: ${esc(e.message || e)}</div>`;
+  }
+}
+// ---------- Change / Cancel a booking (home office admins: hub_booking_admin.sql + my-studio-data) ----------
+// Cancel some or all spots for a 4Cats gift card (or no credit), with an optional admin fee taken off; or move it
+// to any upcoming time of the same thing in the province (optional change fee, sent as a Shopify invoice).
+function bookingAdminStrip(bookings, canMove) {
+  if (!_hoCan.edit) return '';
+  const live = (bookings || []).filter(b => (b.qty || 0) > 0 && !b.returned_at);
+  if (!live.length) return '';
+  return `<details class="ba-strip"><summary>⚙️ Change or cancel a booking (${live.length})</summary><div class="ba-list">${live.map(b =>
+    `<div class="ba-row"><span><b>${esc(b.customer_name || '—')}</b> · ${esc(b.qty)} ${b.qty === 1 ? 'spot' : 'spots'}${b.shopify_order_name ? ' · ' + esc(b.shopify_order_name) : ''}</span>
+      <button class="ho-btn ba-btn" onclick="openBookingAdmin(['${escAttr(b.id)}'], ${escAttr(JSON.stringify(b.customer_name || 'this booking'))}, ${canMove})">${canMove ? 'Change / Cancel' : 'Cancel'}</button></div>`).join('')}</div></details>`;
+}
+async function staffBookingCall(action, extra) {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) throw new Error('Please sign in again.');
+  const r = await fetch(SUPABASE_URL + '/functions/v1/my-studio-data', { method: 'POST',
+    headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + session.access_token },
+    body: JSON.stringify(Object.assign({ staff: true, action }, extra || {})) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+  return d;
+}
+let _ba = null;
+const BA_FEE = 25;
+async function openBookingAdmin(ids, name, canMove) {
+  openDutySheet(`<h3>${esc(name)}</h3><p class="ho-intro">Loading the booking…</p>`);
+  try {
+    const q = await staffBookingCall('staff_quote', { booking_ids: ids });
+    // the original order number(s), from the bookings themselves
+    try { const ob = await sb.from('bookings').select('shopify_order_name').in('id', ids); q.orders = [...new Set((ob.data || []).map(b => b.shopify_order_name).filter(Boolean))]; } catch (e) { q.orders = []; }
+    // $0 on a paid order usually means the payment wasn't matched (e.g. a World invoice): leave it for staff to type in
+    if (q.amount === 0 && q.orders.length) { q.amount_zero = true; q.amount = null; }
+    _ba = { ids, name, canMove, q, tab: 'cancel', opts: null, studio: q.studio_id, whole: undefined }; baDraw();
+  }
+  catch (e) { openDutySheet(`<h3>${esc(name)}</h3><p class="ho-intro">${esc(e.message)}</p><div class="sheet-actions"><button onclick="closeDutySheet()">Close</button></div>`); }
+}
+function baWho() {
+  const people = (typeof _teamPeople !== 'undefined' ? _teamPeople : []).map(p => `<option value="${escAttr(p.name)}"${_ba.who === p.name ? ' selected' : ''}>${esc(p.name)}</option>`).join('');
+  return people ? `<label class="f">Who’s doing it?<select id="ba-who"><option value="">Me (my login)</option>${people}</select></label>` : '';
+}
+function baDraw() {
+  const q = _ba.q, when = `${q.date ? new Date(q.date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }) : ''}${q.time ? ' · ' + shortTime(q.time) : ''}`;
+  const canAdd = _ba.canMove && !q.is_party;
+  const tabs = _ba.canMove ? `<div class="ba-tabs"><button class="${_ba.tab === 'cancel' ? 'on' : ''}" onclick="baTab('cancel')">Cancel</button><button class="${_ba.tab === 'move' ? 'on' : ''}" onclick="baTab('move')">Change date / time</button>${canAdd ? `<button class="${_ba.tab === 'add' ? 'on' : ''}" onclick="baTab('add')">➕ Add people</button>` : ''}</div>` : '';
+  let h = `<h3>${esc(_ba.name)}</h3><p class="ho-intro">${esc(q.title)} · ${esc(when)} · ${esc(STUDIO_NAMES[q.studio_id] || q.studio_id)} · ${q.qty} ${q.qty === 1 ? 'spot' : 'spots'}${q.email ? ' · ' + esc(q.email) : ''}${(q.orders || []).length ? ` · Order <b>${q.orders.map(esc).join(', ')}</b>` : ''}</p>${tabs}`;
+  if (_ba.tab === 'add') { if (!_ba.add) { openDutySheet(h + '<p class="ho-intro">Loading…</p>'); baAddLoad(); return; } openDutySheet(h + baAddHtml()); return; }
+  if (_ba.tab === 'cancel') {
+    // (Nov 10 2026) a kids class: the whole class (every upcoming week, and a part bought with it as a deal) by default, one gift card
+    const K = q.class; if (_ba.whole === undefined) _ba.whole = !!K;
+    const G = K && K.gone, rest = G ? Math.max(0, Math.round((G.pair_paid - G.given) * 100) / 100) : null;   // (a part of the deal already cancelled on its own)
+    const whole = !!K && _ba.whole, amt = whole ? (G && K.amount != null ? Math.max(K.amount, rest) : K.amount) : q.amount, known = amt != null;
+    const kd = x => new Date(x + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' });
+    h += `<div class="ba-form">
+      ${K ? `<label class="ba-check"><input type="checkbox" id="ba-whole" ${whole ? 'checked' : ''} onchange="_ba.whole=this.checked;baDraw()"> Cancel the whole class: <b>${esc(K.title)}</b> (${K.weeks} classes, ${esc(kd(K.first))} – ${esc(kd(K.last))})</label>
+        ${K.together ? '<p class="goal-note">Booked together as a deal, so both parts are cancelled together.</p>' : ''}
+        ${G && whole ? `<p class="goal-note"><b>${esc(G.title)}</b> (${G.weeks} classes, $${G.paid.toFixed(2)} with tax) was already cancelled on its own${G.given ? `, for a <b>$${G.given.toFixed(2)}</b> gift card` : ', with no gift card on record'}. Both parts cost <b>$${G.pair_paid.toFixed(2)}</b>, so the rest to give back is <b>$${rest.toFixed(2)}</b> (filled in below; change it if you like).</p>` : ''}${whole ? '' : '<p class="goal-note">Just this one class date.</p>'}` : ''}
+      ${q.qty > 1 && !whole ? `<label class="f">Cancel<select id="ba-spots" onchange="baCalc()">${Array.from({ length: q.qty }, (_, i) => q.qty - i).map(n => `<option value="${n}">${n === q.qty ? 'all ' + n + ' spots' : n + ' of ' + q.qty + ' spots'}</option>`).join('')}</select></label>` : ''}
+      <label class="f">They paid${known ? '' : q.amount_zero ? ` <span class="goal-note">(came back as $0: check order ${esc((q.orders || []).join(', '))} and type in what they paid)</span>` : ' <span class="goal-note">(couldn’t be worked out: type it in)</span>'}<input id="ba-paid" type="number" step="0.01" min="0" value="${known ? amt.toFixed(2) : ''}" oninput="baCalc()"></label>
+      <div class="ba-radio"><label><input type="radio" name="ba-credit" value="gift" checked onchange="baCalc()"> A 4Cats gift card</label>
+        <label><input type="radio" name="ba-credit" value="refund" onchange="baCalc()"> ↩ Refund to how they paid <span class="goal-note">(card, and any gift card part back onto their gift card)</span></label>
+        <label><input type="radio" name="ba-credit" value="none" onchange="baCalc()"> No credit</label></div>
+      <label class="ba-check"><input type="checkbox" id="ba-fee-on" onchange="baCalc()"> Charge the admin fee <input id="ba-fee" type="number" step="0.01" min="0" value="${BA_FEE}" oninput="baCalc()" style="width:80px"> <span id="ba-feehow">(taken off the gift card)</span></label>
+      <label class="f">Gift card good for<select id="ba-days"><option value="30">30 days</option><option value="90">90 days</option><option value="365">1 year</option></select></label>
+      <label class="ba-check"><input type="checkbox" id="ba-email" checked> Email ${esc(q.email || 'the family')}${q.email ? '' : ' (no email on the booking)'}</label>
+      <label class="f">Note (shows on the class list)<input id="ba-note" maxlength="300" placeholder="e.g. Sick, asked to cancel by phone"></label>
+      ${baWho()}
+      <div class="ba-sum" id="ba-sum"></div>${q.test ? '<p class="goal-note">TEST ORDER: no real gift card will be made.</p>' : ''}${q.is_party ? '<p class="goal-note">This is a party: its time slot goes back on sale when all spots are cancelled.</p>' : ''}
+    </div><div class="sheet-actions"><button onclick="closeDutySheet()">Close</button><button class="primary danger" id="ba-go" onclick="baCancel()">Cancel the booking</button></div>`;
+    openDutySheet(h); baCalc(); return;
+  }
+  // Change date / time
+  if (!_ba.opts) { openDutySheet(h + '<p class="ho-intro">Finding other times…</p>'); baLoadOpts(); return; }
+  // (Nov 10 2026) other workshops at this studio (staff_move_other_workshops.sql): ticked → those too, by day, with their names
+  const hasOther = _ba.opts.some(o => o.same === false);
+  const studios = [...new Set(_ba.opts.filter(o => o.same !== false).map(o => o.studio_id))]; if (!studios.includes(q.studio_id) && hasOther) studios.unshift(q.studio_id);
+  const list = _ba.opts.filter(o => o.studio_id === _ba.studio && (o.same !== false || _ba.others))
+    .sort((a, b) => (a.session_date + (a.session_time || '')) < (b.session_date + (b.session_time || '')) ? -1 : 1);
+  h += `<div class="ba-form">${studios.length > 1 ? `<label class="f">Studio<select onchange="_ba.studio=this.value;baDraw()">${studios.map(sid => `<option value="${escAttr(sid)}"${sid === _ba.studio ? ' selected' : ''}>${esc(STUDIO_NAMES[sid] || sid)}${sid === q.studio_id ? ' (this one)' : ''}</option>`).join('')}</select></label>` : ''}
+    ${hasOther ? `<label class="ba-check"><input type="checkbox" ${_ba.others ? 'checked' : ''} onchange="_ba.others=this.checked;_ba.studio='${escAttr(q.studio_id)}';baDraw()"> Show other workshops at ${esc(STUDIO_NAMES[q.studio_id] || q.studio_id)} too <span class="goal-note">(next 60 days: workshops, Mini Make, glazing)</span></label>` : ''}
+    ${list.length ? `<div class="ba-opts">${list.slice(0, 160).map(o => { const left = o.spaces_left == null ? null : Number(o.spaces_left), full = left !== null && left < q.qty;
+      return `<button class="ba-opt${full ? ' full' : ''}" onclick="baPick('${escAttr(o.id)}')">${o.same === false ? `<i style="font-style:normal;font-weight:600;font-size:12px">${esc(String(o.title || '').split('|').pop().trim())}</i>` : ''}<b>${esc(new Date(o.session_date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))}</b>
+        <span>${esc(o.session_time ? shortTime(o.session_time) : '')}</span><i>${left === null ? '' : left <= 0 ? 'Full' : left + ' left'}</i></button>`; }).join('')}</div>`
+      : '<p class="ho-intro">No other upcoming times for this at that studio.</p>'}
+    <label class="ba-check"><input type="checkbox" id="ba-mfee-on"> Charge a change fee <input id="ba-mfee" type="number" step="0.01" min="0" value="${BA_FEE}" style="width:80px"> (emailed to them as an invoice to pay online)</label>
+    <label class="ba-check"><input type="checkbox" id="ba-memail" checked> Email ${esc(q.email || 'the family')} the new date</label>${baWho()}
+    <p class="goal-note">Pick a time: you’ll see both prices and can charge (or give back) the difference before it moves.</p></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Close</button></div>`;
+  openDutySheet(h);
+}
+function baTab(t) { _ba.tab = t; baDraw(); }
+// A time was picked: show the prices (regular price per spot, before tax) and what to do about the difference
+function baLabel(o) { return `${o.same === false ? String(o.title || '').split('|').pop().trim() + ', ' : ''}${new Date(o.session_date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })}${o.session_time ? ' at ' + shortTime(o.session_time) : ''}${o.studio_id && o.studio_id !== _ba.q.studio_id ? ', ' + (STUDIO_NAMES[o.studio_id] || o.studio_id) : ''}`; }
+async function baPick(target) {
+  _ba.mfee = document.getElementById('ba-mfee-on') && document.getElementById('ba-mfee-on').checked ? +document.getElementById('ba-mfee').value || 0 : 0;
+  _ba.memail = document.getElementById('ba-memail') ? document.getElementById('ba-memail').checked : true;
+  _ba.who = (document.getElementById('ba-who') || {}).value || _ba.who || '';
+  const o = (_ba.opts || []).find(z => String(z.id) === String(target)) || {};
+  openDutySheet(`<h3>Move ${esc(_ba.name)} to ${esc(baLabel(o))}</h3><p class="ho-intro">Looking up the prices…</p>`);
+  let pr = {}; try { pr = await staffBookingCall('staff_price', { booking_ids: _ba.ids, target }); } catch (e) { pr = {}; }
+  _ba.pick = { target, o, pr };
+  const q = _ba.q, was = pr.was != null ? pr.was : (pr.paid_pre != null ? pr.paid_pre / q.qty : ''), now = pr.now != null ? pr.now : '';
+  openDutySheet(`<h3>Move ${esc(_ba.name)}</h3><p class="ho-intro">${esc(q.title)}: ${q.qty} ${q.qty === 1 ? 'spot' : 'spots'} → <b>${esc(baLabel(o))}</b></p>
+    <div class="ba-form"><div class="ba-prices"><label class="f">Was (per spot, before tax)<input id="ba-pwas" type="number" step="0.01" min="0" value="${was === '' ? '' : Number(was).toFixed(2)}" oninput="baDiff()"></label>
+      <label class="f">New time (per spot, before tax)<input id="ba-pnow" type="number" step="0.01" min="0" value="${now === '' ? '' : Number(now).toFixed(2)}" oninput="baDiff()"></label></div>
+      ${pr.was == null || pr.now == null ? '<p class="goal-note">A price couldn’t be looked up: type it in (the regular price, before tax).</p>' : '<p class="goal-note">Regular prices, before tax. Members keep their discount, since the difference is what changes.</p>'}
+      <div class="ba-sum" id="ba-diffsum"></div>
+      <label class="ba-check" id="ba-chargewrap"><input type="checkbox" id="ba-charge" checked onchange="baDiff()"> <span id="ba-chargetxt"></span></label>
+      <label class="ba-check" id="ba-creditwrap"><input type="checkbox" id="ba-credit" checked onchange="baDiff()"> <span id="ba-credittxt"></span></label>
+      ${_ba.mfee ? `<p class="goal-note">Plus the $${_ba.mfee.toFixed(2)} change fee.</p>` : ''}
+      <div class="ba-radio" id="ba-paywrap"><b>How they pay${_ba.mfee ? ' (difference and fee)' : ''}:</b> <label><input type="radio" name="ba-payby" value="card" ${_ba.payBy !== 'invoice' ? 'checked' : ''} onchange="_ba.payBy=this.value;baDiff()"> 💳 By card now (Stripe)</label>
+        <label><input type="radio" name="ba-payby" value="invoice" ${_ba.payBy === 'invoice' ? 'checked' : ''} onchange="_ba.payBy=this.value;baDiff()"> ✉️ Shopify invoice by email</label></div>
+    </div><div class="sheet-actions"><button onclick="baDraw()">Back</button><button class="primary" id="ba-mgo" onclick="baMove('${escAttr(target)}')">Move it</button></div>`);
+  baDiff();
+}
+function baDiff() {
+  const q = _ba.q, pr = (_ba.pick || {}).pr || {}, was = +document.getElementById('ba-pwas').value || 0, now = +document.getElementById('ba-pnow').value || 0;
+  const d = Math.round((now - was) * q.qty * 100) / 100, rate = pr.tax_rate != null ? pr.tax_rate : 0.13;
+  _ba.diff = d; _ba.taxRate = rate;
+  document.getElementById('ba-diffsum').innerHTML = d === 0 ? 'Same price: nothing to charge or give back.' :
+    `${d > 0 ? 'Costs more' : 'Costs less'}: ($${now.toFixed(2)} − $${was.toFixed(2)}) × ${q.qty} = <b>${d > 0 ? '' : '−'}$${Math.abs(d).toFixed(2)}</b> before tax`;
+  document.getElementById('ba-chargewrap').style.display = d > 0 ? '' : 'none';
+  document.getElementById('ba-creditwrap').style.display = d < 0 ? '' : 'none';
+  const card = _ba.payBy !== 'invoice';
+  document.getElementById('ba-chargetxt').textContent = card ? `Charge the difference: $${Math.abs(d).toFixed(2)} + tax, by card after it moves` : `Charge the difference: $${Math.abs(d).toFixed(2)} + tax, emailed to ${q.email || 'them'} as an invoice to pay online`;
+  const charging = (d > 0 && document.getElementById('ba-charge').checked) || _ba.mfee > 0;
+  document.getElementById('ba-paywrap').style.display = charging ? '' : 'none';
+  document.getElementById('ba-credittxt').textContent = `Give the difference back as a 4Cats gift card: $${(Math.abs(d) * (1 + rate)).toFixed(2)} (with tax)`;
+}
+async function baLoadOpts() {
+  try { const d = await staffBookingCall('staff_move_options', { booking_ids: _ba.ids }); _ba.opts = d.options || []; baDraw(); }
+  catch (e) { alert(e.message); _ba.tab = 'cancel'; baDraw(); }
+}
+function baCalc() {
+  const q = _ba.q, spots = +((document.getElementById('ba-spots') || {}).value || q.qty), paid = Math.max(0, +document.getElementById('ba-paid').value || 0);
+  const how = document.querySelector('input[name="ba-credit"]:checked').value, refund = how === 'refund';
+  const share = Math.round(paid * spots / q.qty * 100) / 100, gift = how === 'gift' || refund;   // (a refund works like the gift card: the fee comes off it)
+  const feeOn = document.getElementById('ba-fee-on').checked, fee = feeOn ? Math.max(0, +document.getElementById('ba-fee').value || 0) : 0;
+  const credit = gift ? Math.max(0, Math.round((share - fee) * 100) / 100) : 0;
+  document.getElementById('ba-days').disabled = !gift || refund;   // (Nov 12 2026: open before "They paid" is typed in, too)
+  document.getElementById('ba-feehow').textContent = refund ? '(taken off the refund)' : gift ? '(taken off the gift card)' : '(charged to their card after cancelling: 💳 here, QR or pay link)';
+  const feeCard = !gift && feeOn ? Math.max(0, +document.getElementById('ba-fee').value || 0) : 0;
+  document.getElementById('ba-sum').innerHTML = gift ? `${spots < q.qty ? `${spots} of ${q.qty} spots = $${share.toFixed(2)}` : `$${share.toFixed(2)}`}${fee ? ` − $${fee.toFixed(2)} admin fee` : ''} → <b>$${credit.toFixed(2)} ${refund ? 'refunded to how they paid' : 'gift card'}</b>` : `<b>No credit</b> (spots go back on sale)${feeCard ? `, then <b>💳 charge the $${feeCard.toFixed(2)} admin fee</b> (+ tax)` : ''}`;
+  document.getElementById('ba-go').textContent = q.class && _ba.whole ? 'Cancel the whole class' : spots < q.qty ? `Cancel ${spots} spot${spots === 1 ? '' : 's'}` : 'Cancel the booking';
+}
+async function baCancel() {
+  const q = _ba.q, b = document.getElementById('ba-go'), spots = +((document.getElementById('ba-spots') || {}).value || q.qty);
+  const how = document.querySelector('input[name="ba-credit"]:checked').value, gift = how === 'gift' || how === 'refund', feeOn = document.getElementById('ba-fee-on').checked;
+  const refundTxt = d => d && d.refunded ? (d.refunded.ok ? ` $${Number(d.credit).toFixed(2)} refunded${d.refunded.gift ? ` ($${Number(d.refunded.card).toFixed(2)} to their card, $${Number(d.refunded.gift).toFixed(2)} back onto their gift card)` : ' to their card'}.` : ` ⚠ The refund didn’t go through: ${d.refunded.error}`) : '';
+  _ba.who = (document.getElementById('ba-who') || {}).value || '';
+  const whole = !!(q.class && _ba.whole);
+  if (!confirm(whole ? `Cancel ${q.class.title} for ${_ba.name} (all ${q.class.weeks} classes)? This can’t be undone.` : `Cancel ${spots < q.qty ? spots + ' of ' + q.qty + ' spots for' : ''} ${_ba.name}? This can’t be undone.`)) return;
+  b.disabled = true; b.textContent = 'Cancelling…';
+  try {
+    if (whole) {
+      const d = await staffBookingCall('staff_class_cancel', { booking_ids: _ba.ids, amount: document.getElementById('ba-paid').value, credit: how === 'refund' ? 'refund' : gift ? 'gift' : 'none',
+        fee: gift && feeOn ? +document.getElementById('ba-fee').value || 0 : 0, gift_days: +document.getElementById('ba-days').value, email: document.getElementById('ba-email').checked,
+        note: document.getElementById('ba-note').value, by: _ba.who });
+      const done = `Cancelled ${q.class.title} for ${_ba.name} (${d.weeks} classes).` + (d.problem ? ` ${d.of - d.weeks} couldn’t be cancelled: ${d.problem}` : '');
+      const feeCard = !gift && feeOn ? Math.max(0, +document.getElementById('ba-fee').value || 0) : 0;
+      if (feeCard > 0) return hubCharge({ studio: q.studio_id, name: q.name || _ba.name, email: q.email, lines: [{ name: `Cancellation admin fee: ${q.class.title}`, amount: feeCard }],
+        why: `${done} Now the admin fee.`, ref: (_ba.ids || []).join(','), onDone: m => baRefresh(done + ' ' + m) });
+      closeDutySheet();
+      return await baRefresh(done + (d.refunded ? refundTxt(d) : d.gift_last4 ? ` $${d.credit.toFixed(2)} gift card ending ${d.gift_last4}${d.gift_code ? ' (code ' + d.gift_code + ')' : ''}.` : d.test ? ' (Test order: no gift card.)' : ' No credit.'));
+    }
+    const d = await staffBookingCall('staff_cancel', { booking_ids: _ba.ids, spots, amount: document.getElementById('ba-paid').value, credit: how === 'refund' ? 'refund' : gift ? 'gift' : 'none',
+      fee: gift && feeOn ? +document.getElementById('ba-fee').value || 0 : 0, gift_days: +document.getElementById('ba-days').value, email: document.getElementById('ba-email').checked,
+      note: document.getElementById('ba-note').value, by: _ba.who });
+    const feeCard = !gift && feeOn ? Math.max(0, +document.getElementById('ba-fee').value || 0) : 0;
+    const done = `Cancelled ${d.spots} spot${d.spots === 1 ? '' : 's'} for ${_ba.name}.`;
+    if (feeCard > 0) {   // no credit: the admin fee charged to their card
+      return hubCharge({ studio: q.studio_id, name: q.name || _ba.name, email: q.email, lines: [{ name: `Cancellation admin fee: ${q.title}`, amount: feeCard }],
+        why: `${done} Now the admin fee.`, ref: (_ba.ids || []).join(','), onDone: m => baRefresh(done + ' ' + m) });
+    }
+    closeDutySheet();
+    await baRefresh(`Cancelled ${d.spots} spot${d.spots === 1 ? '' : 's'} for ${_ba.name}.` + (d.refunded ? refundTxt(d) : d.gift_last4 ? ` $${d.credit.toFixed(2)} gift card ending ${d.gift_last4}${d.gift_code ? ' (code ' + d.gift_code + ')' : ''}.` : d.test ? ' (Test order: no gift card.)' : ' No credit.'));
+  } catch (e) { b.disabled = false; baCalc(); alert('Not cancelled: ' + e.message); }
+}
+async function baMove(target, allowFull) {
+  const q = _ba.q, o = (_ba.opts || []).find(z => String(z.id) === String(target)) || {};
+  const fee = _ba.mfee || 0, email = _ba.memail !== false, label = baLabel(o);
+  if (document.getElementById('ba-charge')) { _ba.charge = document.getElementById('ba-charge').checked; _ba.credit = document.getElementById('ba-credit').checked; }
+  const diff = _ba.diff || 0, b = document.getElementById('ba-mgo'); if (b) { b.disabled = true; b.textContent = 'Moving…'; }
+  try {
+    const card = _ba.payBy !== 'invoice';   // (by card: the move itself charges nothing; the card charge follows)
+    const d = await staffBookingCall('staff_move', { booking_ids: _ba.ids, target, allow_full: !!allowFull, fee: card ? 0 : fee, email, by: _ba.who,
+      price_diff: diff, charge_diff: diff > 0 && !!_ba.charge && !card, credit_diff: diff < 0 && !!_ba.credit, tax_rate: _ba.taxRate });
+    if (d.needs_ok) {
+      if (confirm(`${label} has ${Math.max(0, d.spaces_left)} spot${d.spaces_left === 1 ? '' : 's'} left. Moving ${d.qty} puts it over. Move anyway?`)) return baMove(target, true);
+      return;
+    }
+    const cardLines = card ? [diff > 0 && _ba.charge ? { name: `Price difference: ${q.title} (${q.qty} ${q.qty === 1 ? 'spot' : 'spots'})`, amount: diff } : null,
+      fee > 0 ? { name: `Booking change fee: ${q.title}`, amount: fee } : null].filter(Boolean) : [];
+    if (cardLines.length) {
+      const moved = `Moved ${_ba.name} to ${label}.${d.over ? ' (Over the limit.)' : ''}`;
+      return hubCharge({ studio: q.studio_id, name: q.name || _ba.name, email: q.email, lines: cardLines, why: `${moved} Now the ${cardLines.length > 1 ? 'difference and fee' : cardLines[0].name.split(':')[0].toLowerCase()}.`,
+        ref: (_ba.ids || []).join(','), onDone: m => baRefresh(moved + ' ' + m) });
+    }
+    closeDutySheet();
+    const bits = [d.charged_diff ? `$${d.charged_diff.toFixed(2)} price difference` : '', d.fee ? `$${d.fee.toFixed(2)} change fee` : ''].filter(Boolean).join(' and ');
+    await baRefresh(`Moved ${_ba.name} to ${label}.${d.over ? ' (Over the limit.)' : ''}${bits ? (d.invoiced ? ` Invoice for the ${bits} (plus tax) emailed.` : ` (The invoice for the ${bits} didn’t send: check Shopify drafts.)`) : ''}` +
+      (d.diff_gift_last4 ? ` $${d.diff_credit.toFixed(2)} gift card for the difference, ending ${d.diff_gift_last4}${d.diff_gift_code ? ' (code ' + d.diff_gift_code + ')' : ''}.` : ''));
+  } catch (e) { if (b) { b.disabled = false; b.textContent = 'Move it'; } alert('Not moved: ' + e.message); }
+}
+// ---------- 💳 Charge a card (camp-checkout staff mode, a "charge" line): a change fee, price difference or admin fee ----------
+// Staff choose how the family pays: 💳 card here (Stripe opens in a new tab and staff type the card), 📱 QR code, or ✉️ an
+// emailed pay link. Paid → recorded as a sale for the studio and a receipt emailed (stripe-webhook).
+let _chg = null;
+function hubCharge(o) {   // o: { studio, name (family), email, lines: [{ name, amount }] or cart: [front desk lines], why, onDone(msg) }
+  const parts = String(o.name || '').trim().split(/\s+/);
+  _chg = Object.assign({ first: parts[0] || 'Family', last: parts.slice(1).join(' '), order: null, busy: false, msg: '', lines: [] }, o);
+  if (_chg.cart) chgQuote(); else chgDraw();
+}
+function chgFamily() { const C = _chg; return { customer_id: C.customer_id || null, email: C.email, first_name: C.first, last_name: C.last }; }
+async function chgQuote() {   // a booking: its real price for this family first (nothing held)
+  const C = _chg; C.quote = null; C.busy = true; chgDraw();
+  try { C.quote = await chgCall({ action: 'staff_quote', studio: C.studio, family: chgFamily(), lines: C.cart }); }
+  catch (e) { C.msg = e.message; }
+  C.busy = false; chgDraw();
+}
+function chgDraw() {
+  const C = _chg; if (!C) return;
+  const Q = C.quote, sub = C.lines.reduce((t, l) => t + Number(l.amount || 0), 0);
+  let h = `<h3>💳 Charge ${esc(C.name || 'the family')}</h3><p class="ho-intro">${esc(C.why || '')}</p><div class="chg-lines">` +
+    (C.cart ? (!Q ? `<div class="fd-pl"><span>${C.busy ? 'Working out the price…' : 'The price couldn’t be worked out.'}</span></div>` :
+      (Q.lines || []).map(l => `<div class="fd-pl"><span>${esc(l.program)}${l.qty > 1 ? ' × ' + l.qty : ''}</span><span>${Number(l.regular) > Number(l.amount) + 0.004 ? `<s>$${Number(l.regular).toFixed(2)}</s> ` : ''}$${Number(l.amount).toFixed(2)}</span></div>`).join('') +
+      (Q.taxes || []).map(t => `<div class="fd-pl"><span>${esc(t.type)} (${t.rate}%)</span><span>$${Number(t.amount).toFixed(2)}</span></div>`).join('') +
+      `<div class="fd-pl fd-ptotal"><span>Total</span><span>$${Number(Q.total).toFixed(2)}</span></div>`)
+    : C.lines.map(l => `<div class="fd-pl"><span>${esc(l.name)}</span><span>$${Number(l.amount).toFixed(2)}</span></div>`).join('') +
+      `<div class="fd-pl fd-ptotal"><span>Before tax</span><span>$${sub.toFixed(2)}</span></div>`) + '</div>';
+  const o = C.order;
+  if (!o) {
+    const ready = !C.cart || (Q && Q.total != null);
+    h += `<p class="goal-note">${C.cart ? '' : 'Tax is added at checkout. '}The receipt goes to ${esc(C.email || 'their email')}.</p>
+      ${C.msg ? `<p class="fd-msg">${esc(C.msg)}</p>` : ''}
+      <div class="chg-code"><label class="wu-f"><span>🎁 Gift card or credit code <span class="goal-note" style="font-weight:400">(optional)</span></span>
+        <span style="display:flex;gap:6px"><input id="chg-code" value="${escAttr(C.code || '')}" placeholder="Gift card or code" autocomplete="off" style="flex:1"><button class="ho-btn" onclick="chgCodeCheck()">${C.codeInfo ? 'Change' : 'Check'}</button>${C.codeInfo ? '<button class="ho-btn" onclick="_chg.code=\'\';_chg.codeInfo=null;chgDraw()">Remove</button>' : ''}</span></label>
+        ${C.codeInfo ? `<p class="goal-note" style="color:#15803d">✓ ${C.codeInfo.kind === 'gift' ? `Gift card ••${esc(C.codeInfo.last4)}: $${Number(C.codeInfo.balance).toFixed(2)} available. It pays first; a card pays any rest.` : `Credit code ${esc(C.codeInfo.code)}: $${Number(C.codeInfo.amount).toFixed(2)} off this charge.`}</p>` : ''}</div>
+      ${C.allowInvoice ? `<div class="chg-inv"><label class="wu-f"><span>🧾 Or send an invoice, to pay by</span><span style="display:flex;gap:6px"><input type="date" id="chg-payby" value="${escAttr(C.payBy || (() => { const d = new Date(); d.setDate(d.getDate() + 7); return localDateStr(d); })())}" onchange="_chg.payBy=this.value">
+        <button class="ho-btn" ${C.busy || !ready || !C.email ? 'disabled' : ''} onclick="_chg.payBy=document.getElementById('chg-payby').value;chgGo('invoice')">🧾 Send the invoice</button></span></label>
+        <p class="goal-note">For the rare times they can’t pay today: they’re emailed an invoice to pay online by that date.</p></div>` : ''}
+      <div class="chg-modes"><button class="fd-pay" ${C.busy || !ready ? 'disabled' : ''} onclick="chgGo('here')">💳 Card here</button>
+        <button class="ho-btn" ${C.busy || !ready ? 'disabled' : ''} onclick="chgGo('qr')">📱 QR code</button><button class="ho-btn" ${C.busy || !ready || !C.email ? 'disabled' : ''} onclick="chgGo('email')">✉️ Email a pay link</button></div>
+      <p class="goal-note"><b>Card here</b> opens Stripe in a new tab: type the card, then come back to this tab. If their bank asks for an extra check, they approve it on their phone.</p>
+      <div class="sheet-actions"><button onclick="chgSkip()">Don’t charge now</button></div>`;
+  } else if (o.status === 'paid') {
+    h += '<div class="fd-paid">✓ Paid</div><p class="goal-note">The receipt is on its way to them.</p><div class="sheet-actions"><button class="primary" onclick="chgClose(true)">Done</button></div>';
+  } else if (o.status === 'expired' || o.status === 'failed') {
+    h += '<div class="fd-expired">Not paid.</div><div class="sheet-actions"><button onclick="_chg.order=null;chgDraw()">Try again</button><button onclick="chgClose(false)">Close</button></div>';
+  } else {
+    const left = o.deadline ? Math.max(0, Math.round((new Date(o.deadline) - Date.now()) / 1000)) : 0;
+    h += `<div class="fd-pl fd-ptotal"><span>To pay (with tax)</span><span>$${Number(o.amount_due ?? o.total).toFixed(2)}</span></div>`;
+    if (o.mode === 'here') h += `<p><b>Stripe is open in another tab.</b> Type the card there; this turns green when it’s paid.</p><p class="fd-count-down" id="chg-count">${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} left</p>
+      <button class="ho-btn" onclick="window.open(_chg.order.url,'_blank')">Open Stripe again</button>`;
+    else if (o.mode === 'qr') h += `<div class="fd-qrwrap"><div id="chg-qr" class="fd-qr"></div><div><p><b>Scan with a phone camera to pay.</b></p><p class="fd-count-down" id="chg-count">${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} left</p></div></div>`;
+    else if (o.mode === 'invoice') h += `<p>🧾 Invoice emailed to <b>${esc(C.email)}</b>, to pay by <b>${esc(new Date(String(C.payBy) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))}</b>.</p>`;
+    else h += `<p>✉️ Pay link emailed to <b>${esc(C.email)}</b>. It’s good until ${esc(new Date(o.deadline).toLocaleString('en-CA', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}; it shows in Front desk → Recent orders.</p>`;
+    h += `<div class="sheet-actions"><button onclick="chgCancel()">Cancel the charge</button>${o.mode === 'email' || o.mode === 'invoice' ? '<button class="primary" onclick="chgClose(true)">Done</button>' : ''}</div>`;
+  }
+  openDutySheet(h);
+  if (o && o.mode === 'qr' && o.status === 'pending') { const el = document.getElementById('chg-qr'); if (el && !el.firstChild) { try { const q = qrcode(0, 'M'); q.addData(o.url); q.make(); el.innerHTML = q.createSvgTag({ cellSize: 5, margin: 4, scalable: true }); } catch (e) { el.textContent = o.url; } } }
+}
+async function chgCall(body) {
+  // 🔒 (Nov 12 2026) the PIN for checkout's money actions: the person at the desk, or the unlocked coordinator
+  const pin = (typeof fdPin === 'function' ? fdPin() : _sessionPin) || undefined;
+  const r = await fetch(`${SUPABASE_URL}/functions/v1/camp-checkout`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify(Object.assign({ staff: true, staff_pin: pin }, body)) });
+  const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status)); return d;
+}
+async function chgGo(mode) {
+  const C = _chg; if (C.busy) return;
+  const win = mode === 'here' ? window.open('', '_blank') : null;   // (opened now, while it's still a tap, so it isn't blocked)
+  if (win) try { win.document.write('<p style="font-family:sans-serif;padding:20px">Opening Stripe…</p>'); } catch (e) {}
+  C.busy = true; C.msg = ''; chgDraw();
+  try {
+    const d = await chgCall({ action: 'staff_checkout', studio: C.studio, mode: mode === 'email' ? 'email' : mode === 'invoice' ? 'invoice' : 'qr', pay_by: mode === 'invoice' ? (C.payBy || null) : null, family: chgFamily(),
+      gift_code: C.codeInfo && C.codeInfo.kind === 'gift' ? C.code : null, credit_code: C.codeInfo && C.codeInfo.kind === 'credit' ? C.codeInfo.code : null,
+      lines: C.cart || C.lines.map(l => ({ type: 'charge', name: l.name, amount: Math.round(Number(l.amount) * 100) / 100, ref: C.ref || null })) });
+    C.order = Object.assign({ mode, status: d.paid ? 'paid' : 'pending' }, d);
+    if (win) { if (d.url && !d.paid) win.location = d.url; else win.close(); }
+    if (!d.paid && mode !== 'email' && mode !== 'invoice') chgPoll();
+  } catch (e) { C.msg = e.message; if (win) win.close(); }
+  C.busy = false; chgDraw();
+}
+// 🎁 check a gift card (its balance) or a World credit code (its amount) before paying (camp-checkout staff_code_check)
+async function chgCodeCheck() {
+  const C = _chg, v = ((document.getElementById('chg-code') || {}).value || '').trim(); if (!C) return;
+  C.code = v; C.codeInfo = null; C.msg = ''; if (!v) { chgDraw(); return; }
+  C.busy = true; chgDraw();
+  try { C.codeInfo = await chgCall({ action: 'staff_code_check', studio: C.studio, code: v, family: chgFamily() }); }
+  catch (e) { C.msg = /Unknown action/.test(e.message) ? 'Deploy the updated camp-checkout to use gift cards and codes here.' : e.message; }
+  C.busy = false; chgDraw();
+}
+let _chgTimer = null;
+function chgPoll() {
+  clearInterval(_chgTimer); let n = 0;
+  _chgTimer = setInterval(async () => {
+    const o = _chg && _chg.order; if (!o || o.status !== 'pending') { clearInterval(_chgTimer); return; }
+    const left = o.deadline ? Math.round((new Date(o.deadline) - Date.now()) / 1000) : 1, c = document.getElementById('chg-count');
+    if (c) c.textContent = left > 0 ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} left` : 'Time’s up';
+    if (left <= 0) { clearInterval(_chgTimer); try { await chgCall({ action: 'staff_cancel', order_id: o.order_id }); } catch (e) {} o.status = 'expired'; chgDraw(); return; }
+    if (++n % 3) return;
+    try { const d = await chgCall({ action: 'staff_status', order_id: o.order_id }); if (d.status !== 'pending') { o.status = d.status; clearInterval(_chgTimer); chgDraw(); } } catch (e) {}
+  }, 1000);
+}
+async function chgCancel() {
+  const o = _chg.order; if (!confirm('Cancel this charge? Nothing is charged.')) return;
+  try { await chgCall({ action: 'staff_cancel', order_id: o.order_id }); } catch (e) {}
+  clearInterval(_chgTimer); o.status = 'expired'; chgDraw();
+}
+function chgSkip() { chgClose(false, 'Not charged.'); }
+function chgClose(paidOrSent, note) {
+  const C = _chg; clearInterval(_chgTimer); _chg = null; closeDutySheet();
+  const o = C.order, total = o ? Number(o.amount_due ?? o.total).toFixed(2) : '';
+  const msg = note || (o && o.status === 'paid' ? `Charged $${total}.` : o && o.mode === 'invoice' ? `Invoice for $${total} emailed, to pay by ${C.payBy}.` : o && o.mode === 'email' ? `Pay link for $${total} emailed.` : 'Not charged.');
+  if (C.onDone) C.onDone(msg, paidOrSent);
+}
+// ---- ➕ Add people to a booking: a new booking on the same time (World workshops, glazing, Mini Make, camp days), paid by 💳 ----
+async function baAddLoad() {
+  const q = _ba.q, A = _ba.add = { loading: true, who: {}, guests: {}, names: [], err: '' }; baDraw();
+  try {
+    if (!q.session_id) throw new Error('Deploy the updated my-studio-data to add people.');
+    const { data: s } = await sb.from('sessions').select('id, title, session_date, session_time, spaces_left_cache, world_item_id, kids_only, world_class_slot_id, world_party').eq('id', q.session_id).maybeSingle();
+    if (!s) throw new Error('That time wasn’t found.');
+    A.s = s; A.camp = !s.world_item_id && fdIsCamp(s.title || '');
+    if (!s.world_item_id && !A.camp) throw new Error('People can be added this way to World workshops, glazing, Mini Make and camp days. For this one, book it from the Front desk.');
+    if (s.world_item_id) { const { data: it } = await sb.from('world_items').select('id, kind, min_age, max_age, kids_min_age, kids_max_age').eq('id', s.world_item_id).maybeSingle(); A.item = it || {}; }
+    if (q.customer_id) { const { data: f } = await sb.rpc('hub_family_card', { p_customer: q.customer_id, p_pin: _sessionPin || null }); A.people = ((f && f.people) || []).map(p => ({ name: (p.first_name + (p.last_name ? ' ' + p.last_name : '')).trim(), dob: p.birthdate || null, adult: !!p.is_16_plus })); }
+    else A.people = [];
+  } catch (e) { A.err = e.message; }
+  A.loading = false; baDraw();
+}
+function baAddHtml() {
+  const A = _ba.add, q = _ba.q;
+  if (!A || A.loading) return '<p class="ho-intro">Loading…</p>';
+  if (A.err) return `<p class="ho-intro">${esc(A.err)}</p><div class="sheet-actions"><button onclick="closeDutySheet()">Close</button></div>`;
+  const s = A.s, I = A.item || {}, kidsOnly = !!s.kids_only, glazing = I.kind === 'glazing';
+  const age = p => p.dob ? fdAge(p.dob, s.session_date) : (p.adult ? 16 : null);
+  let h = `<div class="ba-form"><p class="goal-note">They’re added as a new booking on the same time (${s.spaces_left_cache ?? '?'} spots left), at today’s price for this family, then charged.</p>`;
+  h += '<div><b>Who’s coming</b>' + (A.people.length ? A.people.map((p, i) => `<label class="ba-check"><input type="checkbox" ${A.who[i] ? 'checked' : ''} onchange="_ba.add.who[${i}]=this.checked"> ${esc(p.name)}${age(p) != null ? ' <span class="goal-note">(' + age(p) + ')</span>' : ''}</label>`).join('') : '<p class="goal-note">No people on this family’s profile.</p>') + '</div>';
+  h += `<div><b>Someone else</b> <span class="goal-note">(name and birthdate${A.camp ? '' : '; adults 16+ can leave the birthdate blank'})</span>` +
+    A.names.map((n, i) => `<div class="ba-addrow"><input placeholder="Name" value="${escAttr(n.name)}" oninput="_ba.add.names[${i}].name=this.value"><input type="date" value="${escAttr(n.dob || '')}" onchange="_ba.add.names[${i}].dob=this.value">${A.camp ? '' : `<label class="ba-check"><input type="checkbox" ${n.adult ? 'checked' : ''} onchange="_ba.add.names[${i}].adult=this.checked"> adult</label>`}<button class="fd-x" onclick="_ba.add.names.splice(${i},1);baDraw()">×</button></div>`).join('') +
+    `<button class="ho-btn sm" onclick="baAddKeep();_ba.add.names.push({name:'',dob:'',adult:false});baDraw()">+ Add someone</button></div>`;
+  if (!A.camp && !kidsOnly) h += '<div><b>Or guests by age</b> <span class="goal-note">(no names)</span><div class="fd-bands">' + FD_BANDS.map(b => `<label>${b[1]}<input type="number" min="0" max="20" value="${A.guests[b[0]] || 0}" oninput="_ba.add.guests['${b[0]}']=+this.value||0"></label>`).join('') + '</div></div>';
+  if (glazing) h += `<label class="f">What are they glazing?<input id="ba-aglaze" value="${escAttr(A.glaze || '')}"></label>`;
+  if (kidsOnly) h += `<div class="ba-prices"><label class="f">Who’s picking up?<input id="ba-apu" value="${escAttr(A.puName || '')}"></label><label class="f">Their phone<input id="ba-aph" value="${escAttr(A.puPhone || '')}"></label></div>`;
+  if (!A.camp && !kidsOnly) h += '<p class="goal-note">Kids 5–7 need one adult each, and kids 8–11 one adult for every two kids. An adult already on their booking counts.</p>';
+  return h + `${A.msg ? `<p class="fd-msg">${esc(A.msg)}</p>` : ''}</div><div class="sheet-actions"><button onclick="closeDutySheet()">Close</button><button class="primary" onclick="baAddGo()">Add and charge</button></div>`;
+}
+function baAddKeep() { const A = _ba.add; if (!A) return; const g = id => (document.getElementById(id) || {}).value; if (g('ba-aglaze') != null) A.glaze = g('ba-aglaze'); if (g('ba-apu') != null) { A.puName = g('ba-apu'); A.puPhone = g('ba-aph'); } }
+function baAddGo() {
+  baAddKeep();
+  const A = _ba.add, q = _ba.q, s = A.s, fail = m => { A.msg = m; baDraw(); };
+  const people = A.people.filter((p, i) => A.who[i]).map(p => ({ name: p.name, dob: p.dob, adult: p.adult }))
+    .concat(A.names.filter(n => String(n.name || '').trim()).map(n => ({ name: n.name.trim(), dob: n.dob || null, adult: !!n.adult })));
+  const guests = FD_BANDS.map(b => ({ label: b[1], n: A.guests[b[0]] || 0 })).filter(g => g.n > 0);
+  if (!people.length && !guests.length) return fail('Tick or add who’s coming.');
+  if (people.some(p => !p.dob && (A.camp || !p.adult))) return fail(A.camp ? 'Every camper needs a birthdate.' : 'Add a birthdate for each child (or tick “adult”).');
+  const n = people.length + guests.reduce((t, g) => t + g.n, 0);
+  if (s.spaces_left_cache != null && n > s.spaces_left_cache) return fail(`Only ${s.spaces_left_cache} spot${s.spaces_left_cache === 1 ? '' : 's'} left on this time.`);
+  if ((A.item || {}).kind === 'glazing' && !String(A.glaze || '').trim()) return fail('Add what they’re glazing.');
+  if (s.kids_only && (!String(A.puName || '').trim() || String(A.puPhone || '').replace(/\D/g, '').length < 7)) return fail('Add who’s picking up (name and phone).');
+  const line = A.camp ? { type: 'camp', days: [s.id], aftercare: [], kids: people.map(p => ({ name: p.name, dob: p.dob })) }
+    : { type: 'world', session_id: s.id, people: people.map(p => ({ name: p.name, dob: p.dob })), guests, extras: {}, glaze: A.glaze || undefined, pickup: s.kids_only ? { name: A.puName, phone: A.puPhone } : undefined };
+  const who = [people.map(p => p.name).join(', '), guests.map(g => g.n + ' × ' + g.label).join(', ')].filter(Boolean).join(', ');
+  hubCharge({ studio: q.studio_id, name: q.name || _ba.name, email: q.email, customer_id: q.customer_id, cart: [line],
+    why: `Adding ${who} to ${q.title}. They’ll be a new booking on the same time once it’s paid.`, onDone: m => baRefresh(`${m} ${/Charged/.test(m) ? 'Added ' + who + '.' : ''}`.trim()) });
+}
+// From a family's profile: Change / Cancel one of their bookings (the Schedule's own panel), and back to the profile after
+let _baFam = null;
+function famBookingAdmin(bookingId, canMove) {
+  const f = _fam.open; if (!f) return;
+  _baFam = f.shopify_customer_id;
+  openBookingAdmin([bookingId], f.parent_name || 'this family', canMove);
+}
+function famGoTime(sessionId, studio, date) { _baFam = null; wsmGoTime(sessionId, studio, date); }
+async function baRefresh(msg) {
+  if (_baFam) { const cid = _baFam; _baFam = null; await famOpen(cid); _fam.msg = msg; famRender(); return; }
+  Object.keys(_plan.classLists || {}).forEach(id => { delete _plan.classLists[id]; });
+  if (typeof loadPlanDay === 'function') await loadPlanDay(_plan.date);
+  _plan.msg = msg; if (typeof renderPlanDay === 'function') renderPlanDay();
+  if (!document.getElementById('plan-msg')) alert(msg);
+}
+// Kids classes: the Day view's own class list (children's names, age from date
+// of birth, walk home, medical notes, parent phone, emergency contact, who
+// registered, order #, attended ✓ and Save on each row), copied as-is below.
+// Only one kids class list at a time (the copied table is built for one).
+async function buildKidsClassList(x, el) {
+  Object.keys(_plan.classLists).forEach(id => {
+    if (id !== x.id && _plan.classLists[id] && _plan.classLists[id].dataset.kids === '1') delete _plan.classLists[id];
+  });
+  el.dataset.kids = '1';
+  window.currentStudioId = _sessionStudioId;
+  try {
+    let q = sb.from('bookings').select('id, customer_name, customer_email, customer_phone, qty, estimated_attendance, shopify_order_name, shopify_line_item_id, booked_at, raw_payload, event_date, order_note, aftercare, early_arrival, returned_at, customer_booking_number');
+    if (/\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(x.title || '')) {
+      const r = await sb.rpc('get_class_week_bookings', { p_session_id: x.id });
+      const ids = (r.data || []).map(z => z.booking_id).filter(Boolean);
+      q = q.in('id', ids.length ? ids : ['00000000-0000-0000-0000-000000000000']);
+    } else q = q.eq('session_id', x.id);
+    const { data, error } = await q.order('booked_at');
+    if (error) throw error;
+    const seen = new Set();
+    const bookings = (data || []).filter(b => !b.returned_at).filter(b => {
+      if (!b.shopify_order_name) return true;
+      const k = b.shopify_order_name + '|' + (b.shopify_line_item_id || b.id);
+      if (seen.has(k)) return false; seen.add(k); return true;
+    });
+    // "Can't make it?" (world_class_weeks.sql): who's away from this class this week, and who's joining it as a catch-up
+    window._wkMap = {};
+    try {
+      const [wOut, wIn] = await Promise.all([sb.from('class_week_changes').select('booking_id, kind, note, to_session').eq('from_session', x.id).is('undone_at', null),
+        sb.from('class_week_changes').select('booking_id, kind, note, from_session').eq('to_session', x.id).is('undone_at', null)]);
+      const sIds = [...new Set([...(wOut.data || []).map(c => c.to_session), ...(wIn.data || []).map(c => c.from_session)].filter(Boolean))];
+      const ss = sIds.length ? await sb.from('sessions').select('id, session_date, session_time').in('id', sIds) : { data: [] };
+      const sm = {}; (ss.data || []).forEach(t => { sm[t.id] = t; });
+      const lab = t => t ? ptyDayLabel(t.session_date) + ' ' + shortTime(t.session_time || '') : 'another class';
+      (wOut.data || []).forEach(c => { window._wkMap[c.booking_id] = { dir: 'out', kind: c.kind, note: c.note,
+        text: 'Not coming today: ' + (c.kind === 'swap' ? 'joining ' + lab(sm[c.to_session]) : c.kind === 'early_next' ? 'skipping, 15 min early next class' : 'skipping') + (c.note ? ' (' + c.note + ')' : '') }; });
+      (wIn.data || []).forEach(c => { window._wkMap[c.booking_id] = { dir: 'in', kind: c.kind, note: c.note, text: 'Catch-up: usually ' + lab(sm[c.from_session]) + (c.note ? ' (' + c.note + ')' : '') }; });
+      // kids joining another class this week: their booking moved there, so list it here too (greyed)
+      const gone = (wOut.data || []).filter(c => c.kind === 'swap').map(c => c.booking_id).filter(id => !bookings.some(b => b.id === id));
+      if (gone.length) { const g = await sb.from('bookings').select('*').in('id', gone); (g.data || []).forEach(b => bookings.push(Object.assign({}, b, { _away: true }))); }
+    } catch (e) { console.warn('class week changes:', e); }
+    const orders = bookings.map(b => b.shopify_order_name).filter(Boolean);
+    const bIds = bookings.map(b => b.id);
+    const [tally, kids, att, cuFrom, cuTo] = await Promise.all([
+      orders.length ? sb.from('tally_registrations').select('*').in('shopify_order_name', orders) : Promise.resolve({ data: [] }),
+      bIds.length ? sb.from('booking_children').select('*').in('booking_id', bIds).order('child_index') : Promise.resolve({ data: [] }),
+      orders.length ? sb.from('attendance').select('*').eq('session_id', x.id).in('shopify_order_name', orders) : Promise.resolve({ data: [] }),
+      fetchCatchupsOriginatingHere(x.id),
+      fetchCatchupsArrivingHere(x.id)
+    ]);
+    const tallyData = {}; (tally.data || []).forEach(t => { (tallyData[t.shopify_order_name] = tallyData[t.shopify_order_name] || []).push(t); });
+    const childrenData = {}; (kids.data || []).forEach(c => { (childrenData[c.booking_id] = childrenData[c.booking_id] || []).push(c); });
+    const attendanceData = {}; (att.data || []).forEach(a => { attendanceData[`${a.shopify_order_name}|${(a.camper_name || '').toLowerCase().trim()}`] = a; });
+    const awayN = bookings.filter(b => (window._wkMap[b.id] || {}).dir === 'out').reduce((n, b) => n + (b.qty || 0), 0);
+    const enrolled = bookings.filter(b => (b.qty || 0) > 0).reduce((n, b) => n + (b.qty || 0), 0) + (cuTo || []).length - awayN;
+    el.innerHTML = `<div class="cl-head"><b>${enrolled}</b> enrolled${awayN ? ` (+ ${awayN} away today)` : ''} · tick ✓ for attendance, and Save after changing a child's details
+        <span class="spacer"></span><button class="ho-btn" onclick="planEmail('${escAttr(x.id)}')">✉️ Email this class</button><button class="ho-btn" onclick="planEmailHistory('${escAttr(x.id)}')">Sent</button><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button></div>
+      ${bookings.length || (cuTo || []).length
+        ? `<div class="booking-table-wrap">${buildSeriesTable(bookings, tallyData, attendanceData, x.id, _plan.date, _sessionStudioId, x.session_time || '', childrenData, cuFrom || {}, cuTo || [], x.title)}</div>`
+        : '<div class="goal-note" style="padding:8px 2px">No one enrolled yet.</div>'}
+      ${bookingAdminStrip(bookings, false)}`;
+    el.dataset.title = x.title; el.dataset.time = x.session_time || '';
+  } catch (e) {
+    el.innerHTML = `<div class="goal-note" style="padding:10px">Couldn't load the class list: ${esc(e.message || e)}</div>`;
+  }
+  renderPlanDay();
+}
+// Camps and PA/PD days: the Day view's camp roster (child, age, walk home,
+// medical, parent phone, emergency contact, aftercare, early arrival, ✓).
+function planIsCamp(x) {
+  const t = String(x.title || '').toLowerCase();
+  return x.session_type !== 'party' && x.session_type !== 'glazing' && /camp|pa day|pd day|pa\/pd|no school/.test(t);
+}
+async function buildCampList(x, el) {
+  Object.keys(_plan.classLists).forEach(id => {
+    if (id !== x.id && _plan.classLists[id] && _plan.classLists[id].dataset.kids === '1') delete _plan.classLists[id];
+  });
+  el.dataset.kids = '1';
+  window.currentStudioId = _sessionStudioId;
+  try {
+    const { data, error } = await sb.from('bookings').select('*').eq('session_id', x.id).order('booked_at');
+    if (error) throw error;
+    const seen = new Set();
+    const cancelled = (data || []).filter(b => b.returned_at || !(b.qty > 0));
+    const bookings = (data || []).filter(b => !b.returned_at && b.qty > 0).filter(b => {   // cancelled / refunded campers are listed under the table instead
+      if (!b.shopify_order_name) return true;
+      const k = b.shopify_order_name + '|' + (b.shopify_line_item_id || b.id);
+      if (seen.has(k)) return false; seen.add(k); return true;
+    });
+    const orders = bookings.map(b => b.shopify_order_name).filter(Boolean), bIds = bookings.map(b => b.id);
+    const [tally, kids, att, day] = await Promise.all([
+      orders.length ? sb.from('tally_registrations').select('*').in('shopify_order_name', orders) : Promise.resolve({ data: [] }),
+      bIds.length ? sb.from('booking_children').select('*').in('booking_id', bIds).order('child_index') : Promise.resolve({ data: [] }),
+      orders.length ? sb.from('attendance').select('*').eq('session_id', x.id).in('shopify_order_name', orders) : Promise.resolve({ data: [] }),
+      sb.from('session_staff').select('camp_day').eq('session_id', x.id).maybeSingle()
+    ]);
+    const tallyData = {}; (tally.data || []).forEach(t => { (tallyData[t.shopify_order_name] = tallyData[t.shopify_order_name] || []).push(t); });
+    const childrenData = {}; (kids.data || []).forEach(c => { (childrenData[c.booking_id] = childrenData[c.booking_id] || []).push(c); });
+    const attendanceData = {}; (att.data || []).forEach(a => { attendanceData[`${a.shopify_order_name}|${(a.camper_name || '').toLowerCase().trim()}`] = a; });
+    const campers = bookings.reduce((n, b) => (!b.returned_at && (b.qty || 0) > 0) ? n + b.qty : n, 0);
+    const campDay = day && day.data && day.data.camp_day ? day.data.camp_day : '';
+    el.innerHTML = `<div class="cl-head"><b>${campers}</b> campers${campDay ? ' · ' + esc(campDay) : ''} · tick ✓ for attendance, and Save after changing a camper's details
+        <span class="spacer"></span><button class="ho-btn" onclick="planEmail('${escAttr(x.id)}')">✉️ Email this class</button><button class="ho-btn" onclick="planEmailHistory('${escAttr(x.id)}')">Sent</button><button class="ho-btn" onclick="planPrintClassList('${escAttr(x.id)}')">🖨 Print this list</button></div>
+      ${bookings.length ? `<div class="booking-table-wrap">${buildCampTable(bookings, tallyData, attendanceData, x.id, _plan.date, childrenData)}</div>`
+                        : '<div class="goal-note" style="padding:8px 2px">No campers booked yet.</div>'}
+      ${bookingAdminStrip(bookings, true)}
+      ${cancelled.length ? `<div class="goal-note" style="padding:6px 2px">Cancelled / refunded: ${cancelled.map(b => esc(b.customer_name || '—') + (b.shopify_order_name ? ' (' + esc(b.shopify_order_name) + ')' : '')).join(', ')}</div>` : ''}`;
+    el.dataset.title = x.title; el.dataset.time = x.session_time || '';
+  } catch (e) {
+    el.innerHTML = `<div class="goal-note" style="padding:10px">Couldn't load the camp list: ${esc(e.message || e)}</div>`;
+  }
+  renderPlanDay();
+}
+
+/* ==========================================================================
+   CAMP ROSTERS — copied as-is from index.html (the schedule's Day view):
+   buildCampTable and what it uses. One camp list at a time (its table body has
+   a fixed id). Change: "Send camp info form" sends the signed-in login.
+   ========================================================================== */
+let campTableRows = []
+let campTableSort = { col: null, dir: 1 }
+function sortCampTable(col) {
+  if (campTableSort.col === col) campTableSort.dir *= -1
+  else { campTableSort.col = col; campTableSort.dir = 1 }
+  const sorted = [...campTableRows].sort((a, b) => (a[col]||'').toLowerCase().localeCompare((b[col]||'').toLowerCase()) * campTableSort.dir)
+  document.getElementById('camp-table-body').innerHTML = sorted.map(r => r.html).join('')
+  document.querySelectorAll('.camp-sort-btn').forEach(btn => {
+    const isActive = btn.dataset.col === col
+    btn.textContent = isActive ? (campTableSort.dir === 1 ? ' ↑' : ' ↓') : ' ⇅'
+    btn.style.opacity = isActive ? '1' : '0.3'
+  })
+}
+
+async function sendCampInfoForm(orderName, customerEmail, customerName, numChildren, btn) {
+  const origText = btn?.textContent || '📧 Send Form'
+  if (btn) { btn.textContent = 'Sending…'; btn.disabled = true }
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/send-camp-form`, {
+      method: 'POST',
+      headers: await fnHeaders(),   // Hub: the signed-in studio login, not just the public key
+      body: JSON.stringify({ orders: [{ shopify_order_name: orderName, studio_id: currentStudioId,
+        customer_email: customerEmail, customer_name: customerName, num_children: numChildren }] })
+    })
+    const result = await res.json()
+    if (!result.success) throw new Error(result.error || 'Unknown error')
+    if (btn) { btn.textContent = '📧 Resent'; btn.classList.add('sent'); btn.disabled = false }
+  } catch(e) {
+    alert('Error sending form: ' + e.message)
+    if (btn) { btn.textContent = origText; btn.disabled = false }
+  }
+}
+
+async function saveCampRow(tallyId, orderName, uid, sessionId) {
+  const btn = document.querySelector(`button[onclick="saveCampRow('${tallyId}','${orderName}','${uid}','${sessionId}')"]`)
+  const camper_name = document.getElementById(`cn-${uid}`)?.value?.trim()
+  if (!camper_name) { alert('Please enter a child name'); return }
+  const ecRaw = document.getElementById(`ec-${uid}`)?.value?.trim()||''
+  const ecParts = ecRaw.split(' ')
+  const lastPart = ecParts[ecParts.length-1]||''
+  const ecPhone = lastPart.match(/[\d\+\-\(\)]{7,}/) ? lastPart : null
+  const ecName = ecPhone ? ecParts.slice(0,-1).join(' ') : ecRaw
+  const payload = { shopify_order_name: orderName, camper_name, camper_age: document.getElementById(`ca-${uid}`)?.value?.trim()||null, walk_home: document.getElementById(`wh-${uid}`)?.checked||false, medical_notes: document.getElementById(`mn-${uid}`)?.value?.trim()||null, aftercare: document.getElementById(`ac-${uid}`)?.checked||false, parent_phone: document.getElementById(`pp-${uid}`)?.value?.trim()||null, emergency_contact_name: ecName||null, emergency_contact_phone: ecPhone||null, table_num: document.getElementById(`tn-${uid}`)?.value?.trim()||null }
+  let error
+  if (tallyId && tallyId !== 'null') { ;({ error } = await sb.from('tally_registrations').update(payload).eq('id', tallyId)) }
+  else { ;({ error } = await sb.from('tally_registrations').insert(payload)) }
+  if (error) { alert('Error saving: ' + error.message); return }
+  if (btn) { btn.textContent = 'Saved ✓'; btn.classList.add('saved'); setTimeout(() => { btn.textContent = 'Save'; btn.classList.remove('saved') }, 2000) }
+}
+
+function getAllMatchingLineItemProps(rawPayload, sessionDate) {
+  try {
+    const payload = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload
+    if (!payload?.line_items) return []
+    const items = payload.line_items
+    let matches = []
+    if (sessionDate) {
+      const d = new Date(sessionDate + 'T12:00:00')
+      const monthDay = d.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }).replace('.', '').toLowerCase()
+      const day = d.getDate()
+      const suffix = day===1||day===21||day===31?'st':day===2||day===22?'nd':day===3||day===23?'rd':'th'
+      matches = items.filter(li => {
+        const t = (li.title || li.name || '').toLowerCase()
+        return t.includes(monthDay) || t.includes(monthDay + suffix)
+      })
+    }
+    if (!matches.length) matches = [items[0]]
+    return matches.flatMap(m => m?.properties || [])
+  } catch(e) { return [] }
+}
+
+function editTableNum(id, value) {
+  return `<input type="number" id="${id}" value="${value||''}" min="1" max="30" placeholder="—" style="width:48px;padding:4px 6px;border:0.5px solid #d0d0c8;border-radius:6px;font-size:13px;text-align:center">`
+}
+
+function buildCampTable(bookings, tallyData, attendanceData, sessionId, dateLabel, childrenData = {}) {
+  campTableRows = []
+  campTableSort = { col: null, dir: 1 }
+  bookings.forEach(b => {
+    const note = getOrderNote(b)
+    const orderUid = (b.shopify_order_name || '').replace('#','') || Math.random().toString(36).slice(2)
+    const isCancelled = (b.qty || 0) === 0
+    const cancelStyle = isCancelled ? ' style="opacity:0.4;text-decoration:line-through;color:#888"' : ''
+    const props = getAllMatchingLineItemProps(b.raw_payload, b.event_date)
+    let participants = props.filter(p => p.name?.toLowerCase().startsWith('participant')).sort((a,z) => a.name.localeCompare(z.name)).map(p => {
+      const name = p.value.split('|')[0]?.trim() || p.value
+      const dobMatch = p.value.match(/DOB:\s*(\d{4}-\d{2}-\d{2})/)
+      const dob = dobMatch ? dobMatch[1] : null
+      const tally = (tallyData[b.shopify_order_name]||[]).find(t => t.camper_name?.toLowerCase().trim() === name.toLowerCase().trim())
+      return { name, dob, tally, source: 'shopify' }
+    })
+    if (participants.length === 0) {
+      const tallyRows = (tallyData[b.shopify_order_name]||[]).filter((t,idx,arr) => arr.findIndex(x => x.camper_name?.toLowerCase().trim() === t.camper_name?.toLowerCase().trim()) === idx)
+      participants = tallyRows.map(t => ({ name: t.camper_name, dob: null, age: t.camper_age, tally: t, source: 'tally' }))    }
+    if (participants.length === 0) {
+      const uid = orderUid
+      const attKey = `${b.shopify_order_name}|`
+      const att = attendanceData[attKey]
+      campTableRows.push({ name:'', age:'', registeredBy: b.customer_name||'', html: `<tr${cancelStyle}>
+        <td style="text-align:center"><input type="checkbox" class="attended-check" ${att?.attended?'checked':''} onchange="saveAttendance('${sessionId}','${b.shopify_order_name}','',this.checked)"></td>
+        <td>${editInput('cn-'+uid,'','Child name')}</td><td>${editInput('ca-'+uid,'','Age','short')}</td>
+        <td>${editTableNum('tn-'+uid,'')}</td>
+        <td>${editCheck('wh-'+uid,false)}</td><td>${editInput('mn-'+uid,'','Medical notes')}</td>
+        <td>${editCheck('ac-'+uid,b.aftercare||false)}</td><td>${editInput('pp-'+uid,b.customer_phone||getPayloadPhone(b.raw_payload),'Phone')}</td>
+        <td>${editInput('ec-'+uid,'','Emergency contact')}</td>
+        <td style="color:#888">${escText(b.customer_name) || '&mdash;'}${bookingCountBadge(b)}</td><td style="text-align:center">${b.qty}</td>
+        <td style="color:#888">${shopifyOrderLink(b.shopify_order_name)}</td><td class="note-cell">${note||''}</td>
+        <td class="no-print" style="white-space:nowrap">
+          <button class="row-save-btn" onclick="saveCampRow(null,'${b.shopify_order_name}','${uid}','${sessionId}')">Save</button>
+          ${b.customer_email ? `<button class="send-form-btn no-print" onclick="sendCampInfoForm(${jsArg(b.shopify_order_name)},${jsArg((b.customer_email||''))},${jsArg((b.customer_name||''))},${b.qty||1},this)" title="Email parent a link to fill in child info" style="margin-left:4px">📧 Send Form</button>` : ''}
+        </td>
+      </tr>` })
+      return
+    }
+    participants.forEach((p, i) => {
+      const t = p.tally
+      const uid = `${orderUid}-${i}`
+      const camperName = p.name || ''
+      const attKey = `${b.shopify_order_name}|${camperName.toLowerCase().trim()}`
+      const att = attendanceData[attKey]
+      const ageDisplay = p.dob ? formatDOB(p.dob, dateLabel) : (p.age ? `Age ${p.age}` : '')
+      const ageSortVal = p.dob ? p.dob : (p.age ? String(p.age).padStart(3,'0') : '')
+      campTableRows.push({ name: camperName, age: ageSortVal, registeredBy: i===0?(b.customer_name||''):'', html: `<tr${cancelStyle}>
+        <td style="text-align:center"><input type="checkbox" class="attended-check" ${att?.attended?'checked':''} onchange="saveAttendance('${sessionId}','${b.shopify_order_name}',${jsArg(camperName)},this.checked)"></td>
+        <td>${editInput('cn-'+uid,camperName,'Child name')}</td><td style="font-size:12px;color:#666">${ageDisplay}</td>
+        <td>${editTableNum('tn-'+uid,t?.table_num||'')}</td>
+        <td>${editCheck('wh-'+uid,t?.walk_home||false)}</td><td>${editInput('mn-'+uid,t?.medical_notes||'','Medical notes')}</td>
+        <td>${editCheck('ac-'+uid,t?.aftercare||b.aftercare||false)}</td><td>${editInput('pp-'+uid,t?.parent_phone||b.customer_phone||getPayloadPhone(b.raw_payload)||'','Phone')}</td>
+        <td>${editInput('ec-'+uid,t?(t.emergency_contact_name||'')+(t.emergency_contact_phone?' '+t.emergency_contact_phone:''):'','Emergency contact')}</td>
+        <td style="color:#888">${i===0?(b.customer_name||'&mdash;')+bookingCountBadge(b):''}</td><td style="text-align:center">1</td>
+        <td style="color:#888">${shopifyOrderLink(b.shopify_order_name)}</td><td class="note-cell">${i===0?(note||''):''}</td>
+        <td class="no-print"><button class="row-save-btn" onclick="saveCampRow('${t?.id||null}','${b.shopify_order_name}','${uid}','${sessionId}')">Save</button></td>
+      </tr>` })
+    })
+    const existingChildren = childrenData[b.id] || []
+    const extraCount = Math.max(0, (b.qty||1) - participants.length)
+    for (let i = 0; i < extraCount; i++) {
+      const childIndex = participants.length + i + 1
+      const existing = existingChildren.find(c => c.child_index === childIndex)
+      const cid = `${b.id}-child-${childIndex}`
+      const attKey = `${b.shopify_order_name}|${(existing?.child_name||'').toLowerCase().trim()}`
+      const att = existing?.child_name ? attendanceData[attKey] : null
+      campTableRows.push({ name: existing?.child_name||'', age: existing?.child_age||'', registeredBy: b.customer_name||'', html: `<tr style="background:#fafaf8${isCancelled ? ';opacity:0.4;text-decoration:line-through;color:#888' : ''}">
+        <td style="text-align:center"><input type="checkbox" class="attended-check" ${att?.attended?'checked':''} onchange="saveAttendance('${sessionId}','${b.shopify_order_name}',${jsArg((existing?.child_name||''))},this.checked)"></td>
+        <td>${editInput('cn-'+cid,existing?.child_name||'','Child name')}</td><td>${editInput('ca-'+cid,existing?.child_age||'','Age','short')}</td>
+        <td>${editTableNum('tn-'+cid,existing?.table_num||'')}</td>
+        <td>${editCheck('wh-'+cid,existing?.walk_home||false)}</td><td>${editInput('mn-'+cid,existing?.medical||'','Medical notes')}</td>
+        <td>${editCheck('ac-'+cid,false)}</td><td>${editInput('pp-'+cid,existing?.parent_phone||'','Phone')}</td>
+        <td>${editInput('ec-'+cid,existing?.emergency_contact||'','Emergency contact')}</td>
+        <td style="color:#888">${escText(b.customer_name) || '&mdash;'}${bookingCountBadge(b)}</td><td style="text-align:center"></td>
+        <td style="color:#888">${shopifyOrderLink(b.shopify_order_name)}</td><td></td>
+        <td class="no-print"><button class="row-save-btn" onclick="saveChildRow('${existing?.id||null}','${b.id}',${childIndex},'${cid}')">Save</button></td>
+      </tr>` })
+    }
+  })
+  const sortBtn = col => `<button class="camp-sort-btn no-print" data-col="${col}" onclick="sortCampTable('${col}')" style="background:none;border:none;cursor:pointer;font-size:10px;color:#888;padding:0;margin-left:2px;opacity:0.3"> ⇅</button>`
+  return `<table class="booking-table"><thead><tr><th>✓</th><th>Participant${sortBtn('name')}</th><th>Age / DOB${sortBtn('age')}</th><th>Table</th><th>Walk home?</th><th>Medical</th><th>Aftercare</th><th>Parent phone</th><th>Emergency contact</th><th>Registered by${sortBtn('registeredBy')}</th><th style="text-align:center">Qty</th><th>Order</th><th>Notes</th><th class="no-print"></th></tr></thead><tbody id="camp-table-body">${campTableRows.map(r=>r.html).join('')}</tbody></table>`
+}
+/* ======================= end of camp roster copy ======================= */
+
+/* ==========================================================================
+   CATCH-UP TRANSFERS — copied from index.html (the schedule's Day view):
+   one-week transfers of a child into another class (or a staff-only "Catch Up
+   Class"). Changes for the Hub: the Schedule's date, who made it, and the
+   Hub's own refresh (planAfterCatchup) instead of the Day view's.
+   ========================================================================== */
+// ---- "Can't make it?" for staff (hub_class_week, world_class_weeks.sql): the same choices families have, no 1-hour cut-off ----
+async function openWeekModal(bookingId, camperName) {
+  document.getElementById('week-modal')?.remove()
+  const m = document.createElement('div'); m.id = 'week-modal'; m.className = 'modal-overlay'
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:9999'
+  m.innerHTML = `<div style="background:#fff;border-radius:14px;padding:20px;width:min(460px,94vw);max-height:90vh;overflow:auto"><h3 style="margin:0 0 6px">Can’t make it this week</h3>
+    <div class="goal-note" style="margin-bottom:10px">${esc(camperName || '')}</div><div id="wm-body" class="goal-note">Loading…</div></div>`
+  m.addEventListener('click', e => { if (e.target === m) m.remove() })
+  document.body.appendChild(m)
+  const r = await sb.rpc('hub_class_week', { p_action: 'options', p_booking: bookingId })
+  const body = document.getElementById('wm-body'); if (!body) return
+  if (r.error) { body.textContent = r.error.message; return }
+  const opts = r.data || []
+  body.className = ''
+  body.innerHTML = `<label style="display:block;font-size:13px;margin-bottom:10px">Note (from the parent, optional)<input id="wm-note" maxlength="300" placeholder="e.g. sick, away that weekend" style="display:block;width:100%;margin-top:4px;padding:6px 8px;border:1px solid #d1d5db;border-radius:8px"></label>
+    <div style="display:grid;gap:8px;margin-bottom:12px;font-size:14px">
+      ${opts.length ? opts.map(o => `<label style="display:flex;gap:8px;align-items:flex-start"><input type="radio" name="wm" value="swap|${escAttr(o.session_id)}"> Join the class on <b>${esc(ptyDayLabel(o.date))} ${esc(shortTime(o.time || ''))}</b> instead <span class="goal-note">(${o.booked} booked, ${o.spaces_left} left)</span></label>`).join('')
+        : '<div class="goal-note">No other class times this week (same class and week) with kids booked and room.</div>'}
+      <label style="display:flex;gap:8px;align-items:flex-start"><input type="radio" name="wm" value="early_next"> Skip this week, and come <b>15 minutes early</b> to the next class</label>
+      <label style="display:flex;gap:8px;align-items:flex-start"><input type="radio" name="wm" value="skip"> Just skip this week (no credit)</label></div>
+    <div id="wm-msg" class="goal-note" style="color:#b91c1c"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" onclick="document.getElementById('week-modal').remove()">Cancel</button><button class="btn" style="background:#1f2937;color:#fff" id="wm-go">Save</button></div>`
+  document.getElementById('wm-go').onclick = async () => {
+    const pick = document.querySelector('#week-modal input[name=wm]:checked'), msg = document.getElementById('wm-msg')
+    if (!pick) { msg.textContent = 'Choose one.'; return }
+    const [kind, to] = pick.value.split('|')
+    const { error } = await sb.rpc('hub_class_week', { p_action: 'apply', p_booking: bookingId, p_kind: kind, p_to: to || null, p_note: document.getElementById('wm-note').value.trim() || null })
+    if (error) { msg.textContent = error.message; return }
+    document.getElementById('week-modal').remove()
+    planAfterCatchup()
+  }
+}
+async function hubWeekUndo(bookingId) {
+  if (!confirm('Undo this week’s change, and keep them in their usual class?')) return
+  const { error } = await sb.rpc('hub_class_week', { p_action: 'undo', p_booking: bookingId })
+  if (error) { alert(error.message); return }
+  planAfterCatchup()
+}
+function openCatchupModal(originSessionId, bookingId, camperName, dateLabel, originSessionTime) {
+  document.getElementById('catchup-modal')?.remove()
+  const modal = document.createElement('div')
+  modal.id = 'catchup-modal'
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9500;display:flex;align-items:center;justify-content:center;padding:1rem'
+  modal.innerHTML = `
+    <div style="background:#fff;border-radius:12px;padding:1.8rem;width:420px;max-width:95vw;max-height:88vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,0.2)">
+      <h3 style="margin:0 0 4px;font-size:16px;font-weight:700;color:#2d6a9f">🔁 Catch-up: ${camperName || 'this child'}</h3>
+      <div style="font-size:12px;color:#888;margin-bottom:16px">Move them into another class for one date only — their regular class will show them as absent and note where they went.</div>
+      <input type="hidden" id="cu-origin-session" value="${originSessionId}">
+      <input type="hidden" id="cu-booking-id" value="${bookingId}">
+      <input type="hidden" id="cu-camper-name" value="${(camperName||'').replace(/"/g,'&quot;')}">
+      <div style="margin-bottom:12px">
+        <label style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.4px">Date they're catching up</label><br>
+        <input type="date" id="cu-date" value="${(_plan && _plan.date) || dateStr(new Date())}" onchange="cuLoadSessionsForDate()" style="width:100%;box-sizing:border-box;border:0.5px solid #d0d0c8;border-radius:6px;padding:8px 10px;font-size:13px;margin-top:4px;outline:none">
+      </div>
+      <div style="margin-bottom:8px">
+        <label style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.4px">Join which class</label><br>
+        <select id="cu-target-session" style="width:100%;box-sizing:border-box;border:0.5px solid #d0d0c8;border-radius:6px;padding:8px 10px;font-size:13px;margin-top:4px;outline:none">
+          <option value="">Loading sessions...</option>
+        </select>
+      </div>
+      <button onclick="cuCreateCatchupClass()" style="margin-bottom:14px;padding:6px 12px;background:#f0f6ff;border:0.5px solid #c5d8f0;border-radius:6px;font-size:12px;color:#2d6a9f;cursor:pointer">+ New Catch Up Class on this date</button>
+      <div style="margin-bottom:16px">
+        <label style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.4px">Note <span style="font-weight:400;color:#bbb;text-transform:none">(optional)</span></label><br>
+        <input type="text" id="cu-note" placeholder="e.g. away for the weekend" style="width:100%;box-sizing:border-box;border:0.5px solid #d0d0c8;border-radius:6px;padding:8px 10px;font-size:13px;margin-top:4px;outline:none">
+      </div>
+      <div id="cu-error" style="color:#c00;font-size:12px;margin-bottom:10px;display:none"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn" onclick="document.getElementById('catchup-modal').remove()">Cancel</button>
+        <button class="btn btn-primary" id="cu-save-btn" onclick="saveCatchupTransfer()">Save Catch-up</button>
+      </div>
+    </div>`
+  document.body.appendChild(modal)
+  cuLoadSessionsForDate()
+}
+
+async function cuLoadSessionsForDate() {
+  const date = document.getElementById('cu-date')?.value
+  const sel = document.getElementById('cu-target-session')
+  const originSessionId = document.getElementById('cu-origin-session')?.value
+  if (!date || !sel) return
+  sel.innerHTML = '<option value="">Loading sessions...</option>'
+  const { data: sessions } = await sb.from('sessions')
+    .select('id, title, session_time, session_type')
+    .eq('studio_id', currentStudioId).eq('session_date', date)
+    .order('session_time')
+  const options = (sessions || [])
+    .filter(s => s.id !== originSessionId)
+    .map(s => `<option value="${s.id}">${fmtTime(s.session_time)} · ${getSeriesDisplayTitle(s.title)}${s.title === 'Catch Up Class' ? ' 🔁' : ''}</option>`)
+    .join('')
+  sel.innerHTML = `<option value="">Select a class...</option>${options}`
+}
+
+async function cuCreateCatchupClass() {
+  const date = document.getElementById('cu-date')?.value
+  if (!date) { alert('Pick a date first.'); return }
+  const time = prompt('What time is the Catch Up Class? (e.g. 4:00 PM)')
+  if (!time) return
+  // Normalize a few common formats to HH:MM:SS; fall back to raw entry if unparseable
+  let time24 = time.trim()
+  const m = time24.match(/^(\d{1,2}):?(\d{2})?\s*(am|pm)?$/i)
+  if (m) {
+    let h = parseInt(m[1], 10)
+    const min = m[2] || '00'
+    const ap = (m[3] || '').toLowerCase()
+    if (ap === 'pm' && h < 12) h += 12
+    if (ap === 'am' && h === 12) h = 0
+    time24 = `${String(h).padStart(2,'0')}:${min}:00`
+  } else if (!/^\d{2}:\d{2}(:\d{2})?$/.test(time24)) {
+    alert('Please enter a time like "4:00 PM" or "16:00".'); return
+  }
+  const { data: inserted, error } = await sb.from('sessions')
+    .insert({ studio_id: currentStudioId, session_date: date, session_time: time24, title: 'Catch Up Class', session_type: 'class', capacity: 0, show: true, is_staff_only: true, spaces_left_cache: null })
+    .select('id').single()
+  if (error) { alert('Error creating Catch Up Class: ' + error.message); return }
+  await cuLoadSessionsForDate()
+  const sel = document.getElementById('cu-target-session')
+  if (sel) sel.value = inserted.id
+}
+
+async function saveCatchupTransfer() {
+  const errEl = document.getElementById('cu-error')
+  errEl.style.display = 'none'
+  const originSessionId = document.getElementById('cu-origin-session').value
+  const bookingId = document.getElementById('cu-booking-id').value
+  const camperName = document.getElementById('cu-camper-name').value
+  const targetSessionId = document.getElementById('cu-target-session').value
+  const note = document.getElementById('cu-note').value.trim()
+
+  if (!targetSessionId) { errEl.textContent = 'Please pick which class they are joining.'; errEl.style.display = 'block'; return }
+
+  const btn = document.getElementById('cu-save-btn')
+  btn.disabled = true; btn.textContent = 'Saving...'
+
+  // Hub: who made it (the coordinator's name when unlocked, else the studio)
+  const userName = (_sessionPin && _lastHeroData && _lastHeroData.firstName && _lastHeroData.firstName !== 'team')
+    ? _lastHeroData.firstName + ' (Hub)' : ((STUDIO_NAMES[_sessionStudioId] || 'Studio') + ' (Hub)')
+
+  const { error } = await sb.from('class_catchups').insert({
+    studio_id: currentStudioId, origin_session_id: originSessionId, origin_booking_id: bookingId,
+    camper_name: camperName, target_session_id: targetSessionId, note: note || null, created_by: userName
+  })
+
+  if (error) {
+    btn.disabled = false; btn.textContent = 'Save Catch-up'
+    errEl.textContent = 'Error: ' + error.message
+    errEl.style.display = 'block'
+    return
+  }
+
+  document.getElementById('catchup-modal')?.remove()
+  planAfterCatchup()
+}
+
+async function removeCatchupTransfer(id, isCatchupClassView = false) {
+  if (!confirm('Remove this catch-up transfer?')) return
+  const { error } = await sb.from('class_catchups').delete().eq('id', id)
+  if (error) { alert('Error removing: ' + error.message); return }
+  planAfterCatchup()
+}
+// After a catch-up is added or removed: refresh the day's counts and the open kids list
+async function planAfterCatchup() {
+  const openId = Object.keys(_plan.classLists || {}).find(id => _plan.classLists[id] && _plan.classLists[id].dataset.kids === '1');
+  await loadPlanDay(_plan.date);
+  const x = openId && (_plan.sessions || []).find(z => z.id === openId);
+  if (x && _plan.classLists[openId]) { if (planIsCamp(x)) await buildCampList(x, _plan.classLists[openId]); else await buildKidsClassList(x, _plan.classLists[openId]); }
+}
+/* ======================= end of catch-up copy ======================= */
+// ---------- ✉️ Email templates page (coordinators + home office) ----------
+// Camp artwork pickup: the Day view's camp pickup email (send-camp-pickup-email: its own
+// send log and once-a-day guard), for camp families in a day / week / range.
+// Any other template: everyone booked on a date, or one class (send-email-blast).
+const ET_CAMP = { id: '__camp', name: '🏺 Camp artwork pickup', subject: '🎨 Great news, camp artwork is ready for pickup!' };
+function etCampMessage(label, mode) {
+  const when = mode === 'day' ? `camp today, ${label},` : mode === 'week' ? `camp ${label}` : `camp (${label})`;
+  return `Hi,\n\n🎨 Great news, your child's camp artwork is ready for pickup!\n\nAll artwork from ${when} has been completed and is ready to go home. If you haven't picked it up yet, we'd love for you to stop by as soon as you can.\n\nOur artwork shelves are filling up quickly, so we'd really appreciate you collecting your child's creations at your earliest convenience.\n\nPlease check our {{calendar_link}} for upcoming studio hours before stopping by. If you're unable to make it during one of our open times, simply contact the studio through the contact form on our website and we'll do our best to arrange another pickup time.\n\nWe can't wait for your artist to be reunited with everything they created!\n\nSee you soon,\nThe 4Cats Hub`;
+}
+let _et = null;
+async function openEmailTplPane() {
+  if (!coordOrAdmin()) { openPinModal(); return; }
+  showOnlyPane('etpl-pane'); setActiveNav('nav-etpl');
+  const body = document.getElementById('etpl-body');
+  body.innerHTML = '<div class="ho-intro">Loading…</div>';
+  const { data } = await sb.from('email_templates').select('*').order('category').order('name');
+  const tpls = (data || []).filter(t => (!t.studio_ids || !t.studio_ids.length || t.studio_ids.includes(_sessionStudioId))
+    && t.category !== 'marketing_seasonal' && (!t.available_in || t.available_in.includes('blast')));
+  _et = { tpls: [ET_CAMP, ...tpls], tpl: null, recips: [], mode: 'week', date: localDateStr(new Date()) };
+  body.innerHTML = `<div class="et-grid">
+      <div class="ho-card et-list">${_et.tpls.map((t, i) => `<button class="et-tpl" onclick="etPick(${i})">${esc(t.name)}${t.id === '__camp' ? '<div class="goal-note">Camp families, by day, week or dates</div>' : ''}</button>`).join('')}</div>
+      <div class="ho-card" id="et-main"><div class="ho-intro" style="margin:0">Pick a template on the left.</div></div></div>`;
+}
+function etPick(i) {
+  _et.tpl = _et.tpls[i];
+  document.querySelectorAll('.et-tpl').forEach((b, k) => b.classList.toggle('on', k === i));
+  const camp = _et.tpl.id === '__camp';
+  const today = localDateStr(new Date());
+  document.getElementById('et-main').innerHTML = `<h3 style="margin:0 0 10px">${esc(_et.tpl.name)}</h3>
+    <div class="et-who">${camp ? `
+        <div class="tsg-modes">${[['day', 'A day'], ['week', 'A week'], ['range', 'Dates']].map(([k, l]) => `<button class="${_et.mode === k ? 'on' : ''}" onclick="_et.mode='${k}'; etPick(${i})">${l}</button>`).join('')}</div>
+        ${_et.mode === 'range' ? `<input type="date" id="et-from" value="${escAttr(_et.from || '')}"> – <input type="date" id="et-to" value="${escAttr(_et.to || today)}">`
+          : `<input type="date" id="et-date" value="${escAttr(_et.date)}">`}`
+      : `<input type="date" id="et-date" value="${escAttr(_et.date)}"><select id="et-class"><option value="">Everyone booked that day</option></select>`}
+      <button class="ho-btn" onclick="etLoad()">Find who to email</button></div>
+    <div id="et-recips"></div>
+    <div class="me-form" style="margin-top:12px">
+      <label>Subject<input id="et-subject" value="${escAttr(camp ? ET_CAMP.subject : (_et.tpl.subject || ''))}"></label>
+      <label>Message<textarea id="et-message" style="min-height:200px">${esc(camp ? etCampMessage('this week', 'week') : (_et.tpl.body || ''))}</textarea></label>
+      <div class="goal-note">Fill-ins: {{first_name}}, {{studio_name}}, {{date}}, {{class_name}}${camp ? ', {{calendar_link}}' : ''}. Blank lines become paragraphs.</div>
+    </div>
+    <div id="et-msg"></div>
+    <div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="ho-btn primary" id="et-send" onclick="etSend()" disabled>Send</button></div>`;
+  if (!camp) etFillClasses();
+}
+async function etFillClasses() {
+  const d = document.getElementById('et-date'), sel = document.getElementById('et-class'); if (!d || !sel) return;
+  d.onchange = etFillClasses;
+  const { data } = await sb.from('sessions').select('id, title, session_time').eq('studio_id', _sessionStudioId).eq('session_date', d.value).order('session_time');
+  sel.innerHTML = '<option value="">Everyone booked that day</option>' + (data || []).map(x => `<option value="${escAttr(x.id)}">${esc(shortTime(x.session_time))} ${esc(x.title)}</option>`).join('');
+  _et.daySessions = data || [];
+}
+async function etLoad() {
+  const camp = _et.tpl.id === '__camp', box = document.getElementById('et-recips');
+  box.innerHTML = '<div class="goal-note">Loading…</div>';
+  let sessions = [], label = '';
+  if (camp) {
+    let from, to;
+    if (_et.mode === 'range') { from = document.getElementById('et-from').value || null; to = document.getElementById('et-to').value; _et.from = from; _et.to = to;
+      if (!to) { box.innerHTML = '<div class="me-msg err">Choose an end date.</div>'; return; } }
+    else { const v = document.getElementById('et-date').value; _et.date = v; if (!v) return;
+      if (_et.mode === 'day') { from = to = v; } else { const [y, m, d] = v.split('-').map(Number); const dt = new Date(y, m - 1, d); const mon = new Date(dt); mon.setDate(dt.getDate() - ((dt.getDay() + 6) % 7)); const fri = new Date(mon); fri.setDate(mon.getDate() + 4); from = localDateStr(mon); to = localDateStr(fri); } }
+    let q = sb.from('sessions').select('id, session_date, session_time, title').eq('studio_id', _sessionStudioId).eq('session_type', 'camp').lte('session_date', to).order('session_date');
+    if (from) q = q.gte('session_date', from);
+    const r = await q; sessions = r.data || [];
+    const fmt = x => { const [y, m, d] = x.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }); };
+    label = _et.mode === 'day' ? fmt(from) : `${from ? fmt(from) : 'up to'} – ${fmt(to)}`;
+    _et.weekStart = from || (sessions[0] && sessions[0].session_date) || to; _et.weekEnd = to;
+    document.getElementById('et-message').value = etCampMessage(label, _et.mode);
+  } else {
+    const v = document.getElementById('et-date').value, cls = document.getElementById('et-class').value; _et.date = v;
+    sessions = cls ? (_et.daySessions || []).filter(x => x.id === cls) : (_et.daySessions || []);
+    label = cls && sessions[0] ? `${shortTime(sessions[0].session_time)} ${sessions[0].title}` : '';
+    _et.className = label; _et.type = cls ? 'classes' : 'day';
+  }
+  _et.sessionIds = sessions.map(x => x.id);
+  if (!sessions.length) { box.innerHTML = `<div class="goal-note">${camp ? 'No camp sessions then at this studio.' : 'Nothing running that day.'}</div>`; document.getElementById('et-send').disabled = true; return; }
+  const { data: bk } = await sb.from('bookings').select('session_id, customer_name, customer_email, qty, returned_at').in('session_id', _et.sessionIds).gt('qty', 0).is('returned_at', null);
+  const seen = {}, recips = []; let noEmail = 0;
+  (bk || []).forEach(b => { const k = String(b.customer_email || '').trim().toLowerCase(); if (!k) { noEmail++; return; } if (!seen[k]) { seen[k] = { email: b.customer_email.trim(), name: b.customer_name || '' }; recips.push(seen[k]); } });
+  recips.sort((a, b) => a.name.localeCompare(b.name));
+  if (camp && recips.length) {   // already sent this pickup email for this period?
+    const { data: log } = await sb.from('camp_pickup_emails').select('recipient_email, sent_at').eq('studio_id', _sessionStudioId).eq('week_start', _et.weekStart).eq('status', 'sent');
+    const sent = {}; (log || []).forEach(r => { sent[String(r.recipient_email || '').toLowerCase()] = r.sent_at; });
+    recips.forEach(r => { r.already = sent[r.email.toLowerCase()] || null; });
+  }
+  _et.recips = recips;
+  box.innerHTML = `<div class="goal-note" style="margin-top:10px"><b>${recips.length}</b> ${camp ? 'camp famil' + (recips.length === 1 ? 'y' : 'ies') : (recips.length === 1 ? 'person' : 'people')}${noEmail ? ` · ${noEmail} booking${noEmail === 1 ? '' : 's'} with no email` : ''}
+      ${recips.length ? ' · <a href="#" onclick="etAll(true); return false">all</a> / <a href="#" onclick="etAll(false); return false">none</a>' : ''}</div>
+    <div class="pe-list">${recips.map((r, i) => `<label><input type="checkbox" class="et-check" data-i="${i}" ${r.already ? '' : 'checked'} onchange="etCount()"> ${esc(r.name)} <span class="goal-note">${esc(r.email)}</span>${r.already ? ' <span class="pf-status ok">already emailed</span>' : ''}</label>`).join('') || '<div class="goal-note" style="padding:8px">No emails on file.</div>'}</div>`;
+  etCount();
+}
+function etAll(on) { document.querySelectorAll('.et-check').forEach(c => { c.checked = on; }); etCount(); }
+function etCount() { const n = document.querySelectorAll('.et-check:checked').length, b = document.getElementById('et-send'); if (b) { b.disabled = !n; b.textContent = n ? `Send to ${n}` : 'Send'; } }
+async function etSend() {
+  const sel = [...document.querySelectorAll('.et-check:checked')].map(c => _et.recips[+c.dataset.i]);
+  const subject = document.getElementById('et-subject').value.trim(), message = document.getElementById('et-message').value.trim(), msg = document.getElementById('et-msg');
+  if (!sel.length || !message) { msg.innerHTML = '<div class="me-msg err">Choose who to email and write the message.</div>'; return; }
+  if (!confirm(`Send this email to ${sel.length} ${sel.length === 1 ? 'person' : 'people'}?`)) return;
+  const btn = document.getElementById('et-send'); btn.disabled = true; btn.textContent = 'Sending…';
+  const camp = _et.tpl.id === '__camp';
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/${camp ? 'send-camp-pickup-email' : 'send-email-blast'}`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify(camp
+      ? { studio_id: _sessionStudioId, studio_name: STUDIO_NAMES[_sessionStudioId] || '', week_start: _et.weekStart, week_end: _et.weekEnd, subject, message, recipients: sel.map(r => ({ email: r.email, name: r.name })) }
+      : { studio_id: _sessionStudioId, studio_name: STUDIO_NAMES[_sessionStudioId] || '', recipient_type: _et.type, subject, message, recipients: sel.map(r => ({ email: r.email, name: r.name })), session_ids: _et.sessionIds, class_name: _et.className || '' }) });
+    const r = await res.json();
+    if (!r.success) throw new Error(r.error || 'The email didn’t send');
+    msg.innerHTML = `<div class="me-msg ok">Sent to ${r.sent != null ? r.sent : sel.length}.${r.skipped ? ' ' + r.skipped + ' skipped (already emailed today).' : ''}${r.failed ? ' ' + r.failed + ' didn’t go through.' : ''}</div>`;
+    btn.textContent = 'Sent ✓';
+  } catch (e) { msg.innerHTML = `<div class="me-msg err">${esc(e.message)}</div>`; btn.disabled = false; etCount(); }
+}
+
+// ---------- ✉️ Email the people booked (send-email-blast, same as the Day view) ----------
+// Coordinators (PIN) and home office. The function checks the signed-in login
+// and logs every send (email_sends).
+let _planEmail = null;
+async function planEmail(sessionId) {
+  if (!planCanEdit()) { openPinModal(); return; }
+  const list = sessionId ? (_plan.sessions || []).filter(x => x.id === sessionId) : (_plan.sessions || []).filter(x => (_plan.booked[x.id] || 0) > 0);
+  if (!list.length) { alert('No one is booked to email.'); return; }
+  openDutySheet('<h3>✉️ Email</h3><div class="goal-note">Loading who’s booked…</div>');
+  // booking ids: each session's own bookings, plus the series roster for kids class weeks 2+
+  const ids = list.map(x => x.id);
+  const week2 = list.filter(x => /\bclass\s+([2-9]|\d{2,})\s+of\s+\d+/i.test(x.title || ''));
+  const extraIds = [];
+  for (const x of week2) { const r = await sb.rpc('get_class_week_bookings', { p_session_id: x.id }); (r.data || []).forEach(z => z.booking_id && extraIds.push(z.booking_id)); }
+  const [own, roster, tpl] = await Promise.all([
+    sb.from('bookings').select('customer_email, customer_name').in('session_id', ids).gt('qty', 0).is('returned_at', null),
+    extraIds.length ? sb.from('bookings').select('customer_email, customer_name, session_id').in('id', extraIds) : Promise.resolve({ data: [] }),
+    sb.from('email_templates').select('*').order('category').order('name')
+  ]);
+  const seen = {}, recips = [];
+  let noEmail = 0;
+  [...(own.data || []), ...(roster.data || [])].forEach(b => {
+    const k = String(b.customer_email || '').trim().toLowerCase();
+    if (!k) { noEmail++; return; }
+    if (!seen[k]) { seen[k] = 1; recips.push({ email: b.customer_email.trim(), name: b.customer_name || '' }); }
+  });
+  recips.sort((a, b) => a.name.localeCompare(b.name));
+  const templates = (tpl.data || []).filter(t => (!t.studio_ids || !t.studio_ids.length || t.studio_ids.includes(_sessionStudioId))
+    && t.category !== 'marketing_seasonal' && (!t.available_in || t.available_in.includes('blast')));
+  const dl = ptyDayLabel(_plan.date);
+  // (Nov 9 2026) a kids class week 2+: its families are booked on the class's first week, so the email check needs those times too
+  const rosterSessions = [...new Set((roster.data || []).map(b => b.session_id).filter(Boolean))];
+  _planEmail = { recips, templates, sessionIds: [...new Set(ids.concat(rosterSessions))], type: sessionId ? 'classes' : 'day',
+    className: sessionId ? `${dl} ${shortTime(list[0].session_time || '')} ${list[0].title}` : '' };
+  openDutySheet(`<h3>✉️ ${sessionId ? 'Email this class' : 'Email everyone booked today'}</h3>
+    <p>${sessionId ? esc(shortTime(list[0].session_time || '') + ' ' + list[0].title) + ' · ' : ''}${esc(dl)}</p>
+    <div class="goal-note"><b>${recips.length}</b> ${recips.length === 1 ? 'person' : 'people'}${noEmail ? ` · ${noEmail} booking${noEmail === 1 ? '' : 's'} with no email` : ''}
+      ${recips.length ? ' · <a href="#" onclick="planEmailAll(true);return false">all</a> / <a href="#" onclick="planEmailAll(false);return false">none</a>' : ''}</div>
+    <div class="pe-list">${recips.map((r, i) => `<label><input type="checkbox" class="pe-check" data-i="${i}" checked onchange="planEmailCount()"> ${esc(r.name)} <span class="goal-note">${esc(r.email)}</span></label>`).join('') || '<div class="goal-note" style="padding:8px">No emails on file.</div>'}</div>
+    <div class="me-form">
+      ${templates.length ? `<label>Template (optional)<select onchange="planEmailTemplate(this.value)"><option value="">Start from scratch…</option>${templates.map(t => `<option value="${escAttr(t.id)}">${esc(t.name)}</option>`).join('')}</select></label>` : ''}
+      <label>Subject<input id="pe-subject" value="A message from your 4Cats studio"></label>
+      <label>Message<textarea id="pe-message" style="min-height:150px">Hi {{first_name}},
+
+We wanted to reach out with a quick note.
+
+[Your message here]
+
+See you soon,
+The 4Cats Hub</textarea></label>
+      <div class="goal-note">Blank lines become paragraphs, **text** is bold. Fill-ins: {{first_name}}, {{studio_name}}, {{date}}, {{class_name}}.</div>
+    </div>
+    <div id="pe-msg"></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" id="pe-send" onclick="planEmailSend()">Send to ${recips.length}</button></div>`);
+}
+function planEmailAll(on) { document.querySelectorAll('.pe-check').forEach(c => { c.checked = on; }); planEmailCount(); }
+function planEmailCount() { const n = document.querySelectorAll('.pe-check:checked').length; const b = document.getElementById('pe-send'); if (b) b.textContent = 'Send to ' + n; }
+function planEmailTemplate(id) {
+  const t = (_planEmail.templates || []).find(z => String(z.id) === String(id)); if (!t) return;
+  document.getElementById('pe-subject').value = t.subject || ''; document.getElementById('pe-message').value = t.body || '';
+}
+async function planEmailSend() {
+  const sel = [...document.querySelectorAll('.pe-check:checked')].map(c => _planEmail.recips[+c.dataset.i]);
+  const subject = document.getElementById('pe-subject').value.trim(), message = document.getElementById('pe-message').value.trim();
+  const msg = document.getElementById('pe-msg');
+  if (!sel.length) { msg.innerHTML = '<div class="me-msg err">Choose at least one person.</div>'; return; }
+  if (!message || /\[Your message here\]/.test(message)) { msg.innerHTML = '<div class="me-msg err">Write your message first.</div>'; return; }
+  if (!confirm(`Send this email to ${sel.length} ${sel.length === 1 ? 'person' : 'people'}?`)) return;
+  const btn = document.getElementById('pe-send'); btn.disabled = true; btn.textContent = 'Sending…';
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/send-email-blast`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify({
+      studio_id: _sessionStudioId, studio_name: STUDIO_NAMES[_sessionStudioId] || '', recipient_type: _planEmail.type, subject, message,
+      recipients: sel.map(r => ({ email: r.email, name: r.name })), session_ids: _planEmail.sessionIds, class_name: _planEmail.className }) });
+    const r = await res.json();
+    if (!r.success) throw new Error(r.error || 'The email didn’t send');
+    msg.innerHTML = `<div class="me-msg ok">Sent to ${r.sent != null ? r.sent : sel.length}.${r.failed ? ' ' + r.failed + ' didn’t go through.' : ''}</div>`;
+    btn.textContent = 'Sent ✓';
+  } catch (e) {
+    msg.innerHTML = `<div class="me-msg err">${esc(e.message)}</div>`; btn.disabled = false; planEmailCount();
+  }
+}
+
+
+/* ==========================================================================
+   FLOOR PLAN — copied as-is from index.html (the schedule's Day view):
+   rooms + tables for the day, automatic table assignment, clear & reassign,
+   table pop-ups and moving a booking to another table (seating_assignments).
+   Changes for the Hub: it refreshes itself instead of switching the Day view's
+   tabs, and is ready to send the signed-in login (window._hubToken, off for now).
+   ========================================================================== */
+let fpTableSlotMap = {}  // tableId → {table, slots} — filled in by loadFloorView (from index.html)
+const SESSION_TYPE_COLOURS = {
+  party:    { bg: '#fce7f3', border: '#f472b6', text: '#9d174d' },
+  minimake: { bg: '#fef9c3', border: '#facc15', text: '#854d0e' },
+  glazing:  { bg: '#ede9fe', border: '#a78bfa', text: '#5b21b6' },
+  wheel:    { bg: '#f3f4f6', border: '#9ca3af', text: '#374151' },
+  kids:     { bg: '#dcfce7', border: '#4ade80', text: '#166534' },
+  default:  { bg: '#dbeafe', border: '#60a5fa', text: '#1e40af' },
+}
+
+function getSessionColour(session) {
+  if (!session) return SESSION_TYPE_COLOURS.default
+  const title = (session.title || '').toLowerCase()
+  const type = (session.session_type || '').toLowerCase()
+  if (type === 'party') return SESSION_TYPE_COLOURS.party
+  if (title.includes('mini make')) return SESSION_TYPE_COLOURS.minimake
+  if (type === 'glazing' || title.includes('glazing')) return SESSION_TYPE_COLOURS.glazing
+  if (title.includes('wheel')) return SESSION_TYPE_COLOURS.wheel
+  if (/class\s+\d+\s+of\s+\d+/i.test(session.title || '') || title.includes('kids')) return SESSION_TYPE_COLOURS.kids
+  return SESSION_TYPE_COLOURS.default
+}
+
+// Keep getFloorColour as alias for backwards compat with legend rendering
+function getFloorColour(timeStr) { return SESSION_TYPE_COLOURS.default }
+
+// ── LOAD FLOOR VIEW ───────────────────────────────────────────────
+// Floor plan grid constants (must match admin.html)
+const FP_CELL_W = 100
+const FP_CELL_H = 80
+const FP_THICK = 4
+
+async function loadFloorView() {
+  // colour system is now session-type based
+  const el = document.getElementById('floor-view-content')
+  el.innerHTML = '<div class="loading">Loading floor plan…</div>'
+  const today = dateStr(currentDate)
+
+  // Load everything in parallel
+  const [tablesRes, roomsRes, featuresRes, sessionsRes] = await Promise.all([
+    fetch(SUPABASE_URL + '/rest/v1/studio_tables?studio_id=eq.' + currentStudioId + '&is_active=eq.true&order=table_number.asc', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    }),
+    fetch(SUPABASE_URL + '/rest/v1/studio_rooms?studio_id=eq.' + currentStudioId + '&order=sort_order.asc', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    }),
+    fetch(SUPABASE_URL + '/rest/v1/studio_cell_features?studio_id=eq.' + currentStudioId, {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    }),
+    sb.from('sessions').select('id, title, session_time, session_type, capacity').eq('studio_id', currentStudioId).eq('session_date', today).order('session_time')
+  ])
+
+  const tablesJson = await tablesRes.json()
+  const tables = Array.isArray(tablesJson) ? tablesJson : []
+  const roomsJson = await roomsRes.json()
+  const rooms = Array.isArray(roomsJson) ? roomsJson : []
+  const featuresJson = featuresRes.ok ? await featuresRes.json().catch(() => []) : []
+  const features = Array.isArray(featuresJson) ? featuresJson : []
+  const sessions = sessionsRes.data || []
+
+  if (!tablesRes.ok) {
+    el.innerHTML = '<div style="color:#c00;font-size:13px;padding:2rem 0">Error loading tables (' + tablesRes.status + '). Check that studio_tables is exposed in Supabase API settings.</div>'
+    return
+  }
+  if (!tables.length) {
+    el.innerHTML = '<div style="color:#aaa;font-size:13px;padding:2rem 0">No tables configured for this studio yet. Set them up in the admin 🪑 Tables tab.</div>'
+    return
+  }
+
+  // Load seating assignments
+  const sessionIds = sessions.map(s => s.id)
+  let assignments = []
+  if (sessionIds.length) {
+    const aRes = await fetch(SUPABASE_URL + '/rest/v1/seating_assignments?session_id=in.(' + sessionIds.join(',') + ')', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    })
+    const aJson = await aRes.json()
+    assignments = Array.isArray(aJson) ? aJson : []
+  }
+
+  // Load bookings
+  let bookings = []
+  if (sessionIds.length) {
+    const { data: bData } = await sb.from('bookings')
+      .select('id, session_id, customer_name, qty, shopify_order_name')
+      .in('session_id', sessionIds).gt('qty', 0).is('returned_at', null)
+    bookings = bData || []
+  }
+
+  // Build tableMap: tableId → array of slot objects
+  const tableMap = {}
+  tables.forEach(t => { tableMap[t.id] = [] })
+
+  const assignByTableSession = {}
+  assignments.forEach(a => {
+    const key = a.table_id + '|' + a.session_id
+    if (!assignByTableSession[key]) assignByTableSession[key] = []
+    assignByTableSession[key].push(a)
+  })
+  Object.entries(assignByTableSession).forEach(([key, aList]) => {
+    const [tableId, sessionId] = key.split('|')
+    const session = sessions.find(s => s.id === sessionId)
+    if (!session || !tableMap[tableId]) return
+    const colour = getSessionColour(session)
+    const sessionBookings = aList.map(a => {
+      const b = bookings.find(bk => bk.id === a.booking_id)
+      return { name: a.customer_name || (b ? b.customer_name : '?'), qty: b ? b.qty : 1, bookingId: a.booking_id, assignmentId: a.id, assignedBy: a.assigned_by }
+    })
+    const totalGuests = sessionBookings.reduce((s, b) => s + (b.qty || 1), 0)
+    tableMap[tableId].push({ session, sessionBookings, totalGuests, colour, hasManual: aList.some(a => a.assigned_by === 'manual') })
+  })
+
+  // ── LEGEND ────────────────────────────────────────────────────────
+  const legendItems = [
+    { label: 'Party', key: 'party' },
+    { label: 'Mini Make', key: 'minimake' },
+    { label: 'Glazing', key: 'glazing' },
+    { label: 'Wheel', key: 'wheel' },
+    { label: 'Kids Class', key: 'kids' },
+    { label: 'Workshop / Other', key: 'default' },
+  ]
+  let legendHtml = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:1.2rem;align-items:center">'
+  legendHtml += '<span style="font-size:12px;color:#888">Session types:</span>'
+  legendItems.forEach(item => {
+    const c = SESSION_TYPE_COLOURS[item.key]
+    legendHtml += `<span style="font-size:12px;padding:2px 10px;border-radius:10px;background:${c.bg};color:${escText(c.text)};border:1px solid ${c.border}">${item.label}</span>`
+  })
+  const sessionIdsWithBookings = new Set(bookings.map(b => b.session_id))
+  const unassignedSessions = sessions.filter(s =>
+    !assignments.some(a => a.session_id === s.id) && sessionIdsWithBookings.has(s.id)
+  )
+  if (unassignedSessions.length) {
+    legendHtml += `<span style="font-size:12px;color:#e65100;margin-left:8px">⚠ ${unassignedSessions.length} session${unassignedSessions.length > 1 ? 's' : ''} not yet assigned</span>`
+  }
+  legendHtml += '<span style="font-size:12px;color:#aaa;margin-left:4px">· 🚪 door &nbsp; <span style="color:#4285f4">🪟 window</span></span>'
+  legendHtml += '</div>'
+
+  // ── ROOM LAYOUT ───────────────────────────────────────────────────
+  const roomList = Array.isArray(rooms) ? rooms : []
+  const roomNames = roomList.map(r => r.name)
+  const featList = Array.isArray(features) ? features : []
+
+  // Tables with no room or unknown room
+  const unroomed = tables.filter(t => !t.room_name || !roomNames.includes(t.room_name))
+
+  let roomsHtml = ''
+
+  // Helper: build feature SVG for a cell
+  function fpFeatureSvg(cellFeats) {
+    if (!cellFeats || !cellFeats.length) return ''
+    const W = FP_CELL_W, H = FP_CELL_H
+    const DOOR_COLOR = '#444'
+    const WIN_COLOR = '#4285f4'
+    let parts = ''
+    cellFeats.forEach(function(f) {
+      const edge = f.edge, type = f.feature_type
+      if (type === 'door') {
+        const GAP = W * 0.28
+        const GAPV = H * 0.32
+        if (edge === 'top') {
+          parts += `<line x1="0" y1="1" x2="${W/2-GAP/2}" y2="1" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<line x1="${W/2+GAP/2}" y1="1" x2="${W}" y2="1" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<path d="M ${W/2-GAP/2} 1 Q ${W/2} ${GAP*0.8} ${W/2+GAP/2} 1" stroke="${DOOR_COLOR}" stroke-width="1" fill="none" stroke-dasharray="2,2"/>`
+        } else if (edge === 'bottom') {
+          const y = H-1
+          parts += `<line x1="0" y1="${y}" x2="${W/2-GAP/2}" y2="${y}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<line x1="${W/2+GAP/2}" y1="${y}" x2="${W}" y2="${y}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<path d="M ${W/2-GAP/2} ${y} Q ${W/2} ${H-1-GAP*0.8} ${W/2+GAP/2} ${y}" stroke="${DOOR_COLOR}" stroke-width="1" fill="none" stroke-dasharray="2,2"/>`
+        } else if (edge === 'left') {
+          parts += `<line x1="1" y1="0" x2="1" y2="${H/2-GAPV/2}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<line x1="1" y1="${H/2+GAPV/2}" x2="1" y2="${H}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<path d="M 1 ${H/2-GAPV/2} Q ${GAPV*0.8} ${H/2} 1 ${H/2+GAPV/2}" stroke="${DOOR_COLOR}" stroke-width="1" fill="none" stroke-dasharray="2,2"/>`
+        } else if (edge === 'right') {
+          const x = W-1
+          parts += `<line x1="${x}" y1="0" x2="${x}" y2="${H/2-GAPV/2}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<line x1="${x}" y1="${H/2+GAPV/2}" x2="${x}" y2="${H}" stroke="${DOOR_COLOR}" stroke-width="${FP_THICK}"/>`
+          parts += `<path d="M ${x} ${H/2-GAPV/2} Q ${W-1-GAPV*0.8} ${H/2} ${x} ${H/2+GAPV/2}" stroke="${DOOR_COLOR}" stroke-width="1" fill="none" stroke-dasharray="2,2"/>`
+        }
+      } else if (type === 'window') {
+        const TICK = 5, N = 3
+        if (edge === 'top') {
+          parts += `<line x1="0" y1="1" x2="${W}" y2="1" stroke="${WIN_COLOR}" stroke-width="${FP_THICK}"/>`
+          for (let i=1;i<=N;i++) { const tx=(W/(N+1))*i; parts += `<line x1="${tx}" y1="1" x2="${tx}" y2="${1+TICK}" stroke="${WIN_COLOR}" stroke-width="1.5"/>` }
+        } else if (edge === 'bottom') {
+          const y=H-1
+          parts += `<line x1="0" y1="${y}" x2="${W}" y2="${y}" stroke="${WIN_COLOR}" stroke-width="${FP_THICK}"/>`
+          for (let i=1;i<=N;i++) { const tx=(W/(N+1))*i; parts += `<line x1="${tx}" y1="${y}" x2="${tx}" y2="${y-TICK}" stroke="${WIN_COLOR}" stroke-width="1.5"/>` }
+        } else if (edge === 'left') {
+          parts += `<line x1="1" y1="0" x2="1" y2="${H}" stroke="${WIN_COLOR}" stroke-width="${FP_THICK}"/>`
+          for (let i=1;i<=N;i++) { const ty=(H/(N+1))*i; parts += `<line x1="1" y1="${ty}" x2="${1+TICK}" y2="${ty}" stroke="${WIN_COLOR}" stroke-width="1.5"/>` }
+        } else if (edge === 'right') {
+          const x=W-1
+          parts += `<line x1="${x}" y1="0" x2="${x}" y2="${H}" stroke="${WIN_COLOR}" stroke-width="${FP_THICK}"/>`
+          for (let i=1;i<=N;i++) { const ty=(H/(N+1))*i; parts += `<line x1="${x}" y1="${ty}" x2="${x-TICK}" y2="${ty}" stroke="${WIN_COLOR}" stroke-width="1.5"/>` }
+        }
+      }
+    })
+    return `<svg style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible" viewBox="0 0 ${W} ${H}">${parts}</svg>`
+  }
+
+  // Helper: build a positioned table card on the grid
+  function fpTableCard(t) {
+    const slots = tableMap[t.id] || []
+    const maxConcurrent = slots.reduce((max, sl) => Math.max(max, sl.totalGuests), 0)
+    const isOver = maxConcurrent > t.capacity
+    const isEmpty = slots.length === 0
+    const isPortrait = t.orientation === 'portrait'
+    const isRound = t.shape === 'round'
+
+    const px = (t.position_x || 0) * FP_CELL_W
+    const py = (t.position_y || 0) * FP_CELL_H
+    const PAD = 6
+    const cardW = isRound ? FP_CELL_H - PAD*2 : isPortrait ? FP_CELL_W * 0.55 : FP_CELL_W * 2 - PAD*2
+    const cardH = isRound ? FP_CELL_H - PAD*2 : isPortrait ? FP_CELL_H * 2 - PAD*2 : FP_CELL_H * 0.55
+    const spanW = isPortrait ? FP_CELL_W : isRound ? FP_CELL_W : FP_CELL_W * 2
+    const spanH = isPortrait ? FP_CELL_H * 2 : FP_CELL_H
+    const radius = isRound ? '50%' : '6px'
+    const borderColor = isOver ? '#f43f5e' : isEmpty ? '#ccc' : '#888'
+    const bg = isEmpty ? '#f8f8f6' : '#fff'
+
+    // Compact slot badges — click table for full detail
+    let slotContent = ''
+    if (isEmpty) {
+      slotContent = `<div style="font-size:9px;color:#ccc;margin-top:2px">empty</div>`
+    } else {
+      slots.forEach(sl => {
+        const c = sl.colour
+        const timeLabel = fmtTime(sl.session.session_time)
+        const shortTitle = sl.session.title.length > 16 ? sl.session.title.substring(0,14) + '…' : sl.session.title
+        slotContent += `<div style="background:${c.bg};border:1px solid ${c.border};border-radius:3px;padding:2px 4px;margin-top:2px;font-size:9px;line-height:1.3">
+          <div style="font-weight:600;color:${escText(c.text)}">${timeLabel} · ${sl.totalGuests} guest${sl.totalGuests !== 1 ? 's' : ''}</div>
+          <div style="color:#555">${shortTitle}</div>
+        </div>`
+      })
+    }
+
+    // Encode table data for popup — store in a global map keyed by table id
+    fpTableSlotMap[t.id] = { table: t, slots: slots }
+
+    return `<div style="position:absolute;left:${px}px;top:${py}px;width:${spanW}px;height:${spanH}px;display:flex;align-items:center;justify-content:center;z-index:2;box-sizing:border-box">
+      <div onclick="showTablePopup('${t.id}')" style="width:${cardW}px;height:${cardH}px;border-radius:${radius};border:2px solid ${borderColor};background:${bg};box-shadow:0 2px 6px rgba(0,0,0,0.07);position:relative;overflow:hidden;display:flex;flex-direction:column;align-items:center;padding:4px 4px 2px;box-sizing:border-box;cursor:pointer;transition:box-shadow 0.15s" onmouseover="this.style.boxShadow='0 4px 14px rgba(0,0,0,0.15)'" onmouseout="this.style.boxShadow='0 2px 6px rgba(0,0,0,0.07)'">
+        <div style="font-weight:700;font-size:${isPortrait ? 11 : 12}px;color:${isEmpty ? '#bbb' : '#222'};line-height:1;white-space:nowrap">T${t.table_number}${t.label ? ' <span style="font-weight:400;color:#aaa;font-size:9px">' + t.label + '</span>' : ''}</div>
+        <div style="font-size:9px;color:${isOver ? '#f43f5e' : '#aaa'}">${maxConcurrent}/${t.capacity}${isOver ? ' ⚠' : ''}</div>
+        <div style="width:100%;overflow:hidden;flex:1">${slotContent}</div>
+      </div>
+    </div>`
+  }
+
+  // Render each room as a section
+  if (roomList.length) {
+    roomList.forEach(function(room, rIdx) {
+      const cols = room.grid_cols || 8
+      const rows = room.grid_rows || 2
+      const roomTables = tables.filter(t => t.room_name === room.name)
+      const canvasW = cols * FP_CELL_W
+      const canvasH = rows * FP_CELL_H
+
+      roomsHtml += `<div style="margin-bottom:1.5rem">`
+      // Room header
+      roomsHtml += `<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <span style="font-weight:600;font-size:14px">🏠 ${escText(room.name)}</span>
+        <span style="font-size:12px;color:#aaa">${roomTables.length} table${roomTables.length !== 1 ? 's' : ''}</span>
+      </div>`
+
+      // Grid canvas
+      roomsHtml += `<div style="overflow-x:auto;background:#fafafa;border:1.5px solid #e0e0d8;border-radius:8px;padding:8px">`
+      roomsHtml += `<div style="position:relative;width:${canvasW}px;height:${canvasH}px">`
+
+      // Draw cells with features
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const x = col * FP_CELL_W
+          const y = row * FP_CELL_H
+          const cellFeats = featList.filter(f => f.room_name === room.name && f.cell_x === col && f.cell_y === row)
+          roomsHtml += `<div style="position:absolute;left:${x}px;top:${y}px;width:${FP_CELL_W}px;height:${FP_CELL_H}px;border:1px dashed #e0e0d8;box-sizing:border-box">${fpFeatureSvg(cellFeats)}</div>`
+        }
+      }
+
+      // Draw tables
+      roomTables.forEach(t => { roomsHtml += fpTableCard(t) })
+
+      roomsHtml += `</div></div>`
+
+      // Divider between rooms (not after last)
+      if (rIdx < roomList.length - 1) {
+        roomsHtml += `<div style="display:flex;align-items:center;gap:10px;margin:1rem 0 0.5rem">
+          <div style="flex:1;height:2px;background:linear-gradient(to right,#e0e0d8,transparent)"></div>
+          <span style="font-size:11px;color:#ccc">▼</span>
+          <div style="flex:1;height:2px;background:linear-gradient(to left,#e0e0d8,transparent)"></div>
+        </div>`
+      }
+
+      roomsHtml += `</div>`
+    })
+  }
+
+  // Unroomed tables fallback
+  if (unroomed.length) {
+    roomsHtml += `<div style="margin-top:1rem;padding:12px;border:1.5px dashed #ddd;border-radius:8px">
+      <div style="font-size:12px;color:#aaa;margin-bottom:8px">Unassigned to a room:</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px">`
+    unroomed.forEach(t => {
+      const slots = tableMap[t.id] || []
+      const totalSeated = slots.reduce((s, sl) => s + sl.totalGuests, 0)
+      const isOver = totalSeated > t.capacity
+      const isEmpty = slots.length === 0
+      let slotsHtml = ''
+      slots.forEach(sl => {
+        const c = sl.colour
+        slotsHtml += `<div style="background:${c.bg};border:1px solid ${c.border};border-radius:4px;padding:3px 6px;margin-top:4px;font-size:11px">
+          <div style="font-weight:600;color:${escText(c.text)}">${fmtTime(sl.session.session_time)}</div>
+          <div style="color:#555">${sl.totalGuests} guests</div>
+        </div>`
+      })
+      roomsHtml += `<div style="border:1.5px solid ${isOver ? '#f43f5e' : isEmpty ? '#e8e8e0' : '#c8c8c0'};border-radius:8px;padding:10px;background:${isEmpty ? '#fafafa' : '#fff'}">
+        <div style="font-weight:700;font-size:14px;color:${isEmpty ? '#ccc' : '#222'}">T${t.table_number}</div>
+        <div style="font-size:11px;color:#aaa">${totalSeated}/${t.capacity}</div>
+        ${isEmpty ? '<div style="font-size:11px;color:#ccc">Empty</div>' : slotsHtml}
+      </div>`
+    })
+    roomsHtml += `</div></div>`
+  }
+
+  el.innerHTML = legendHtml + roomsHtml
+}
+
+// ── AUTO-ASSIGN ENGINE ────────────────────────────────────────────
+
+async function assignTablesForDay() {
+  // Handle both the day-view button and floor-plan button
+  const btn = document.getElementById('assign-tables-btn') || document.getElementById('fp-assign-btn')
+  const fpBtn = document.getElementById('fp-assign-btn')
+  const dayBtn = document.getElementById('assign-tables-btn')
+  const statusEl = document.getElementById('fp-assign-status')
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Assigning…' }
+  if (fpBtn && fpBtn !== btn) { fpBtn.disabled = true; fpBtn.textContent = '⏳ Assigning…' }
+  if (statusEl) statusEl.textContent = ''
+
+  const today = dateStr(currentDate)
+
+  if (!currentStudioId) {
+    alert('No studio selected.')
+    if (dayBtn) { dayBtn.textContent = '🪑 Assign Tables'; dayBtn.disabled = false }
+    if (fpBtn) { fpBtn.textContent = '🪑 Assign Tables'; fpBtn.disabled = false }
+    return
+  }
+
+  try {
+    // 1. Load tables for this studio
+    const tablesRes = await fetch(SUPABASE_URL + '/rest/v1/studio_tables?studio_id=eq.' + currentStudioId + '&is_active=eq.true&order=table_number.asc', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    })
+    const tables = await tablesRes.json()
+    if (!Array.isArray(tables) || !tables.length) {
+      alert('No tables configured for this studio. Set them up in admin → 🪑 Tables first.')
+      return
+    }
+
+    // 2. Load table groups
+    const groupsRes = await fetch(SUPABASE_URL + '/rest/v1/studio_table_groups?studio_id=eq.' + currentStudioId + '&order=sort_order.asc', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    })
+    const groups = await groupsRes.json()
+    const tableGroups = Array.isArray(groups) ? groups : []
+
+    // 3. Load today's sessions
+    console.log('[Assign] studio:', currentStudioId, 'date:', today)
+    const sessRes = await fetch(SUPABASE_URL + '/rest/v1/sessions?studio_id=eq.' + currentStudioId + '&session_date=eq.' + today + '&order=session_time.asc&select=id,title,session_time,session_type,capacity,spaces_left_cache,duration_minutes', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    })
+    const sessions = await sessRes.json()
+    console.log('[Assign] sessions found:', Array.isArray(sessions) ? sessions.length : sessions)
+    if (!Array.isArray(sessions) || !sessions.length) {
+      alert('No sessions found for ' + today + ' at this studio.')
+      if (dayBtn) { dayBtn.textContent = '🪑 Assign Tables'; dayBtn.disabled = false }
+      if (fpBtn) { fpBtn.textContent = '🪑 Assign Tables'; fpBtn.disabled = false }
+      return
+    }
+
+    // 4. Load bookings
+    const sessionIds = sessions.map(s => s.id)
+    const { data: bookings } = await sb.from('bookings')
+      .select('id, session_id, customer_name, qty, shopify_order_name, raw_payload')
+      .in('session_id', sessionIds).gt('qty', 0).is('returned_at', null)
+
+    // 5. Load existing assignments — skip any session that already has manual assignments
+    const aRes = await fetch(SUPABASE_URL + '/rest/v1/seating_assignments?session_id=in.(' + sessionIds.join(',') + ')', {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    })
+    const existingAssignments = await aRes.json()
+    const manualSessionIds = new Set(
+      (Array.isArray(existingAssignments) ? existingAssignments : [])
+        .filter(a => a.assigned_by === 'manual')
+        .map(a => a.session_id)
+    )
+    // Also skip fully auto-assigned sessions (don't overwrite)
+    const autoAssignedSessionIds = new Set(
+      (Array.isArray(existingAssignments) ? existingAssignments : [])
+        .map(a => a.session_id)
+    )
+
+    // 6. Build table availability tracker
+    // tableHold[tableId] = array of {startMinutes, endMinutes}
+    const tableHold = {}
+    tables.forEach(t => { tableHold[t.id] = [] })
+
+    // Pre-populate holds from existing manual assignments
+    if (existingAssignments && existingAssignments.length) {
+      existingAssignments.forEach(a => {
+        const session = sessions.find(s => s.id === a.session_id)
+        if (!session) return
+        const startMins = timeToMins(session.session_time)
+        const holdMins = getHoldMinutes(session)
+        if (tableHold[a.table_id]) {
+          tableHold[a.table_id].push({ start: startMins, end: startMins + holdMins })
+        }
+      })
+    }
+
+    // Helpers
+    function timeToMins(timeStr) {
+      if (!timeStr) return 0
+      const parts = timeStr.split(':')
+      return parseInt(parts[0]) * 60 + parseInt(parts[1])
+    }
+
+    function getHoldMinutes(session) {
+      if (session.session_type === 'party') {
+        // Find next party session to determine how long to hold
+        const myMins = timeToMins(session.session_time)
+        const nextParty = sessions
+          .filter(s => s.session_type === 'party' && timeToMins(s.session_time) > myMins)
+          .sort((a, b) => timeToMins(a.session_time) - timeToMins(b.session_time))[0]
+        if (nextParty) {
+          // Hold until next party starts (so same tables can't be reused)
+          return timeToMins(nextParty.session_time) - myMins + 1
+        }
+        // No next party — use actual duration or 2.5 hours default
+        return (session.duration_minutes || 150) + 15
+      }
+      return 120 // 2-hour hold for all other types
+    }
+
+    function isTableFree(tableId, startMins, endMins) {
+      return (tableHold[tableId] || []).every(h => endMins <= h.start || startMins >= h.end)
+    }
+
+    function holdTable(tableId, startMins, endMins) {
+      if (tableHold[tableId]) tableHold[tableId].push({ start: startMins, end: endMins })
+    }
+
+    // 7. Sort sessions by time then by type (parties first within same time)
+    const sessionsToAssign = sessions
+      .filter(s => !manualSessionIds.has(s.id) && !autoAssignedSessionIds.has(s.id))
+      .sort((a, b) => {
+        const tA = timeToMins(a.session_time), tB = timeToMins(b.session_time)
+        if (tA !== tB) return tA - tB
+        if (a.session_type === 'party' && b.session_type !== 'party') return -1
+        if (b.session_type === 'party' && a.session_type !== 'party') return 1
+        return 0
+      })
+
+    const usedGroupIds = new Set() // track which groups have been assigned a party
+
+    const newAssignments = []
+
+    // Debug: log all party sessions
+    const partySessions = sessionsToAssign.filter(s => s.session_type === 'party')
+    console.log('[Party sessions to assign]', partySessions.map(s => s.session_time + ' id:' + s.id.substring(0,8)))
+
+    for (const session of sessionsToAssign) {
+      const sessionBookings = (bookings || []).filter(b => b.session_id === session.id)
+      if (!sessionBookings.length) continue
+
+      const startMins = timeToMins(session.session_time)
+      const holdMins = getHoldMinutes(session)
+      const endMins = startMins + holdMins
+
+      const isParty = session.session_type === 'party'
+      const isGlazing = session.session_type === 'glazing'
+      const isMiniMake = (session.title || '').toLowerCase().includes('mini make')
+      const isWheel = (session.title || '').toLowerCase().includes('wheel')
+      const isKidsClass = /class\s+\d+\s+of\s+\d+/i.test(session.title || '')
+      const isSplatter = isParty && (session.title || '').toLowerCase().includes('splatter')
+
+      if (isParty) {
+        // Each booking is a separate party — assign a unique group to each booking
+        const tablesNeeded = 2
+
+        console.log('[Party] session:', session.session_time, 'bookings:', sessionBookings.length, '(each gets its own group)')
+
+        for (const booking of sessionBookings) {
+          const sortedForParty = isSplatter
+            ? tableGroups.slice().sort((a, b) => {
+                const aHasSplatter = (a.table_ids || []).some(id => { const t = tables.find(x => x.id === id); return t && t.is_splatter_preferred })
+                const bHasSplatter = (b.table_ids || []).some(id => { const t = tables.find(x => x.id === id); return t && t.is_splatter_preferred })
+                if (aHasSplatter && !bHasSplatter) return -1
+                if (!aHasSplatter && bHasSplatter) return 1
+                return (a.sort_order || 0) - (b.sort_order || 0)
+              })
+            : tableGroups
+
+          let bookingAssigned = false
+          for (const group of sortedForParty) {
+            if (usedGroupIds.has(group.id)) continue
+            const groupTables = (group.table_ids || []).map(id => tables.find(t => t.id === id)).filter(Boolean)
+            if (groupTables.length < tablesNeeded) continue
+            const candidateTables = groupTables.slice(0, tablesNeeded)
+            const allFree = candidateTables.every(t => isTableFree(t.id, startMins, endMins))
+            if (!allFree) continue
+
+            candidateTables.forEach(t => { holdTable(t.id, startMins, endMins) })
+            usedGroupIds.add(group.id)
+            console.log('[Party assigned] booking:', booking.customer_name, 'session:', session.session_time, 'group:', group.name, 'tables:', candidateTables.map(t => 'T' + t.table_number))
+
+            // First table gets the actual booking, rest are reserved for the party
+            newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: candidateTables[0].id, booking_id: booking.id, customer_name: booking.customer_name, assigned_by: 'auto' })
+            for (let i = 1; i < candidateTables.length; i++) {
+              newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: candidateTables[i].id, booking_id: null, customer_name: booking.customer_name + ' (cont.)', assigned_by: 'auto' })
+            }
+            bookingAssigned = true
+            break
+          }
+
+          if (!bookingAssigned) {
+            // Fallback: use any free party-preferred or neutral tables
+            console.log('[Party FALLBACK] booking:', booking.customer_name, 'session:', session.session_time)
+            const pool = []
+            const addP = t => { if (!pool.find(x => x.id === t.id)) pool.push(t) }
+            tables.filter(t => t.is_kids_party_preferred && isTableFree(t.id, startMins, endMins)).forEach(addP)
+            tables.filter(t => isTableFree(t.id, startMins, endMins) && !t.is_kids_party_preferred && !t.is_glazing_preferred && !t.is_glazing_only && !t.is_minimake_preferred && !t.is_wheel_preferred && !t.is_kids_class_preferred).forEach(addP)
+            tables.filter(t => isTableFree(t.id, startMins, endMins) && !t.is_kids_party_preferred && !t.is_glazing_only).forEach(addP)
+            const picked = pool.slice(0, tablesNeeded)
+            picked.forEach(t => { holdTable(t.id, startMins, endMins) })
+            newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: picked[0].id, booking_id: booking.id, customer_name: booking.customer_name, assigned_by: 'auto' })
+            for (let i = 1; i < picked.length; i++) {
+              newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: picked[i].id, booking_id: null, customer_name: booking.customer_name + ' (cont.)', assigned_by: 'auto' })
+            }
+          }
+        }
+
+      } else {
+        // Workshop / glazing / mini make / wheel / kids class
+        // Determine if this session has a preferred table type
+        const hasPreference = isGlazing || isMiniMake || isWheel || isKidsClass
+
+        // Free tables helper
+        const isFreeAndAvailable = t => isTableFree(t.id, startMins, endMins)
+
+        // ALL free tables (excluding glazing-only for non-glazing, party-only for non-party)
+        const allAvailable = tables.filter(t => {
+          if (!isFreeAndAvailable(t)) return false
+          if (t.is_glazing_only && !isGlazing) return false
+          if (t.is_kids_party_preferred && !isParty) return false
+          return true
+        })
+
+        // Tier 1: preferred for THIS session type + same-type reuse
+        const tier1 = allAvailable.filter(t => {
+          const isPreferredForThis = (
+            (isGlazing && t.is_glazing_preferred) ||
+            (isMiniMake && t.is_minimake_preferred) ||
+            (isWheel && t.is_wheel_preferred) ||
+            (isKidsClass && t.is_kids_class_preferred)
+          )
+          if (isPreferredForThis) return true
+          // Same-type reuse
+          return (tableHold[t.id] || []).some(h => {
+            const prev = sessions.find(s => timeToMins(s.session_time) + getHoldMinutes(s) === h.end)
+            if (!prev) return false
+            return (isGlazing && prev.session_type === 'glazing') ||
+              (isMiniMake && (prev.title||'').toLowerCase().includes('mini make')) ||
+              (isWheel && (prev.title||'').toLowerCase().includes('wheel')) ||
+              (isKidsClass && /class\s+\d+\s+of\s+\d+/i.test(prev.title||''))
+          })
+        })
+
+        // Tier 2: no preference flags at all (truly neutral)
+        const tier2 = allAvailable.filter(t =>
+          !t.is_glazing_preferred && !t.is_minimake_preferred &&
+          !t.is_wheel_preferred && !t.is_kids_class_preferred
+        )
+
+        // Tier 3: preferred for OTHER types (avoid but use rather than leave unassigned)
+        const tier3 = allAvailable.filter(t => {
+          const isPreferredForThis = (isGlazing && t.is_glazing_preferred) ||
+            (isMiniMake && t.is_minimake_preferred) ||
+            (isWheel && t.is_wheel_preferred) ||
+            (isKidsClass && t.is_kids_class_preferred)
+          return !isPreferredForThis
+        })
+
+        // Tier 4: glazing-only as absolute last resort for non-glazing
+        const tier4 = tables.filter(t =>
+          isFreeAndAvailable(t) && t.is_glazing_only && !isGlazing
+        )
+
+        // Build candidate list — guaranteed non-empty if ANY table is free
+        const candidates = []
+        const add = t => { if (!candidates.find(c => c.id === t.id)) candidates.push(t) }
+        tier1.forEach(add)
+        tier2.forEach(add)
+        tier3.forEach(add)
+        tier4.forEach(add)
+
+        if (candidates.length === 0) {
+          console.warn('[Assign] No candidates for session:', session.title, '@', session.session_time)
+        }
+
+        // Fill tables: pack bookings into seats, move to next table when full
+        let tableIdx = 0
+        let seatsUsedOnCurrentTable = 0
+
+        for (const b of sessionBookings) {
+          if (tableIdx >= candidates.length) break // no more tables
+          const t = candidates[tableIdx]
+          // Will this booking fit?
+          if (seatsUsedOnCurrentTable + (b.qty || 1) > t.capacity && seatsUsedOnCurrentTable > 0) {
+            holdTable(t.id, startMins, endMins)
+            tableIdx++
+            seatsUsedOnCurrentTable = 0
+            if (tableIdx >= candidates.length) break
+          }
+          const currentTable = candidates[tableIdx]
+          if (seatsUsedOnCurrentTable === 0) {
+            // Starting a new table — check it's still free (might have been taken by previous booking)
+            if (!isTableFree(currentTable.id, startMins, endMins)) {
+              tableIdx++
+              seatsUsedOnCurrentTable = 0
+              if (tableIdx >= candidates.length) break
+            }
+          }
+          newAssignments.push({ studio_id: currentStudioId, session_id: session.id, table_id: candidates[tableIdx].id, booking_id: b.id, customer_name: b.customer_name, assigned_by: 'auto' })
+          seatsUsedOnCurrentTable += (b.qty || 1)
+        }
+        // Hold all tables used
+        const usedTableIds = [...new Set(newAssignments.filter(a => a.session_id === session.id).map(a => a.table_id))]
+        usedTableIds.forEach(tid => { if (isTableFree(tid, startMins, endMins)) holdTable(tid, startMins, endMins) })
+      }
+    }
+
+    // 8. Write new assignments to Supabase
+    if (!newAssignments.length) {
+      alert('All sessions are already assigned or have no bookings.')
+      return
+    }
+
+    const insertRes = await fetch(SUPABASE_URL + '/rest/v1/seating_assignments', {
+      method: 'POST',
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY), 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify(newAssignments)
+    })
+
+    if (!insertRes.ok) {
+      const err = await insertRes.json().catch(() => ({}))
+      throw new Error(err.message || 'HTTP ' + insertRes.status)
+    }
+
+    if (dayBtn) { dayBtn.textContent = '✓ Assigned!'; setTimeout(() => { dayBtn.textContent = '🪑 Assign Tables'; dayBtn.disabled = false }, 2500) }
+    if (fpBtn) { fpBtn.textContent = '✓ Assigned!'; setTimeout(() => { fpBtn.textContent = '🪑 Assign Tables'; fpBtn.disabled = false }, 2500) }
+    if (statusEl) { statusEl.textContent = 'Tables assigned for ' + today; setTimeout(() => { statusEl.textContent = '' }, 4000) }
+
+    // Switch to floor view to show result
+    loadFloorView()
+
+  } catch(e) {
+    alert('Assignment failed: ' + e.message)
+    if (dayBtn) { dayBtn.textContent = '🪑 Assign Tables'; dayBtn.disabled = false }
+    if (fpBtn) { fpBtn.textContent = '🪑 Assign Tables'; fpBtn.disabled = false }
+  }
+}
+
+// ── REASSIGN MODAL (from floor plan) ─────────────────────────────
+
+async function openReassignModal(assignmentId, bookingId, customerName, currentTableId) {
+  // Load all tables for this studio
+  const res = await fetch(SUPABASE_URL + '/rest/v1/studio_tables?studio_id=eq.' + currentStudioId + '&is_active=eq.true&order=table_number.asc', {
+    headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+  })
+  const tables = await res.json()
+  if (!Array.isArray(tables)) return
+
+  const existing = document.getElementById('reassign-modal')
+  if (existing) existing.remove()
+
+  const opts = tables.map(t => `<option value="${t.id}" ${t.id === currentTableId ? 'selected' : ''}>Table ${t.table_number}${t.label ? ' – ' + t.label : ''} (cap ${t.capacity})</option>`).join('')
+
+  const modal = document.createElement('div')
+  modal.id = 'reassign-modal'
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center'
+  modal.innerHTML = `
+    <div style="background:#fff;border-radius:12px;padding:1.8rem;width:360px;max-width:95vw;box-shadow:0 8px 40px rgba(0,0,0,0.2)">
+      <h3 style="margin:0 0 1rem;font-size:15px;font-weight:600">Move ${customerName}</h3>
+      <label style="font-size:12px;color:#666;display:block;margin-bottom:6px">Move to table</label>
+      <select id="reassign-table-sel" style="width:100%;height:36px;border:1px solid #ddd;border-radius:6px;padding:0 10px;font-size:14px;background:white;margin-bottom:0.8rem">${opts}</select>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:1rem">
+        <input type="checkbox" id="reassign-overseat"> Allow over-seating (ignore capacity)
+      </label>
+      <div id="reassign-err" style="color:#c00;font-size:12px;display:none;margin-bottom:0.8rem"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn" onclick="document.getElementById('reassign-modal').remove()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveReassign('${assignmentId}','${bookingId}')">Move</button>
+      </div>
+    </div>`
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove() })
+  document.body.appendChild(modal)
+}
+
+async function clearDayAssignments() {
+  if (!confirm('This will delete ALL table assignments for today (including manual ones) so you can re-run auto-assign. Continue?')) return
+  const today = dateStr(currentDate)
+  const { data: sessions } = await sb.from('sessions').select('id').eq('studio_id', currentStudioId).eq('session_date', today)
+  const sIds = (sessions || []).map(s => s.id)
+  if (!sIds.length) return
+  await fetch(SUPABASE_URL + '/rest/v1/seating_assignments?session_id=in.(' + sIds.join(',') + ')', {
+    method: 'DELETE',
+    headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+  })
+  await loadFloorView()
+}
+
+function showTablePopup(tableId) {
+  const entry = fpTableSlotMap[tableId]
+  if (!entry) return
+  const { table: t, slots } = entry
+  const totalSeated = slots.reduce((s, sl) => s + sl.totalGuests, 0)
+  const maxConcurrent = slots.reduce((max, sl) => Math.max(max, sl.totalGuests), 0)
+  const isOver = maxConcurrent > t.capacity
+
+  const existing = document.getElementById('table-detail-popup')
+  if (existing) existing.remove()
+
+  const prefFlags = []
+  if (t.is_kids_party_preferred) prefFlags.push('🎂 Party preferred')
+  if (t.is_glazing_preferred) prefFlags.push('🎨 Glazing preferred')
+  if (t.is_minimake_preferred) prefFlags.push('⭐ Mini Make preferred')
+  if (t.is_wheel_preferred) prefFlags.push('🏺 Wheel preferred')
+  if (t.is_kids_class_preferred) prefFlags.push('👶 Kids Class preferred')
+  if (t.is_glazing_only) prefFlags.push('🔒 Glazing only')
+
+  let slotsHtml = ''
+  if (!slots.length) {
+    slotsHtml = '<div style="color:#bbb;font-size:13px;padding:0.5rem 0">No sessions assigned to this table today.</div>'
+  } else {
+    slots.forEach(sl => {
+      const c = getSessionColour(sl.session)
+      slotsHtml += `<div style="margin-bottom:1rem">`
+      slotsHtml += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">`
+      slotsHtml += `<span style="background:${c.bg};color:${escText(c.text)};border:1px solid ${c.border};padding:2px 10px;border-radius:10px;font-size:12px;font-weight:600">${fmtTime(sl.session.session_time)}</span>`
+      slotsHtml += `<span style="font-size:13px;font-weight:600;color:#222">${escText(sl.session.title)}</span>`
+      slotsHtml += `<span style="font-size:12px;color:#aaa;margin-left:auto">${sl.totalGuests} guest${sl.totalGuests !== 1 ? 's' : ''}</span>`
+      slotsHtml += `</div>`
+      slotsHtml += `<div style="border:1px solid #f0f0e8;border-radius:6px;overflow:hidden">`
+      sl.sessionBookings.forEach((b, idx) => {
+        const rowBg = idx % 2 === 0 ? '#fff' : '#fafaf8'
+        slotsHtml += `<div style="display:flex;align-items:center;gap:10px;padding:7px 12px;background:${rowBg};border-bottom:${idx < sl.sessionBookings.length-1 ? '1px solid #f0f0e8' : 'none'}">`
+        slotsHtml += `<span style="font-size:13px;color:#333;flex:1">${escText(b.name)}</span>`
+        if (b.qty > 1) slotsHtml += `<span style="font-size:12px;color:#888;background:#f5f5f0;padding:1px 8px;border-radius:10px">×${b.qty}</span>`
+        slotsHtml += `<button onclick="openReassignModal('${b.assignmentId}','${b.bookingId}',${jsArg((b.name||''))},'${t.id}')" style="font-size:11px;padding:3px 10px;border:1px solid #ddd;border-radius:5px;background:white;cursor:pointer;color:#555">Move</button>`
+        slotsHtml += `</div>`
+      })
+      slotsHtml += `</div></div>`
+    })
+  }
+
+  const modal = document.createElement('div')
+  modal.id = 'table-detail-popup'
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9000;display:flex;align-items:center;justify-content:center;padding:1rem'
+  modal.innerHTML = `
+    <div style="background:#fff;border-radius:12px;width:100%;max-width:480px;max-height:85vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,0.2)">
+      <div style="padding:1.2rem 1.4rem;border-bottom:1px solid #f0f0e8;display:flex;align-items:flex-start;gap:12px">
+        <div style="flex:1">
+          <div style="font-weight:700;font-size:17px">Table ${t.table_number}${t.label ? ' <span style="font-weight:400;font-size:13px;color:#aaa">— ' + t.label + '</span>' : ''}</div>
+          <div style="font-size:12px;color:${isOver ? '#f43f5e' : '#888'};margin-top:2px">${maxConcurrent}/${t.capacity} peak${isOver ? ' ⚠ Over capacity' : ''}${t.room_name ? ' · ' + t.room_name : ''}</div>
+          ${prefFlags.length ? '<div style="font-size:11px;color:#aaa;margin-top:3px">' + prefFlags.join(' · ') + '</div>' : ''}
+        </div>
+        <button onclick="document.getElementById('table-detail-popup').remove()" style="font-size:20px;border:none;background:none;cursor:pointer;color:#aaa;padding:0;line-height:1">×</button>
+      </div>
+      <div style="padding:1.2rem 1.4rem">${slotsHtml}</div>
+    </div>`
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove() })
+  document.body.appendChild(modal)
+}
+
+async function saveReassign(assignmentId, bookingId) {
+  const tableId = document.getElementById('reassign-table-sel').value
+  const allowOver = document.getElementById('reassign-overseat').checked
+  const errEl = document.getElementById('reassign-err')
+  errEl.style.display = 'none'
+
+  if (!allowOver) {
+    // Check capacity for target table on this day
+    const today = dateStr(currentDate)
+    const { data: sessions } = await sb.from('sessions').select('id').eq('studio_id', currentStudioId).eq('session_date', today)
+    const sIds = (sessions || []).map(s => s.id)
+    const aRes = await fetch(SUPABASE_URL + '/rest/v1/seating_assignments?table_id=eq.' + tableId + (sIds.length ? '&session_id=in.(' + sIds.join(',') + ')' : ''), {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    })
+    const aList = await aRes.json()
+    const tRes = await fetch(SUPABASE_URL + '/rest/v1/studio_tables?id=eq.' + tableId, {
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY) }
+    })
+    const tList = await tRes.json()
+    const table = tList[0]
+    const { data: bData } = await sb.from('bookings').select('qty').in('id', (Array.isArray(aList) ? aList : []).map(a => a.booking_id).filter(Boolean))
+    const seated = (bData || []).reduce((s, b) => s + (b.qty || 1), 0)
+    if (table && seated >= table.capacity) {
+      errEl.textContent = 'Table ' + table.table_number + ' is at capacity (' + table.capacity + '). Check "Allow over-seating" to proceed.'
+      errEl.style.display = 'block'
+      return
+    }
+  }
+
+  const res = await fetch(SUPABASE_URL + '/rest/v1/seating_assignments?id=eq.' + assignmentId, {
+    method: 'PATCH',
+    headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + (window._hubToken || SUPABASE_KEY), 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+    body: JSON.stringify({ table_id: tableId, assigned_by: 'manual' })
+  })
+
+  if (!res.ok) { errEl.textContent = 'Save failed. Try again.'; errEl.style.display = 'block'; return }
+  document.getElementById('reassign-modal').remove()
+  await loadFloorView()
+}
+
+// ── QR / QUICK LINKS ──────────────────────────────────────────────────────────
+
+// ── LINKS / QR VIEW ──────────────────────────────────────────
+
+// Per-studio QR codes and links
+// Keys match studio IDs exactly. Fill in:
+//   partyDashboard  — QR PNG for party-dashboard.html (if different per studio, else move to QR_GLOBAL)
+//   partySignin     — QR PNG for legacy party sign-in page
+//   workshopPDF     — Google Drive direct-download or view URL for the workshop check-in sheet PDF
+const QR_BASE = 'https://snxibhbhhchjthfmjtaj.supabase.co/storage/v1/object/public/qr-codes'
+/* ======================= end of floor plan copy ======================= */
+
+// Open / close the floor plan for the Schedule's day
+async function planToggleFloor(show) {
+  const box = document.getElementById('plan-floor');
+  if (show === undefined) show = box.style.display === 'none';
+  box.style.display = show ? '' : 'none';
+  if (!show) return;
+  // Same database access as the Day view (public key) until those tables' permissions
+  // are checked: set window._hubToken to the signed-in token to switch it over.
+  window._hubToken = null;
+  window.currentStudioId = _sessionStudioId;
+  const [y, m, d] = _plan.date.split('-').map(Number);
+  currentDate = new Date(y, m - 1, d);
+  document.getElementById('plan-floor-title').textContent = '🪑 Floor plan · ' + ptyDayLabel(_plan.date);
+  await loadFloorView();
+  box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function planPrintClassList(sessionId) {
+  const el = _plan.classLists[sessionId];
+  if (!el) return;
+  let table = el.querySelector('table');
+  if (table && el.dataset.kids === '1') {   // kids table: print what's typed in, not the boxes
+    table = table.cloneNode(true);
+    const live = el.querySelectorAll('table input');
+    table.querySelectorAll('input').forEach((inp, i) => {
+      const src = live[i];
+      const span = document.createElement('span');
+      span.textContent = src.type === 'checkbox' ? (src.checked ? '✓' : '') : src.value;
+      inp.replaceWith(span);
+    });
+    table.querySelectorAll('.no-print, button').forEach(n => n.remove());
+  }
+  const win = window.open('', '_blank', 'width=800,height=900');
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(el.dataset.title || 'Class list')}</title>
+    <style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;padding:24px;color:#1a1a1a;font-size:13px}h1{font-size:17px;margin:0 0 4px}.sub{color:#777;margin-bottom:16px}
+    table{width:100%;border-collapse:collapse}th{text-align:left;font-size:10px;text-transform:uppercase;color:#777;border-bottom:1.5px solid #1a1a1a;padding:5px 8px}
+    td{padding:6px 8px;border-bottom:1px solid #eee;vertical-align:top}.cl-kids{font-size:12px;color:#7a5800}@page{size:portrait}</style></head><body>
+    <h1>${esc(shortTime(el.dataset.time))} — ${esc(el.dataset.title || '')}</h1>
+    <div class="sub">${esc(STUDIO_NAMES[_sessionStudioId] || '')} · ${esc(ptyDayLabel(_plan.date))} · ${esc(el.querySelector('.cl-head b') ? el.querySelector('.cl-head b').textContent : '')} people</div>
+    ${table ? table.outerHTML : '<p>No one booked yet.</p>'}</body></html>`);
+  win.document.close(); win.focus(); setTimeout(() => win.print(), 400);
+}
+// The Day view's own print code (copied below): it reads the day and studio from these.
+function planPrintSetup() {
+  window.currentStudioId = _sessionStudioId;
+  const [y, m, d] = _plan.date.split('-').map(Number);
+  window.currentDate = new Date(y, m - 1, d);
+}
+function planPrintExtras() { planPrintSetup(); printDayExtras(); }
+function planPrintGlazing() { planPrintSetup(); printAllGlazing(); }
+
+// Note on a session: the same notes box as the Day view (session_staff.notes).
+function planEditNote(sessionId) {
+  const x = _plan.sessions.find(z => z.id === sessionId) || (_plan.parties.find(p => p.session.id === sessionId) || {}).session;
+  if (!x) return;
+  const cur = ((_plan.staffBy[sessionId] || {}).notes) || '';
+  openDutySheet(`<h3>Note</h3><p>${esc(shortTime(x.session_time || ''))} · ${esc(x.title)}</p>
+    <label class="f">Note for this session<textarea id="plan-note-text" maxlength="1000" placeholder="e.g. Bring the extra easels out, one guest in a wheelchair">${esc(cur)}</textarea></label>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="planSaveNote('${escAttr(sessionId)}')">Save note</button></div>`);
+  const ta = document.getElementById('plan-note-text'); if (ta) ta.focus();
+}
+async function planSaveNote(sessionId) {
+  const text = document.getElementById('plan-note-text').value.trim();
+  const now = new Date().toISOString();
+  const row = _plan.staffBy[sessionId];
+  const r = row ? await sb.from('session_staff').update({ notes: text, updated_at: now }).eq('session_id', sessionId)
+                : await sb.from('session_staff').insert({ session_id: sessionId, studio_id: _sessionStudioId, notes: text, updated_at: now });
+  if (r.error) { alert("Couldn't save the note: " + r.error.message); return; }
+  _plan.staffBy[sessionId] = Object.assign({}, row || { session_id: sessionId }, { notes: text });
+  closeDutySheet(); renderPlanDay();
+}
+
+// ---------- Party forms on the Schedule ----------
+// The form, pricing, gift card, POS order and thank-you email are the Day view's
+// own code (copied as-is below, in the party script), so both always agree.
+// Builds one party's form (the Day view's own form) as a standalone element.
+// pt: { booking_id, booking, detail, session, t1, t2 }
+function buildPartyFormEl(pt) {
+  window.currentStudioId = _sessionStudioId;
+  document.getElementById('date-picker').value = pt.session.session_date || (_plan && _plan.date) || '';
+  document.getElementById('studio-name').textContent = STUDIO_NAMES[_sessionStudioId] || '';
+  const subtype = getPartySubtype(pt.session.title || '');
+  const el = document.createElement('div');
+  el.id = 'card-party-' + pt.booking_id;
+  el.innerHTML = `<span class="session-title" style="display:none">${esc(pt.session.title || '')}</span>
+    <input type="hidden" id="d2-pt1-${escAttr(pt.booking_id)}" value="${escAttr(pt.t1 || '')}">
+    <input type="hidden" id="d2-pt2-${escAttr(pt.booking_id)}" value="${escAttr(pt.t2 || '')}">` +
+    buildPartyBookingBlock(Object.assign({}, pt.booking, { session_id: pt.session.id }), pt.detail, subtype, 0,
+      pt.session.title || '', pt.session.session_date || '', pt.session.session_time || '', [], 'hub');
+  setTimeout(() => {   // show the calculation straight away if the party's already closed
+    const blk = el.querySelector('[id^="block-"]');
+    if (blk && pt.detail && pt.detail.actual_guests) recalcOutcome(blk.id.replace('block-', ''), subtype);
+  }, 0);
+  return el;
+}
+// (Nov 9 2026) Cancel a party from the Schedule (the Families tab's Change / Cancel): home office any time; coordinators up to 14 days before
+function planPartyCancelOk(pt) {
+  if (!pt || !pt.booking_id || !pt.session) return false;
+  if (_hoCan && _hoCan.edit) return true;
+  if (!planCanEdit()) return false;
+  const days = Math.round((new Date(String(pt.session.session_date) + 'T12:00:00') - new Date(localDateStr(new Date()) + 'T12:00:00')) / 86400000);
+  return days >= 14;
+}
+// (Nov 9 2026) 📅 A day with people on shift and nothing saved yet (no roles saved): home office's Hub runs the day board's own
+// planning for that day in the background (day-board.html?autoplan=1: Plan the day + Save the day), then shows it. Once per day per visit;
+// a saved day is never changed. (Studios get it from the day board's 📅 Plan ahead, run by home office.)
+const _planAutoTried = {};
+function planAutoFromBoard(P) {
+  if (!P || !(_studioData && _studioData.isAdmin) || !_sessionStudioId) return;
+  if (P.date < localDateStr(new Date()) || !(P.team || []).length) return;
+  if (PLAN_ROLES.some(([f]) => String(P.roles[f] || '').trim())) return;   // (roles saved: the day has a plan)
+  const key = _sessionStudioId + '|' + P.date; if (_planAutoTried[key]) return; _planAutoTried[key] = true;
+  const f = document.createElement('iframe');
+  f.style.cssText = 'position:fixed;width:1200px;height:800px;left:-9999px;top:0;opacity:0;pointer-events:none';
+  f.src = `day-board.html?autoplan=1&studio=${encodeURIComponent(_sessionStudioId)}&date=${encodeURIComponent(P.date)}`;
+  const done = async ev => {
+    const d = ev.data || {}; if (d.dayboard !== 'autoplan' || d.studio !== _sessionStudioId || d.date !== P.date) return;
+    window.removeEventListener('message', done); clearTimeout(t); f.remove();
+    if (d.result === 'planned' && _plan && _plan.date === P.date) { await loadPlanDay(P.date); _plan.msg = '📅 Planned from the day board: change anything, then Save.'; renderPlanDay(); }
+  };
+  const t = setTimeout(() => { window.removeEventListener('message', done); f.remove(); }, 60000);
+  window.addEventListener('message', done); document.body.appendChild(f);
+  P.msg = P.msg || '📅 Planning this day from the day board…'; const m = document.getElementById('plan-msg'); if (m) m.textContent = P.msg;
+}
+function togglePartyForm(i) {
+  const pt = _plan.parties[i];
+  if (!pt) return;
+  if (_plan.partyForms[pt.booking_id]) { delete _plan.partyForms[pt.booking_id]; delete _wu[pt.booking_id]; renderPlanDay(); return; }
+  _plan.partyForms[pt.booking_id] = document.createElement('div');   // 🎉 the new After the party panel (the old form: its "Old form" button)
+  renderPlanDay(); wuOpen(pt);
+}
+// =====================================================================================================================
+// 🎉 After the party (party_wrapup.sql): the Hub's form for a kids party, splatter party, get-together or field trip.
+//   Before (contact, project, notes) → On the day (guests, art and party time; 11am kids parties: extra adults as $5 observers;
+//   field trips: children only) → Settle up, priced from Party pricing (World settings), with the customer's member price:
+//   paid so far (Shopify, World invoice, Stripe or field trip invoice) vs the actual total (with the terms' minimums).
+//   Owed → 💳 Take payment (card here, QR or pay link; gift cards and credit codes too). Credit → 🎁 gift card.
+//   Field trips can instead send the final count to the field trip tracker, to invoice. Then Save and the thank-you email.
+// =====================================================================================================================
+let _wuPricing = null, _wu = {};
+async function wuPricing() {
+  if (_wuPricing) return _wuPricing;
+  // (the prices are the same everywhere, but public-studio-data wants a studio on every request)
+  const get = v => fetch(`${SUPABASE_URL}/functions/v1/public-studio-data?view=${v}&studio=${encodeURIComponent(_sessionStudioId || 'BC-YYJ-OB')}`, { headers: { Authorization: 'Bearer ' + SUPABASE_ANON_KEY, apikey: SUPABASE_ANON_KEY } }).then(r => r.json()).catch(() => ({}));
+  const [pa, ev, ft] = await Promise.all([get('parties'), get('events'), get('fieldtrips')]);
+  const out = { P: Object.assign({}, (ev && ev.pricing) || {}, (pa && pa.pricing) || {}), disc: (pa && pa.member_discount) || null, FT: (ft && ft.pricing) || {} };
+  if (!(out.P.kids && +out.P.kids.base > 0)) { out.missing = true; return out; }   // (Nov 10 2026) a failed load isn't kept: tried again next time
+  _wuPricing = out;
+  return _wuPricing;
+}
+function wuKind(s) { const t = String((s && s.title) || '').toLowerCase(), w = s && s.world_party;
+  return /buyout/.test(t) ? 'buyout' : /field\s*trip/.test(t) ? 'field_trip' : w === 'splatter' || /splatter/.test(t) ? 'splatter' : w === 'get_together' || /get.?together/.test(t) ? 'get_together' : 'kids'; }
+const WU_LABEL = { kids: 'Kids Party', splatter: 'Splatter Party', get_together: 'Adult Get-Together', field_trip: 'Field Trip', buyout: 'Studio Buyout' };
+const wuMin = t => { const m = String(t || '').match(/(\d+)/); return m ? +m[1] : 0; };
+async function wuOpen(pt) {
+  const id = pt.booking_id, k = wuKind(pt.session), d = pt.detail || {}, b = pt.booking || {};
+  const W = _wu[id] = { pt, kind: k, loading: true, msg: '', f: {} };
+  let addons = {}; try { addons = parseAddonDetails(parsePartyAddons(b.raw_payload, getPartySubtype(pt.session.title || '')), getPartySubtype(pt.session.title || '')) || {}; } catch (e) {}
+  W.addons = addons;
+  try {
+    const [pr, paid] = await Promise.all([wuPricing(), sb.rpc('hub_party_paid', { p_booking: id })]);
+    if (paid.error) throw new Error(/hub_party_paid/.test(paid.error.message) ? 'Run party_wrapup.sql in Supabase first.' : paid.error.message);
+    W.pr = pr; W.paid = paid.data || {};
+    if (pr.missing) W.err = 'Party prices didn’t load, so the settle-up can’t be worked out. Close the form and open it again (or refresh the page).';
+  } catch (e) { W.err = e.message; }
+  const props = (W.paid && W.paid.props) || {};
+  const bookedGuests = +(String(props['Number of guests'] || '').match(/\d+/) || [])[0] || addons.guestCount || pt.guests || (k === 'get_together' || k === 'field_trip' ? 10 : 8);
+  W.promo = /yes/i.test(String(props['Promotional party'] || '')) || /promotional/i.test(JSON.stringify(props));   // 🎁 the party itself was free
+  W.booked = { guests: bookedGuests, art: addons.artTime || (/90/.test(props['Art time'] || '') ? '90 min' : k === 'get_together' || k === 'field_trip' ? '90 min' : '60 min'),
+    party: addons.partyTime || (/45/.test(props['Party time after'] || '') ? '45 min' : /60/.test(props['Party time after'] || '') ? '60 min' : /30/.test(props['Party time after'] || '') ? '30 min' : 'none'),
+    upgrade: !!addons.projectUpgrade || !!props['Project upgrade'], canvas: !!addons.canvasUpgrade || /yes/i.test(props['Canvas'] || ''), custom: /custom/i.test(JSON.stringify(props)) };
+  W.f = { contact_name: d.contact_name || b.customer_name || '', contacted: d.contacted || '', expected_guests: d.expected_guests || bookedGuests,
+    project: d.project || b.project_preference || props['Project Type'] || props['Project'] || '', party_reason: d.party_reason || d.occasion || b.reason_for_gathering || props['Reason for Celebration'] || props['Reason for get-together'] || '',
+    medium: d.medium || (() => { try { return mapProjectTypeToMedium(getProjectTypeFromPayload(b.raw_payload) || props['Project Type'] || '') || ''; } catch (e) { return ''; } })() || (k === 'field_trip' ? 'obc' : k === 'get_together' ? 'clay' : ''),
+    colour_choice: d.colour_choice || props['Colour Theme'] || '', school_name: d.school_name || '', grade_age_group: d.grade_age_group || '', notes: d.notes || '',
+    actual_guests: d.actual_guests || '', actual_art_time: d.actual_art_time || W.booked.art, actual_party_time: d.actual_party_time || W.booked.party,
+    extra_adults: d.extra_adults || '', outcome_notes: d.outcome_notes || '',
+    upgrade: d.extras && d.extras.upgrade != null ? !!d.extras.upgrade : W.booked.upgrade, custom: d.extras && d.extras.custom != null ? !!d.extras.custom : W.booked.custom,
+    canvas: d.extras && d.extras.canvas != null ? !!d.extras.canvas : W.booked.canvas };
+  W.detail = d; W.loading = false; wuDraw(id);
+}
+// the actual total, before tax, from Party pricing (the same sums World uses), with the member price and the terms' minimums
+function wuCalc(W) {
+  const k = W.kind, f = W.f, P = (W.pr && W.pr.P) || {}, n = parseInt(f.actual_guests, 10) || 0, r2 = x => Math.round(x * 100) / 100;
+  const member = !!(W.paid && W.paid.member) && !(W.paid.plan === 'workshops' && k !== 'get_together'), rate = +P.rate || 0;
+  const after = wuMin(f.actual_party_time === 'none' ? 0 : f.actual_party_time), lines = [];
+  if (!n || k === 'buyout') return null;   // (a studio buyout settles through its balance invoice: Hub → Studio buyouts)
+  if (k === 'kids' || k === 'splatter') {
+    const K = P[k] || {}, inc = +K.included || 8, min = W.booked.guests >= 16 ? 16 : inc, people = Math.max(n, min);
+    const longArt = k === 'kids' && /90/.test(f.actual_art_time), base1 = +K.art_hours || 1, artH = longArt ? (+K.long_art_hours || 1.5) : base1;
+    const extras = Math.max(0, people - inc) * rate * artH + (k === 'kids' ? inc * rate * (artH - base1) : 0) + people * rate * (after / 60) +
+      (people >= (+K.big_at || 9999) ? (+K.big_fee || 0) * (artH / base1) : 0) + (k === 'splatter' && f.canvas ? (+K.canvas || 0) * people : 0);
+    const D = (W.pr && W.pr.disc) || {}, flat = member ? (+D.base_discount_flat_cents || 0) / 100 : 0;
+    let pct = member ? +D.extras_discount_pct || 0 : 0; if (pct > 1) pct /= 100;
+    const base = W.promo ? 0 : Math.max(0, (+K.base || 0) - flat), ex = r2(extras * (1 - pct));
+    lines.push([`${WU_LABEL[k]} (${inc} guests included)${W.promo ? ' · 🎁 promotional: on us' : flat ? ' · member price' : ''}`, base]);
+    if (ex) lines.push([`${people > n ? `${people} guests charged (minimum ${min})` : `${people} guests`}${longArt ? ', 90-min art' : ''}${after ? `, ${after} min party time` : ''}${k === 'splatter' && f.canvas ? ', canvas' : ''}${pct ? ` · member ${Math.round(pct * 100)}% off` : ''}`, ex]);
+    if (k === 'kids' && f.upgrade && +K.upgrade) lines.push(['Project upgrade', +K.upgrade]);
+    if (k === 'kids' && f.custom && +K.custom) lines.push(['Custom project', +K.custom]);
+    const obs = /^11:/.test(String(W.pt.session.session_time || '')) ? Math.max(0, parseInt(f.extra_adults, 10) || 0) : 0;
+    if (obs) lines.push([`Extra adults (observers) × ${obs}`, obs * (+K.parent_helper || 5)]);
+    return { lines, total: r2(lines.reduce((t, l) => t + l[1], 0)), people, min, member };
+  }
+  if (k === 'get_together') {
+    const G = P.get_together || {}, min = W.booked.guests >= 21 ? 21 : (+G.min || 10), people = Math.max(n, min);
+    const pct = member ? Math.max(0, Math.min(100, +G.member_pct || 0)) : 0, m = 1 - pct / 100;
+    lines.push([`${people} guests × $${(+G.per_person || 0).toFixed(2)} (90-min art)${people > n ? ` · minimum ${min}` : ''}`, r2(people * (+G.per_person || 0) * m)]);
+    if (after) lines.push([`${after} min party time`, r2(people * rate * (after / 60) * m)]);
+    if (people >= (+G.teacher_at || 9999)) lines.push(['Extra teacher', r2((+G.teacher_fee || 0) * m)]);
+    return { lines, total: r2(lines.reduce((t, l) => t + l[1], 0)), people, min, member, pct };
+  }
+  const FT = (W.pr && W.pr.FT) || {}, projects = FT.projects || [], min = +FT.min || 10, people = Math.max(n, min);
+  const pj = projects.find(p => String(f.project || '').toLowerCase().includes(String(p.label).toLowerCase())) || null;
+  const unit = pj ? +pj.price : Math.max(0, ...projects.map(p => +p.price || 0));
+  lines.push([`${people} children × $${unit.toFixed(2)}${pj ? ` (${pj.label})` : ' (choose the project above)'}${people > n ? ` · minimum ${min}` : ''}`, r2(people * unit)]);
+  if (/custom/i.test(f.project || '') && +FT.custom) lines.push(['Custom project', +FT.custom]);
+  return { lines, total: r2(lines.reduce((t, l) => t + l[1], 0)), people, min, member: false };
+}
+const wuTax = st => String(st || '').startsWith('ON') ? 0.13 : 0.05;
+function wuDraw(id) {
+  const W = _wu[id], el = _plan && _plan.partyForms[id]; if (!W || !el) return;
+  if (W.loading) { el.innerHTML = '<div class="wu-card"><p class="goal-note">Loading…</p></div>'; return; }
+  const k = W.kind, f = W.f, b = W.pt.booking || {}, s = W.pt.session, st = _sessionStudioId, i = (n, l, t, x = '') => `<label class="wu-f"><span>${l}</span><input data-wu="${n}" type="${t || 'text'}" value="${escAttr(f[n] ?? '')}" ${x}></label>`;
+  const sel = (n, l, opts) => `<label class="wu-f"><span>${l}</span><select data-wu="${n}">${opts.map(o => `<option value="${escAttr(o[0])}"${String(f[n]) === o[0] ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select></label>`;
+  const is11 = /^11:/.test(String(s.session_time || '')), d = W.detail || {};
+  let h = `<div class="wu-card"><div class="wu-head"><b>${esc(WU_LABEL[k])}</b> · ${esc(b.customer_name || '')} <span class="goal-note">${esc(b.customer_email || '')} · ${esc(b.shopify_order_name || '')}</span>
+      ${W.paid && W.paid.member ? `<span class="cust-st cust-booked" title="${escAttr('From their ' + (W.paid.member_source === 'membership' ? 'membership' : 'member tags'))}">★ Member${W.paid.plan === 'workshops' ? ' (Workshops Only)' : ''}</span>` : '<span class="cust-st">Not a member</span>'}</div>`;
+  if (W.err) h += `<p class="fd-msg">${esc(W.err)}</p>`;
+  // (Nov 10 2026) what they booked and paid for, so staff can see it (Expected guests below is just for planning)
+  { const B = W.booked || {}, paidB = Number((W.paid && W.paid.paid) || 0);
+    const bits = [`<b>${B.guests} guests</b>`, k !== 'get_together' && k !== 'field_trip' ? `${B.art} art` : '', B.party && B.party !== 'none' ? `${B.party} party time after` : 'no party time after',
+      B.upgrade ? 'project upgrade' : '', B.custom ? 'custom project' : '', B.canvas ? 'canvas' : ''].filter(Boolean);
+    h += `<div class="wu-booked">🧾 <b>Booked and paid for:</b> ${bits.join(' · ')} · <b>$${paidB.toFixed(2)}</b> before tax${W.promo ? ' · 🎁 promotional party (the party was free)' : ''}${W.paid && W.paid.source ? ` <span class="goal-note">(${esc({ shopify: 'Shopify order', stripe: '4Cats checkout', world_invoice: 'World invoice', field_trip_invoice: 'field trip invoice' }[W.paid.source] || W.paid.source)})</span>` : ''}</div>`; }
+  h += `<div class="wu-sec"><div class="wu-h">1 · Before</div><div class="wu-grid">${i('contact_name', 'Contact')}${sel('contacted', 'Contacted?', [['', '—'], ['Yes', 'Yes'], ['Left message', 'Left message'], ['No', 'No']])}
+      ${k === 'field_trip' ? i('school_name', 'School / group') + i('grade_age_group', 'Grade / ages') : i('party_reason', k === 'get_together' ? 'Occasion' : 'Celebrating')}
+      ${k === 'splatter' ? i('colour_choice', 'Colours') : sel('medium', 'Medium', [['', '— not set —'], ['obc', '🌈 Oven-bake Clay'], ['clay', '🏺 Clay'], ['painting', '🎨 Painting']].concat(k === 'kids' ? [['besties', '💕 Besties']] : [])) + i('project', 'Project')}${i('expected_guests', k === 'field_trip' ? 'Expected children' : 'Expected guests (for planning: doesn’t change the price)', 'number', 'min="0"')}</div>
+      <label class="wu-f wide"><span>Notes (allergies, requests)</span><textarea data-wu="notes" rows="2">${esc(f.notes || '')}</textarea></label></div>`;
+  h += `<div class="wu-sec"><div class="wu-h">2 · On the day</div><div class="wu-grid">${i('actual_guests', k === 'field_trip' ? 'Children who came' : 'Guests who came', 'number', 'min="0"')}
+      ${k !== 'field_trip' && k !== 'get_together' ? sel('actual_art_time', 'Art time', [['60 min', '60 min'], ['90 min', '90 min']]) : ''}
+      ${k !== 'field_trip' ? sel('actual_party_time', 'Party time after', [['none', 'None'], ['30 min', '30 min'], ['45 min', '45 min'], ['60 min', '60 min']]) : ''}
+      ${is11 && k === 'kids' ? i('extra_adults', 'Extra adults ($5 observers, beyond the 2 included)', 'number', 'min="0"') : ''}</div>
+      ${(() => { const K = ((W.pr && W.pr.P) || {})[k] || {}, cb = (n, l, price, was) => `<label class="wu-chk"><input type="checkbox" data-wu="${n}"${f[n] ? ' checked' : ''}> ${l}${price ? ` <span class="goal-note">$${Number(price).toFixed(2)}${n === 'canvas' ? ' per guest' : ''}</span>` : ''}${was ? ' <span class="goal-note">(booked)</span>' : ''}</label>`;
+        return k === 'kids' ? `<div class="wu-extras"><b>Extras</b>${cb('upgrade', 'Project upgrade', K.upgrade, W.booked.upgrade)}${cb('custom', 'Custom project', K.custom, W.booked.custom)}</div>`
+          : k === 'splatter' ? `<div class="wu-extras"><b>Extras</b>${cb('canvas', 'Canvas', K.canvas, W.booked.canvas)}</div>` : ''; })()}
+      <p class="goal-note">${k === 'field_trip' ? 'Children only: teachers and adults aren\u2019t charged.' : is11 && k === 'kids' ? 'At 11am, adults beyond the 2 included are $5 observers.' : 'Adults who join in count as guests.'}</p>
+      <label class="wu-f wide"><span>How it went (notes)</span><input data-wu="outcome_notes" value="${escAttr(f.outcome_notes || '')}"></label></div>`;
+  // 3 · Settle up
+  const c = wuCalc(W), paidBefore = Number((W.paid && W.paid.paid) || 0), paidNow = Number(d.settle_paid_now || 0), tax = wuTax(st);
+  h += '<div class="wu-sec"><div class="wu-h">3 · Settle up</div>';
+  if (k === 'buyout') h += '<p class="goal-note">A studio buyout is settled through its balance invoice (home office: 🏢 Studio buyouts).</p>';
+  else if (!c) h += '<p class="goal-note">Enter how many came to see what\u2019s owed or credited.</p>';
+  else {
+    const diff = Math.round((c.total - paidBefore - paidNow) * 100) / 100, withTax = Math.round(Math.abs(diff) * (1 + tax) * 100) / 100;
+    W.calc = Object.assign({}, c, { paidBefore, paidNow, diff, withTax });
+    h += '<div class="wu-calc">' + c.lines.map(l => `<div class="fd-pl"><span>${esc(l[0])}</span><span>$${Number(l[1]).toFixed(2)}</span></div>`).join('') +
+      `<div class="fd-pl fd-ptotal"><span>Actual total (before tax)</span><span>$${c.total.toFixed(2)}</span></div>
+       <div class="fd-pl"><span>Paid when booked <span class="goal-note">(${esc({ shopify: 'Shopify order', stripe: '4Cats checkout', world_invoice: 'World invoice', field_trip_invoice: 'field trip invoice' }[W.paid.source] || W.paid.source || '')})</span></span><span>\u2212$${paidBefore.toFixed(2)}</span></div>
+       ${paidNow ? `<div class="fd-pl"><span>Paid since, in the Hub</span><span>\u2212$${paidNow.toFixed(2)}</span></div>` : ''}
+       <div class="fd-pl fd-ptotal ${diff > 0.004 ? 'wu-owe' : diff < -0.004 ? 'wu-credit' : ''}"><span>${diff > 0.004 ? 'Owing' : diff < -0.004 ? 'Credit due' : 'All settled'} (with ${Math.round(tax * 100)}% tax)</span><span>$${withTax.toFixed(2)}</span></div></div>`;
+    if (d.settle_status) h += `<p class="goal-note">Last: <b>${esc({ paid: '✓ Paid', credit_sent: '🎁 Gift card sent', invoice_later: '📋 Final count sent to the field trip tracker', all_good: '✓ All good', link_sent: '✉️ Pay link sent', invoiced: '🧾 Invoice sent' }[d.settle_status] || d.settle_status)}</b></p>`;
+    h += '<div class="wu-acts">';
+    if (diff > 0.004) {
+      h += `<button class="fd-pay" onclick="wuPay('${escAttr(W.pt.booking_id)}')">💳 Take payment: $${withTax.toFixed(2)}</button>`;
+      if (k === 'field_trip') h += `<button class="ho-btn" onclick="wuFinal('${escAttr(W.pt.booking_id)}')">📋 Pay later: send the final count to invoice</button>`;
+    } else if (diff < -0.004) h += `<button class="ho-btn primary" onclick="wuGift('${escAttr(W.pt.booking_id)}')">🎁 Send a $${withTax.toFixed(2)} gift card</button>`;
+    else h += `<button class="ho-btn" onclick="wuSave('${escAttr(W.pt.booking_id)}',{settle_status:'all_good'})">✓ All good</button>`;
+    h += '</div>';
+  }
+  h += '</div>';
+  h += `${W.msg ? `<p class="fd-msg">${esc(W.msg)}</p>` : ''}<div class="wu-foot"><button class="ho-btn primary" onclick="wuSave('${escAttr(W.pt.booking_id)}')">Save</button>
+      ${b.customer_email ? `<button class="ho-btn" onclick="wuThanks('${escAttr(W.pt.booking_id)}')">✉️ ${d.thank_you_sent_at ? 'Resend' : 'Send'} the thank-you</button>${d.thank_you_sent_at ? `<span class="goal-note">sent · ${esc(d.party_ticket_number || '')}</span>` : ''}` : ''}
+      <span class="spacer"></span><button class="ho-btn sm" onclick="wuOldForm('${escAttr(W.pt.booking_id)}')">Old form</button></div></div>`;
+  el.innerHTML = h;
+}
+document.addEventListener('input', ev => { const t = ev.target; if (!t.dataset || !t.dataset.wu || t.type === 'checkbox') return; const card = t.closest('.pf-wrap'); const id = card && card.dataset.pf; if (!id || !_wu[id]) return; _wu[id].f[t.dataset.wu] = t.value; });
+document.addEventListener('change', ev => { const t = ev.target; if (!t.dataset || !t.dataset.wu) return; const card = t.closest('.pf-wrap'); const id = card && card.dataset.pf; if (!id || !_wu[id]) return; _wu[id].f[t.dataset.wu] = t.type === 'checkbox' ? t.checked : t.value;
+  if (['actual_guests', 'actual_art_time', 'actual_party_time', 'extra_adults', 'project', 'upgrade', 'custom', 'canvas'].includes(t.dataset.wu)) wuDraw(id); });
+function wuFields(W) {
+  const f = W.f, p = {}; ['contact_name', 'contacted', 'expected_guests', 'project', 'medium', 'colour_choice', 'school_name', 'grade_age_group', 'notes', 'actual_guests', 'actual_art_time', 'actual_party_time', 'extra_adults', 'outcome_notes'].forEach(k => { p[k] = f[k] == null ? '' : String(f[k]); });
+  p[W.kind === 'get_together' ? 'occasion' : 'party_reason'] = f.party_reason || '';
+  p.extras = { upgrade: !!f.upgrade, custom: !!f.custom, canvas: !!f.canvas };
+  if (W.calc) { p.settle_total = String(W.calc.total); p.settle_paid_before = String(W.calc.paidBefore); p.settle_member = !!W.calc.member;
+    p.outcome = W.calc.diff > 0.004 ? 'Charge extra' : W.calc.diff < -0.004 ? 'Issue credit' : 'All good'; p.outcome_amount = W.calc.withTax ? W.calc.withTax.toFixed(2) : ''; }
+  return p;
+}
+async function wuSave(id, extra, quiet) {
+  const W = _wu[id]; if (!W) return;
+  const { data, error } = await sb.rpc('hub_party_wrapup_save', { p_booking: id, p: Object.assign(wuFields(W), extra || {}) });
+  if (error) { W.msg = /hub_party_wrapup_save/.test(error.message) ? 'Run party_wrapup.sql in Supabase first.' : error.message; wuDraw(id); return false; }
+  W.detail = data; W.pt.detail = data; W.msg = quiet || 'Saved.'; wuDraw(id); return true;
+}
+function wuPay(id) {
+  const W = _wu[id], c = W && W.calc, b = W.pt.booking || {}; if (!c || c.diff <= 0) return;
+  hubCharge({ studio: _sessionStudioId, name: b.customer_name || 'the family', email: (W.paid && W.paid.email) || b.customer_email || '', customer_id: (W.paid && W.paid.customer_id) || null,
+    lines: [{ name: `${WU_LABEL[W.kind]} balance (${ptyDayLabel ? ptyDayLabel(W.pt.session.session_date) : W.pt.session.session_date}): ${c.people} ${W.kind === 'field_trip' ? 'children' : 'guests'}`, amount: c.diff }],
+    ref: 'party:' + id, why: `What\u2019s owing for the ${WU_LABEL[W.kind].toLowerCase()} after the day.`, allowInvoice: planCanEdit(),
+    onDone: async (msg, ok) => {
+      const paid = /^Charged/.test(msg || '');
+      if (paid) await wuSave(id, { add_paid_now: String(c.diff), settle_status: 'paid', log: { what: 'paid', amount: c.diff } }, msg);
+      else if (ok && /^Invoice/.test(msg || '')) await wuSave(id, { settle_status: 'invoiced', log: { what: 'invoice', amount: c.diff } }, msg);
+      else if (ok) await wuSave(id, { settle_status: 'link_sent', log: { what: 'pay_link', amount: c.diff } }, msg + ' When it\u2019s paid, mark it here with Save.');
+      else { W.msg = msg; wuDraw(id); }
+    } });
+}
+async function wuFinal(id) {
+  const W = _wu[id], c = W && W.calc; if (!c) return;
+  if (!confirm(`Send the final count (${c.people} children, $${c.diff.toFixed(2)} owing before tax) to the field trip tracker, to invoice?`)) return;
+  const { error } = await sb.rpc('hub_ft_final_count', { p_booking: id, p_children: parseInt(W.f.actual_guests, 10) || c.people, p_total: c.total, p_owing: c.diff });
+  if (error) { W.msg = error.message; wuDraw(id); return; }
+  await wuSave(id, { settle_status: 'invoice_later', log: { what: 'final_count', amount: c.diff } }, 'Sent to the field trip tracker: home office will invoice the balance.');
+}
+async function wuGift(id) {
+  const W = _wu[id], c = W && W.calc, b = W.pt.booking || {}; if (!c || c.diff >= 0) return;
+  const email = (W.paid && W.paid.email) || b.customer_email; if (!email) { alert('This booking has no email.'); return; }
+  if (!confirm(`Send a $${c.withTax.toFixed(2)} gift card to ${email}?`)) return;
+  try {
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/issue-party-gift-card`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify({ customer_email: email, customer_name: b.customer_name || '',
+      amount_pretax: Math.abs(c.diff), tax_rate: wuTax(_sessionStudioId), order_name: b.shopify_order_name || '', session_date: W.pt.session.session_date, party_type: W.pt.session.title || '', studio_name: STUDIO_NAMES[_sessionStudioId] || '' }) });
+    const d = await r.json().catch(() => ({})); if (!d.success) throw new Error(d.error || 'The gift card didn\u2019t send.');
+    await wuSave(id, { settle_status: 'credit_sent', log: { what: 'gift_card', amount: c.withTax, last4: d.last_characters } }, `🎁 Gift card sent (ends in …${d.last_characters}).`);
+  } catch (e) { W.msg = e.message; wuDraw(id); }
+}
+async function wuThanks(id) {
+  const W = _wu[id], b = W.pt.booking || {}, sub = { kids: 'kids', splatter: 'splatter', get_together: 'adult', field_trip: 'fieldtrip' }[W.kind];
+  await wuSave(id, null, 'Saved.');
+  try {
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/send-party-thankyou`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+      body: JSON.stringify({ bookingId: id, customerEmail: b.customer_email, customerName: b.customer_name, studioId: _sessionStudioId, sessionTitle: W.pt.session.title || '', sessionDate: W.pt.session.session_date, subtype: sub }) });
+    const d = await r.json().catch(() => ({})); if (!d.success) throw new Error(d.error || 'It didn\u2019t send.');
+    W.detail = Object.assign({}, W.detail, { thank_you_sent_at: new Date().toISOString(), party_ticket_number: d.ticketNumber }); W.msg = `✉️ Thank-you sent · ticket ${d.ticketNumber}.`;
+  } catch (e) { W.msg = 'The thank-you didn\u2019t send: ' + e.message; }
+  wuDraw(id);
+}
+function wuOldForm(id) {   // the old Day view form, for anything the new panel doesn't cover yet
+  const pt = (_plan.parties || []).find(p => p.booking_id === id); if (!pt) return;
+  delete _wu[id]; _plan.partyForms[id] = buildPartyFormEl(pt); renderPlanDay();
+}
+
+function placePartyForms() {
+  if (!_plan) return;
+  document.querySelectorAll('#plan-body .pf-wrap[data-cl]').forEach(slot => {
+    const el = _plan.classLists[slot.dataset.cl];
+    if (el && el.parentNode !== slot) slot.appendChild(el);
+  });
+  document.querySelectorAll('#plan-body .pf-wrap[data-pf]').forEach(slot => {
+    const el = _plan.partyForms[slot.dataset.pf];
+    if (el && el.parentNode !== slot) slot.appendChild(el);
+  });
+}
+// Party teachers picked on the Schedule go into the form's save too.
+function syncPartyTeacherInputs() {
+  (_plan.parties || []).forEach(pt => {
+    const a = document.getElementById('d2-pt1-' + pt.booking_id), b = document.getElementById('d2-pt2-' + pt.booking_id);
+    if (a) a.value = pt.t1 || '';
+    if (b) b.value = pt.t2 || '';
+  });
+}
+function loadPartyFormBanner() { /* the Day view's banner isn't on the Hub */ }
+
+// ==========================================================================
+// SIGN-IN AND VIEWS
+//   Studio view — opens with the studio email login (any staff member on the
+//     studio's device). Studio-level cards only, always that login's studio.
+//   Coordinator view — "🔓 Coordinator view" asks for a PIN. An active SC of
+//     this studio (or an admin) unlocks the SC cards on top. It locks itself
+//     after INACTIVITY_LOCK_MS idle, back to the studio view (not signed out).
+// Both levels are enforced on the server (resolveAccess in each Edge
+// Function) — hiding cards here is only the visual half. The PIN is kept in
+// memory only while unlocked: never stored, never sent anywhere else.
+// ==========================================================================
+let _sessionPin = null;        // coordinator PIN while the SC view is unlocked
+let _sessionStudioId = null;   // studio currently shown
+let _studioData = null;        // community-dashboard-data response for the studio login
+let _viewLevel = null;         // 'studio' | 'sc' | 'admin'
+let _studioViewStarted = false;
+let _fridayRefreshTimer = null;
+const FRIDAY_REFRESH_MS = 60000; // 60s — adjust if you want it faster/slower
+
+// ---------- Studio login ----------
+function renderLoginGate(errorMsg) {
+  document.getElementById('dashboard-shell').style.display = 'none';
+  document.getElementById('dashboard-gate').style.display = 'flex';
+  document.getElementById('dashboard-gate-body').innerHTML = `
+    <div class="gate-detail">Sign in with your studio login, or your own email to see your shifts.</div>
+    ${errorMsg ? `<div class="gate-error">${esc(errorMsg)}</div>` : ''}
+    <input type="email" id="login-email" class="gate-text-input" placeholder="Email" autocomplete="username" inputmode="email" autocapitalize="off" autocorrect="off" spellcheck="false" />
+    <input type="password" id="login-password" class="gate-text-input" placeholder="Password" autocomplete="current-password"
+           onkeydown="if(event.key==='Enter') submitStudioLogin()" />
+    <button class="gate-btn" id="login-btn" onclick="submitStudioLogin()">Sign in</button>
+    <button class="gate-schedule-btn" style="margin-top:10px" onclick="renderResetRequest()">First time, or forgot your password?</button>`;
+}
+// Staff set (or reset) their own password: Supabase emails them a link when THEY ask.
+function renderResetRequest(msg) {
+  document.getElementById('dashboard-gate-body').innerHTML = `
+    <div class="gate-detail">Type the email on your 4Cats staff profile. We’ll email you a link to set your password.</div>
+    ${msg ? `<div class="gate-error" style="background:#e3f9ec;color:#14532d">${esc(msg)}</div>` : ''}
+    <input type="email" id="reset-email" class="gate-text-input" placeholder="Email" autocomplete="username" inputmode="email" autocapitalize="off" autocorrect="off" spellcheck="false"
+           onkeydown="if(event.key==='Enter') sendResetLink()">
+    <button class="gate-btn" id="reset-btn" onclick="sendResetLink()">Email me a link</button>
+    <button class="gate-schedule-btn" style="margin-top:10px" onclick="renderLoginGate()">← Back to sign in</button>`;
+}
+async function sendResetLink() {
+  const email = (document.getElementById('reset-email').value || '').trim();
+  if (!/.+@.+\..+/.test(email)) return;
+  // Studio logins (@4cats.com) are shared: their password is changed by home office, not reset here
+  if (/@([a-z0-9-]+\.)*4cats\.com$/i.test(email)) {
+    renderResetRequest();
+    document.getElementById('dashboard-gate-body').insertAdjacentHTML('afterbegin',
+      '<div class="gate-error">Studio logins (@4cats.com) can’t be reset here. Please ask home office to change the password.</div>');
+    document.getElementById('reset-email').value = email;
+    return;
+  }
+  const btn = document.getElementById('reset-btn'); btn.disabled = true; btn.textContent = 'Sending…';
+  const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname });
+  // Same message either way, so the page never reveals which emails have a login
+  renderResetRequest(error && /rate|limit/i.test(error.message)
+    ? 'Too many emails were sent just now. Please try again in a little while.'
+    : 'If that email has a 4Cats login, a link is on its way. Check your inbox (and junk folder).');
+}
+function renderSetPassword(msg) {
+  document.getElementById('dashboard-shell').style.display = 'none';
+  document.getElementById('dashboard-gate').style.display = 'flex';
+  document.getElementById('dashboard-gate-body').innerHTML = `
+    <div class="gate-detail">Choose your password (at least 8 characters).</div>
+    ${msg ? `<div class="gate-error">${esc(msg)}</div>` : ''}
+    <input type="password" id="new-pw1" class="gate-text-input" placeholder="New password" autocomplete="new-password">
+    <input type="password" id="new-pw2" class="gate-text-input" placeholder="Same again" autocomplete="new-password" onkeydown="if(event.key==='Enter') saveNewPassword()">
+    <button class="gate-btn" id="new-pw-btn" onclick="saveNewPassword()">Save password</button>`;
+}
+async function saveNewPassword() {
+  const a = document.getElementById('new-pw1').value, b = document.getElementById('new-pw2').value;
+  if (a.length < 8) { renderSetPassword('Use at least 8 characters.'); return; }
+  if (a !== b) { renderSetPassword('Those two don’t match.'); return; }
+  document.getElementById('new-pw-btn').disabled = true;
+  const { error } = await sb.auth.updateUser({ password: a });
+  if (error) { renderSetPassword(/session|expired|token/i.test(error.message) ? 'That link has expired. Go back and ask for a new one.' : error.message); return; }
+  history.replaceState(null, '', location.pathname);
+  startStudioView();
+}
+
+async function submitStudioLogin() {
+  const email = (document.getElementById('login-email').value || '').trim();
+  const password = document.getElementById('login-password').value || '';
+  if (!email || !password) return;
+  const btn = document.getElementById('login-btn');
+  btn.disabled = true; btn.textContent = 'Signing in…';
+  const { error } = await sb.auth.signInWithPassword({ email, password });
+  if (error) { renderLoginGate("That email and password didn't match."); return; }
+  startStudioView();
+}
+
+async function signOutStudio() {
+  if (!confirm('Sign this device out of the studio login? The schedule will sign out too.')) return;
+  await sb.auth.signOut(); // onAuthStateChange below resets the page
+}
+
+function resetToSignedOut() {
+  endCoordinatorView(false);
+  stopStudioTimers();
+  _studioViewStarted = false; _studioData = null; _sessionStudioId = null; _viewLevel = null;
+  document.body.classList.remove('admin-login');
+  const ss = document.getElementById('staff-shell'); if (ss) ss.style.display = 'none';
+  teamBrand(false);   // (signed out: back to "4Cats Hub")
+  _me = null; if (_meTeamTimer) { clearInterval(_meTeamTimer); _meTeamTimer = null; }
+  document.querySelectorAll('.main [id^="card-"]').forEach(el => { el.innerHTML = ''; });
+  const sw = document.getElementById('admin-studio-switcher');
+  if (sw) sw.remove();
+  const pane = document.getElementById('schedule-pane');
+  pane.innerHTML = ''; _scheduleLoaded = false; _scheduleStudioId = null;
+  invReset();
+  _hoCan = { view: false, edit: false }; _hoAnns = []; _hoEditing = null;
+  const hoGroup = document.getElementById('nav-group-homeoffice');
+  if (hoGroup) hoGroup.style.display = 'none';
+  ['ho-editor', 'ho-list'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = ''; });
+  renderLoginGate();
+}
+
+function stopStudioTimers() {
+  if (_teamTimer) { clearInterval(_teamTimer); _teamTimer = null; }
+  _teamCount = 0;
+  _annData = []; _duties = []; _dutyTemplates = []; _dutiesLoaded = false; _teamPeople = [];
+  _oc = { open: null, close: null }; _cl = null; _todayEvents = []; _classInfo = null;
+  if (_clSaveTimer) { clearTimeout(_clSaveTimer); _clSaveTimer = null; }
+  closeDutySheet();
+  const annEl = document.getElementById('hub-announcements');
+  if (annEl) annEl.innerHTML = '';
+  if (_fridayRefreshTimer) { clearInterval(_fridayRefreshTimer); _fridayRefreshTimer = null; }
+  if (_goalRefreshTimer) { clearInterval(_goalRefreshTimer); _goalRefreshTimer = null; }
+}
+
+// ---------- Approved studio computers (hub_devices.sql) ----------
+// Each computer keeps a random device key in this browser. A studio login on a computer
+// home office hasn't approved shows a code to read to home office, and opens by itself
+// once they approve it (checked every 5 seconds).
+let _deviceTimer = null;
+function hubDeviceToken() {
+  let t = null;
+  try { t = localStorage.getItem('hub_device_key'); } catch (e) {}
+  if (!t || t.length < 32) {
+    const a = new Uint8Array(32); crypto.getRandomValues(a);
+    t = Array.from(a, b => b.toString(16).padStart(2, '0')).join('');
+    try { localStorage.setItem('hub_device_key', t); } catch (e) {}
+  }
+  // Ask Chrome to keep this site's data even when the disk gets full (so the approval isn't lost)
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); } catch (e) {}
+  return t;
+}
+async function hubDeviceGate(studioId) {
+  let r;
+  try { r = await sb.rpc('hub_device_check', { p_token: hubDeviceToken(), p_user_agent: navigator.userAgent }); } catch (e) { return true; }
+  if (r.error) return /hub_device_check/i.test(r.error.message) ? true : (renderLoginGate(r.error.message), false);   // before hub_devices.sql: open as before
+  const d = r.data || {};
+  if (d.status === 'approved' || d.status === 'not_needed') { if (_deviceTimer) { clearInterval(_deviceTimer); _deviceTimer = null; } return true; }
+  document.getElementById('dashboard-shell').style.display = 'none';
+  document.getElementById('dashboard-gate').style.display = '';
+  document.getElementById('dashboard-gate-body').innerHTML = `
+    <div class="gate-title">${d.status === 'revoked' ? 'This computer was removed' : 'This computer isn’t approved yet'}</div>
+    <p class="gate-detail">${d.status === 'revoked' ? 'Home office removed this computer from the studio’s list. Call home office if that’s a mistake.'
+      : 'The studio login only works on the studio’s own computers. Call or message home office and read them this code:'}</p>
+    ${d.status !== 'revoked' ? `<div class="dev-code">${esc(d.code || '')}</div>
+      <p class="gate-detail" style="margin-top:6px">This page opens by itself once they approve it.</p>` : ''}
+    <button class="gate-btn" style="background:#fff;color:var(--ink);border:1px solid var(--border);margin-top:14px" onclick="if(_deviceTimer){clearInterval(_deviceTimer);_deviceTimer=null}; sb.auth.signOut().then(()=>location.reload())">Sign out</button>`;
+  if (!_deviceTimer) _deviceTimer = setInterval(async () => {
+    try {
+      const c = await sb.rpc('hub_device_check', { p_token: hubDeviceToken(), p_user_agent: navigator.userAgent });
+      if (!c.error && c.data && c.data.status === 'approved') { clearInterval(_deviceTimer); _deviceTimer = null; startStudioView(studioId); }
+    } catch (e) {}
+  }, 5000);
+  return false;
+}
+
+// ---------- Studio view ----------
+async function startStudioView(studioId) {
+  // A personal staff login (hub_staff_portal.sql) opens the staff view instead.
+  if (!_studioViewStarted) {
+    try {
+      const w = await sb.rpc('hub_whoami');
+      if (!w.error && w.data && w.data.kind === 'staff') { startStaffView(w.data); return; }
+      if (!w.error && w.data && w.data.kind === 'studio' && !(await hubDeviceGate(studioId))) return;   // studio logins: approved computers only
+    } catch (e) { /* not set up yet: carry on as a studio login */ }
+  }
+  let data;
+  try {
+    data = await fetchFridayFillRateWithPin(null, studioId || _sessionStudioId);
+  } catch (e) {
+    // (Nov 9 2026) "not signed in" is often only a login that didn't renew in time (a tab or laptop waking from sleep, a dropped
+    // connection): renew it and try once more before asking to sign in again
+    if (/not signed in/i.test(e.message)) {
+      try {
+        const r = await sb.auth.refreshSession();
+        if (!r.error && r.data && r.data.session) { data = await fetchFridayFillRateWithPin(null, studioId || _sessionStudioId); }
+      } catch (e2) { console.warn('Login renewal didn\u2019t work:', e2 && e2.message); }
+    }
+    if (!data) {
+      // Signed in, but the login can't be used here (expired, or not linked to a studio).
+      renderLoginGate(/not signed in/i.test(e.message) ? 'Your login has expired — sign in again.' : e.message);
+      return;
+    }
+  }
+  _studioData = data;
+  // Home office (admin) logins see the Hub's own coordinator tabs without a PIN.
+  document.body.classList.toggle('admin-login', !!data.isAdmin);
+  if (data.isAdmin) setTimeout(refreshCoordBadges, 0);
+  _studioViewStarted = true;
+  _sessionStudioId = data.studioId;
+  _viewLevel = 'studio';
+  document.getElementById('dashboard-gate').style.display = 'none';
+  document.getElementById('dashboard-shell').style.display = 'flex';
+  showDashboardPane();
+  renderViewBar();
+  renderAdminStudioSwitcher(data);
+  setupHomeOffice(data);
+  await initDashboard(data);
+  loadStudioCards(data.studioId);
+  if (_fridayRefreshTimer) clearInterval(_fridayRefreshTimer);
+  _fridayRefreshTimer = setInterval(refreshFridayFillRate, FRIDAY_REFRESH_MS);
+  startGoalRefresh();
+  hubRestoreLast(data);   // (home office: back to the studio, tab and date from last time)
+  if (typeof dashStartup === 'function') dashStartup(data);   // 🏠 My dashboard first, for people who ticked "Open when the Hub starts"
+}
+
+// ---------- Kiln status (shown to customers on 4Cats World) ----------
+// Every studio login sees it; only the coordinator view (manager PIN) or an
+// admin login can change it. hub_kiln_set checks the PIN again on the server.
+// Customers see it on World's home page, with how many days after making to
+// book glazing.
+const KILN_STATES = { ok: ['🔥', 'Up and running', 7], behind: ['⏳', 'Running behind', 10], issue: ['🔧', 'Kiln issue', 18] };
+let _kiln = null;
+async function loadKilnCard(studioId) {
+  const el = document.getElementById('card-kiln');
+  if (!el || !studioId) return;
+  const r = await sb.rpc('hub_kiln_get', { p_studio_id: studioId });
+  if (r.error) { el.style.display = 'none'; return; }   // not set up yet, or not allowed
+  const k = (r.data && r.data[0]) || { status: 'ok', glaze_days: 7 };
+  _kiln = { studioId, status: k.status, days: k.glaze_days, note: k.note || '', updated_at: k.updated_at, updated_by: k.updated_by };
+  drawKilnCard();
+  el.style.display = '';
+}
+function drawKilnCard(msg) {
+  const el = document.getElementById('card-kiln'), k = _kiln;
+  if (!el || !k) return;
+  const st = KILN_STATES[k.status] || KILN_STATES.ok;
+  const changed = k.updated_at ? 'Changed ' + new Date(k.updated_at).toLocaleString('en-CA', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + (k.updated_by ? ' by ' + esc(k.updated_by) : '') : 'Shown on 4Cats World.';
+  if (!coordOrAdmin()) {   // read-only for the plain studio view
+    el.innerHTML = `<div class="team-title">Kiln status</div>
+    <div class="kiln-now"><span class="kn-ico">${st[0]}</span><span>${esc(st[1])}<br><span style="font-weight:400;font-size:13px;color:#666">Customers see: book glazing ${k.days} days or more after making</span></span></div>
+    ${k.note ? `<div class="kiln-row" style="color:#555">“${esc(k.note)}”</div>` : ''}
+    <div class="kiln-meta">${changed} · Coordinators can change this in the coordinator view.</div>`;
+    return;
+  }
+  el.innerHTML = `<div class="team-title">Kiln status</div>
+    <div class="kiln-now"><span class="kn-ico">${st[0]}</span><span>${esc(st[1])}<br><span style="font-weight:400;font-size:13px;color:#666">Customers see: book glazing ${k.days} days or more after making</span></span></div>
+    <div class="kiln-pick">${Object.keys(KILN_STATES).map(key => `<button type="button" class="${key}${k.status === key ? ' on' : ''}" onclick="kilnPick('${key}')">${KILN_STATES[key][0]} ${esc(KILN_STATES[key][1])}</button>`).join('')}</div>
+    <div class="kiln-row">Book glazing after <input type="number" id="kiln-days" min="1" max="90" value="${k.days}" style="width:64px"> days</div>
+    <div class="kiln-row"><input type="text" id="kiln-note" maxlength="140" placeholder="Note for customers (optional)" value="${esc(k.note)}" style="flex:1;min-width:180px">
+      <button class="ho-btn primary" type="button" onclick="kilnSave()">Save</button></div>
+    <div class="kiln-meta">${msg ? esc(msg) : changed}</div>`;
+}
+function kilnPick(key) {
+  if (!_kiln || !coordOrAdmin()) return;
+  _kiln.note = document.getElementById('kiln-note').value;
+  _kiln.status = key;
+  _kiln.days = KILN_STATES[key][2];   // suggested days for that state; change it before saving if needed
+  drawKilnCard('Not saved yet: press Save.');
+}
+async function kilnSave() {
+  if (!_kiln || !coordOrAdmin()) return;
+  _kiln.days = parseInt(document.getElementById('kiln-days').value, 10) || 7;
+  _kiln.note = document.getElementById('kiln-note').value.trim();
+  const who = (typeof _me !== 'undefined' && _me && _me.name) ? _me.name : null;
+  const r = await sb.rpc('hub_kiln_set', { p_studio_id: _kiln.studioId, p_status: _kiln.status, p_glaze_days: _kiln.days, p_note: _kiln.note, p_by: who, p_pin: _sessionPin || null });
+  if (r.error) { drawKilnCard('Not saved: ' + r.error.message); return; }
+  await loadKilnCard(_kiln.studioId);
+  drawKilnCard('Saved ✓ Customers will see it on 4Cats World within a minute.');
+}
+
+function loadStudioCards(studioId) {
+  loadKilnCard(studioId);
+  loadTeamToday(studioId);
+  loadAnnouncements(studioId);
+  loadDuties(studioId);
+  if (typeof hubTicketsBadge === 'function') hubTicketsBadge();
+  loadOpenClose(studioId);
+  loadTodayEvents(studioId);
+  loadClassStaff(studioId);
+  if (_teamTimer) clearInterval(_teamTimer);
+  _teamTimer = setInterval(() => {
+    if (!_studioViewStarted) return;
+    loadTeamToday(_sessionStudioId);
+    loadAnnouncements(_sessionStudioId);
+    if (!document.getElementById('duty-sheet-back')) loadDuties(_sessionStudioId); // not mid-edit
+    if (!_cl) loadOpenClose(_sessionStudioId);                                     // not mid-list
+    loadTodayEvents(_sessionStudioId);
+    loadClassStaff(_sessionStudioId);
+    if (coordOrAdmin()) refreshCoordBadges();
+  }, 5 * 60 * 1000);
+  loadFlashChallenges(studioId);
+  loadDailyHero(_sessionPin, studioId);
+  loadTodaysProjects(studioId);   // company-wide projects + this studio's forecast pills
+  loadWeekInfoBar();
+  refreshInventory();             // Supplies badge (or the page, if it's open)
+}
+
+// Coordinator-only cards (the server refuses these without a valid PIN).
+function loadCoordinatorCards(studioId) {
+  if (!_sessionPin) return;
+  loadAllBookingBuckets(_sessionPin, studioId);   // Kids Parties + Team Building
+  loadGoalProgress(_sessionPin, studioId);        // Sales Goals
+  if (paneVisible('points-pane')) loadPoints(_sessionPin, studioId);
+  loadMarketingSuggestions(_sessionPin, studioId); // weather tag already loaded by the studio view
+  loadCheckinCount(_sessionPin, studioId);
+  if (paneVisible('instagram-pane')) { coordinatorPaneBar('instagram-bar'); loadInstagram(_sessionPin, studioId); }
+  if (paneVisible('occupancy-pane')) openOccupancy();
+  refreshInventory();             // PIN unlocks the Counts tab
+}
+
+function renderViewBar() {
+  const bar = document.getElementById('view-bar');
+  if (!bar) return;
+  const studioName = STUDIO_NAMES[_sessionStudioId] || _sessionStudioId || '';
+  if (_sessionPin) {
+    bar.innerHTML = `
+      <span class="sc-badge">${_viewLevel === 'admin' ? '👁️ Admin view' : '🔓 Coordinator view'}</span>
+      <span><span class="who">${esc(studioName)}</span> · locks after ${Math.round(INACTIVITY_LOCK_MS / 1000)}s idle</span>
+      <span class="spacer"></span>
+      <button onclick="endCoordinatorView()">🔒 Lock</button>`;
+  } else {
+    bar.innerHTML = `
+      <span>Studio view · <span class="who">${esc(studioName)}</span></span>
+      <span class="spacer"></span>
+      <button class="unlock" onclick="openPinModal()">🔓 Coordinator view</button>
+      <button onclick="signOutStudio()">Sign out</button>`;
+  }
+}
+
+// ---------- Coordinator unlock ----------
+// The PIN box auto-submits only when someone TYPES the 4th digit, never when the
+// browser fills it in (a saved password filling in after each wrong try made it
+// loop and use up the 5-tries lockout). PIN boxes are text fields shown as dots
+// (.pin-mask), so browsers never see a password to save or fill in.
+function openPinModal(errorMsg) {
+  const studioName = STUDIO_NAMES[_sessionStudioId] || _sessionStudioId || 'this studio';
+  document.getElementById('pin-modal-body').innerHTML = `
+    <div class="gate-detail">Enter your coordinator PIN to unlock the coordinator view for ${esc(studioName)}.</div>
+    ${errorMsg ? `<div class="gate-error">${esc(errorMsg)}</div>` : ''}
+    <input type="text" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore autocomplete="off" inputmode="numeric" maxlength="4" id="coordinator-pin-input" class="pin-mask gate-pin-input"
+           placeholder="PIN" name="coord-pin-${Date.now()}"
+           onkeydown="if(event.key==='Enter') submitCoordinatorPin()"
+           oninput="if(event.inputType === 'insertText' && this.value.length===this.maxLength) submitCoordinatorPin()" />
+    <button class="gate-btn" onclick="submitCoordinatorPin()">Unlock</button>`;
+  document.getElementById('pin-modal').style.display = 'flex';
+  const input = document.getElementById('coordinator-pin-input');
+  if (input) input.focus();
+}
+
+function closePinModal() {
+  document.getElementById('pin-modal').style.display = 'none';
+  document.getElementById('pin-modal-body').innerHTML = '';
+}
+
+let _pinSubmitting = false;
+async function submitCoordinatorPin() {
+  if (_pinSubmitting) return;
+  const input = document.getElementById('coordinator-pin-input');
+  const pin = input ? input.value.trim() : '';
+  if (!pin) return;
+  _pinSubmitting = true;
+  let data;
+  try {
+    data = await fetchFridayFillRateWithPin(pin, _sessionStudioId);
+  } catch (e) {
+    _pinSubmitting = false;
+    openPinModal(e.message || 'Invalid PIN or not authorized for this view.');
+    return;
+  }
+  _pinSubmitting = false;
+  closePinModal();
+
+  _sessionPin = pin;
+  _viewLevel = data.level === 'admin' ? 'admin' : 'sc';
+  document.body.classList.add('sc-mode');
+  document.body.classList.toggle('preview-mode', _viewLevel === 'admin');
+
+  // An SC PIN always shows that SC's studio (an admin studio login may have
+  // been looking at a different one).
+  const studioChanged = data.studioId !== _sessionStudioId;
+  _sessionStudioId = data.studioId;
+  startBirthdayLook(data); // 🎂 only if it's this coordinator's birthday today
+  renderViewBar();
+  renderAdminStudioSwitcher(data); // admin PIN → all studios; SC PIN → no switcher
+  renderFridayFillRateBody(data); // Friday numbers only come back with a PIN
+  if (studioChanged) {
+    await renderWeatherCard(data.studioId);
+    loadStudioCards(data.studioId);
+  } else {
+    loadDailyHero(_sessionPin, data.studioId); // greeting switches to their name
+    drawKilnCard();                            // kiln status becomes editable
+  }
+  loadCoordinatorCards(data.studioId);
+  try { labourCardLoad(); } catch (e) {}   // (Nov 9 2026) 📊 labour % for the coordinator
+  loadFlashChallenges(data.studioId); // the SC can now claim
+  try { inflLoad(data.studioId); } catch (e) {}   // 📣 influencer posts
+  refreshCoordBadges();
+  checkAdjustPower();
+  resetInactivityTimer();
+  // The Schedule page switches to editing straight away.
+  if (paneVisible('plan-pane') && _plan) {
+    if (studioChanged) loadPlanDay(_plan.date); else renderPlanDay();
+  }
+}
+
+// Back to the studio view: forget the PIN, empty the coordinator cards.
+function endCoordinatorView(reload = true) {
+  const wasUnlocked = !!_sessionPin;
+  _sessionPin = null;
+  endBirthdayLook(); // back to today's theme
+  if (_studioViewStarted) _viewLevel = 'studio';
+  document.body.classList.remove('sc-mode', 'preview-mode');
+  if (_inactivityTimer) { clearTimeout(_inactivityTimer); _inactivityTimer = null; }
+  ['card-points', 'card-marketing-suggestions', 'card-checkins', 'card-instagram',
+   'card-friday-fillrate', 'card-sales-goals', 'card-kids-parties', 'card-team-building', 'card-make-the-gift', 'mtg-top'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = '';
+  });
+  _adjustStaff = null;
+  try { labourCardLoad(); } catch (e) {}   // (the coordinator's labour card goes again, unless home office)
+  drawKilnCard();   // kiln status back to read-only (admin logins stay editable)
+  const adminLogin = !!(_studioData && _studioData.isAdmin);
+  if (paneVisible('points-pane') || paneVisible('instagram-pane') || paneVisible('occupancy-pane') || (paneVisible('ackc-pane') && _ackcMode === 'coord') ||
+      (!adminLogin && (paneVisible('parties-pane') || paneVisible('notif-pane')))) showDashboardPane(); // coordinator-only pages
+  if (!adminLogin) _pty = null;
+  if (paneVisible('plan-pane') && _plan) renderPlanDay();   // Schedule stays, read-only
+  // Supplies: admin preview only while INVENTORY_LIVE is false, so locking
+  // closes it. Once live, locking reloads it so the Counts tab locks again.
+  if (!INVENTORY_LIVE) {
+    if (paneVisible('inventory-pane')) showDashboardPane();
+    invCloseGroup();
+    setInvBadge(0);
+  } else if (reload && paneVisible('inventory-pane')) {
+    loadInventory();
+  }
+  ['points-bar', 'instagram-bar', 'occupancy-bar', 'occ-days', 'occ-detail'].forEach(id => { const b = document.getElementById(id); if (b) b.innerHTML = ''; });
+  _occStrip = null;
+  _lastPointsData = null;
+  if (!_studioViewStarted) return;
+  if (!wasUnlocked || !reload) { renderViewBar(); return; }
+  loadFlashChallenges(_sessionStudioId); // hide "We did it!" again
+
+  // A non-admin studio login always returns to its own studio.
+  if (!_studioData.isAdmin && _sessionStudioId !== _studioData.studioId) {
+    changeAdminStudio(_studioData.studioId);
+  } else {
+    loadDailyHero(null, _sessionStudioId); // greeting back to "team"
+  }
+  renderViewBar();
+  renderAdminStudioSwitcher(Object.assign({}, _studioData, { studioId: _sessionStudioId }));
+}
+
+// Studio dropdown — shown for an admin studio login or an admin PIN.
+// Changing it reloads every card for the chosen studio.
+function renderAdminStudioSwitcher(data) {
+  const existing = document.getElementById('admin-studio-switcher');
+  if (existing) existing.remove();
   if (!data || !data.isAdmin) return;
-  for (let i = 0; i < 50 && typeof _hubRestoring !== 'undefined' && _hubRestoring; i++) await new Promise(r => setTimeout(r, 100));   // (after "back to last time's spot")
-  try { if (!_dash.me) await dashLoadMe(); } catch (e) { return; }
-  if (_dash.layout && _dash.layout.start) openMyDash();
+
+  const optionsHtml = (data.studios || []).map(id =>
+    `<option value="${esc(id)}" ${id === data.studioId ? 'selected' : ''}>${esc(STUDIO_NAMES[id] || id)}</option>`
+  ).join('');
+
+  const bar = document.createElement('div');
+  bar.id = 'admin-studio-switcher';
+  bar.className = 'admin-switcher-bar';
+  bar.innerHTML = `
+    <span class="admin-switcher-label">👁️ Admin — studio:</span>
+    <select id="admin-studio-select" onchange="changeAdminStudio(this.value)">${optionsHtml}</select>`;
+  document.getElementById('view-bar').after(bar);
 }
 
-// ---------- Styles (kept with the page so hub.html only gains the pane and button) ----------
-function dashStyles() {
-  if (document.getElementById('dash-css')) return;
-  const s = document.createElement('style'); s.id = 'dash-css';
-  s.textContent = `
-.dash-status { font-size: 13px; color: var(--ink-soft); } .dash-status.bad { color: var(--red); font-weight: 700; }
-.dash-editbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: var(--accent-soft); border-radius: 14px; padding: 10px 12px; margin: 8px 0 12px; }
-.dash-start { font-size: 13px; display: flex; align-items: center; gap: 6px; }
-.dash-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-rows: 4px; grid-auto-flow: row dense; gap: 0 12px; align-items: start; margin-top: 8px; }
-.dash-block { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px 14px; min-width: 0; box-sizing: border-box; display: flex; flex-direction: column; margin-bottom: 12px; }
-.dash-block.fixed .dash-body { flex: 1 1 auto; min-height: 0; max-height: none; }
-.dash-block.sz-s { grid-column: span 1; } .dash-block.sz-m { grid-column: span 2; } .dash-block.sz-l { grid-column: 1 / -1; }
-.dash-block header { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; height: 28px; flex: none; min-width: 0; }
-.dash-block header b { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.dash-block .spacer { flex: 1; }
-.dash-open, .dash-ref { border: 0; background: none; color: var(--accent); font-weight: 700; font-size: 13px; cursor: pointer; padding: 2px 4px; white-space: nowrap; flex: none; }
-.dash-ref { color: var(--ink-soft); }
-.dash-body { max-height: 420px; overflow-y: auto; font-size: 13.5px; }
-.dash-grid.editing .dash-block { outline: 2px dashed var(--accent-soft); resize: vertical; overflow: hidden; max-height: 1000px; } .dash-block.dragging { opacity: .4; outline: 2px dashed var(--accent) !important; box-shadow: none; }
-.dash-tools { display: flex; flex-wrap: nowrap; gap: 3px; align-items: center; flex: none; }   /* (in the header, so Customize never changes a block's height) */
-.dash-tools button { border: 1px solid var(--border); background: var(--card-bg); color: var(--ink); border-radius: 7px; min-width: 24px; height: 24px; padding: 0 4px; font-size: 11px; cursor: pointer; }
-.dash-tools button:disabled { opacity: .35; cursor: default; } .dash-tools .dash-sz.on { background: var(--accent); border-color: var(--accent); color: #fff; }
-.dash-grip { cursor: grab; font-size: 18px; line-height: 24px; color: var(--ink-soft); padding: 0 2px; }
-.dash-empty { color: var(--ink-soft); padding: 4px 0; } .dash-empty.bad { color: var(--red); }
-.dash-list { display: flex; flex-direction: column; gap: 6px; }
-.dash-row { border-left: 3px solid var(--border); padding: 2px 0 2px 8px; } .dash-row.late { border-left-color: var(--red); }
-.dash-main { font-weight: 600; } .dash-sub { color: var(--ink-soft); font-size: 12.5px; margin-top: 2px; }
-.dash-more { color: var(--ink-soft); font-size: 12.5px; margin-top: 6px; }
-.dash-big { margin-bottom: 6px; } .dash-big b { font-size: 26px; } .dash-big span { color: var(--ink-soft); }
-.dash-big b.warn, .dash-stats b.bad { color: var(--red); } .dash-big b.ok, .dash-stats b.ok { color: var(--green); }
-.dash-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
-.dash-pill { display: inline-block; border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 700; background: var(--border); color: var(--ink); }
-.dash-pill.bad { background: var(--red-bg); color: var(--red); } .dash-pill.mid { background: var(--amber-bg); color: var(--amber); } .dash-pill.ok { background: var(--green-bg); color: var(--green); }
-.dash-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(70px, 1fr)); gap: 8px; } .dash-stats div { text-align: center; font-size: 12px; color: var(--ink-soft); }
-.dash-stats b { display: block; font-size: 22px; color: var(--ink); }
-.dash-bars { display: flex; flex-direction: column; gap: 5px; }
-.dash-bar { display: grid; grid-template-columns: minmax(90px, 40%) 1fr 44px; gap: 8px; align-items: center; font-size: 12.5px; }
-.dash-bar span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .dash-bar b { text-align: right; }
-.dash-bar i { display: block; height: 8px; background: var(--border); border-radius: 99px; overflow: hidden; } .dash-bar em { display: block; height: 100%; background: var(--accent); } .dash-bar em.ok { background: var(--green); }
-.dash-links { display: flex; flex-wrap: wrap; gap: 6px; }
-.dash-note { width: 100%; min-height: 110px; box-sizing: border-box; border: 1px solid var(--border); border-radius: 10px; padding: 8px; font: inherit; resize: vertical; background: #fffdf2; }
-.dash-starters { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; margin: 10px 0 14px; }
-.dash-starter { display: block; background: var(--card-bg); border: 1px solid var(--border); border-radius: 14px; padding: 12px; cursor: pointer; } .dash-starter.best { border-color: var(--accent); }
-.dash-starter input { margin-right: 6px; }
-.dash-addgrp { margin-bottom: 10px; } .dash-addgrp > b { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-soft); margin: 8px 0 4px; }
-.dash-addrow { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); }
-.dash-set label { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; } .dash-ticks { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 4px; }
-.dash-hls { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-bottom: 8px; }
-.dash-hl { border-radius: 12px; padding: 8px 10px; background: var(--border); display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
-.dash-hl small { color: var(--ink-soft); } .dash-hl.ok { background: var(--green-bg); color: #14532d; } .dash-hl.mid { background: var(--amber-bg); color: #78350f; } .dash-hl.bad { background: var(--red-bg); color: #7f1d1d; }
-.dash-hl.ok small, .dash-hl.mid small, .dash-hl.bad small { color: inherit; opacity: .75; } .dash-red { color: var(--red); }
-.dash-acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; } .dash-assign { margin-top: 4px; font: inherit; font-size: 12.5px; padding: 3px 6px; border-radius: 8px; border: 1px solid var(--border); max-width: 100%; }
-.dash-pace { display: flex; flex-direction: column; }
-.dash-pace-row { display: grid; grid-template-columns: 30px minmax(0, 1fr) minmax(50px, 30%) 56px; gap: 8px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
-.dash-pace-row:last-child { border-bottom: 0; } .dash-rank { text-align: center; font-weight: 700; color: var(--ink-soft); }
-.dash-pace-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .dash-pace-name small { display: block; font-weight: 400; color: var(--ink-soft); font-size: 11.5px; }
-.dash-pace-row i { display: block; height: 8px; background: var(--border); border-radius: 99px; overflow: hidden; } .dash-pace-row em { display: block; height: 100%; }
-.dash-pace-row b { text-align: center; border-radius: 8px; padding: 2px 0; font-size: 12.5px; }
-.dash-wk { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; } .dash-wk b { font-size: 13.5px; }
-.dash-prog { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 13px; } .dash-prog i { flex: 1; height: 8px; background: var(--border); border-radius: 99px; overflow: hidden; } .dash-prog em { display: block; height: 100%; background: var(--green); }
-.dash-check { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto 24px; gap: 8px; align-items: center; padding: 6px 4px; border-bottom: 1px solid var(--border); cursor: pointer; }
-.dash-check input { width: 18px; height: 18px; margin: 0; accent-color: var(--green); } .dash-check.on .dash-main { color: var(--ink-soft); font-weight: 500; }
-.dash-check .dash-sub { margin: 0; text-align: right; } .dash-check.on .dash-sub { color: var(--green); font-weight: 600; } .dash-check a { text-decoration: none; text-align: center; }
-.dash-head-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; } .dash-head-row .dash-big { margin: 0; }
-.dash-order { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; border-bottom: 1px solid var(--border); transition: opacity .2s, transform .2s; }
-.dash-order.gone { opacity: 0; transform: translateX(20px); pointer-events: none; }
-.dash-tick { flex: none; width: 30px; height: 30px; border-radius: 999px; border: 1.5px solid var(--green); background: var(--card-bg); color: var(--green); font-weight: 800; cursor: pointer; }
-.dash-tick:hover { background: var(--green); color: #fff; } .dash-order-main { min-width: 0; flex: 1; }
-.dash-o-amt { float: right; font-weight: 800; } .dash-o-items { font-size: 12.5px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dash-block { color: var(--ink); }
-.dash-hero { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; } .dash-hero .spacer { flex: 1; }
-.dash-hero-btns { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; } .dash-hello { min-width: 0; }
-.dash-greet { font-family: 'Fredoka', 'Inter', sans-serif; font-size: clamp(22px, 2vw, 30px); font-weight: 700; color: var(--ink); line-height: 1.15; }
-.dash-date { color: var(--ink-soft); font-size: 13.5px; margin-top: 3px; } #dash-glance { font-weight: 600; }
-.dash-av { display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; background: var(--accent-soft); flex: none; }
-.dash-hero .hub-av, .dash-hero .dash-av { flex: none; }
-.dash-note-banner { display: flex; gap: 10px; align-items: flex-start; background: var(--card-bg); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 14px; padding: 10px 12px; margin: 0 0 12px; color: var(--ink); }
-.dash-note-banner > div { flex: 1; font-size: 14px; } .dash-note-banner b { display: block; margin-bottom: 2px; }
-.dash-setup { background: #f3e8fb; border: 1px solid #d9b8f0; border-radius: 14px; padding: 12px 14px; margin: 6px 0 12px; color: #3b1d52; font-size: 13.5px; }
-.dash-setup-note { width: 100%; box-sizing: border-box; min-height: 60px; margin-top: 4px; border: 1px solid #d9b8f0; border-radius: 10px; padding: 8px; font: inherit; }
-.dash-setup-btns { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; } .dash-setup-btns .spacer { flex: 1; }
-.dash-sws { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
-.dash-sw { text-align: left; border: 1px solid #e6e3ee; background: #fff; border-radius: 12px; padding: 8px; cursor: pointer; } .dash-sw.on { border-color: #111; box-shadow: 0 0 0 1px #111; }
-.dash-sw-pic { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 9px 26px; gap: 4px; padding: 6px; border-radius: 8px; height: 50px; box-sizing: border-box; }
-.dash-sw-pic i { display: block; border-radius: 3px; } .dash-sw-pic i + i { border: 1px solid; } .dash-sw-pic b { display: block; border-radius: 4px; border: 1px solid; }
-.dash-sw-name { display: block; font-weight: 700; font-size: 12.5px; margin-top: 6px; color: #1f1b3a; } .dash-sw-mood { display: block; font-size: 11px; color: #6b6a80; }
-.dash-sh { margin: 14px 0 6px; font-size: 13px; } .dash-set-row { display: flex; gap: 8px; align-items: center; margin: 6px 0; font-size: 13.5px; } .dash-set-row input[type=text] { flex: 1; padding: 6px 8px; border: 1px solid #ddd; border-radius: 8px; font: inherit; }
-.dash-avs { display: flex; flex-wrap: wrap; gap: 6px; max-height: 220px; overflow-y: auto; }
-.dash-avc { width: 44px; height: 44px; border-radius: 999px; border: 2px solid transparent; background: #f3f1f8; padding: 0; overflow: hidden; cursor: pointer; font-size: 22px; } .dash-avc img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.dash-avc.on { border-color: #111; }
-#mydash-pane.themed { background: var(--dash-bg); min-height: 100vh; box-sizing: border-box; }
-#mydash-pane.themed .ho-btn { background: var(--card-bg); color: var(--ink); border-color: var(--border); }
-#mydash-pane.themed .ho-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--dash-on); }
-#mydash-pane.themed input, #mydash-pane.themed select, #mydash-pane.themed textarea { background: var(--card-bg); color: var(--ink); border-color: var(--border); }
-#mydash-pane.themed .dash-block a, #mydash-pane.themed .dash-open { color: var(--accent); }
-#mydash-pane.dark .goal-note, #mydash-pane.dark .fd-sm, #mydash-pane.dark .lab-sub, #mydash-pane.dark .dash-sub { color: var(--ink-soft); }
-#mydash-pane.dark .dash-note { background: var(--dash-bg); color: var(--ink); } #mydash-pane.dark .dash-setup { background: #3b2f58; color: #f0eaf9; border-color: #5a4a80; }
-@media (max-width: 1100px) { .dash-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .dash-block.sz-l { grid-column: 1 / -1; } }
-@media (max-width: 640px) { .dash-grid { grid-template-columns: 1fr; } .dash-block.sz-s, .dash-block.sz-m, .dash-block.sz-l { grid-column: 1 / -1; } }`;
-  document.head.appendChild(s);
+async function changeAdminStudio(studioId) {
+  _sessionStudioId = studioId;
+  hubRemember({ studio: studioId });
+  try {
+    const data = await fetchFridayFillRateWithPin(_sessionPin, studioId);
+    if (_sessionPin) renderFridayFillRateBody(data);
+    await renderWeatherCard(studioId);
+    renderViewBar();
+    loadStudioCards(studioId);
+    loadCoordinatorCards(studioId);
+    if (_plan) _plan = Object.assign(_plan, { stale: true });   // Schedule reloads for the new studio
+    _pty = null; refreshCoordBadges();                            // Parties / Notifications for the new studio
+    if (paneVisible('parties-pane')) loadPartiesPane();
+    if (paneVisible('notif-pane')) loadNotifPane();
+    if (paneVisible('plan-pane') && _plan) loadPlanDay(_plan.date);
+    // keep both studio dropdowns in step, and the studio calendar if it's open
+    const top = document.getElementById('admin-studio-select'); if (top && top.value !== studioId) top.value = studioId;
+    renderPlanStudioPick();
+    if (paneVisible('schedule-pane') && _scheduleStudioId !== studioId) {   // the studio calendar: reload its page for the new studio
+      const fr = document.querySelector('#schedule-pane iframe');
+      if (fr) { const u = new URL(fr.getAttribute('src'), location.href); u.searchParams.set('studio', studioId); fr.src = u.pathname.split('/').pop() + u.search; _scheduleStudioId = studioId; }
+    }
+  } catch (e) {
+    console.error('Failed to switch studio view:', e);
+  }
 }
+
+async function refreshFridayFillRate() {
+  if (!_studioViewStarted || !_sessionPin) return;
+  try {
+    const data = await fetchFridayFillRateWithPin(_sessionPin, _sessionStudioId);
+    renderFridayFillRateBody(data);
+  } catch (e) {
+    console.error('Friday fill rate auto-refresh failed:', e);
+    // Deliberately not surfacing this to the UI — a transient failed refresh
+    // shouldn't yank the dashboard away from someone mid-use. It'll just
+    // retry on the next interval.
+  }
+}
+
+
+/* ---------- init (studio view) ---------- */
+async function initDashboard(fridayData) {
+  await renderWeatherCard(fridayData.studioId);
+  if (_sessionPin) renderFridayFillRateBody(fridayData); // coordinator view only
+}
+// ---------- Seasonal Theme (banner image + accent colors) ----------
+// Public/decorative, no PIN needed — loads immediately, before login even.
+// Falls back to the default purple gradient if no theme is active yet or
+// the fetch fails, so this can never block/break the rest of the page.
+
+// ---------- theme look: colours + hero banner (shared by the day's theme
+// and the coordinator birthday theme) ----------
+const THEME_VARS = ['--accent', '--accent-deep', '--sidebar-bg', '--sidebar-bg-2'];
+const THEME_VAR_KEYS = { accent_color: '--accent', accent_color_deep: '--accent-deep', sidebar_color: '--sidebar-bg', sidebar_color_deep: '--sidebar-bg-2' };
+let _baseLook = null;          // { vars, bannerUrl } — today's theme, set by loadDashboardTheme
+let _heroBannerUrl = null;
+let _heroObserver = null;
+function captureThemeVars() {
+  const o = {};
+  THEME_VARS.forEach(v => { o[v] = document.documentElement.style.getPropertyValue(v); });
+  return o;
+}
+function applyThemeVars(vars) {
+  THEME_VARS.forEach(v => {
+    if (vars[v]) document.documentElement.style.setProperty(v, vars[v]);
+    else document.documentElement.style.removeProperty(v); // back to the built-in purple
+  });
+}
+function paintHeroBanner() {
+  const hero = document.getElementById('card-daily-hero');
+  if (!hero) return;
+  hero.style.backgroundImage = _heroBannerUrl
+    ? `linear-gradient(135deg, rgba(0,0,0,0.35), rgba(0,0,0,0.15)), url('${_heroBannerUrl}')`
+    : '';
+}
+function setHeroBanner(url) {
+  _heroBannerUrl = url || null;
+  paintHeroBanner();
+  if (!_heroObserver) {
+    const heroEl = document.getElementById('card-daily-hero');
+    if (heroEl) {
+      _heroObserver = new MutationObserver(paintHeroBanner); // hero re-renders keep the banner
+      _heroObserver.observe(heroEl, { childList: true });
+    }
+  }
+}
+
+// ---------- coordinator birthday ----------
+// community-dashboard-data sends `birthday` + `birthdayTheme` with a PIN
+// unlock when it's (about) that person's birthday. The final check uses the
+// iPad's own date. The birthday look lasts until the coordinator view locks.
+// Set it up in projects.html → Themes → Coordinator birthday.
+let _birthdayActive = false;
+let _birthdayGreeting = null;
+function isBirthdayToday(b) {
+  if (!b || !b.month || !b.day) return false;
+  const t = new Date(), m = t.getMonth() + 1, d = t.getDate();
+  if (Number(b.month) === m && Number(b.day) === d) return true;
+  if (Number(b.month) === 2 && Number(b.day) === 29 && m === 2 && d === 28) {
+    const y = t.getFullYear();
+    return !((y % 4 === 0 && y % 100 !== 0) || y % 400 === 0); // Feb 29 birthday, not a leap year
+  }
+  return false;
+}
+function startBirthdayLook(data) {
+  endBirthdayLook(false);
+  if (!data || !isBirthdayToday(data.birthday)) return;
+  const bt = data.birthdayTheme || {};
+  if (!_baseLook) _baseLook = { vars: captureThemeVars(), bannerUrl: _heroBannerUrl };
+  const vars = Object.assign({}, _baseLook.vars);
+  Object.keys(THEME_VAR_KEYS).forEach(k => { if (bt[k]) vars[THEME_VAR_KEYS[k]] = bt[k]; });
+  applyThemeVars(vars);
+  setHeroBanner(bt.banner_image_url || _baseLook.bannerUrl);
+  _birthdayGreeting = (bt.greeting || '').trim() || 'Happy Birthday 🎂';
+  _birthdayActive = true;
+  launchConfetti();
+}
+function endBirthdayLook(rerender = true) {
+  if (!_birthdayActive) return;
+  _birthdayActive = false;
+  _birthdayGreeting = null;
+  if (_baseLook) { applyThemeVars(_baseLook.vars); setHeroBanner(_baseLook.bannerUrl); }
+  if (rerender && _lastHeroData) renderDailyHero(_lastHeroData);
+}
+// A short confetti burst. Skipped for anyone with reduced motion turned on.
+function launchConfetti() {
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const layer = document.createElement('div');
+  layer.className = 'confetti-layer';
+  const cs = getComputedStyle(document.documentElement);
+  const colors = [cs.getPropertyValue('--accent').trim() || '#6d4aeb', cs.getPropertyValue('--accent-deep').trim() || '#5636c9', '#f5a623', '#16a34a', '#be185d', '#1d4ed8'];
+  for (let i = 0; i < 70; i++) {
+    const c = document.createElement('span');
+    c.style.left = (Math.random() * 100) + 'vw';
+    c.style.background = colors[i % colors.length];
+    c.style.animationDelay = (Math.random() * 0.8) + 's';
+    c.style.animationDuration = (2.2 + Math.random() * 1.6) + 's';
+    c.style.setProperty('--drift', (Math.random() * 160 - 80) + 'px');
+    c.style.setProperty('--spin', (Math.random() * 720 - 360) + 'deg');
+    if (i % 3 === 0) c.style.borderRadius = '50%';
+    layer.appendChild(c);
+  }
+  document.body.appendChild(layer);
+  setTimeout(() => layer.remove(), 4800);
+}
+
+async function loadDashboardTheme() {
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/dashboard_themes?is_active=eq.true&select=*&limit=1`,
+      { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } }
+    );
+    const rows = await res.json();
+    // Season default (may be missing) → week's theme → special day; each
+    // level only overrides what it actually sets.
+    const theme = (Array.isArray(rows) && rows[0]) || {};
+    if (theme.accent_color) document.documentElement.style.setProperty('--accent', theme.accent_color);
+    if (theme.accent_color_deep) document.documentElement.style.setProperty('--accent-deep', theme.accent_color_deep);
+    if (theme.sidebar_color) document.documentElement.style.setProperty('--sidebar-bg', theme.sidebar_color);
+    if (theme.sidebar_color_deep) document.documentElement.style.setProperty('--sidebar-bg-2', theme.sidebar_color_deep);
+
+    // Per-week-theme banner AND colors take priority over the season-level
+    // ones — only fall back per-field if that specific week's theme hasn't
+    // set its own (so a theme can set just a banner, just colors, or both).
+    let bannerUrl = theme.banner_image_url;
+    try {
+      const weekStyleRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_active_theme_banner`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+        body: JSON.stringify({ p_date: localDateStr(new Date()) })
+      });
+      const weekStyleRows = await weekStyleRes.json();
+      const weekStyle = weekStyleRows && weekStyleRows[0];
+      if (weekStyle) {
+        if (weekStyle.banner_image_url) bannerUrl = weekStyle.banner_image_url;
+        if (weekStyle.accent_color) document.documentElement.style.setProperty('--accent', weekStyle.accent_color);
+        if (weekStyle.accent_color_deep) document.documentElement.style.setProperty('--accent-deep', weekStyle.accent_color_deep);
+        if (weekStyle.sidebar_color) document.documentElement.style.setProperty('--sidebar-bg', weekStyle.sidebar_color);
+        if (weekStyle.sidebar_color_deep) document.documentElement.style.setProperty('--sidebar-bg-2', weekStyle.sidebar_color_deep);
+      }
+    } catch (e) {
+      console.error('Weekly theme style load failed, using season theme instead:', e);
+    }
+
+    // Special day (Halloween, Valentine's Day…) — wins over the week's theme
+    // for that one day: its banner, and any colours it sets.
+    // projects.html → Themes → Special days.
+    try {
+      const sdRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_special_day`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+        body: JSON.stringify({ p_date: localDateStr(new Date()) })
+      });
+      const sd = sdRes.ok ? (await sdRes.json())[0] : null;
+      if (sd) {
+        if (sd.banner_image_url) bannerUrl = sd.banner_image_url;
+        if (sd.accent_color) document.documentElement.style.setProperty('--accent', sd.accent_color);
+        if (sd.accent_color_deep) document.documentElement.style.setProperty('--accent-deep', sd.accent_color_deep);
+        if (sd.sidebar_color) document.documentElement.style.setProperty('--sidebar-bg', sd.sidebar_color);
+        if (sd.sidebar_color_deep) document.documentElement.style.setProperty('--sidebar-bg-2', sd.sidebar_color_deep);
+        if (sd.greeting) {
+          _specialGreeting = sd.greeting;
+          if (_lastHeroData) renderDailyHero(_lastHeroData); // hero may have drawn first
+        }
+      }
+    } catch (e) {
+      console.error('Special day load failed, keeping the week\'s theme:', e);
+    }
+
+    // Remember today's look so a birthday unlock can go back to it on lock.
+    _baseLook = { vars: captureThemeVars(), bannerUrl: bannerUrl || null };
+    if (!_birthdayActive) setHeroBanner(bannerUrl || null);
+  } catch (e) {
+    console.error('Dashboard theme load failed:', e);
+    // Fail silently — default styling still works fine.
+  }
+}
+
+// ---------- Schedule tab ----------
+// schedule.html (a schedule-only copy of index.html) in a frame. It uses the
+// same studio login as this page, so it opens straight away when signed in.
+// Opening it locks the coordinator view, so SC cards never sit open behind
+// it; the studio view stays signed in.
+// It opens on the studio the dashboard is showing (?studio=…, honoured for
+// admin logins only — a studio login always gets its own studio). If an admin
+// has switched studios since, the frame reloads on the new one.
+let _scheduleLoaded = false;
+let _scheduleStudioId = null;
+function openSchedule(view) {
+  endCoordinatorView();
+  document.getElementById('dashboard-gate').style.display = 'none';
+  document.getElementById('dashboard-shell').style.display = 'flex';
+  showOnlyPane('schedule-pane');
+  const pane = document.getElementById('schedule-pane');
+  if (!_scheduleLoaded || (_sessionStudioId && _scheduleStudioId !== _sessionStudioId)) {
+    const params = new URLSearchParams();
+    if (_sessionStudioId) params.set('studio', _sessionStudioId);
+    if (view === 'week') params.set('view', 'week');
+    const qs = params.toString();
+    pane.innerHTML = `<iframe src="schedule.html${qs ? '?' + qs : ''}" title="Studio schedule"></iframe>`;
+    _scheduleLoaded = true;
+    _scheduleStudioId = _sessionStudioId;
+  }
+  setActiveNav('nav-schedule');
+}
+async function goToDashboard() {
+  if (_studioViewStarted) { showDashboardPane(); return; }
+  // Came from the Schedule button on the sign-in screen — the schedule may
+  // have signed this device in, in which case the dashboard opens directly.
+  const { data } = await sb.auth.getSession();
+  if (data && data.session) startStudioView();
+  else renderLoginGate();
+}
+function showDashboardPane() {
+  showOnlyPane('dashboard-main');
+  setActiveNav('nav-dashboard');
+}
+// (Nov 10 2026) Home office logins: the Hub remembers the studio, the tab and the Schedule's date, and opens there again on reload
+function hubRemember(x) {
+  if (_hubRestoring || !(_studioData && _studioData.isAdmin)) return;
+  try { const o = JSON.parse(localStorage.getItem('hub_last') || '{}'); localStorage.setItem('hub_last', JSON.stringify(Object.assign(o, x, { at: Date.now() }))); } catch (e) { }
+}
+let _hubRestoring = true, _hubRestored = false;   // (nothing is remembered until the Hub has started and reopened last time's spot)
+async function hubRestoreLast(data) {
+  if (_hubRestored) return; _hubRestored = true;
+  if (!data || !data.isAdmin) { _hubRestoring = false; return; }
+  let o = null; try { o = JSON.parse(localStorage.getItem('hub_last') || 'null'); } catch (e) { }
+  if (!o || Date.now() - (o.at || 0) > 7 * 86400000) { _hubRestoring = false; return; }   // (a week old: start fresh)
+  _hubRestoring = true;
+  try {
+    if (o.studio && o.studio !== _sessionStudioId && (data.studios || []).includes(o.studio)) await changeAdminStudio(o.studio);
+    if (o.nav === 'nav-plan') { showOnlyPane('plan-pane'); setActiveNav('nav-plan'); renderPlanStudioPick(); await loadPlanDay(o.date || localDateStr(new Date())); }
+    else if (o.nav && o.nav !== 'nav-dashboard') { const b = document.getElementById(o.nav); if (b && b.offsetParent !== null) b.click(); }
+  } catch (e) { console.warn('Hub: couldn’t reopen where you were:', e); }
+  _hubRestoring = false;
+}
+
+// ---------- Coordinator view auto-lock ----------
+// After 60 seconds idle the coordinator view locks back to the studio view.
+// The studio login itself stays signed in.
+const INACTIVITY_LOCK_MS = 60 * 1000;
+let _inactivityTimer = null;
+function resetInactivityTimer() {
+  if (!_sessionPin) return; // studio view only — nothing to lock
+  if (_inactivityTimer) clearTimeout(_inactivityTimer);
+  _inactivityTimer = setTimeout(() => endCoordinatorView(), INACTIVITY_LOCK_MS);
+}
+['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll'].forEach(evt => {
+  document.addEventListener(evt, resetInactivityTimer, { passive: true });
+});
+
+// Signed out anywhere on this device (here, or in the schedule frame) →
+// back to the sign-in screen.
+sb.auth.onAuthStateChange((event) => {
+  if (event === 'PASSWORD_RECOVERY') { setTimeout(renderSetPassword, 0); return; }
+  if (event === 'SIGNED_OUT' && (_studioViewStarted || _scheduleLoaded || _me)) resetToSignedOut();
+});
+
+
+async function renderPunchoutLink(token) {
+  const gate = document.getElementById('dashboard-gate');
+  document.getElementById('dashboard-shell').style.display = 'none';
+  gate.style.display = '';
+  const box = document.getElementById('dashboard-gate-body') || gate;   // keeps the logo and "4Cats Hub" title
+  box.innerHTML = '<div class="gate-detail">Loading…</div>';
+  const { data, error } = await sb.rpc('hub_punchout_link_info', { p_token: token });
+  if (error || !data || !data.ok) { box.innerHTML = `<div class="gate-detail">${esc((data && data.why) || (error && error.message) || 'This link isn’t valid.')}</div>`; return; }
+  const [y, m, d] = String(data.work_date).split('-').map(Number);
+  const when = new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+  box.innerHTML = `<div class="gate-detail" style="text-align:left"><b>Hi ${esc(data.name)}!</b> You’re still punched in at <b>${esc(data.studio_name)}</b> for ${esc(when)}${data.shift_end ? ` (your shift ended at ${esc(shortTime(data.shift_end))})` : ''}. What time did you finish?</div>
+    <input type="time" id="po-time" class="gate-text-input" value="${escAttr(String(data.shift_end || '').slice(0, 5))}" step="300">
+    <input id="po-comment" class="gate-text-input" maxlength="300" placeholder="Comment (optional)">
+    <button class="gate-btn" id="po-go" onclick="submitPunchoutLink('${escAttr(token)}')">Set my punch-out time</button>
+    <div id="po-msg" style="margin-top:10px"></div>`;
+}
+async function submitPunchoutLink(token) {
+  const t = document.getElementById('po-time').value, msg = document.getElementById('po-msg');
+  if (!t) { msg.innerHTML = '<div class="me-msg err">Choose the time you finished.</div>'; return; }
+  document.getElementById('po-go').disabled = true;
+  const { error } = await sb.rpc('hub_punchout_by_link', { p_token: token, p_time: t, p_comment: document.getElementById('po-comment').value || null });
+  if (error) { msg.innerHTML = `<div class="me-msg err">${esc(error.message)}</div>`; document.getElementById('po-go').disabled = false; return; }
+  const box = document.getElementById('po-go').parentElement;
+  box.innerHTML = `<div class="gate-detail"><b>✓ Thanks!</b> You’re punched out at ${esc(shortTime(t + ':00'))}. Home office can see it was set from the email.</div>`;
+}
+</script>
+<script src="hub/today.js?v=20261112c"></script>
+<script src="hub/products.js?v=20261112c"></script>
+<script src="hub/supplies.js?v=20261112c"></script>
+<script src="hub/front-desk.js?v=20261112c"></script>
+<script src="hub/families.js?v=20261112c"></script>
+<script src="hub/home-office.js?v=20261112c"></script>
+<script src="hub/workshops.js?v=20261112c"></script>
+<script src="hub/class-times.js?v=20261112c"></script>
+<script src="hub/comms.js?v=20261112c"></script>
+<script src="hub/staff.js?v=20261112c"></script>
+<script src="hub/coordinator.js?v=20261112c"></script>
+<script src="hub/duties.js?v=20261112c"></script>
+<script src="hub/chat.js?v=20261112c"></script>
+<script src="hub/auto-schedule.js?v=20261112c"></script>
+<script src="hub/stats.js?v=20261112c"></script>
+<script src="hub/memberships.js?v=20261112c"></script>
+<script src="hub/studio-notes.js?v=20261112c"></script>
+<script src="hub/party-forms.js?v=20261112c"></script>
+
+<script src="hub/tickets.js?v=20261112c"></script>
+<script src="hub/dashboard.js?v=20261112i"></script>
+<script>
+// Start-up: runs last, after hub.html and every hub/ file above have loaded.
+loadDashboardTheme();
+(async () => {
+  // "Forgot to punch out?" email link: its own page, no sign-in needed
+  const punchoutToken = new URLSearchParams(location.search).get('punchout');
+  if (punchoutToken) { renderPunchoutLink(punchoutToken); return; }
+  const { data } = await sb.auth.getSession();
+  if (_isPasswordRecovery && data && data.session) { renderSetPassword(); return; }
+  if (data && data.session) startStudioView();
+  else renderLoginGate();
+})();
+</script>
+</body>
+</html>
