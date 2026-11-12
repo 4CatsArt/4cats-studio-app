@@ -22,6 +22,7 @@
 // (Nov 12 2026: 💰 Labour cost asks hub_day_labour studio by studio, 6 at a time (one call for all 31 timed out); ⏱ punch notes
 // (shown, ✎ to add or change: hub_ho_punch_note, SQL step 9); 🏬 time for studios (hub_ho_alloc_set, SQL step 10).)
 // (Nov 12 2026: contractor clocks, hours only (SQL step 11): set in 👥 Set up for…, never on Timesheets; 📄 Hours report with CSV.)
+// (Nov 12 2026: Layout blocks: 📌 Section header and ➖ Divider / space, no card around them; same size in Customize and after Done.)
 
 // ---------- State ----------
 let _dash = { me: null, layout: null, edit: false, err: '', saving: '', saveTimer: null, refreshTimer: null, drag: null, choose: false, cache: {}, ro: null };
@@ -62,7 +63,7 @@ function dashOpen(fn, arg) {
 
 // ---------- The block library ----------
 // type: { name, group, area, level, size (default), sizes, opts (defaults), settings(b) → html, open: [fn, arg], load(b) → html }
-const DASH_GROUPS = ['Mine', 'Studio day', 'Customers', 'People', 'Money', 'Comms', 'World', 'Community', 'Admin'];
+const DASH_GROUPS = ['Layout', 'Mine', 'Studio day', 'Customers', 'People', 'Money', 'Comms', 'World', 'Community', 'Admin'];
 const DASH_ROWS_SETTING = b => `<label>Rows to show <select data-opt="rows">${[3, 5, 8, 12].map(n => `<option value="${n}"${+b.opts.rows === n ? ' selected' : ''}>${n}</option>`).join('')}</select></label>`;
 const DASH_BLOCKS = {
   // ---- Mine ----
@@ -119,6 +120,21 @@ const DASH_BLOCKS = {
       const S = await dashRpc('hub_ho_punch_state');
       return dashClockHtml(b, S);
     }
+  },
+
+  section: {
+    name: '📌 Section header', group: 'Layout', area: null, deco: true, size: 'l', opts: { text: 'New section', line: 'yes' }, words: 'heading title label group',
+    desc: 'A title over a group of blocks (e.g. “💰 Money”), with an optional line across.',
+    settings: b => `<label>Title <input type="text" data-opt="text" maxlength="60" value="${escAttr(b.opts.text || '')}" placeholder="e.g. 💰 Money" style="flex:1;padding:6px 8px;border:1px solid #ddd;border-radius:8px;font:inherit"></label>
+      <label>Line across <select data-opt="line"><option value="yes"${b.opts.line !== 'no' ? ' selected' : ''}>Yes</option><option value="no"${b.opts.line === 'no' ? ' selected' : ''}>No</option></select></label>`,
+    load(b) { return `<div class="dash-sec${b.opts.line === 'no' ? '' : ' line'}"><span>${esc(b.opts.text || 'Section')}</span><i></i></div>`; }
+  },
+  divider: {
+    name: '➖ Divider / space', group: 'Layout', area: null, deco: true, size: 'l', opts: { line: 'yes', space: 'm' }, words: 'spacer line separator gap break',
+    desc: 'A thin line, or just empty space, between groups of blocks.',
+    settings: b => `<label>Show <select data-opt="line"><option value="yes"${b.opts.line !== 'no' ? ' selected' : ''}>A line</option><option value="no"${b.opts.line === 'no' ? ' selected' : ''}>Just space</option></select></label>
+      <label>Space <select data-opt="space">${[['s', 'Small'], ['m', 'Medium'], ['l', 'Large']].map(([v, l]) => `<option value="${v}"${(b.opts.space || 'm') === v ? ' selected' : ''}>${l}</option>`).join('')}</select></label>`,
+    load(b) { const h = { s: 8, m: 24, l: 56 }[b.opts.space] || 24; return `<div class="dash-div${b.opts.line === 'no' ? '' : ' line'}" style="height:${h}px"></div>`; }
   },
 
   // ---- Studio day ----
@@ -667,7 +683,7 @@ function dashTileHtml(b, html) {
   return `<div class="dash-tile">${S.slice(0, b.size === 'xs' ? 2 : 3).map(([n, l, t]) => `<div class="dash-tn"><b class="${t || ''}">${esc(n)}</b><span>${esc(l)}</span></div>`).join('')}</div>`;
 }
 function dashToggleView(id) {
-  const b = _dash.layout.blocks[dashIdx(id)]; if (!b) return;
+  const b = _dash.layout.blocks[dashIdx(id)]; if (!b || DASH_BLOCKS[b.type].deco) return;
   if (b.view === 'stat') { delete b.view; if (b.size === 'xs') b.size = 's'; } else { b.view = 'stat'; if (b.size === 'm' || b.size === 'l') b.size = 'xs'; }
   delete b.h; dashSaveSoon(); dashDraw();
 }
@@ -836,18 +852,18 @@ function dashDraw(noLoad) {   // noLoad: redraw from blocks already loaded, with
   L.blocks.forEach(b => { if (!noLoad || _dash.cache[b.id] === undefined) dashLoadBlock(b.id, false); });
 }
 function dashBlockShell(b, i) {
-  const t = DASH_BLOCKS[b.type], ed = _dash.edit, n = _dash.layout.blocks.length, tile = b.view === 'stat';
+  const t = DASH_BLOCKS[b.type], ed = _dash.edit, n = _dash.layout.blocks.length, deco = !!t.deco, tile = !deco && b.view === 'stat';
   const SZ = { xs: 'Extra small', s: 'Small', m: 'Medium', l: 'Full width' };
   const sizes = (tile ? ['xs', 's', 'm'] : ['s', 'm', 'l']).map(z => `<button class="dash-sz${b.size === z ? ' on' : ''}" onclick="dashSize('${b.id}','${z}')" title="${SZ[z]}">${z.toUpperCase()}</button>`).join('');
   const tools = ed ? `<div class="dash-tools"><span class="dash-grip" title="Drag to move" draggable="true" ondragstart="dashDragStart(event,'${b.id}')" ondragend="dashDragEnd()">⠿</span>
       <button onclick="dashMove('${b.id}',-1)" ${i === 0 ? 'disabled' : ''} title="Move back">◀</button><button onclick="dashMove('${b.id}',1)" ${i === n - 1 ? 'disabled' : ''} title="Move forward">▶</button>
-      <button class="dash-view" onclick="dashToggleView('${b.id}')" title="${tile ? 'Show the full block' : 'Show only its main numbers, as a small tile'}">${tile ? '▤' : '▦'}</button>
+      ${deco ? '' : `<button class="dash-view" onclick="dashToggleView('${b.id}')" title="${tile ? 'Show the full block' : 'Show only its main numbers, as a small tile'}">${tile ? '▤' : '▦'}</button>`}
       ${sizes}${b.h ? `<button class="dash-hauto" onclick="dashHeightAuto('${b.id}')" title="Height: fit to what's in it">↕</button>` : ''}${t.settings ? `<button onclick="dashSettings('${b.id}')" title="Settings">⚙</button>` : ''}<button onclick="dashRemove('${b.id}')" title="Remove">✕</button></div>` : '';
-  const acts = !ed && !tile ? `${t.open ? `<button class="dash-open" onclick="dashOpen('${escAttr(t.open[0])}'${t.open[1] !== undefined ? `,'${escAttr(t.open[1])}'` : ''})">Open →</button>` : ''}
+  const acts = !ed && !tile && !deco ? `${t.open ? `<button class="dash-open" onclick="dashOpen('${escAttr(t.open[0])}'${t.open[1] !== undefined ? `,'${escAttr(t.open[1])}'` : ''})">Open →</button>` : ''}
       <button class="dash-ref" onclick="dashLoadBlock('${b.id}', true)" title="Refresh">↻</button>` : '';
   const size = !tile && b.size === 'xs' ? 's' : b.size;
-  return `<section class="dash-block sz-${size}${tile ? ' tile' : ''}${b.h ? ' fixed' : ''}" id="dash-${b.id}" data-id="${b.id}"${b.h ? ` style="height:${b.h}px"` : ''} ${ed ? `ondragover="dashDragOver(event,'${b.id}')" ondrop="dashDrop(event)"` : ''}>
-    <header><b title="${escAttr(t.name)}">${esc(t.name)}</b><span class="spacer"></span>${ed ? tools : acts}</header>
+  return `<section class="dash-block sz-${size}${tile ? ' tile' : ''}${deco ? ' deco' : ''}${b.h ? ' fixed' : ''}" id="dash-${b.id}" data-id="${b.id}"${b.h ? ` style="height:${b.h}px"` : ''} ${ed ? `ondragover="dashDragOver(event,'${b.id}')" ondrop="dashDrop(event)"` : ''}>
+    ${deco && !ed ? '' : `<header><b title="${escAttr(t.name)}">${esc(t.name)}</b><span class="spacer"></span>${ed ? tools : acts}</header>`}
     <div class="dash-body" id="dash-body-${b.id}"${tile && !ed && t.open ? ` onclick="dashOpen('${escAttr(t.open[0])}'${t.open[1] !== undefined ? `,'${escAttr(t.open[1])}'` : ''})" title="Open"` : ''}>${_dash.cache[b.id] || '<div class="dash-empty">Loading…</div>'}</div></section>`;
 }
 async function dashLoadBlock(id, fresh) {
@@ -1001,6 +1017,7 @@ function dashAdd(type) {
   closeDutySheet(); dashSaveSoon(); dashDraw();
   const last = _dash.layout.blocks[_dash.layout.blocks.length - 1], el = document.getElementById('dash-' + last.id);
   if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  if (type === 'section') setTimeout(() => { dashSettings(last.id); const i = document.querySelector('#dash-set input[data-opt="text"]'); if (i) { i.focus(); i.select(); } }, 60);   // (type its title straight away)
 }
 function dashSettings(id) {
   const b = _dash.layout.blocks[dashIdx(id)]; if (!b) return; const t = DASH_BLOCKS[b.type];
@@ -1510,6 +1527,15 @@ function dashStyles() {
 .dash-alloc-row input { width: 76px; padding: 6px; border-radius: 8px; border: 1px solid #ddd; font: inherit; }
 .dash-hrs { width: 100%; border-collapse: collapse; font-size: 13px; } .dash-hrs th, .dash-hrs td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #eee; white-space: nowrap; }
 .dash-hrs td:last-child { white-space: normal; min-width: 160px; } .dash-hrs tfoot td { border-top: 2px solid #ddd; border-bottom: 0; }
+.dash-block.deco { background: none; border: 0; box-shadow: none; padding: 0 2px; }
+.dash-block.deco .dash-body { max-height: none; overflow: visible; }
+.dash-block.deco header { position: absolute; top: 2px; right: 2px; left: auto; height: auto; margin: 0; z-index: 3; background: var(--card-bg); border-radius: 8px; padding: 2px; box-shadow: var(--shadow); }
+.dash-block.deco header > b, .dash-block.deco header > .spacer { display: none; }
+.dash-sec { display: flex; align-items: center; gap: 12px; padding: 14px 0 2px; min-height: 30px; }
+.dash-sec span { font-family: 'Fredoka', 'Inter', sans-serif; font-size: 20px; font-weight: 700; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.dash-sec i { flex: 1; height: 2px; border-radius: 2px; background: transparent; } .dash-sec.line i { background: var(--border); }
+.dash-div { display: flex; align-items: center; } .dash-div.line::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.dash-grid.editing .dash-block.deco { outline: 2px dashed var(--accent-soft); outline-offset: 2px; border-radius: 8px; min-height: 0; }
 .dash-pace { display: flex; flex-direction: column; }
 .dash-pace-row { display: grid; grid-template-columns: 30px minmax(0, 1fr) minmax(50px, 30%) 56px; gap: 8px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
 .dash-pace-row:last-child { border-bottom: 0; } .dash-rank { text-align: center; font-weight: 700; color: var(--ink-soft); }
