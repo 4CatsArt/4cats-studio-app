@@ -1,5 +1,12 @@
 // hub/home-office.js: Home office → 🏫 Field trips (tracker + 🧾 invoices), 🏢 Studio buyouts (requests + 🧾 invoices),
 // 🕘 Activity log and 🎁 Donations & giveaways. Moved out of hub.html as-is (Nov 11 2026). Loaded by hub.html after its main script.
+// (Nov 11 2026) Field trips and Buyouts follow “Parties & events”, Donations “World site & deals” on access.html (perm_can).
+const _hoArea = {};
+async function hoAreaLoad(area) {
+  const [v, e] = await Promise.all([sb.rpc('perm_can', { p_area: area, p_level: 'view' }), sb.rpc('perm_can', { p_area: area, p_level: 'edit' })]);
+  _hoArea[area] = { view: v.data === true, edit: e.data === true };
+}
+function hoA(area, level) { const a = _hoArea[area]; return !!(a && a[level]); }
 
 // ---------- Home office → 🏫 Field trips (world_field_trips.sql + field_trip_tracker.sql): a spreadsheet / project tracker ----------
 // World's Field Trips form adds a row (and emails events@4cats.com); + Add a request adds rows for ones by email or phone.
@@ -47,7 +54,7 @@ const ftiDl = d => d ? new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDa
 function ftInvOf(reqId) { return (_ft.inv || []).filter(i => i.request_id === reqId).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null; }
 function ftInvCell(r) {
   if (_ft.inv === null) return _ft.invErr && /hub_ft_invoices/.test(_ft.invErr) ? '<span class="fd-sm">Run field_trip_invoices.sql</span>' : '';
-  const i = ftInvOf(r.id), ed = _hoCan.edit, b = (a, l) => `<option value="${a}">${l}</option>`;
+  const i = ftInvOf(r.id), ed = hoA('parties_events', 'edit'), b = (a, l) => `<option value="${a}">${l}</option>`;
   if (!i || ['cancelled', 'released'].includes(i.status)) return (i ? `<span class="cust-st">${esc(FTI_ST[i.status])}</span> ` : '') + (ed ? `<button class="ho-btn sm" onclick="ftInvNew('${escAttr(r.id)}')">🧾 Invoice</button>` : '');
   const what = i.status === 'sent' ? `deposit due ${ftiDl(i.pay_by)}` : i.status === 'balance_sent' ? `$${Number(i.balance || 0).toFixed(2)} due ${ftiDl(i.balance_due)}` : i.status === 'deposit_paid' ? `trip ${ftiDl(i.day)}` : '';
   return `<span class="cust-st cust-${i.status === 'sent' || i.status === 'balance_sent' ? 'held' : 'booked'}" title="${escAttr(`${i.school || ''} · ${i.day} ${String(i.at).slice(0, 5)} · ${i.students} children · ${i.project || 'project to choose'}${i.agreed_at ? ' · terms agreed by ' + i.agreed_name : ''} · paid so far $${Number(i.paid_total || 0).toFixed(2)} before tax`)}">${esc(FTI_ST[i.status] || i.status)}</span> <span class="fd-sm">${esc(what)}</span>
@@ -121,8 +128,8 @@ function ftAfter() { if (paneVisible('ft-pane')) ftLoad(); if (_plan && paneVisi
 let _bo = { rows: null, status: 'open', err: '', add: null };
 let _boMove = null;   // (an unpaid invoice being moved to a new date or time: released just before the new hold)
 const BO_STATUS = [['new', 'New'], ['contacted', 'Contacted'], ['invoiced', 'Invoiced'], ['booked', 'Booked'], ['declined', 'Declined']];
-function openBoPane() {
-  if (!_hoCan.view) { alert('Studio buyouts are for home office.'); return; }
+async function openBoPane() {
+  await hoAreaLoad('parties_events'); if (!hoA('parties_events', 'view')) { alert('Studio buyouts need “Parties & events” on the Access page.'); return; }
   showOnlyPane('bo-pane'); setActiveNav('nav-bo'); boLoad();
 }
 async function boLoad() {
@@ -137,7 +144,7 @@ async function boBadge() {
 }
 function boDraw() {
   const el = document.getElementById('bo-pane'); if (!el) return;
-  const ed = _hoCan.edit, R = _bo.rows, money = n => n == null ? '' : '$' + Number(n).toLocaleString('en-CA', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  const ed = hoA('parties_events', 'edit'), R = _bo.rows, money = n => n == null ? '' : '$' + Number(n).toLocaleString('en-CA', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
   const dl = d => d ? new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '';
   let h = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🏢 Studio buyouts</div><span class="spacer"></span>
       ${ed ? `<button class="ho-btn primary" onclick="_bo.add=_bo.add?null:{};boDraw()">${_bo.add ? 'Close' : '+ Add a request'}</button>` : ''}<button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
@@ -192,7 +199,7 @@ const BOI_ST = { sent: '⏳ Deposit invoice sent', deposit_paid: '✓ Deposit pa
 function boInvOf(r) { return (_bo.inv || []).find(i => i.id === r.buyout_id) || (_bo.inv || []).filter(i => i.request_id === r.id).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null; }
 function boInvCell(r) {
   if (_bo.inv === null) return '';
-  const i = boInvOf(r), ed = _hoCan.edit, dl = d => d ? new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '';
+  const i = boInvOf(r), ed = hoA('parties_events', 'edit'), dl = d => d ? new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '';
   if (!i || ['cancelled', 'released'].includes(i.status)) return (i ? `<span class="cust-st">${esc(BOI_ST[i.status])}</span>` : '') + (ed ? `<button class="ho-btn primary" onclick="boInvNew('${escAttr(r.id)}')">🧾 Invoice</button>` : '');
   const what = i.status === 'sent' ? `deposit due ${dl(i.pay_by)}` : i.status === 'balance_sent' ? `$${Number(i.balance || 0).toFixed(2)} due ${dl(i.balance_due)}` : i.status === 'deposit_paid' ? `${dl(i.day)} · balance a week before` : '';
   const o = (a, l) => `<option value="${a}">${l}</option>`;
@@ -322,8 +329,8 @@ async function boInvAct(id, action) {
 }
 function boAfter() { if (paneVisible('bo-pane')) boLoad(); if (_plan && paneVisible('plan-pane')) customLoad(true).then(() => renderPlanDay()); }
 
-function openFtPane() {
-  if (!_hoCan.view) { alert('Field trips are for home office admins.'); return; }
+async function openFtPane() {
+  await hoAreaLoad('parties_events'); if (!hoA('parties_events', 'view')) { alert('Field trips need “Parties & events” on the Access page.'); return; }
   showOnlyPane('ft-pane'); setActiveNav('nav-ft'); ftLoad();
 }
 async function ftLoad() {
@@ -338,7 +345,7 @@ async function ftLoad() {
   if (b) { b.textContent = n; b.style.display = n ? '' : 'none'; }
 }
 function ftCell(r, c) {
-  const [f, , type, w] = c, v = r[f], id = escAttr(r.id), on = `onchange="ftSave('${id}','${f}',this.value)"`, ro = !_hoCan.edit ? 'disabled' : '';
+  const [f, , type, w] = c, v = r[f], id = escAttr(r.id), on = `onchange="ftSave('${id}','${f}',this.value)"`, ro = !hoA('parties_events', 'edit') ? 'disabled' : '';
   if (type === 'ro') return `<td class="ft-ro">${v ? esc(new Date(v).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })) : ''}</td>`;
   if (type === 'status') return `<td><select class="ft-in ft-st-${escAttr(v || 'new')}" ${ro} ${on}>${FT_STATUS.map(o => `<option value="${o[0]}"${o[0] === v ? ' selected' : ''}>${o[1]}</option>`).join('')}</select></td>`;
   if (type === 'source') return `<td><select class="ft-in" ${ro} ${on}>${FT_SOURCE.map(o => `<option value="${o[0]}"${o[0] === (v || 'form') ? ' selected' : ''}>${o[1]}</option>`).join('')}</select></td>`;
@@ -369,7 +376,7 @@ function ftDrawPage(el) {
   const due = rows.filter(r => r.follow_up && r.follow_up <= today && !['booked', 'declined'].includes(r.status)).length;
   const A = F.add;
   let h = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🏫 Field trips</div><span class="spacer"></span>
-      ${_hoCan.edit ? `<button class="ho-btn primary" onclick="_ft.add=_ft.add?null:{source:'email'};ftDraw()">${A ? 'Close' : '+ Add a request'}</button>` : ''}<button class="ho-btn" onclick="ftCsv()">⬇ Download</button><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+      ${hoA('parties_events', 'edit') ? `<button class="ho-btn primary" onclick="_ft.add=_ft.add?null:{source:'email'};ftDraw()">${A ? 'Close' : '+ Add a request'}</button>` : ''}<button class="ho-btn" onclick="ftCsv()">⬇ Download</button><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
     <div class="ho-intro">Every field trip request: World's form adds a row (and emails events@4cats.com), and <b>+ Add a request</b> adds ones that come by email or phone. Click any cell to change it; it saves straight away. Rows with a follow-up date today or earlier are highlighted.</div>`;
   if (A) h += `<div class="ft-add"><b>New request</b>
       <label>School<input id="fta-school" value="${escAttr(A.school || '')}"></label><label>Contact<input id="fta-contact" value="${escAttr(A.contact_name || '')}"></label>
@@ -390,9 +397,9 @@ function ftDrawPage(el) {
   if (F.err) h += `<div class="goal-note">${esc(F.err)}</div>`;
   else if (R === null) h += '<div class="goal-note">Loading…</div>';
   else if (!rows.length) h += '<div class="goal-note">No field trip requests here.</div>';
-  else h += `<div class="ft-topscroll" id="ft-topscroll"><div></div></div><div class="fd-tbl-wrap ft-wrap"><table class="fd-tbl ft-tbl"><thead><tr><th style="min-width:200px">Invoice</th>${ftCols().map(c => `<th style="min-width:${c[3]}px" class="ft-dragth" draggable="true" title="Drag to move this column" ondragstart="_ftDrag='${c[0]}';event.dataTransfer.effectAllowed='move'" ondragover="event.preventDefault()" ondrop="event.preventDefault();ftColDrop('${c[0]}')"><button class="fd-th${F.sort === c[0] ? ' on' : ''}" onclick="ftSort('${c[0]}')">${esc(c[1])}${F.sort === c[0] ? (F.desc ? ' ▼' : ' ▲') : ''}</button></th>`).join('')}${_hoCan.edit ? '<th></th>' : ''}</tr></thead><tbody>` +
+  else h += `<div class="ft-topscroll" id="ft-topscroll"><div></div></div><div class="fd-tbl-wrap ft-wrap"><table class="fd-tbl ft-tbl"><thead><tr><th style="min-width:200px">Invoice</th>${ftCols().map(c => `<th style="min-width:${c[3]}px" class="ft-dragth" draggable="true" title="Drag to move this column" ondragstart="_ftDrag='${c[0]}';event.dataTransfer.effectAllowed='move'" ondragover="event.preventDefault()" ondrop="event.preventDefault();ftColDrop('${c[0]}')"><button class="fd-th${F.sort === c[0] ? ' on' : ''}" onclick="ftSort('${c[0]}')">${esc(c[1])}${F.sort === c[0] ? (F.desc ? ' ▼' : ' ▲') : ''}</button></th>`).join('')}${hoA('parties_events', 'edit') ? '<th></th>' : ''}</tr></thead><tbody>` +
     rows.map(r => `<tr class="${r.follow_up && r.follow_up <= today && !['booked', 'declined'].includes(r.status) ? 'ft-due' : ''} ft-r-${escAttr(r.status || 'new')}"><td class="ft-inv">${ftInvCell(r)}</td>${ftCols().map(c => ftCell(r, c)).join('')}` +
-      (_hoCan.edit ? `<td class="ft-x">${F.saving[r.id] === 1 ? '…' : F.saving[r.id] === 2 ? '✓' : `<button title="Delete this row" onclick="ftDel('${escAttr(r.id)}')">🗑</button>`}</td>` : '') + '</tr>').join('') + '</tbody></table></div>';
+      (hoA('parties_events', 'edit') ? `<td class="ft-x">${F.saving[r.id] === 1 ? '…' : F.saving[r.id] === 2 ? '✓' : `<button title="Delete this row" onclick="ftDel('${escAttr(r.id)}')">🗑</button>`}</td>` : '') + '</tr>').join('') + '</tbody></table></div>';
   el.innerHTML = h;
   const w1 = el.querySelector('.ft-wrap'); if (w1 && keep) { w1.scrollTop = keep[0]; w1.scrollLeft = keep[1]; }
   // the top scrollbar: as wide as the table, and in step with the table's own
@@ -406,7 +413,7 @@ function ftDrawPage(el) {
 }
 function ftSort(k) { if (_ft.sort === k) _ft.desc = !_ft.desc; else { _ft.sort = k; _ft.desc = ['created_at', 'quote', 'students', 'adults'].includes(k); } ftDraw(); }
 async function ftSave(id, field, value) {
-  if (!_hoCan.edit) { alert('Changing field trips needs Studio Ops edit access.'); return; }
+  if (!hoA('parties_events', 'edit')) { alert('Changing field trips needs “Parties & events” (Edit) on the Access page.'); return; }
   _ft.saving[id] = 1; ftDraw();
   const { data, error } = await sb.rpc('hub_field_trip_save', { p: { id, [field]: value } });
   if (error) { delete _ft.saving[id]; ftDraw(); alert('Not saved: ' + (/hub_field_trip_save/.test(error.message) ? 'run field_trip_tracker.sql first.' : error.message)); return; }
@@ -506,8 +513,8 @@ function actCsv() {
 // Prize codes can be made right here for an entry; they're managed in World settings → Prices & sales → Prize codes.
 let _don = { rows: null, search: '', from: '', to: '', err: '' };
 const DON_KINDS = [['donation', 'Donation'], ['giveaway', 'Giveaway'], ['contest', 'Contest winner'], ['other', 'Other']];
-function openDonPane() {
-  if (!_hoCan.view) { alert('Donations & giveaways is for home office admins.'); return; }
+async function openDonPane() {
+  await hoAreaLoad('world_site_deals'); if (!hoA('world_site_deals', 'view')) { alert('Donations & giveaways need “World site & deals” on the Access page.'); return; }
   showOnlyPane('don-pane'); setActiveNav('nav-don');
   if (!_don.from) { const y = new Date().getFullYear(); _don.from = y + '-01-01'; }
   donDraw(); donLoad();
@@ -524,7 +531,7 @@ function donDraw() {
   const value = R.reduce((t, d) => t + (+d.value || 0), 0);
   const chip = c => `<span class="don-code ${c.used === true ? 'used' : c.off === true ? 'off' : c.kind === 'unknown' ? 'unk' : ''}" title="${c.kind === 'membership' ? 'Membership code' : c.kind === 'unknown' ? 'Not a World code (e.g. a Shopify-only code)' : 'Prize code'}">${esc(c.code)} · ${c.used === true ? '✓ used' : c.off === true ? 'off / ended' : c.kind === 'unknown' ? '?' : c.starts ? 'starts ' + esc(new Date(c.starts + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })) : 'not yet'}</span>`;
   el.innerHTML = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🎁 Donations & giveaways</div><span class="spacer"></span>
-      ${_hoCan.edit ? '<button class="ho-btn primary" onclick="donEdit(null)">+ Add</button>' : ''}<button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+      ${hoA('world_site_deals', 'edit') ? '<button class="ho-btn primary" onclick="donEdit(null)">+ Add</button>' : ''}<button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
     <div class="ho-intro">Everything given away (school auctions, contests, prizes) and the codes that went with it. Codes show whether they’ve been used. Make and manage prize codes here or in World settings → Prices & sales → Prize codes.</div>
     <div class="don-filters"><input type="search" id="don-q" placeholder="Search who, event, email or code" value="${escAttr(_don.search)}" onkeydown="if(event.key==='Enter')donFilter()">
       <label>From <input type="date" id="don-from" value="${escAttr(_don.from)}"></label><label>To <input type="date" id="don-to" value="${escAttr(_don.to)}"></label><button class="ho-btn" onclick="donFilter()">Show</button></div>
@@ -533,7 +540,7 @@ function donDraw() {
     ${R.length ? `<div class="don-list">${R.map(d => `<div class="don-row"><div class="don-main"><b>${esc(d.recipient)}</b> <span class="don-kind">${esc((DON_KINDS.find(k => k[0] === d.kind) || [0, d.kind])[1])}</span>
         <div class="goal-note">${esc(new Date(d.given_on + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' }))}${d.event ? ' · ' + esc(d.event) : ''}${d.studio_id ? ' · ' + esc(STUDIO_NAMES[d.studio_id] || d.studio_id) : ''}${d.value ? ' · $' + Number(d.value).toFixed(2) : ''}${d.contact_name || d.contact_email ? ' · ' + esc([d.contact_name, d.contact_email, d.contact_phone].filter(Boolean).join(', ')) : ''}</div>
         ${(d.code_status || []).length ? `<div class="don-codes">${d.code_status.map(chip).join('')}</div>` : ''}${d.notes ? `<div class="don-notes">${esc(d.notes)}</div>` : ''}</div>
-      ${_hoCan.edit ? `<button class="ho-btn" onclick="donEdit('${escAttr(d.id)}')">Edit</button>` : ''}</div>`).join('')}</div>` : '<div class="ho-intro">Nothing logged for these dates yet.</div>'}`}`;
+      ${hoA('world_site_deals', 'edit') ? `<button class="ho-btn" onclick="donEdit('${escAttr(d.id)}')">Edit</button>` : ''}</div>`).join('')}</div>` : '<div class="ho-intro">Nothing logged for these dates yet.</div>'}`}`;
 }
 function donFilter() { _don.search = document.getElementById('don-q').value.trim(); _don.from = document.getElementById('don-from').value; _don.to = document.getElementById('don-to').value; _don.rows = null; donDraw(); donLoad(); }
 function donEdit(id) {
