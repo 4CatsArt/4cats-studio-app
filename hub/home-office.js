@@ -599,3 +599,69 @@ async function donDelete(id) {
   const { error } = await sb.rpc('hub_donation_delete', { p_id: id }); if (error) { alert(error.message); return; }
   closeDutySheet(); _don.rows = null; donDraw(); donLoad();
 }
+
+// ---------- Home office → 🎉 Party balances (Nov 12 2026; hub_party_balances) ----------
+// Every party (kids, splatter, get-togethers, field trips, buyouts) in a date range: what was paid before tax, whether the
+// after-party form is filled in (actual guests), and what's owing from it. "Open" goes to the party on the Schedule (wsmGoTime).
+if (typeof PANES !== 'undefined' && PANES.indexOf('pb-pane') < 0) PANES.push('pb-pane');
+let _pb = { from: '', to: '', studio: '', show: 'attention', kind: '', q: '', rows: null, err: '' };
+const PB_KIND = { kids: 'Kids party', splatter: 'Splatter party', get_together: 'Get-together', field_trip: 'Field trip', buyout: 'Studio buyout' };
+const PB_ST = { paid: '✓ Paid', all_good: '✓ All good', credit_sent: '🎁 Gift card sent', invoice_later: '📋 Sent to the field trip tracker', link_sent: '✉️ Pay link sent', waived: '✓ Let go' };
+const PB_DONE = { paid: 1, all_good: 1, credit_sent: 1, invoice_later: 1, waived: 1 };   // (a pay link sent is still owing until it's paid)
+async function openPbPane() {
+  await hoAreaLoad('parties_events'); if (!hoA('parties_events', 'view')) { alert('Party balances need “Parties & events” on the Access page.'); return; }
+  showOnlyPane('pb-pane'); setActiveNav('nav-pb');
+  if (!_pb.from) { const d = new Date(); d.setDate(d.getDate() - 30); _pb.from = localDateStr(d); const e = new Date(); e.setDate(e.getDate() + 30); _pb.to = localDateStr(e); }
+  pbLoad();
+}
+async function pbLoad() {
+  _pb.rows = null; pbDraw();
+  const { data, error } = await sb.rpc('hub_party_balances', { p_from: _pb.from, p_to: _pb.to, p_studio: _pb.studio || null });
+  _pb.err = error ? error.message : ''; _pb.rows = error ? [] : (data || []); pbDraw();
+}
+// a party's state: upcoming, form missing (after the party), owing, settled, or filled in with nothing owing
+function pbState(r, t) {
+  if (r.date > t) return 'upcoming';
+  if (r.kind === 'buyout') return 'buyout';
+  if (!r.filled) return 'missing';
+  if (r.status && PB_DONE[r.status]) return 'settled';
+  if (r.owing != null && Number(r.owing) > 0.004) return 'owing';
+  return 'ok';
+}
+function pbDraw() {
+  const el = document.getElementById('pb-pane'); if (!el) return;
+  const t = localDateStr(new Date()), R = _pb.rows || [], m = x => '$' + Number(x || 0).toFixed(2);
+  const cnt = k => R.filter(r => pbState(r, t) === k).length;
+  let h = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🎉 Party balances</div><span class="spacer"></span><button class="ho-btn" onclick="goToDashboard()">← Today screen</button></div>
+    <p class="ho-intro">Every party, past and upcoming: what was paid (before tax), whether the after-party form is filled in, and what’s owing from it. Open one to see or finish its form on the Schedule.</p>
+    <div class="sup-tools">
+      <label>From <input type="date" value="${escAttr(_pb.from)}" onchange="_pb.from=this.value;pbLoad()"></label>
+      <label>To <input type="date" value="${escAttr(_pb.to)}" onchange="_pb.to=this.value;pbLoad()"></label>
+      <select onchange="_pb.studio=this.value;pbLoad()"><option value="">All studios</option>${Object.keys(STUDIO_NAMES).sort((a, b) => STUDIO_NAMES[a].localeCompare(STUDIO_NAMES[b])).map(id => `<option value="${escAttr(id)}"${_pb.studio === id ? ' selected' : ''}>${esc(STUDIO_NAMES[id])}</option>`).join('')}</select>
+      <select onchange="_pb.kind=this.value;pbDraw()"><option value="">Every kind</option>${Object.keys(PB_KIND).map(k => `<option value="${k}"${_pb.kind === k ? ' selected' : ''}>${PB_KIND[k]}</option>`).join('')}</select>
+      <input type="search" placeholder="Search name, email, order" value="${escAttr(_pb.q)}" oninput="_pb.q=this.value;pbDraw()"></div>`;
+  if (_pb.err) { el.innerHTML = h + `<p class="fd-msg">${esc(_pb.err)}</p>`; return; }
+  if (!_pb.rows) { el.innerHTML = h + '<p class="goal-note">Loading…</p>'; return; }
+  const tabs = [['attention', `Needs attention (${cnt('missing') + cnt('owing')})`], ['missing', `⚠️ Form not filled in (${cnt('missing')})`], ['owing', `💲 Owing (${cnt('owing')})`],
+    ['settled', `✓ Settled (${cnt('settled') + cnt('ok')})`], ['upcoming', `Upcoming (${cnt('upcoming')})`], ['all', `All (${R.length})`]];
+  h += `<div class="sn-quick" style="margin:6px 0 10px">${tabs.map(([k, l]) => `<button class="ho-btn sm${_pb.show === k ? ' primary' : ''}" onclick="_pb.show='${k}';pbDraw()">${l}</button>`).join('')}</div>`;
+  const q = _pb.q.trim().toLowerCase();
+  const rows = R.filter(r => { const st = pbState(r, t);
+      return (_pb.show === 'all' || (_pb.show === 'attention' ? (st === 'missing' || st === 'owing') : _pb.show === 'settled' ? (st === 'settled' || st === 'ok') : st === _pb.show))
+        && (!_pb.kind || r.kind === _pb.kind) && (!q || [r.customer, r.email, r.order, r.reason].join(' ').toLowerCase().includes(q)); })
+    .sort((a, b) => _pb.show === 'upcoming' ? (a.date < b.date ? -1 : 1) : (a.date < b.date ? 1 : -1));
+  if (!rows.length) { el.innerHTML = h + '<p class="goal-note">Nothing here for these dates.</p>'; return; }
+  const total = rows.reduce((s, r) => s + (pbState(r, t) === 'owing' ? Number(r.owing || 0) : 0), 0);
+  h += `<table class="fd-tbl sup-tbl"><thead><tr><th>Party</th><th>When</th><th>Paid (before tax)</th><th>After-party form</th><th>Owing</th><th></th></tr></thead><tbody>${rows.map(r => {
+    const st = pbState(r, t), g = r.filled ? `${r.actual_guests} guests` : '';
+    const form = st === 'upcoming' ? '<span class="goal-note">not due yet</span>' : st === 'buyout' ? '<span class="goal-note">settled in Studio buyouts</span>'
+      : st === 'missing' ? '<b style="color:#b3261e">⚠️ Not filled in</b>' : `✓ Filled in · ${esc(g)}${r.status && PB_ST[r.status] ? ` · ${esc(PB_ST[r.status])}` : ''}`;
+    const owe = st === 'owing' ? `<b>${m(r.owing)}</b>` : st === 'settled' || st === 'ok' ? '<span class="goal-note">–</span>' : st === 'missing' ? '<span class="goal-note">?</span>' : '';
+    return `<tr><td><b>${esc(PB_KIND[r.kind] || 'Party')}</b>${r.reason ? ' · ' + esc(r.reason) : ''}<br><span class="goal-note">${esc(r.customer || '')}${r.order ? ' · ' + esc(r.order) : ''} · ${esc(String(STUDIO_NAMES[r.studio_id] || r.studio_id).replace(/^.*?\s-\s/, ''))}</span></td>
+      <td style="white-space:nowrap">${esc(ptyDayLabel(r.date))}<br><span class="goal-note">${esc(shortTime(r.time))}</span></td>
+      <td>${r.paid != null ? m(r.paid) : '<span class="goal-note">–</span>'}</td><td>${form}</td><td>${owe}</td>
+      <td><button class="ho-btn sm" onclick="pbOpen('${escAttr(r.session_id)}','${escAttr(r.studio_id)}','${escAttr(r.date)}')">Open</button></td></tr>`; }).join('')}</tbody></table>`;
+  if (total > 0) h += `<p class="goal-note" style="margin-top:8px">Owing in this list: <b>${m(total)}</b> before tax.</p>`;
+  el.innerHTML = h;
+}
+function pbOpen(sessionId, studio, date) { wsmGoTime(sessionId, studio, date); }
