@@ -7,6 +7,8 @@
 // live reordering while dragging; Customize buttons sit in each block's header so blocks are the same size in both modes.)
 // (Nov 12 2026: 🏁 Studio pace from pace.html's numbers, 🗓️ Weekly schedule check shared between people, 🧾 New orders feed
 // with per-person ✓; my_dashboard SQL step 3.)
+// (Nov 12 2026: a personal header (greeting, picture, today at a glance), 🎨 colour themes, and owners' 👥 Set up for…: a starting
+// dashboard per person (hub_dash_templates, SQL step 4) that ↺ always goes back to; step 4 also adds can_set_up to hub_dash_me.)
 
 // ---------- State ----------
 let _dash = { me: null, layout: null, edit: false, err: '', saving: '', saveTimer: null, refreshTimer: null, drag: null, choose: false, cache: {}, ro: null };
@@ -62,14 +64,15 @@ const DASH_BLOCKS = {
       const n = +b.opts.rows || 5;
       const items = typeof inboxItemHtml === 'function' ? sorted.slice(0, n).map(inboxItemHtml).join('')
         : sorted.slice(0, n).map(x => dashLine(esc(x.title || x.kind || 'Item'), esc(dashStudio(x.studio_id)))).join('');
+      dashGlanceSet(b, list.length + (list.length === 1 ? ' thing for you' : ' things for you'));
       return dashBig(list.length, list.length === 1 ? 'to decide' : 'to decide') + items + (list.length > n ? `<div class="dash-more">+ ${list.length - n} more</div>` : '');
     }
   },
   chat_unread: {
     name: '💬 Unread chat', group: 'Mine', area: null, size: 's', open: ['openChatPane'],
     desc: 'How many chat messages you haven’t read.',
-    async load() {
-      const n = +(await dashRpc('hub_chat_unread')) || 0;
+    async load(b) {
+      const n = +(await dashRpc('hub_chat_unread')) || 0; dashGlanceSet(b, n ? n + ' unread chat' : '');
       return n ? dashBig(n, n === 1 ? 'unread message' : 'unread messages', 'warn') : '<div class="dash-empty">All caught up. ✓</div>';
     }
   },
@@ -114,7 +117,7 @@ const DASH_BLOCKS = {
     name: '⚠️ Class bookings to fix', group: 'Studio day', area: 'class_times', level: 'view', size: 'm', opts: { rows: 5 }, settings: DASH_ROWS_SETTING, open: ['openAsPane'],
     desc: 'Families missing a week of a class, weeks on the wrong day, paid but not booked.',
     async load(b) {
-      const L = (await dashRpc('hub_class_problems')) || [];
+      const L = (await dashRpc('hub_class_problems')) || []; dashGlanceSet(b, L.length ? L.length + ' class bookings to fix' : '');
       const W = { missing_week: '📚 Missing a week', off_day_week: '📅 Week on the wrong day', paid_not_booked: '💳 Paid, not booked' };
       return (L.length ? dashBig(L.length, 'to look at', 'warn') : '') +
         dashRows(L, +b.opts.rows || 5, x => dashLine(`<b>${esc(W[x.problem] || x.problem)}</b> · ${esc(dashStudio(x.studio_id))}`, esc(dashDay(x.day) + (x.detail ? ' · ' + x.detail : ''))), 'Every family is on all their weeks. ✓');
@@ -169,7 +172,7 @@ const DASH_BLOCKS = {
       const due = i => i.status === 'balance_sent' ? i.balance_due : i.pay_by;
       const L = [].concat((ft || []).map(i => Object.assign({ kind: '🏫' }, i)), (bo || []).map(i => Object.assign({ kind: '🏢' }, i)))
         .filter(i => i.status === 'sent' || i.status === 'balance_sent').sort((a, b) => String(due(a) || '').localeCompare(String(due(b) || '')));
-      const t = dashToday(), late = L.filter(i => due(i) && String(due(i)).slice(0, 10) < t);
+      const t = dashToday(), late = L.filter(i => due(i) && String(due(i)).slice(0, 10) < t); dashGlanceSet(b, late.length ? late.length + ' invoices past due' : '');
       return `<div class="dash-chips"><span class="dash-pill ${late.length ? 'bad' : 'ok'}">${late.length} past due</span><span class="dash-pill">${L.length} unpaid</span></div>` +
         dashRows(L, +b.opts.rows || 5, i => dashLine(`${i.kind} ${esc(i.school || i.name || dashStudio(i.studio_id))}`,
           esc((i.status === 'sent' ? 'deposit' : 'balance') + ' due ' + dashDay(due(i))), due(i) && String(due(i)).slice(0, 10) < t ? 'late' : ''), 'Everything sent is paid. ✓');
@@ -191,7 +194,7 @@ const DASH_BLOCKS = {
     async load(b) {
       const L = (await dashRpc('hub_all_sick_calls', { p_days: 3 })) || [];
       const needs = c => (typeof sickNeedsPlan === 'function' ? sickNeedsPlan(c) : !c.plan);
-      const wait = L.filter(needs);
+      const wait = L.filter(needs); dashGlanceSet(b, wait.length ? wait.length + (wait.length === 1 ? ' sick call needs' : ' sick calls need') + ' a plan' : '');
       return `<div class="dash-chips"><span class="dash-pill ${wait.length ? 'bad' : 'ok'}">${wait.length} need a plan</span><span class="dash-pill">${L.length - wait.length} handled</span></div>` +
         dashRows(wait.concat(L.filter(c => !needs(c))), +b.opts.rows || 5, c => dashLine(esc(c.name + ' · ' + (c.studio_name || dashStudio(c.studio_id))),
           esc(dashDay(c.shift_date) + ' · ' + shortTime(c.start_time) + '–' + shortTime(c.end_time)), needs(c) ? 'late' : ''), 'No sick calls. ✓');
@@ -201,7 +204,7 @@ const DASH_BLOCKS = {
     name: '🔁 Shift swaps', group: 'People', area: 'staff_scheduling', level: 'edit', size: 's', opts: { rows: 5 }, settings: DASH_ROWS_SETTING, open: ['openSwapsPane'],
     desc: 'Give-away shifts someone has taken, waiting for approval.',
     async load(b) {
-      const W = ((await dashRpc('hub_offers_admin')) || []).filter(o => o.status === 'taken');
+      const W = ((await dashRpc('hub_offers_admin')) || []).filter(o => o.status === 'taken'); dashGlanceSet(b, W.length ? W.length + ' shift swaps to approve' : '');
       return (W.length ? dashBig(W.length, 'waiting for you', 'warn') : '') +
         dashRows(W, +b.opts.rows || 5, o => dashLine(esc(o.from_name + ' → ' + o.taker_name), esc(dashDay(o.shift_date) + ' · ' + shortTime(o.start_time) + ' · ' + (o.studio_name || ''))), 'Nothing waiting. ✓');
     }
@@ -221,7 +224,7 @@ const DASH_BLOCKS = {
     desc: 'New and open concerns: counts and age only. Details stay on the Concerns page.',
     async load() {
       const L = (await dashRpc('hub_concerns_list')) || [];
-      const fresh = L.filter(c => c.status === 'new'), looking = L.filter(c => c.status === 'reviewing');
+      const fresh = L.filter(c => c.status === 'new'); dashGlanceSet(b, fresh.length ? fresh.length + ' new concerns' : ''); const looking = L.filter(c => c.status === 'reviewing');
       const oldest = fresh.map(c => c.created_at).filter(Boolean).sort()[0];
       return `<div class="dash-stats"><div><b class="${fresh.length ? 'bad' : 'ok'}">${fresh.length}</b>New</div><div><b>${looking.length}</b>Looking into it</div></div>` +
         (oldest ? `<div class="dash-sub">Oldest new one: ${esc(relTime(oldest))}</div>` : '');
@@ -261,6 +264,7 @@ const DASH_BLOCKS = {
       const off = (_dash.week && _dash.week[b.id]) || 0, wk = dashMonday(off);
       const d = (await dashRpc('hub_sched_check_list', { p_week: wk })) || {}, C = {};
       (d.checks || []).forEach(c => { C[c.studio_id] = c; });
+      if (!off) dashGlanceSet(b, (d.checks || []).length + ' of ' + Object.keys(STUDIO_NAMES).length + ' schedules checked');
       return dashSchedHtml(b, wk, off, C);
     }
   },
@@ -270,7 +274,7 @@ const DASH_BLOCKS = {
     settings: b => `<label>Go back <select data-opt="days">${[['1', '1 day'], ['3', '3 days'], ['7', 'A week'], ['14', '2 weeks']].map(([v, l]) => `<option value="${v}"${String(b.opts.days) === v ? ' selected' : ''}>${l}</option>`).join('')}</select></label>`,
     async load(b) {
       const d = (await dashRpc('hub_dash_orders', { p_days: +b.opts.days || 3, p_limit: 40 })) || {}, O = d.orders || [];
-      (_dash.orders = _dash.orders || {})[b.id] = O;
+      (_dash.orders = _dash.orders || {})[b.id] = O; dashGlanceSet(b, +d.waiting ? d.waiting + ' new orders' : '');
       if (!O.length) return '<div class="dash-empty">No new orders. ✓</div>';
       const money = v => v == null ? '' : '$' + Number(v).toFixed(2);
       return `<div class="dash-head-row"><span class="dash-big"><b>${esc(d.waiting)}</b> <span>new</span></span><button class="ho-btn sm" onclick="dashOrdersAckAll('${b.id}')">✓ All shown</button></div>` +
@@ -469,25 +473,50 @@ async function openMyDash() {
   if (!_dash.me) { dashDraw(); await dashLoadMe(); }
   dashDraw(); dashStartRefresh();
 }
+const DASH_PERSONAL = ['theme', 'avatar', 'name', 'greet', 'start'];   // (a person's own choices: a starting dashboard never overwrites them)
+function dashNormalize(L) {
+  if (!L || !Array.isArray(L.blocks)) return null;
+  const out = { v: 1, start: !!L.start, starter: L.starter || '', blocks: L.blocks.filter(b => b && DASH_BLOCKS[b.type]).map(b => Object.assign({ id: b.id || dashNewId(), type: b.type, size: ['s', 'm', 'l'].includes(b.size) ? b.size : 'm', opts: Object.assign({}, DASH_BLOCKS[b.type].opts || {}, b.opts || {}) }, dashHeightOk(b.h) ? { h: dashHeightOk(b.h) } : {})) };
+  if (L.theme && DASH_THEMES.some(t => t.key === L.theme)) out.theme = L.theme;
+  if (L.avatar && typeof L.avatar === 'object' && (L.avatar.key || L.avatar.emoji)) out.avatar = { key: L.avatar.key ? String(L.avatar.key).slice(0, 300) : undefined, emoji: L.avatar.emoji ? String(L.avatar.emoji).slice(0, 16) : undefined };
+  if (L.name) out.name = String(L.name).slice(0, 40);
+  if (L.greet === false) out.greet = false;
+  if (L.note) { out.note = String(L.note).slice(0, 600); if (L.note_by) out.note_by = String(L.note_by).slice(0, 60); }
+  return out;
+}
+function dashFromTemplate(T, keep) {   // a starting dashboard, keeping the person's own colour, picture, name and start choice
+  const L = dashNormalize(T); if (!L) return null;
+  L.blocks.forEach(b => { b.id = dashNewId(); });
+  L.start = false; delete L.avatar; delete L.name; delete L.greet;
+  if (keep) DASH_PERSONAL.forEach(k => { if (keep[k] !== undefined && keep[k] !== null && !(k === 'theme' && !keep.theme)) L[k] = keep[k]; });
+  return L;
+}
 async function dashLoadMe() {
   _dash.err = '';
   try {
     _dash.me = await dashRpc('hub_dash_me');
-    const L = _dash.me.layout;
-    if (L && Array.isArray(L.blocks)) _dash.layout = { v: 1, start: !!L.start, starter: L.starter || '', blocks: L.blocks.filter(b => b && DASH_BLOCKS[b.type]).map(b => Object.assign({ id: b.id || dashNewId(), type: b.type, size: ['s', 'm', 'l'].includes(b.size) ? b.size : 'm', opts: Object.assign({}, DASH_BLOCKS[b.type].opts || {}, b.opts || {}) }, dashHeightOk(b.h) ? { h: dashHeightOk(b.h) } : {})) };
+    const L = dashNormalize(_dash.me.layout), T = _dash.me.template;
+    if (L) _dash.layout = L;
+    else if (T && dashNormalize(T)) { _dash.layout = dashFromTemplate(T, null); dashSaveSoon(); }   // (first visit: the one an owner set up)
     else if (dashIsOwner()) { _dash.layout = dashBuild(['owner']); dashSaveSoon(); }
     else { _dash.layout = null; _dash.choose = true; }
   } catch (e) {
     _dash.me = null;
     _dash.err = /hub_dash_me/.test(e.message || '') ? 'Run My dashboard step 2 SQL in Supabase first.' : (e.message || 'Couldn’t load your dashboard.');
   }
+  if (!_dash.sessName) try {   // (the greeting's name, until someone types their own)
+    const r = await sb.auth.getSession(), u = r && r.data && r.data.session && r.data.session.user;
+    const n = u ? ((u.user_metadata && u.user_metadata.name) || String(u.email || '').split('@')[0]) : '';
+    _dash.sessName = n ? n.replace(/[._-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()).split(' ')[0] : '';
+  } catch (e) { }
 }
 function dashSaveSoon() {
+  if (_dash.target) { _dash.dirty = true; _dash.saving = 'Not saved yet'; dashStatus(); return; }   // (set-up mode saves with its own buttons)
   clearTimeout(_dash.saveTimer); _dash.saving = 'Saving…'; dashStatus();
   _dash.saveTimer = setTimeout(dashSaveNow, 800);
 }
 async function dashSaveNow() {
-  if (!_dash.layout) return;
+  if (!_dash.layout || _dash.target) return;
   try { await dashRpc('hub_dash_save', { p_layout: _dash.layout }); _dash.saving = 'Saved ✓'; }
   catch (e) { _dash.saving = 'Not saved: ' + (e.message || 'error'); }
   dashStatus();
@@ -498,21 +527,33 @@ function dashStatus() { const el = document.getElementById('dash-status'); if (e
 // ---------- Drawing ----------
 function dashDraw(noLoad) {   // noLoad: redraw from blocks already loaded, without asking the database again
   const el = document.getElementById('mydash-pane'); if (!el) return;
-  const head = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🏠 My dashboard</div><span class="spacer"></span>
-    <span id="dash-status" class="dash-status"></span>
-    ${_dash.layout ? `<button class="ho-btn" onclick="dashRefreshAll()" title="Refresh every block">↻</button>
-      <button class="ho-btn${_dash.edit ? ' primary' : ''}" onclick="dashToggleEdit()">${_dash.edit ? '✓ Done' : '✏️ Customize'}</button>` : ''}</div>`;
+  dashApplyTheme();
+  if (!noLoad) _dash.glance = {};
+  const L = _dash.layout, T = _dash.target;
+  const btns = `<span id="dash-status" class="dash-status"></span>
+    ${L ? `<button class="ho-btn" onclick="dashRefreshAll()" title="Refresh every block">↻</button>
+      <button class="ho-btn" onclick="dashPersonalize()" title="${T ? 'Colour' : 'Colour, picture and greeting'}">🎨</button>` : ''}
+    ${!T && _dash.me && _dash.me.can_set_up ? '<button class="ho-btn" onclick="dashSetupOpen()" title="Set up someone’s starting dashboard">👥 Set up for…</button>' : ''}
+    ${L ? `<button class="ho-btn${_dash.edit ? ' primary' : ''}" onclick="dashToggleEdit()">${_dash.edit ? '✓ Done' : '✏️ Customize'}</button>` : ''}`;
+  let head;
+  if (T) head = `<div class="ho-head"><div class="pts-page-title" style="margin:0">👥 ${esc(T.name)}’s starting dashboard</div><span class="spacer"></span>${btns}</div>` + dashSetupBar();
+  else if (L && L.greet !== false && _dash.me) {
+    const nm = dashMyName(), g = typeof heroGreetingHtml === 'function' ? heroGreetingHtml(nm || 'there') : esc((typeof timeOfDayGreeting === 'function' ? timeOfDayGreeting() : 'Hello') + ', ' + (nm || 'there') + '!');
+    head = `<div class="dash-hero">${dashAvatarHtml(L, 56)}<div class="dash-hello"><div class="dash-greet">${g}</div>
+      <div class="dash-date">${esc(new Date().toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' }))}<span id="dash-glance"></span></div></div>
+      <span class="spacer"></span><div class="dash-hero-btns">${btns}</div></div>`;
+  } else head = `<div class="ho-head"><div class="pts-page-title" style="margin:0">🏠 My dashboard</div><span class="spacer"></span>${btns}</div>`;
+  if (!T && L && L.note) head += `<div class="dash-note-banner"><span>📌</span><div><b>${esc(L.note_by ? 'A note from ' + L.note_by : 'A note for you')}</b><div>${esc(L.note).replace(/\n/g, '<br>')}</div></div><button class="ho-btn sm" onclick="dashNoteDismiss()" title="Hide this note">✕</button></div>`;
   if (_dash.err) { el.innerHTML = head + `<div class="ho-card"><div class="goal-note">${esc(_dash.err)}</div><button class="ho-btn" onclick="_dash.me=null;openMyDash()">Try again</button></div>`; return; }
   if (!_dash.me) { el.innerHTML = head + '<div class="ho-intro">Loading…</div>'; return; }
   if (_dash.choose || !_dash.layout) { el.innerHTML = head + dashChooserHtml(); return; }
-  const L = _dash.layout;
   const bar = _dash.edit ? `<div class="dash-editbar"><button class="ho-btn primary" onclick="dashAddOpen()">+ Add a block</button>
-      <button class="ho-btn" onclick="dashReset()">↺ Start again from a role's layout</button>
-      <label class="dash-start"><input type="checkbox" ${L.start ? 'checked' : ''} onchange="_dash.layout.start=this.checked;dashSaveSoon()"> Open My dashboard when the Hub starts</label>
+      <button class="ho-btn" onclick="dashReset()">${!T && _dash.me.template ? '↺ Back to my starting dashboard' : '↺ Start again from a role’s layout'}</button>
+      ${T ? '' : `<label class="dash-start"><input type="checkbox" ${L.start ? 'checked' : ''} onchange="_dash.layout.start=this.checked;dashSaveSoon()"> Open My dashboard when the Hub starts</label>`}
       <span class="fd-sm">Drag ⠿ to move, or use ◀ ▶. S, M and L change the width; drag a block’s bottom-right corner to change its height. Blocks stack up to fill gaps.</span></div>` : '';
   el.innerHTML = head + bar + `<div class="dash-grid${_dash.edit ? ' editing' : ''}" id="dash-grid"${_dash.edit ? ' ondragover="dashDragOver(event)" ondrop="dashDrop(event)"' : ''}>${L.blocks.map(dashBlockShell).join('')}</div>` +
     (!L.blocks.length ? `<div class="ho-card"><div class="goal-note">No blocks yet.</div><button class="ho-btn primary" onclick="${_dash.edit ? '' : 'dashToggleEdit();'}dashAddOpen()">+ Add a block</button></div>` : '');
-  dashStatus();
+  dashStatus(); dashGlanceDraw();
   dashPackStart();
   L.blocks.forEach(b => { if (!noLoad || _dash.cache[b.id] === undefined) dashLoadBlock(b.id, false); });
 }
@@ -563,20 +604,30 @@ function dashStartRefresh() {
 // ---------- First visit: pick a starting layout ----------
 function dashChooserHtml() {
   const best = dashBestStarter();
-  return `<div class="ho-intro">Pick a layout to start from. It only shows the blocks your access allows, and you can add, remove, move and resize them afterwards.</div>
+  const who = _dash.target ? esc(_dash.target.name) + '’s' : 'your';
+  return `<div class="ho-intro">Pick a layout to start from. It only shows the blocks ${who} access allows, and ${_dash.target ? 'you can still add, remove, move and resize them before saving' : 'you can add, remove, move and resize them afterwards'}.</div>
     <div class="dash-starters">${DASH_STARTERS.map(s => { const B = dashStarterBlocks(s);
       return `<label class="dash-starter${s.key === best ? ' best' : ''}"><input type="radio" name="dash-st" value="${s.key}" ${s.key === best ? 'checked' : ''}>
-        <b>${esc(s.name)}</b>${s.key === best ? ' <span class="dash-pill ok">Closest to your access</span>' : ''}
+        <b>${esc(s.name)}</b>${s.key === best ? ` <span class="dash-pill ok">Closest to ${_dash.target ? esc(_dash.target.name) + '’s' : 'your'} access</span>` : ''}
         <div class="dash-sub">${B.length ? B.map(([t]) => esc(DASH_BLOCKS[t].name)).join(' · ') : 'Only For you and Quick links (nothing else matches your access)'}</div></label>`; }).join('')}</div>
     <button class="ho-btn primary" onclick="dashChoose()">Start with this layout</button>`;
 }
 function dashChoose() {
   const r = document.querySelector('input[name="dash-st"]:checked'); if (!r) return;
-  _dash.layout = dashBuild([r.value]); _dash.choose = false; dashSaveSoon(); dashDraw();
+  const keep = _dash.keep || _dash.layout; _dash.keep = null;
+  _dash.layout = dashBuild([r.value]); _dash.choose = false;
+  if (keep) ['theme', 'avatar', 'name', 'greet', 'start', 'note', 'note_by'].forEach(k => { if (keep[k] !== undefined) _dash.layout[k] = keep[k]; });
+  if (_dash.target) _dash.edit = true;
+  dashSaveSoon(); dashDraw();
 }
 function dashReset() {
-  if (!confirm('Start again from a role’s layout? Your current blocks and their settings will be replaced.')) return;
-  _dash.choose = true; _dash.edit = false; _dash.cache = {}; dashDraw();
+  const T = !_dash.target && _dash.me && _dash.me.template;
+  if (T) {   // (back to the starting dashboard an owner set up; their colour, picture and name stay)
+    if (!confirm('Go back to your starting dashboard? Your current blocks and their settings will be replaced (your colour and picture stay).')) return;
+    _dash.layout = dashFromTemplate(T, _dash.layout); _dash.cache = {}; _dash.edit = false; dashSaveSoon(); dashDraw(); return;
+  }
+  if (!confirm(_dash.target ? 'Start again from a role’s layout?' : 'Start again from a role’s layout? Your current blocks and their settings will be replaced.')) return;
+  _dash.keep = _dash.layout; _dash.choose = true; _dash.edit = false; _dash.cache = {}; dashDraw();
 }
 
 // ---------- Customize ----------
@@ -718,6 +769,157 @@ function dashReloadType(type) { if (_dash.layout && paneVisible('mydash-pane')) 
   }
 })();
 
+// ---------- Personal header: name, picture, today at a glance ----------
+function dashMyName() { return (_dash.layout && _dash.layout.name) || _dash.sessName || ''; }
+function dashAvatarHtml(L, size) {
+  const A = L && L.avatar, nm = dashMyName() || '?';
+  if (A && A.key && typeof hubAvatarHtml === 'function') return hubAvatarHtml({ name: nm, avatar_key: A.key, staff_id: nm }, size);
+  if (A && A.emoji) return `<span class="dash-av" style="width:${size}px;height:${size}px;font-size:${Math.round(size * 0.55)}px">${esc(A.emoji)}</span>`;
+  return typeof hubAvatarHtml === 'function' ? hubAvatarHtml({ name: nm, staff_id: nm }, size) : `<span class="dash-av" style="width:${size}px;height:${size}px">${esc(nm.charAt(0).toUpperCase())}</span>`;
+}
+function dashGlanceSet(b, txt) { if (!b || !b.id) return; (_dash.glance = _dash.glance || {})[b.id] = txt || ''; dashGlanceDraw(); }
+function dashGlanceDraw() {
+  const el = document.getElementById('dash-glance'); if (!el || !_dash.layout) return;
+  const parts = _dash.layout.blocks.map(b => (_dash.glance || {})[b.id]).filter(Boolean);
+  el.textContent = parts.length ? ' · ' + parts.join(' · ') : '';
+}
+function dashNoteDismiss() { if (!_dash.layout) return; delete _dash.layout.note; delete _dash.layout.note_by; dashSaveSoon(); dashDraw(true); }
+
+// ---------- 🎨 Colours (the dashboard page only) ----------
+const DASH_THEMES = [
+  { key: 'classic', name: '4Cats classic', mood: 'The Hub’s own colours' },
+  { key: 'buttercup', name: 'Buttercup', mood: 'Warm, happy, sunny', bg: '#fff8e1', card: '#ffffff', accent: '#d6a02a', soft: '#fbefc7', ink: '#2d2a22', inkSoft: '#7a7365', border: '#f1e6c4', on: '#fff' },
+  { key: 'sage', name: 'Sage Studio', mood: 'Calm, natural, organized', bg: '#eef3ec', card: '#ffffff', accent: '#6b8e6e', soft: '#dce8dc', ink: '#253027', inkSoft: '#6b7a6c', border: '#dde6dc', on: '#fff' },
+  { key: 'blush', name: 'Blush', mood: 'Soft, playful, welcoming', bg: '#fdf0f2', card: '#ffffff', accent: '#d9768f', soft: '#f9dbe2', ink: '#33252a', inkSoft: '#85707a', border: '#f3dde3', on: '#fff' },
+  { key: 'lavender', name: 'Lavender Haze', mood: 'Dreamy, gentle, modern', bg: '#f4f0fb', card: '#ffffff', accent: '#9a7fd4', soft: '#e6ddf6', ink: '#2b2540', inkSoft: '#776f8c', border: '#e7e0f3', on: '#fff' },
+  { key: 'sky', name: 'Sky Blue', mood: 'Fresh, clear, airy', bg: '#ecf5fc', card: '#ffffff', accent: '#4b8dc4', soft: '#d8e9f6', ink: '#1f2d3a', inkSoft: '#687888', border: '#d9e7f2', on: '#fff' },
+  { key: 'peachy', name: 'Peachy', mood: 'Warm, cheerful, friendly', bg: '#fff2eb', card: '#ffffff', accent: '#e2875e', soft: '#fcdccb', ink: '#35261f', inkSoft: '#85706a', border: '#f6e0d4', on: '#fff' },
+  { key: 'mint', name: 'Mint Condition', mood: 'Fresh, bright, clean', bg: '#eaf7f1', card: '#ffffff', accent: '#379a77', soft: '#d3eee2', ink: '#1e3129', inkSoft: '#64786f', border: '#d6ebe1', on: '#fff' },
+  { key: 'oat', name: 'Oat Milk', mood: 'Neutral, minimal, timeless', bg: '#f5f0e7', card: '#ffffff', accent: '#9a8166', soft: '#e9dfcf', ink: '#2f2a23', inkSoft: '#7d7468', border: '#e6ddcf', on: '#fff' },
+  { key: 'rosewood', name: 'Rosewood', mood: 'Rich, warm, sophisticated', bg: '#f8edee', card: '#ffffff', accent: '#a4515f', soft: '#eed5d9', ink: '#331f23', inkSoft: '#83686d', border: '#ecd9dc', on: '#fff' },
+  { key: 'midnight', name: 'Midnight', mood: 'Deep navy, professional', dark: 1, bg: '#111a2e', card: '#1a2640', accent: '#8ab4f8', soft: '#24365a', ink: '#e7edf8', inkSoft: '#9babc6', border: '#2a3b5e', on: '#0f1a2e' },
+  { key: 'charcoal', name: 'Charcoal', mood: 'Sleek, modern, focused', dark: 1, bg: '#1b1b1d', card: '#29292c', accent: '#e3b55a', soft: '#3a352a', ink: '#eeeeee', inkSoft: '#a3a3a8', border: '#3b3b40', on: '#1b1b1d' },
+  { key: 'plum', name: 'Plum Night', mood: 'Moody, colourful, creative', dark: 1, bg: '#1e1829', card: '#2b2340', accent: '#c7a2f2', soft: '#3b2f58', ink: '#f0eaf9', inkSoft: '#a99bc2', border: '#3e335a', on: '#1e1829' }
+];
+function dashApplyTheme() {
+  const el = document.getElementById('mydash-pane'); if (!el) return;
+  const t = DASH_THEMES.find(x => x.key === (_dash.layout && _dash.layout.theme)) || DASH_THEMES[0];
+  ['--dash-bg', '--card-bg', '--accent', '--accent-soft', '--ink', '--ink-soft', '--border', '--dash-on'].forEach(v => el.style.removeProperty(v));
+  el.classList.toggle('themed', !!t.bg); el.classList.toggle('dark', !!t.dark);
+  if (!t.bg) return;
+  [['--dash-bg', t.bg], ['--card-bg', t.card], ['--accent', t.accent], ['--accent-soft', t.soft], ['--ink', t.ink], ['--ink-soft', t.inkSoft], ['--border', t.border], ['--dash-on', t.on]].forEach(([k, v]) => el.style.setProperty(k, v));
+}
+function dashThemeSwatch(t, on) {
+  const bg = t.bg || '#f5f4fb', card = t.card || '#ffffff', acc = t.accent || 'var(--accent)', line = t.border || '#eceaf6';
+  return `<button class="dash-sw${on ? ' on' : ''}" onclick="dashSetTheme('${t.key}')"><span class="dash-sw-pic" style="background:${bg}"><i style="background:${acc}"></i><i style="background:${card};border-color:${line}"></i><b style="background:${card};border-color:${line}"></b><b style="background:${card};border-color:${line}"></b></span>
+    <span class="dash-sw-name">${esc(t.name)}${on ? ' ✓' : ''}</span><span class="dash-sw-mood">${esc(t.mood)}</span></button>`;
+}
+async function dashPersonalize() {
+  if (!_dash.layout) return;
+  const L = _dash.layout, cur = L.theme || 'classic', T = _dash.target;
+  let h = `<h3 style="margin:0 0 4px">🎨 ${T ? esc(T.name) + '’s colour' : 'Make it yours'}</h3><p class="fd-sm" style="margin:0 0 10px">${T ? 'The colour their dashboard starts with. They can change it any time.' : 'Only My dashboard changes colour; the rest of the Hub stays the same.'}</p>
+    <div class="dash-sws">${DASH_THEMES.map(t => dashThemeSwatch(t, t.key === cur)).join('')}</div>`;
+  if (!T) {
+    h += `<h4 class="dash-sh">Your picture</h4><div class="dash-avs" id="dash-avs">${dashAvatarChoicesHtml()}</div>
+      <h4 class="dash-sh">Greeting</h4><label class="dash-set-row">What should it call you? <input type="text" maxlength="40" value="${escAttr(L.name || '')}" placeholder="${escAttr(_dash.sessName || 'Your name')}" onchange="dashSetName(this.value)"></label>
+      <label class="dash-set-row"><input type="checkbox" ${L.greet !== false ? 'checked' : ''} onchange="dashSetGreet(this.checked)"> Show the greeting and “today at a glance” at the top</label>`;
+  }
+  h += '<div style="text-align:right;margin-top:12px"><button class="ho-btn primary" onclick="closeDutySheet()">Done</button></div>';
+  openDutySheet(h);
+  if (!T && !_dash.avatars) { _dash.avatars = await dashAvatarList(); const box = document.getElementById('dash-avs'); if (box) box.innerHTML = dashAvatarChoicesHtml(); }
+}
+function dashSetTheme(k) {
+  if (!_dash.layout) return;
+  if (k === 'classic') delete _dash.layout.theme; else _dash.layout.theme = k;
+  dashApplyTheme(); dashSaveSoon();
+  const box = document.querySelector('.dash-sws'); if (box) box.innerHTML = DASH_THEMES.map(t => dashThemeSwatch(t, t.key === (_dash.layout.theme || 'classic'))).join('');
+}
+function dashSetName(v) { v = String(v || '').trim().slice(0, 40); if (v) _dash.layout.name = v; else delete _dash.layout.name; dashSaveSoon(); dashDraw(true); }
+function dashSetGreet(on) { if (on) delete _dash.layout.greet; else _dash.layout.greet = false; dashSaveSoon(); dashDraw(true); }
+const DASH_EMOJI = ['🐱', '🦊', '🐻', '🐼', '🐨', '🦉', '🐸', '🐝', '🦋', '🌻', '🌈', '🎨', '🖌️', '🏺', '☕', '🌿', '⭐', '🍩'];
+async function dashAvatarList() {   // the staff avatar library (as on personal profiles), if this login can see it
+  try {
+    const st = sb.storage.from(typeof AVATAR_BUCKET !== 'undefined' ? AVATAR_BUCKET : 'staff-avatars'), out = [];
+    const top = await st.list('', { limit: 200, sortBy: { column: 'name', order: 'asc' } });
+    if (top.error || !top.data) return [];
+    const files = top.data.filter(f => f.id), folders = top.data.filter(f => !f.id).slice(0, 12);
+    files.forEach(f => out.push(f.name));
+    for (const fo of folders) { const r = await st.list(fo.name, { limit: 100 }); (r.data || []).filter(f => f.id).forEach(f => out.push(fo.name + '/' + f.name)); if (out.length > 300) break; }
+    return out.filter(k => /\.(png|jpe?g|webp|gif|svg)$/i.test(k));
+  } catch (e) { return []; }
+}
+function dashAvatarChoicesHtml() {
+  const A = (_dash.layout && _dash.layout.avatar) || {}, url = k => `${SUPABASE_URL}/storage/v1/object/public/${typeof AVATAR_BUCKET !== 'undefined' ? AVATAR_BUCKET : 'staff-avatars'}/${String(k).split('/').map(encodeURIComponent).join('/')}`;
+  const pics = _dash.avatars === undefined ? '<span class="fd-sm">Loading pictures…</span>' : (_dash.avatars || []).map(k => `<button class="dash-avc${A.key === k ? ' on' : ''}" onclick="dashSetAvatar('key', ${escAttr(JSON.stringify(k))})"><img loading="lazy" src="${escAttr(url(k))}" alt=""></button>`).join('');
+  return pics + DASH_EMOJI.map(e => `<button class="dash-avc emo${A.emoji === e ? ' on' : ''}" onclick="dashSetAvatar('emoji', '${e}')">${e}</button>`).join('') +
+    `<button class="dash-avc emo${!A.key && !A.emoji ? ' on' : ''}" onclick="dashSetAvatar('', '')" title="Just my first letter">${esc((dashMyName() || '?').charAt(0).toUpperCase())}</button>`;
+}
+function dashSetAvatar(kind, v) {
+  if (!kind) delete _dash.layout.avatar; else _dash.layout.avatar = kind === 'key' ? { key: v } : { emoji: v };
+  dashSaveSoon(); const box = document.getElementById('dash-avs'); if (box) box.innerHTML = dashAvatarChoicesHtml(); dashDraw(true);
+}
+
+// ---------- 👥 Set up for… (owners): a person's starting dashboard ----------
+// The grid shows the owner's own numbers (data always loads as whoever is signed in); the block library and starting layouts
+// follow the person's access. Nothing saves until "Save"; ✏️ Customize works the same as on your own.
+async function dashSetupOpen() {
+  openDutySheet('<h3 style="margin:0 0 8px">👥 Set up a starting dashboard</h3><p class="fd-sm">Loading…</p>');
+  let P;
+  try { P = (await dashRpc('hub_dash_people')) || []; }
+  catch (e) { openDutySheet(`<h3 style="margin:0 0 8px">👥 Set up a starting dashboard</h3><p class="fd-msg">${esc(/hub_dash_people/.test(e.message || '') ? 'Run My dashboard step 4 SQL in Supabase first.' : e.message)}</p><div style="text-align:right"><button class="ho-btn" onclick="closeDutySheet()">Close</button></div>`); return; }
+  _dash.people = P;
+  const when = t => t ? new Date(t).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }) : '';
+  openDutySheet(`<h3 style="margin:0 0 4px">👥 Set up a starting dashboard</h3>
+    <p class="fd-sm" style="margin:0 0 10px">Pick someone to arrange their blocks and colour. They can change it afterwards, and ↺ always takes them back to the one you set.</p>
+    ${P.map((x, i) => `<div class="dash-addrow"><div><div><b>${esc(x.name || x.email)}</b>${x.me ? ' <span class="dash-pill">you</span>' : ''} <span class="fd-sm">${esc(x.email || '')}</span></div>
+      <div class="dash-sub">${x.template_at ? `Starting dashboard set${x.template_by ? ' by ' + esc(x.template_by) : ''} ${esc(when(x.template_at))}` : 'No starting dashboard yet'}${x.arranged_at ? ` · arranged their own ${esc(when(x.arranged_at))}` : ' · hasn’t opened My dashboard yet'}</div></div>
+      <button class="ho-btn sm primary" onclick="dashSetupStart(${i})">${x.template_at ? 'Edit' : 'Set up'}</button></div>`).join('') || '<p class="fd-sm">No home office logins found.</p>'}
+    <div style="text-align:right;margin-top:10px"><button class="ho-btn" onclick="closeDutySheet()">Close</button></div>`);
+}
+async function dashSetupStart(i) {
+  const x = (_dash.people || [])[i]; if (!x) return;
+  let R; try { R = await dashRpc('hub_dash_for', { p_user: x.user_id }); } catch (e) { alert(e.message || e); return; }
+  closeDutySheet();
+  _dash.own = { me: _dash.me, layout: _dash.layout, cache: _dash.cache, edit: _dash.edit, choose: _dash.choose };
+  _dash.target = { user_id: x.user_id, name: R.name || x.name || x.email, had: !!R.template };
+  _dash.me = { areas: R.areas || {}, roles: R.roles || [], actions: {} };
+  const L = dashNormalize(R.template) || (R.layout ? dashFromTemplate(R.layout, null) : null);
+  if (L && R.layout && !R.template && R.layout.theme) L.theme = R.layout.theme;
+  _dash.layout = L; _dash.choose = !L; _dash.cache = {}; _dash.edit = !!L; _dash.dirty = false; _dash.saving = '';
+  dashDraw();
+}
+function dashSetupBar() {
+  const T = _dash.target, L = _dash.layout;
+  return `<div class="dash-setup"><div><b>You’re arranging ${esc(T.name)}’s starting dashboard.</b> The blocks show your numbers while you arrange them; the blocks you can add follow ${esc(T.name)}’s access.
+      ${T.had ? '' : ` ${esc(T.name)} gets this the first time they open My dashboard.`} They can change it afterwards, and ↺ takes them back to this one.</div>
+    ${L ? `<label class="dash-set-row" style="display:block;margin-top:8px">A welcome note for ${esc(T.name)} (optional; shows at the top of their dashboard until they close it)
+      <textarea class="dash-setup-note" maxlength="600" oninput="_dash.layout.note=this.value;_dash.dirty=true">${esc(L.note || '')}</textarea></label>
+    <div class="dash-setup-btns"><button class="ho-btn primary" onclick="dashSetupSave(false)">💾 Save as ${esc(T.name)}’s starting dashboard</button>
+      <button class="ho-btn" onclick="dashSetupSave(true)" title="Also replaces what they've arranged so far (their colour, picture and name stay)">Save and replace theirs now</button>
+      ${T.had ? `<button class="ho-btn danger" onclick="dashSetupDelete()">Remove their starting dashboard</button>` : ''}
+      <span class="spacer"></span><button class="ho-btn" onclick="dashSetupClose()">Close</button></div>` : `<div class="dash-setup-btns"><span class="spacer"></span><button class="ho-btn" onclick="dashSetupClose()">Close</button></div>`}</div>`;
+}
+async function dashSetupSave(replace) {
+  const T = _dash.target, L = _dash.layout; if (!T || !L) return;
+  if (replace && !confirm('Replace what ' + T.name + ' has arranged with this now? Their colour, picture and name stay.')) return;
+  const out = JSON.parse(JSON.stringify(L)); delete out.avatar; delete out.name; delete out.greet; delete out.start;
+  if (out.note && out.note.trim()) out.note_by = (_dash.own && _dash.own.layout && _dash.own.layout.name) || _dash.sessName || ''; else { delete out.note; delete out.note_by; }
+  try { await dashRpc('hub_dash_template_save', { p_user: T.user_id, p_layout: out, p_replace: !!replace }); }
+  catch (e) { alert('Couldn’t save: ' + (e.message || e)); return; }
+  T.had = true; _dash.dirty = false; _dash.saving = replace ? 'Saved, and replaced theirs ✓' : 'Saved as their starting dashboard ✓'; dashDraw(true);
+}
+async function dashSetupDelete() {
+  const T = _dash.target; if (!T || !confirm('Remove ' + T.name + '’s starting dashboard? What they’ve arranged stays; ↺ will offer the role layouts again.')) return;
+  try { await dashRpc('hub_dash_template_delete', { p_user: T.user_id }); } catch (e) { alert(e.message || e); return; }
+  T.had = false; _dash.saving = 'Starting dashboard removed'; dashDraw(true);
+}
+function dashSetupClose() {
+  if (_dash.dirty && !confirm('Close without saving ' + _dash.target.name + '’s dashboard?')) return;
+  const o = _dash.own || {}; _dash.target = null; _dash.own = null; _dash.dirty = false; _dash.saving = '';
+  _dash.me = o.me; _dash.layout = o.layout; _dash.cache = o.cache || {}; _dash.edit = false; _dash.choose = !!o.choose;
+  dashDraw();
+}
+
 // ---------- Open on start (called by hub.html once the Hub has started) ----------
 async function dashStartup(data) {
   if (!data || !data.isAdmin) return;
@@ -746,7 +948,7 @@ function dashStyles() {
 .dash-body { max-height: 420px; overflow-y: auto; font-size: 13.5px; }
 .dash-grid.editing .dash-block { outline: 2px dashed var(--accent-soft); resize: vertical; overflow: hidden; max-height: 1000px; } .dash-block.dragging { opacity: .4; outline: 2px dashed var(--accent) !important; box-shadow: none; }
 .dash-tools { display: flex; flex-wrap: nowrap; gap: 3px; align-items: center; flex: none; }   /* (in the header, so Customize never changes a block's height) */
-.dash-tools button { border: 1px solid var(--border); background: #fff; border-radius: 7px; min-width: 24px; height: 24px; padding: 0 4px; font-size: 11px; cursor: pointer; }
+.dash-tools button { border: 1px solid var(--border); background: var(--card-bg); color: var(--ink); border-radius: 7px; min-width: 24px; height: 24px; padding: 0 4px; font-size: 11px; cursor: pointer; }
 .dash-tools button:disabled { opacity: .35; cursor: default; } .dash-tools .dash-sz.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .dash-grip { cursor: grab; font-size: 18px; line-height: 24px; color: var(--ink-soft); padding: 0 2px; }
 .dash-empty { color: var(--ink-soft); padding: 4px 0; } .dash-empty.bad { color: var(--red); }
@@ -787,9 +989,37 @@ function dashStyles() {
 .dash-head-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; } .dash-head-row .dash-big { margin: 0; }
 .dash-order { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; border-bottom: 1px solid var(--border); transition: opacity .2s, transform .2s; }
 .dash-order.gone { opacity: 0; transform: translateX(20px); pointer-events: none; }
-.dash-tick { flex: none; width: 30px; height: 30px; border-radius: 999px; border: 1.5px solid var(--green); background: #fff; color: var(--green); font-weight: 800; cursor: pointer; }
+.dash-tick { flex: none; width: 30px; height: 30px; border-radius: 999px; border: 1.5px solid var(--green); background: var(--card-bg); color: var(--green); font-weight: 800; cursor: pointer; }
 .dash-tick:hover { background: var(--green); color: #fff; } .dash-order-main { min-width: 0; flex: 1; }
 .dash-o-amt { float: right; font-weight: 800; } .dash-o-items { font-size: 12.5px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dash-block { color: var(--ink); }
+.dash-hero { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; } .dash-hero .spacer { flex: 1; }
+.dash-hero-btns { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; } .dash-hello { min-width: 0; }
+.dash-greet { font-family: 'Fredoka', 'Inter', sans-serif; font-size: clamp(22px, 2vw, 30px); font-weight: 700; color: var(--ink); line-height: 1.15; }
+.dash-date { color: var(--ink-soft); font-size: 13.5px; margin-top: 3px; } #dash-glance { font-weight: 600; }
+.dash-av { display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; background: var(--accent-soft); flex: none; }
+.dash-hero .hub-av, .dash-hero .dash-av { flex: none; }
+.dash-note-banner { display: flex; gap: 10px; align-items: flex-start; background: var(--card-bg); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 14px; padding: 10px 12px; margin: 0 0 12px; color: var(--ink); }
+.dash-note-banner > div { flex: 1; font-size: 14px; } .dash-note-banner b { display: block; margin-bottom: 2px; }
+.dash-setup { background: #f3e8fb; border: 1px solid #d9b8f0; border-radius: 14px; padding: 12px 14px; margin: 6px 0 12px; color: #3b1d52; font-size: 13.5px; }
+.dash-setup-note { width: 100%; box-sizing: border-box; min-height: 60px; margin-top: 4px; border: 1px solid #d9b8f0; border-radius: 10px; padding: 8px; font: inherit; }
+.dash-setup-btns { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; } .dash-setup-btns .spacer { flex: 1; }
+.dash-sws { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.dash-sw { text-align: left; border: 1px solid #e6e3ee; background: #fff; border-radius: 12px; padding: 8px; cursor: pointer; } .dash-sw.on { border-color: #111; box-shadow: 0 0 0 1px #111; }
+.dash-sw-pic { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 9px 26px; gap: 4px; padding: 6px; border-radius: 8px; height: 50px; box-sizing: border-box; }
+.dash-sw-pic i { display: block; border-radius: 3px; } .dash-sw-pic i + i { border: 1px solid; } .dash-sw-pic b { display: block; border-radius: 4px; border: 1px solid; }
+.dash-sw-name { display: block; font-weight: 700; font-size: 12.5px; margin-top: 6px; color: #1f1b3a; } .dash-sw-mood { display: block; font-size: 11px; color: #6b6a80; }
+.dash-sh { margin: 14px 0 6px; font-size: 13px; } .dash-set-row { display: flex; gap: 8px; align-items: center; margin: 6px 0; font-size: 13.5px; } .dash-set-row input[type=text] { flex: 1; padding: 6px 8px; border: 1px solid #ddd; border-radius: 8px; font: inherit; }
+.dash-avs { display: flex; flex-wrap: wrap; gap: 6px; max-height: 220px; overflow-y: auto; }
+.dash-avc { width: 44px; height: 44px; border-radius: 999px; border: 2px solid transparent; background: #f3f1f8; padding: 0; overflow: hidden; cursor: pointer; font-size: 22px; } .dash-avc img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.dash-avc.on { border-color: #111; }
+#mydash-pane.themed { background: var(--dash-bg); min-height: 100vh; box-sizing: border-box; }
+#mydash-pane.themed .ho-btn { background: var(--card-bg); color: var(--ink); border-color: var(--border); }
+#mydash-pane.themed .ho-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--dash-on); }
+#mydash-pane.themed input, #mydash-pane.themed select, #mydash-pane.themed textarea { background: var(--card-bg); color: var(--ink); border-color: var(--border); }
+#mydash-pane.themed .dash-block a, #mydash-pane.themed .dash-open { color: var(--accent); }
+#mydash-pane.dark .goal-note, #mydash-pane.dark .fd-sm, #mydash-pane.dark .lab-sub, #mydash-pane.dark .dash-sub { color: var(--ink-soft); }
+#mydash-pane.dark .dash-note { background: var(--dash-bg); color: var(--ink); } #mydash-pane.dark .dash-setup { background: #3b2f58; color: #f0eaf9; border-color: #5a4a80; }
 @media (max-width: 1100px) { .dash-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .dash-block.sz-l { grid-column: 1 / -1; } }
 @media (max-width: 640px) { .dash-grid { grid-template-columns: 1fr; } .dash-block.sz-s, .dash-block.sz-m, .dash-block.sz-l { grid-column: 1 / -1; } }`;
   document.head.appendChild(s);
