@@ -427,3 +427,20 @@ async function famReceipt(order) {
   if (w) { w.document.open(); w.document.write(html); w.document.close(); }
   else alert('Your browser blocked the receipt window. Allow pop-ups for the Hub, then try again.');
 }
+
+// 🧾 (Nov 13 2026) a field trip's or buyout's receipts (Home office → Field trips / Studio buyouts): one payment opens straight away,
+// two or more (deposit, balance) show a small list to choose from
+async function famTripReceipts(kind, id, btn) {
+  const old = document.getElementById('fam-paymenu'); if (old) old.remove();
+  const { data, error } = await sb.rpc('hub_trip_payments', kind === 'bo' ? { p_bo: id } : { p_ft: id });
+  if (error) { alert(/hub_trip_payments/.test(error.message) && /function/i.test(error.message) ? 'Run hub_trip_payments.sql in Supabase first.' : error.message); return; }
+  const L = data || [];
+  if (!L.length) { alert('No online payments on this invoice yet (it may have been paid at the studio).'); return; }
+  if (L.length === 1) { famReceipt(L[0].order); return; }
+  const PART = { deposit: 'Deposit', balance: 'Balance', full: 'Paid in full' }, r = btn.getBoundingClientRect();
+  const m = document.createElement('div'); m.id = 'fam-paymenu';
+  m.style.cssText = `position:fixed;z-index:9999;left:${Math.min(r.left, window.innerWidth - 300)}px;top:${r.bottom + 6}px;background:#fff;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.2);padding:8px;min-width:260px`;
+  m.innerHTML = '<div style="font-size:12px;color:#5c6670;padding:4px 8px">Which payment?</div>' + L.map(p => `<button class="ho-btn" style="display:block;width:100%;text-align:left;margin:4px 0" onclick="document.getElementById('fam-paymenu').remove();famReceipt('${famEsc(p.order)}')">🧾 ${famEsc(PART[p.part] || p.part || 'Payment')} · ${famEsc(p.order)} · $${(+p.amount || 0).toFixed(2)}</button>`).join('');
+  document.body.appendChild(m);
+  setTimeout(() => document.addEventListener('click', function off(e) { if (!m.contains(e.target)) { m.remove(); document.removeEventListener('click', off); } }), 0);
+}
