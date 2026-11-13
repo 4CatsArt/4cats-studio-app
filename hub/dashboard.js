@@ -71,6 +71,7 @@ function dashOpen(fn, arg) {
 // ---------- The block library ----------
 // type: { name, group, area, level, size (default), sizes, opts (defaults), settings(b) → html, open: [fn, arg], load(b) → html }
 // (Nov 12 2026: 📅 Coming up: hub_cal_range for the next 1–14 days, layers to choose; click opens it on 📅 Calendar.)
+// (Nov 13 2026: 🌴 Time off requests: pending time off with Approve / Deny; Open → staff-schedule.html#timeoff.)
 const DASH_GROUPS = ['Layout', 'Mine', 'Studio day', 'Customers', 'People', 'Money', 'Warehouse', 'Comms', 'World', 'Community', 'Admin'];
 const DASH_ROWS_SETTING = b => `<label>Rows to show <select data-opt="rows">${[3, 5, 8, 12].map(n => `<option value="${n}"${+b.opts.rows === n ? ' selected' : ''}>${n}</option>`).join('')}</select></label>`;
 const DASH_BLOCKS = {
@@ -321,6 +322,34 @@ const DASH_BLOCKS = {
       const W = ((await dashRpc('hub_offers_admin')) || []).filter(o => o.status === 'taken'); dashGlanceSet(b, W.length ? W.length + ' shift swaps to approve' : '');
       return (W.length ? dashBig(W.length, 'waiting for you', 'warn') : '') +
         dashRows(W, +b.opts.rows || 5, o => dashLine(esc(o.from_name + ' → ' + o.taker_name), esc(dashDay(o.shift_date) + ' · ' + shortTime(o.start_time) + ' · ' + (o.studio_name || ''))), 'Nothing waiting. ✓');
+    }
+  },
+  time_off: {
+    name: '🌴 Time off requests', group: 'People', area: 'staff_scheduling', level: 'view', size: 's', opts: { rows: 5 }, settings: DASH_ROWS_SETTING,
+    open: ['dashOpenUrl', 'staff-schedule.html#timeoff'], every: 300000, words: 'vacation holiday leave pending approve deny',
+    desc: 'Time off waiting for approval, newest first (new in the last 2 days marked), with Approve and Deny. Leaves out former staff and requests after someone’s last day, like staff-schedule.',
+    async load(b) {
+      const today = dashToday();
+      const { data, error } = await sb.from('staff_time_off').select('*').eq('status', 'pending').gte('end_date', today).limit(300);
+      if (error) throw error;
+      const ids = [...new Set((data || []).map(r => r.staff_id))];
+      const P = {};
+      if (ids.length) { const { data: sp } = await sb.from('staff_profiles').select('id, display_name, preferred_name, is_active, termination_date').in('id', ids); (sp || []).forEach(x => { P[x.id] = x; }); }
+      // (the same archive rule as staff-schedule: not former staff, nothing starting after someone's last day)
+      const L = (data || []).filter(r => { const p = P[r.staff_id]; return !(p && (p.is_active === false || (p.termination_date && (p.termination_date < today || r.start_date > p.termination_date)))); })
+        .sort((x, y) => String(y.created_at || y.start_date).localeCompare(String(x.created_at || x.start_date)));
+      const fresh = r => r.created_at && Date.now() - new Date(r.created_at).getTime() < 2 * 864e5;
+      const nNew = L.filter(fresh).length, canEdit = dashCan('staff_scheduling', 'edit');
+      dashGlanceSet(b, L.length ? L.length + ' time off request' + (L.length === 1 ? '' : 's') + ' waiting' : '');
+      const name = r => { const p = P[r.staff_id] || {}; return (p.preferred_name || '').trim() || p.display_name || 'Someone'; };
+      const kind = r => r.type === 'sick' ? 'sick leave' : r.type === 'medical' ? 'medical leave' : r.type === 'vacation' ? 'time off' : (r.type || 'time off');
+      const days = r => r.start_date === r.end_date ? dashDay(r.start_date) : dashDay(r.start_date) + ' – ' + dashDay(r.end_date);
+      const hm = t => { if (!t) return ''; const [h, m] = String(t).split(':').map(Number); return (h % 12 || 12) + (m ? ':' + String(m).padStart(2, '0') : '') + (h < 12 ? 'am' : 'pm'); };
+      return (L.length ? `<div class="dash-chips">${dashBig(L.length, 'waiting', 'warn')}${nNew ? `<span class="dash-pill warn">${nNew} new</span>` : ''}</div>` : '') +
+        dashRows(L, +b.opts.rows || 5, r => `<div class="dash-row dash-to"><div class="dash-main">${esc(name(r))}${fresh(r) ? ' <span class="dash-pill warn">new</span>' : ''}</div>
+          <div class="dash-sub">${esc(days(r) + (r.start_time ? ' · ' + hm(r.start_time) + '–' + hm(r.end_time) : '') + ' · ' + kind(r))}${r.note ? `<div class="dash-to-note">“${esc(String(r.note).slice(0, 120))}”</div>` : ''}</div>
+          ${canEdit ? `<div class="dash-to-act"><button class="ho-btn sm" onclick="event.stopPropagation();dashTimeOff('${escAttr(String(r.id))}','approved','${escAttr(b.id)}')">✓ Approve</button><button class="ho-btn sm" onclick="event.stopPropagation();dashTimeOff('${escAttr(String(r.id))}','denied','${escAttr(b.id)}',${escAttr(JSON.stringify(name(r) + ', ' + days(r)))})">✕ Deny</button></div>` : ''}</div>`,
+          'No time off waiting. ✓');
     }
   },
   sign_offs: {
@@ -715,6 +744,14 @@ const DASH_PACE_TIERS = [   // (the same five bands as pace.html)
   { label: 'Planned growth', bg: '#75fc4c', fg: '#000' }, { label: 'All good', bg: '#e0218a', fg: '#fff' }];
 function dashPaceTier(v) { if (v == null) return null; return DASH_PACE_TIERS[v > 100 ? 4 : v >= 80 ? 3 : v >= 50 ? 2 : v >= 10 ? 1 : 0]; }
 function dashOpenUrl(u) { window.open(u, '_blank'); }
+// 🌴 Approve or deny a time off request from the dashboard (the same as staff-schedule's buttons)
+async function dashTimeOff(id, status, blockId, label) {
+  if (status === 'denied' && !confirm('Deny ' + (label || 'this request') + '?')) return;
+  const { data: u } = await sb.auth.getUser();
+  const { error } = await sb.from('staff_time_off').update({ status, reviewed_by: u && u.user ? u.user.id : null, reviewed_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', id);
+  if (error) { alert('Couldn’t save: ' + error.message); return; }
+  delete _dash.cache[blockId]; dashLoadBlock(blockId, true);
+}
 function dashMonday(off) {   // this week's Monday (local), moved by whole weeks
   const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7) + 7 * (off || 0));
   return localDateStr(d);
@@ -1718,6 +1755,8 @@ function dashStyles() {
 .dash-tools button:disabled { opacity: .35; cursor: default; } .dash-tools .dash-sz.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .dash-grip { cursor: grab; font-size: 18px; line-height: 24px; color: var(--ink-soft); padding: 0 2px; }
 .dash-empty { color: var(--ink-soft); padding: 4px 0; } .dash-empty.bad { color: var(--red); }
+.dash-to { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: center; } .dash-to .dash-sub { grid-column: 1; } .dash-to-act { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 4px; }
+.dash-to-note { color: var(--ink-soft); font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .dash-cal-day { margin-bottom: 8px; } .dash-cal-h { font-size: 12px; font-weight: 800; color: var(--ink-soft); text-transform: uppercase; letter-spacing: .03em; margin: 2px 0 3px; }
 .dash-cal-row { display: flex; gap: 10px; width: 100%; text-align: left; border: 0; border-left: 3px solid var(--c); background: none; padding: 4px 8px; font: inherit; font-size: 13.5px; color: var(--ink); cursor: pointer; border-radius: 4px; }
 .dash-cal-row:hover { background: #f7f6fb; } .dash-cal-row.past { opacity: .5; } .dash-cal-t { width: 62px; flex: none; color: var(--ink-soft); font-size: 12.5px; padding-top: 1px; }
