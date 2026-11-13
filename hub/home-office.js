@@ -57,9 +57,10 @@ function ftInvCell(r) {
   const i = ftInvOf(r.id), ed = hoA('parties_events', 'edit'), b = (a, l) => `<option value="${a}">${l}</option>`;
   if (!i || ['cancelled', 'released'].includes(i.status)) return (i ? `<span class="cust-st">${esc(FTI_ST[i.status])}</span> ` : '') + (ed ? `<button class="ho-btn sm" onclick="ftInvNew('${escAttr(r.id)}')">🧾 Invoice</button>` : '');
   const what = i.status === 'sent' ? `deposit due ${ftiDl(i.pay_by)}` : i.status === 'balance_sent' ? `$${Number(i.balance || 0).toFixed(2)} due ${ftiDl(i.balance_due)}` : i.status === 'deposit_paid' ? `trip ${ftiDl(i.day)}` : '';
-  return `<span class="cust-st cust-${i.status === 'sent' || i.status === 'balance_sent' ? 'held' : 'booked'}" title="${escAttr(`${i.school || ''} · ${i.day} ${String(i.at).slice(0, 5)} · ${i.students} children · ${i.project || 'project to choose'}${i.agreed_at ? ' · terms agreed by ' + i.agreed_name : ''} · paid so far $${Number(i.paid_total || 0).toFixed(2)} before tax`)}">${esc(FTI_ST[i.status] || i.status)}</span> <span class="fd-sm">${esc(what)}</span>
+  const stLabel = i.pay_on_day && i.status === 'deposit_paid' ? '🤝 Paying on the day' : null;   // (Nov 13 2026)
+  return `<span class="cust-st cust-${i.status === 'sent' || i.status === 'balance_sent' ? 'held' : 'booked'}" title="${escAttr(`${i.school || ''} · ${i.day} ${String(i.at).slice(0, 5)} · ${i.students} children · ${i.project || 'project to choose'}${i.agreed_at ? ' · terms agreed by ' + i.agreed_name : ''} · paid so far $${Number(i.paid_total || 0).toFixed(2)} before tax`)}">${esc(stLabel || FTI_ST[i.status] || i.status)}</span> <span class="fd-sm">${esc(what)}</span>
     ${ed && ['sent', 'deposit_paid', 'balance_sent'].includes(i.status) ? `<select class="fti-act" onchange="if (this.value) { const a = this.value; this.value = ''; ftInvAct('${escAttr(i.id)}', a); }"><option value="">Actions…</option>${
-      i.status === 'sent' ? b('send', i.sent_at ? 'Resend invoice' : 'Send invoice') + b('extend', 'Extend the deposit date') + b('cancel', 'Cancel')
+      i.status === 'sent' ? b('send', i.sent_at ? 'Resend invoice' : 'Send invoice') + b('extend', 'Extend the deposit date') + b('pay_on_day', '🤝 Paying in full on the day (no deposit)') + b('cancel', 'Cancel')
       : i.status === 'deposit_paid' ? b('balance', 'Send the balance invoice') + b('paid_studio', 'Paid at the studio') + b('cancel', 'Cancel')
       : b('send', 'Resend the balance invoice') + b('paid_studio', 'Paid at the studio')}</select>` : ''}`;
 }
@@ -111,9 +112,11 @@ async function ftInvAct(id, action) {
   if (action === 'extend') { date = prompt('New deposit due date (YYYY-MM-DD):', String(i.pay_by || '')); if (!date) return; }
   if (action === 'balance') { n = prompt(`How many children came? (at least ${10} are charged)`, String(i.students || '')); if (!n) return; n = parseInt(n, 10); if (!(n > 0)) { alert('Enter a number.'); return; } }
   if (action === 'paid_studio' && !confirm('Mark this field trip as paid in full at the studio?')) return;
+  if (action === 'pay_on_day' && !confirm(`${i.school || 'This school'} pays in full on the day, with no deposit?\n\nThis books the field trip now (the party form opens for the trip details) and it won't be released at the deposit date. On the day, use “Paid at the studio” or “Send the balance invoice”.`)) return;   // (Nov 13 2026)
   if (action === 'cancel' && !confirm(i.status === 'sent' ? 'Cancel this invoice? The time is released and its workshops reopen.' : 'Cancel this field trip? (The deposit is non-refundable under the terms.)')) return;
   const { data, error } = await sb.rpc('hub_ft_invoice_action', { p_id: id, p_action: action, p_date: date, p_students: n });
   if (error) { alert(error.message); return; }
+  if (action === 'pay_on_day') alert('Booked: paying in full on the day. The party form is on the day view now.');
   if (action === 'balance') { const r = await ftInvEmail(id); alert(r.ok ? `Balance invoice emailed: $${Number(data.balance || 0).toFixed(2)} + tax, due ${ftiDl(data.balance_due)}.` : 'Saved, but the email didn\u2019t send: ' + r.error + ' (use Resend).'); }
   ftAfter();
 }
