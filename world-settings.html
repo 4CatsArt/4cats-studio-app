@@ -446,6 +446,20 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
 .sh-list { margin: 6px 0 10px; padding-left: 22px; max-width: 620px; } .sh-list li { padding: 6px 0; border-bottom: 1px solid #f0e9dc; display: flex; align-items: center; gap: 8px; }
 .sh-list li img { width: 40px; height: 40px; object-fit: cover; border-radius: 8px; } .sh-acts { margin-left: auto; display: flex; gap: 10px; }
 .sh-perkrow { display: flex; gap: 8px; margin-bottom: 8px; max-width: 820px; } .sh-perkrow input:not([data-shpk="icon"]) { flex: 1; }
+
+.sh-colour .sh-sw { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.sh-swb { width: 28px; height: 28px; border-radius: 50%; border: 1px solid #d8ccb7; cursor: pointer; padding: 0; } .sh-swb.on { outline: 3px solid #1f2a24; outline-offset: 2px; }
+.sh-custom { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; margin-left: 6px; } .sh-custom input { width: 34px; height: 28px; border: 0; padding: 0; background: none; cursor: pointer; }
+.lib-modal { position: fixed; inset: 0; background: rgba(20,24,20,.45); z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.lib-modal[hidden] { display: none; }
+.lib-card { background: #fff; border-radius: 18px; width: min(980px, 100%); max-height: 88vh; display: flex; flex-direction: column; padding: 16px; gap: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.25); }
+.lib-head { display: flex; gap: 10px; align-items: center; } .lib-head input { flex: 1; border: 1px solid #ddd5ca; border-radius: 999px; padding: 8px 14px; font: inherit; }
+.lib-chips { display: flex; gap: 6px; flex-wrap: wrap; } .lib-chips button { border: 1px solid #e3d9c6; background: #fff; border-radius: 999px; padding: 4px 12px; cursor: pointer; font: inherit; font-size: 13px; text-transform: capitalize; }
+.lib-chips button.on { background: #1f2a24; color: #fff; border-color: #1f2a24; }
+.lib-grid { overflow: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; align-content: start; }
+.lib-pic { border: 2px solid transparent; border-radius: 12px; background: #faf6ee; padding: 4px; cursor: pointer; display: grid; gap: 4px; text-align: left; font: inherit; font-size: 12px; }
+.lib-pic:hover { border-color: #c3090c; } .lib-pic img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; display: block; }
+.lib-pic span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -3341,6 +3355,61 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
     });
   }
 
+  // ---- 🖼️ Picture library: pictures already in World's storage (world-banners, every folder) and the shop's product photos, searchable ----
+  var LIB = { items: null, loading: null };
+  async function libLoad() {
+    if (LIB.items) return LIB.items;
+    if (LIB.loading) return LIB.loading;
+    LIB.loading = (async function () {
+      var items = [], seen = {};
+      var add = function (url, name, folder, at) { if (!url || seen[url]) return; seen[url] = 1; items.push({ url: url, name: String(name || ''), folder: folder, at: at || '' }); };
+      ((shShop && shShop.products) || []).forEach(function (p) { (p.images || []).forEach(function (u, i) { add(u, p.name + (i ? ' (' + (i + 1) + ')' : ''), 'Products', ''); }); });
+      var st = sb.storage.from(BUCKET), isPic = function (n) { return /\.(jpe?g|png|webp|gif|svg)$/i.test(n); };
+      var walk = async function (prefix, depth) {
+        for (var off = 0; off < 3000; off += 1000) {
+          var r = await st.list(prefix, { limit: 1000, offset: off, sortBy: { column: 'created_at', order: 'desc' } });
+          var L = (r && r.data) || [];
+          for (var i = 0; i < L.length; i++) {
+            var f = L[i], path = (prefix ? prefix + '/' : '') + f.name;
+            if (!f.id && depth < 2) await walk(path, depth + 1);   // a folder
+            else if (f.id && isPic(f.name)) add(st.getPublicUrl(path).data.publicUrl, f.name.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' '), (prefix || 'pictures').split('/')[0], f.created_at || '');
+          }
+          if (L.length < 1000) break;
+        }
+      };
+      try { await walk('', 0); } catch (e) { console.error('picture library:', e); }
+      LIB.items = items; LIB.loading = null; return items;
+    })();
+    return LIB.loading;
+  }
+  function libOpen(onPick) {
+    var box = document.getElementById('libModal');
+    if (!box) { box = document.createElement('div'); box.id = 'libModal'; box.className = 'lib-modal'; document.body.appendChild(box); }
+    var st = { q: '', folder: '' };
+    var draw = function (items) {
+      var folders = []; items.forEach(function (x) { if (folders.indexOf(x.folder) === -1) folders.push(x.folder); });
+      var q = st.q.toLowerCase(), list = items.filter(function (x) { return (!st.folder || x.folder === st.folder) && (!q || (x.name + ' ' + x.folder).toLowerCase().indexOf(q) !== -1); });
+      box.querySelector('.lib-chips').innerHTML = ['<button type="button" data-libf=""' + (!st.folder ? ' class="on"' : '') + '>All (' + items.length + ')</button>'].concat(folders.map(function (f) {
+        return '<button type="button" data-libf="' + esc(f) + '"' + (st.folder === f ? ' class="on"' : '') + '>' + esc(f) + '</button>'; })).join('');
+      box.querySelector('.lib-grid').innerHTML = list.length ? list.slice(0, 300).map(function (x) {
+        return '<button type="button" class="lib-pic" data-liburl="' + esc(x.url) + '" title="' + esc(x.name) + '"><img src="' + esc(x.url) + '" alt="" loading="lazy"><span>' + esc(x.name) + '</span></button>'; }).join('') +
+        (list.length > 300 ? '<p class="help">Showing 300 of ' + list.length + ': search to narrow it down.</p>' : '')
+        : '<p class="help">' + (items.length ? 'Nothing matches.' : 'No pictures found. If you\u2019ve uploaded pictures before, the library may need read access to storage: tell Claude.') + '</p>';
+    };
+    box.innerHTML = '<div class="lib-card" role="dialog" aria-label="Picture library"><div class="lib-head"><b>Choose a picture</b><input type="search" placeholder="Search by name or folder" aria-label="Search pictures"><button type="button" class="btn btn-plain" data-libx>Close</button></div>' +
+      '<div class="lib-chips"></div><div class="lib-grid"><p class="help">Loading pictures\u2026</p></div></div>';
+    box.hidden = false;
+    var items = [];
+    libLoad().then(function (it) { items = it; draw(items); });
+    box.querySelector('input').addEventListener('input', function (e) { st.q = e.target.value; draw(items); });
+    box.onclick = function (e) {
+      if (e.target === box || e.target.closest('[data-libx]')) { box.hidden = true; return; }
+      var f = e.target.closest('[data-libf]'); if (f) { st.folder = f.dataset.libf; draw(items); return; }
+      var pk = e.target.closest('[data-liburl]'); if (pk) { box.hidden = true; onPick(pk.dataset.liburl); }
+    };
+    setTimeout(function () { var i = box.querySelector('input'); if (i) i.focus(); }, 30);
+  }
+
   // ---------------- 🛍️ Shop page (shop_page_layout.sql): World's shop page (#shop) ----------------
   // The header (and a picture spot for a banner later), a sale spot, the gift card banner, which collections show and in what order,
   // best sellers (picked products, in order), the perks row and the closing banner. World shows changes within a minute.
@@ -3356,14 +3425,32 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
     Object.keys(SH_DEF).forEach(function (k) { d[k] = H[k] != null && H[k] !== '' ? H[k] : JSON.parse(JSON.stringify(SH_DEF[k])); });
     d.image = H.image || null; d.sale = H.sale || { on: false, title: '', text: '', button: 'Shop the sale', link: '#shop/all', tone: 'berry', ends: null, image: null };
     d.cols = H.cols || []; d.best = H.best || [];
+    var TONE = { berry: '#fde8e6', purple: '#efe7fb', gold: '#fdf3d8', green: '#e3f3ea', blue: '#e4effb' };
+    d.colors = Object.assign({ head: '#ffffff', sale: (H.sale && H.sale.tone && !(H.colors || {}).sale) ? TONE[H.sale.tone] || '#ffffff' : '#ffffff', gift: '#ffffff', cols: '#ffffff', best: '#ffffff', perks: '#ffffff', closing: '#ffffff' }, H.colors || {});
     while (d.perks.length < 3) d.perks.push({ icon: '', title: '', text: '' });
     return (shDraft = d);
   }
-  function shPic(key, url, label, help) {
+  var SH_SWATCHES = [['#ffffff', 'White'], ['#faf6ee', 'Cream'], ['#fde8e6', 'Light red'], ['#fce7f1', 'Pink'], ['#efe7fb', 'Purple'], ['#fdf3d8', 'Gold'], ['#e3f3ea', 'Green'], ['#e4effb', 'Blue'], ['#c3090c', '4Cats red'], ['#123d2e', 'Dark green']];
+  function shColor(key, label) {   // a section's colour: 4Cats swatches, or any colour
+    var c = (shDraftGet().colors || {})[key] || '#ffffff', dis = canEdit ? '' : ' disabled';
+    return '<div class="field sh-colour"><label>' + (label || 'Colour') + '</label><div class="sh-sw">' + SH_SWATCHES.map(function (w) {
+      return '<button type="button" class="sh-swb' + (w[0].toLowerCase() === c.toLowerCase() ? ' on' : '') + '" data-shsw="' + key + '" data-c="' + w[0] + '" title="' + w[1] + '" aria-label="' + w[1] + '" style="background:' + w[0] + '"' + dis + '></button>'; }).join('') +
+      '<label class="sh-custom" title="Any colour"><input type="color" data-shcol="' + key + '" value="' + esc(c) + '"' + dis + '> Other</label></div></div>';
+  }
+  function shPic(key, url, label, help, auto) {
+    var show = url || auto;
     return '<div class="field"><label>' + label + '</label><div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">' +
-      '<span class="sh-pv" style="' + (url ? 'background-image:url(\'' + esc(url).replace(/'/g, '') + '\')' : '') + '">' + (url ? '' : 'None') + '</span>' +
+      '<span class="sh-pv" style="' + (show ? 'background-image:url(\'' + esc(show).replace(/'/g, '') + '\')' : '') + '">' + (show ? '' : 'None') + '</span>' +
       (canEdit ? '<label class="btn btn-plain" style="cursor:pointer">' + (url ? 'Change picture' : 'Upload a picture') + '<input type="file" data-shup="' + key + '" accept="image/*" hidden></label>' +
-        (url ? '<button class="btn btn-plain" type="button" data-shdelpic="' + key + '">Remove</button>' : '') : '') + '<span class="help">' + help + '</span></div></div>';
+        '<button class="btn btn-plain" type="button" data-shlib="' + key + '">Choose from library</button>' +
+        (url ? '<button class="btn btn-plain" type="button" data-shdelpic="' + key + '">Remove</button>' : '') : '') + '<span class="help">' + (auto && !url ? 'Using the linked product\u2019s photo. Upload or choose one to use a different picture.' : help) + '</span></div></div>';
+  }
+  function shAutoPic(link) {
+    var L = String(link || ''), m, P = (shShop && shShop.products) || [], C = (shShop && shShop.collections) || [];
+    if ((m = L.match(/^#product\/(.+)$/))) { var p = P.filter(function (x) { return x.slug === m[1]; })[0]; return p && (p.images || [])[0] || null; }
+    if ((m = L.match(/^#shop\/(.+)$/)) && m[1] !== 'all') { var c = C.filter(function (x) { return x.slug === m[1]; })[0]; if (!c) return null;
+      var f = P.filter(function (x) { return x.id === (c.products || [])[0]; })[0]; return c.image || (f && (f.images || [])[0]) || null; }
+    return null;
   }
   function shopPageHtml() {
     if (shHome === null) return '<section class="panel" style="margin-top:20px"><h2>Shop page</h2><p class="sub">Run shop_page_layout.sql in Supabase to switch this on.</p></section>';
@@ -3383,7 +3470,7 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
       '<p class="sub">World\u2019s shop page (#shop), from the top: the header, a sale spot, the gift card banner, collections, best sellers, the perks row and the closing banner. World shows changes within a minute.</p>' +
       '<h3 class="mem-h">Header</h3><div class="two" style="max-width:820px"><div class="field"><label for="sh_title">Title</label>' + inp('sh_title', d.title) + '</div>' +
       '<div class="field"><label for="sh_intro">Text under it</label>' + inp('sh_intro', d.intro) + '</div></div>' +
-      shPic('image', d.image, 'Banner picture (optional)', 'Leave empty for now: World shows the title only. A wide picture shows beside the title.') +
+      shPic('image', d.image, 'Banner picture (optional)', 'Leave empty for now: World shows the title only. A wide picture shows beside the title.') + shColor('head') +
       '<h3 class="mem-h">Sale spot</h3><p class="help">A banner under the header for a current sale. It goes away by itself after its last day.</p>' +
       '<label class="chk" style="display:flex;gap:8px;align-items:center;margin:4px 0 10px"><input type="checkbox" id="sh_s_on"' + (d.sale.on ? ' checked' : '') + dis + '> <b>Show the sale spot</b></label>' +
       '<div class="two" style="max-width:820px"><div class="field"><label for="sh_s_title">Headline</label>' + inp('sh_s_title', d.sale.title, 'e.g. Black Friday: 20% off Ditto kits') + '</div>' +
@@ -3393,18 +3480,17 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
         (lCols.length ? '<optgroup label="A collection">' + lCols.map(opt).join('') + '</optgroup>' : '') + (lProds.length ? '<optgroup label="A product">' + lProds.map(opt).join('') + '</optgroup>' : '') +
         '<option value="other"' + (isOther ? ' selected' : '') + '>Another link\u2026</option></select>' + '<input id="sh_s_other" placeholder="https://\u2026 or #shop/\u2026" value="' + esc(isOther ? link : '') + '"' + (isOther ? '' : ' hidden') + dis + ' style="margin-top:6px"></div>' +
       '<div class="field"><label for="sh_s_ends">Last day (optional)</label><input type="date" id="sh_s_ends" value="' + esc(d.sale.ends || '') + '"' + dis + '></div>' +
-      '<div class="field"><label for="sh_s_tone">Colour</label><select id="sh_s_tone"' + dis + '>' + SH_TONES.map(function (t) { return '<option value="' + t[0] + '"' + ((d.sale.tone || 'berry') === t[0] ? ' selected' : '') + '>' + t[1] + '</option>'; }).join('') + '</select></div></div>' +
-      shPic('sale', d.sale.image, 'Sale picture (optional)', 'Shows on the left. Landscape works best.') +
+      '</div>' + shPic('sale', d.sale.image, 'Sale picture (optional)', 'Shows on the left, and the whole banner (picture too) goes to the link. Landscape works best. Link a product to use its photo.', shAutoPic(d.sale.link)) + shColor('sale') +
       '<h3 class="mem-h">Gift card banner</h3><label class="chk" style="display:flex;gap:8px;align-items:center;margin:4px 0 10px"><input type="checkbox" id="sh_g_on"' + (d.gift.on !== false ? ' checked' : '') + dis + '> <b>Show the gift card banner</b> <span class="help">(its picture is the first gift card design)</span></label>' +
       '<div class="two" style="max-width:820px"><div class="field"><label for="sh_g_title">Headline</label>' + inp('sh_g_title', d.gift.title) + '</div><div class="field"><label for="sh_g_text">Text</label>' + inp('sh_g_text', d.gift.text) + '</div>' +
-      '<div class="field"><label for="sh_g_btn">Button</label>' + inp('sh_g_btn', d.gift.button) + '</div></div>' +
-      '<h3 class="mem-h">Collections</h3><div class="field" style="max-width:400px"><label for="sh_c_title">Heading</label>' + inp('sh_c_title', d.cols_title) + '</div>' +
+      '<div class="field"><label for="sh_g_btn">Button</label>' + inp('sh_g_btn', d.gift.button) + '</div></div>' + shColor('gift') +
+      '<h3 class="mem-h">Collections</h3><div class="field" style="max-width:400px"><label for="sh_c_title">Heading</label>' + inp('sh_c_title', d.cols_title) + '</div>' + shColor('cols', 'Background colour') +
       '<p class="help">' + (colsOn.length ? 'Shown in this order:' : 'None picked: World shows every collection that has products. Pick some to choose which, and their order.') + '</p>' +
       '<ol class="sh-list">' + colsOn.map(function (id, i) { var c = C.filter(function (x) { return x.id === id; })[0];
         return '<li><b>' + esc(c.name) + '</b> <span class="help">' + (c.products || []).length + ' products</span>' + (canEdit ? '<span class="sh-acts">' + (i ? '<button class="link-btn" type="button" data-shcup="' + i + '">\u2191 Up</button>' : '') + '<button class="link-btn" type="button" data-shcdel="' + i + '">Remove</button></span>' : '') + '</li>'; }).join('') + '</ol>' +
       (canEdit && colsOff.length ? '<div style="display:flex;gap:8px;max-width:520px"><select id="sh_c_add" style="flex:1">' + colsOff.map(function (c) { return '<option value="' + esc(c.id) + '">' + esc(c.name) + ' (' + (c.products || []).length + ')</option>'; }).join('') + '</select><button class="btn btn-plain" type="button" id="sh_c_addbtn">+ Add collection</button></div>' : '') +
       (!C.length ? '<p class="help">No collections yet: make them in the Hub \u2192 Products.</p>' : '') +
-      '<h3 class="mem-h">Best sellers</h3><div class="field" style="max-width:400px"><label for="sh_b_title">Heading</label>' + inp('sh_b_title', d.best_title) + '</div>' +
+      '<h3 class="mem-h">Best sellers</h3><div class="field" style="max-width:400px"><label for="sh_b_title">Heading</label>' + inp('sh_b_title', d.best_title) + '</div>' + shColor('best', 'Background colour') +
       '<p class="help">' + (d.best.length ? 'Up to 8, in this order (4 fill a row on a computer):' : 'None picked: World shows the first 4 products in stock.') + '</p>' +
       '<ol class="sh-list">' + d.best.map(function (id, i) { var p = pById(id);
         return '<li>' + (p && (p.images || [])[0] ? '<img src="' + esc(p.images[0]) + '" alt="">' : '') + '<b>' + esc(p ? p.name : 'A product no longer in the shop') + '</b>' + (p ? ' <span class="help">$' + Number(p.price || 0).toFixed(2) + '</span>' : '') +
@@ -3414,9 +3500,10 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
       '<h3 class="mem-h">Perks row</h3><p class="help">Up to three. An empty title hides that one. <code>{free_over}</code> becomes your free shipping amount (e.g. $79).</p>' +
       d.perks.slice(0, 3).map(function (x, i) { return '<div class="sh-perkrow"><input data-shpk="icon" data-i="' + i + '" value="' + esc(x.icon || '') + '" placeholder="\ud83d\ude9a" maxlength="4" style="width:60px;text-align:center"' + dis + '>' +
         '<input data-shpk="title" data-i="' + i + '" value="' + esc(x.title || '') + '" placeholder="Title"' + dis + '><input data-shpk="text" data-i="' + i + '" value="' + esc(x.text || '') + '" placeholder="Small text (optional)"' + dis + '></div>'; }).join('') +
+      shColor('perks') +
       '<h3 class="mem-h">Closing banner</h3><label class="chk" style="display:flex;gap:8px;align-items:center;margin:4px 0 10px"><input type="checkbox" id="sh_e_on"' + (d.closing.on !== false ? ' checked' : '') + dis + '> <b>Show the closing banner</b></label>' +
       '<div class="field" style="max-width:520px"><label for="sh_e_title">Text</label>' + inp('sh_e_title', d.closing.title) + '</div>' +
-      shPic('closing', d.closing.image, 'Picture (optional)', 'Shows on the left (e.g. the 4Cats cats). A see-through PNG works best.') +
+      shPic('closing', d.closing.image, 'Picture (optional)', 'Shows on the left (e.g. the 4Cats cats). A see-through PNG works best.') + shColor('closing') +
       (canEdit ? '<div style="display:flex;gap:8px;align-items:center;margin-top:12px"><button class="btn btn-berry" type="button" id="shSave">Save shop page</button><a class="btn btn-plain" href="https://world-dev.4cats.com/#shop" target="_blank" rel="noopener">See it on the test site \u2197</a><span class="help" id="shMsg"></span></div>' : '') + '</section>';
   }
   function shCollect() {
@@ -3424,7 +3511,9 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
     var v = function (id) { var el = document.getElementById(id); return el ? el.value.trim() : ''; }, ck = function (id) { var el = document.getElementById(id); return !!(el && el.checked); };
     d.title = v('sh_title'); d.intro = v('sh_intro');
     var lk = v('sh_s_link');
-    d.sale = Object.assign({}, d.sale, { on: ck('sh_s_on'), title: v('sh_s_title'), text: v('sh_s_text'), button: v('sh_s_btn'), link: lk === 'other' ? v('sh_s_other') : lk, ends: v('sh_s_ends') || null, tone: v('sh_s_tone') || 'berry' });
+    d.sale = Object.assign({}, d.sale, { on: ck('sh_s_on'), title: v('sh_s_title'), text: v('sh_s_text'), button: v('sh_s_btn'), link: lk === 'other' ? v('sh_s_other') : lk, ends: v('sh_s_ends') || null });
+    delete d.sale.tone;
+    app.querySelectorAll('[data-shcol]').forEach(function (el) { d.colors[el.dataset.shcol] = el.value; });
     d.gift = { on: ck('sh_g_on'), title: v('sh_g_title'), text: v('sh_g_text'), button: v('sh_g_btn') };
     d.cols_title = v('sh_c_title'); d.best_title = v('sh_b_title');
     app.querySelectorAll('[data-shpk]').forEach(function (el) { var x = d.perks[+el.dataset.i]; if (x) x[el.dataset.shpk] = el.value.trim(); });
@@ -3437,10 +3526,13 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
   function bindShopPage() {
     var sec = app.querySelector('[data-foldname="Shop page"]'); if (!sec || !canEdit || !shDraft && shHome === null) return;
     var lk = document.getElementById('sh_s_link');
-    if (lk) lk.addEventListener('change', function () { document.getElementById('sh_s_other').hidden = lk.value !== 'other'; });
+    if (lk) lk.addEventListener('change', function () { if (lk.value === 'other') { document.getElementById('sh_s_other').hidden = false; return; } shCollect(); shRedraw(); });   // (the linked product's photo shows)
     sec.addEventListener('click', function (e) {
       var b = e.target.closest('button'); if (!b || b.id === 'shSave') return;
       var d = shDraftGet(), D = b.dataset;
+      if (D.shsw) { shCollect(); d.colors[D.shsw] = D.c; shRedraw(); return; }
+      if (D.shlib) { var key0 = D.shlib; shCollect(); libOpen(function (url) { var dd = shDraftGet(); if (key0 === 'image') dd.image = url; else if (key0 === 'sale') dd.sale.image = url; else dd.closing.image = url; shRedraw();
+        var m3 = document.getElementById('shMsg'); if (m3) m3.textContent = 'Picture chosen \u2713 Press \u201cSave shop page\u201d to use it.'; }); return; }
       if (D.shcup || D.shcdel || D.shbup || D.shbdel || D.shdelpic || b.id === 'sh_c_addbtn' || b.id === 'sh_b_addbtn') shCollect(); else return;
       var C = ((shShop && shShop.collections) || []).map(function (c) { return c.id; });
       d.cols = d.cols.filter(function (id) { return C.indexOf(id) !== -1; });
