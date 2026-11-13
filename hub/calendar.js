@@ -6,6 +6,8 @@
 // date, agenda, and notes for each date: shared with the people invited; a 1:1's only the two of you.)
 // (Nov 12 2026: ⚙ My calendar settings: your Zoom link (fills in new meetings) and time zone (hub_cal_settings); email invites,
 // updates and cancellations through the hub-cal-invite Edge Function; hub.html#cal-<id> ("Answer in the Hub") opens that meeting.)
+// (Nov 12 2026: 📞 Call types (hub_calendar_appointments.sql): set up calls coordinators can book with you (open hours, length,
+// buffer, notice…); booked calls show on 👥 Meetings, and open with who, their answer, Join and Cancel. Booking: hub/appt.js.)
 
 if (typeof PANES !== 'undefined' && !PANES.includes('cal-pane')) PANES.push('cal-pane');
 const CAL_LAYERS = [
@@ -93,7 +95,7 @@ function calDraw() {
       : '<p class="ho-intro">Nothing in the next 5 weeks on the layers you’ve switched on.</p>';
   }
   el.innerHTML = `<div class="ho-head"><div class="pts-page-title" style="margin:0">📅 Calendar</div><span class="spacer"></span>
-      <button class="ho-btn" onclick="calSettings()" title="Your Zoom link and time zone">⚙</button><button class="ho-btn" onclick="calNew(null, 'one_on_one')">+ 1:1</button><button class="ho-btn" onclick="calNew(null, 'meeting')">+ Meeting</button><button class="ho-btn primary" onclick="calNew()">+ Add event</button></div>
+      <button class="ho-btn" onclick="calSettings()" title="Your Zoom link and time zone">⚙</button><button class="ho-btn" onclick="calApptTypes()" title="Calls coordinators can book with you">📞 Call types</button><button class="ho-btn" onclick="calNew(null, 'one_on_one')">+ 1:1</button><button class="ho-btn" onclick="calNew(null, 'meeting')">+ Meeting</button><button class="ho-btn primary" onclick="calNew()">+ Add event</button></div>
     <div class="cal-bar"><div class="cal-nav"><button class="ho-btn" onclick="calMove(-1)" title="Back">◀</button><button class="ho-btn" onclick="calToday()">Today</button><button class="ho-btn" onclick="calMove(1)" title="Forward">▶</button>
         <b class="cal-title">${esc(title)}</b>${_cal.loading ? '<span class="fd-sm">Loading…</span>' : ''}</div>
       <div class="cal-views">${[['month', 'Month'], ['week', 'Week'], ['agenda', 'Agenda']].map(([v, l]) => `<button class="${_cal.view === v ? 'on' : ''}" onclick="calView('${v}')">${l}</button>`).join('')}</div></div>
@@ -104,6 +106,7 @@ function calDraw() {
 // ---------- an item: details (and edit, for events) ----------
 function calOpen(i) {
   const x = _cal.items[i]; if (!x) return;
+  if (x.kind === 'call') { calCall(i); return; }
   if (x.layer === 'meeting') { calMeeting(i); return; }
   if ((x.layer === 'event' || x.layer === 'planning') && x.editable) { calForm(x); return; }
   const when = calWhen(x);
@@ -161,6 +164,72 @@ async function calSkip() {
   if (error) { document.getElementById('cm-msg').textContent = error.message; return; }
   closeDutySheet(); calLoad();
   calInvite(x.id, 'send');   // (✉️ the update takes that date off their calendars)
+}
+
+// ---------- 📞 calls coordinators booked with you ----------
+function calCall(i) {
+  const x = _cal.items[i]; if (!x) return; _cal.edit = x;
+  openDutySheet(`<h3 style="margin:0 0 2px">${esc(x.title)}</h3><p class="fd-sm" style="margin:0 0 10px">${esc(calWhen(x))}</p>
+    ${x.location && /^https?:\/\//.test(x.location) ? `<div style="margin:0 0 10px"><a class="ho-btn primary" href="${escAttr(x.location)}" target="_blank" rel="noopener">🎥 Join</a></div>` : ''}
+    <div class="cal-lbl">Booked by</div><p style="margin:0 0 10px">${esc(x.by)}${x.studio_id ? ' · ' + esc(STUDIO_NAMES[x.studio_id] || x.studio_id) : ''}</p>
+    ${x.note ? `<div class="cal-lbl">What they want to talk about</div><p style="white-space:pre-wrap;margin:0 0 10px">${esc(x.note)}</p>` : ''}
+    <div class="fd-msg" id="cc-msg"></div>
+    <div style="display:flex;gap:8px;margin-top:12px"><button class="ho-btn" style="color:#c62828" onclick="calCallCancel()">Cancel this call</button><span style="flex:1"></span><button class="ho-btn primary" onclick="closeDutySheet()">Close</button></div>`);
+}
+async function calCallCancel() {
+  const x = _cal.edit; if (!x || !confirm('Cancel this call? ' + (x.by || 'They') + ' will get an email.')) return;
+  const { error } = await sb.rpc('hub_appt_cancel', { p_booking: x.id });
+  if (error) { document.getElementById('cc-msg').textContent = error.message; return; }
+  try { await fetch(`${SUPABASE_URL}/functions/v1/hub-cal-invite`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify({ booking_id: x.id, action: 'appt_cancel' }) }); } catch (e) { }
+  closeDutySheet(); calLoad();
+}
+// ---------- 📞 your call types: what coordinators can book with you ----------
+const CAL_DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+async function calApptTypes() {
+  const { data, error } = await sb.rpc('hub_appt_types_mine');
+  if (error) { calToast(/hub_appt/.test(error.message) ? 'Run the appointments SQL first.' : error.message, true); return; }
+  _cal.types = data || [];
+  const hrs = t => (t.hours || []).map(w => `${CAL_DOW[w.dow]} ${calTime(w.start)}–${calTime(w.end)}`).join(', ');
+  openDutySheet(`<h3 style="margin:0 0 4px">📞 Call types</h3><p class="fd-sm" style="margin:0 0 10px">Calls coordinators can book with you, from the Coordinator view or their own login. Booked calls show on your calendar.</p>
+    ${_cal.types.length ? _cal.types.map((t, i) => `<div class="cal-at${t.active ? '' : ' off'}"><div><b>${esc(t.title)}</b> · ${t.minutes} min${t.active ? '' : ' · <i>off</i>'}<div class="fd-sm">${esc(hrs(t))} · ${t.upcoming} upcoming</div></div><button class="ho-btn sm" onclick="calApptForm(${i})">Change</button></div>`).join('')
+      : '<p class="fd-sm">None yet.</p>'}
+    <div style="display:flex;gap:8px;margin-top:12px"><button class="ho-btn primary" onclick="calApptForm(-1)">+ New call type</button><span style="flex:1"></span><button class="ho-btn" onclick="closeDutySheet()">Close</button></div>`);
+}
+function calApptForm(i) {
+  const t = i >= 0 ? _cal.types[i] : { title: 'Coordinator check-in', minutes: 30, buffer_min: 10, notice_hours: 24, ahead_days: 21, max_per_day: null, cancel_hours: 12, one_upcoming: true, active: true,
+    question: 'What do you want to talk about?', hours: [{ dow: 2, start: '10:00', end: '12:00' }, { dow: 4, start: '14:00', end: '16:00' }] };
+  _cal.at = JSON.parse(JSON.stringify(t)); calApptFormDraw();
+}
+function calApptFormDraw() {
+  const t = _cal.at, v = k => escAttr(t[k] == null ? '' : t[k]), sel = (id, list, cur) => `<select id="${id}">${list.map(([a, b]) => `<option value="${a}"${String(cur) === String(a) ? ' selected' : ''}>${b}</option>`).join('')}</select>`;
+  openDutySheet(`<h3 style="margin:0 0 10px">${t.id ? 'Change call type' : '+ New call type'}</h3>
+    <div class="cal-form">
+      <label class="wide">Name<input id="ca-title" value="${v('title')}" maxlength="120"></label>
+      <label class="wide">Description (optional)<input id="ca-desc" value="${v('description')}" maxlength="1000" placeholder="e.g. A quick catch-up on how things are going"></label>
+      <label>Length${sel('ca-min', [[15, '15 min'], [20, '20 min'], [30, '30 min'], [45, '45 min'], [60, '1 hour']], t.minutes)}</label>
+      <label>Gap between calls${sel('ca-buf', [[0, 'None'], [5, '5 min'], [10, '10 min'], [15, '15 min'], [30, '30 min']], t.buffer_min)}</label>
+      <label>Notice needed${sel('ca-notice', [[2, '2 hours'], [12, '12 hours'], [24, '1 day'], [48, '2 days'], [72, '3 days']], t.notice_hours)}</label>
+      <label>Book up to${sel('ca-ahead', [[7, '1 week ahead'], [14, '2 weeks ahead'], [21, '3 weeks ahead'], [30, '1 month ahead'], [60, '2 months ahead']], t.ahead_days)}</label>
+      <label>Most calls a day${sel('ca-max', [['', 'No limit'], [1, '1'], [2, '2'], [3, '3'], [4, '4'], [6, '6']], t.max_per_day == null ? '' : t.max_per_day)}</label>
+      <label>They can cancel up to${sel('ca-cancel', [[0, 'any time'], [2, '2 hours before'], [12, '12 hours before'], [24, '1 day before'], [48, '2 days before']], t.cancel_hours)}</label>
+      <div class="wide"><div class="cal-lbl">Open hours (your time)</div>${(t.hours || []).map((w, k) => `<div class="cal-hr">${sel('ca-dow-' + k, CAL_DOW.map((d, n) => [n, d]), w.dow)}<input type="time" id="ca-s-${k}" value="${escAttr(w.start)}" step="900"> to <input type="time" id="ca-e-${k}" value="${escAttr(w.end)}" step="900"><button class="ho-btn sm" onclick="calApptHours();_cal.at.hours.splice(${k},1);calApptFormDraw()">✕</button></div>`).join('')}
+        <button class="ho-btn sm" onclick="calApptHours();_cal.at.hours.push({dow:2,start:'10:00',end:'12:00'});calApptFormDraw()">+ Add open hours</button></div>
+      <label class="wide">Question when they book (optional)<input id="ca-q" value="${v('question')}" maxlength="300"></label>
+      <label class="wide">Zoom link (optional)<input id="ca-loc" value="${v('location')}" placeholder="Leave empty to use yours from ⚙ settings"></label>
+      <label class="wide cal-chk"><input type="checkbox" id="ca-one" ${t.one_upcoming ? 'checked' : ''}> One upcoming call per coordinator</label>
+      <label class="wide cal-chk"><input type="checkbox" id="ca-on" ${t.active ? 'checked' : ''}> Open for booking</label>
+    </div><div class="fd-msg" id="ca-msg"></div>
+    <div style="display:flex;gap:8px;margin-top:12px"><button class="ho-btn" onclick="calApptTypes()">← Back</button><span style="flex:1"></span><button class="ho-btn primary" onclick="calApptSave()">Save</button></div>`);
+}
+function calApptHours() { (_cal.at.hours || []).forEach((w, k) => { const g = id => (document.getElementById(id) || {}).value; if (g('ca-dow-' + k) != null) { w.dow = +g('ca-dow-' + k); w.start = g('ca-s-' + k); w.end = g('ca-e-' + k); } }); }
+async function calApptSave() {
+  calApptHours();
+  const g = id => (document.getElementById(id) || {}).value, t = _cal.at;
+  const p = { id: t.id || null, title: g('ca-title'), description: g('ca-desc'), minutes: +g('ca-min'), buffer_min: +g('ca-buf'), notice_hours: +g('ca-notice'), ahead_days: +g('ca-ahead'),
+    max_per_day: g('ca-max'), cancel_hours: +g('ca-cancel'), hours: t.hours, question: g('ca-q'), location: g('ca-loc'), one_upcoming: document.getElementById('ca-one').checked, active: document.getElementById('ca-on').checked };
+  const { error } = await sb.rpc('hub_appt_type_save', { p });
+  if (error) { document.getElementById('ca-msg').textContent = error.message; return; }
+  calToast('✓ Saved'); calApptTypes();
 }
 
 // ---------- add or change an event ----------
@@ -320,6 +389,8 @@ function calStyles() {
 .cal-att { display: flex; flex-wrap: wrap; gap: 6px; } .cal-a { border-radius: 999px; padding: 3px 10px; font-size: 13px; background: #f1f0f6; }
 .cal-a.yes { background: #e7f4e8; color: #1b5e20; } .cal-a.no { background: #fde2e2; color: #b91c1c; } .cal-a.maybe { background: #fff3e0; color: #92400e; }
 .cal-ans { display: flex; gap: 6px; flex-wrap: wrap; }
+.cal-at { display: flex; gap: 10px; align-items: center; justify-content: space-between; border: 1px solid #eee; border-radius: 10px; padding: 8px 10px; margin-bottom: 6px; } .cal-at.off { opacity: .6; }
+.cal-hr { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; flex-wrap: wrap; } .cal-hr select, .cal-hr input { padding: 6px; border: 1px solid #ddd; border-radius: 8px; font: inherit; }
 .cal-toast { position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 10001; background: #1f1b3a; color: #fff; padding: 10px 18px; border-radius: 999px; font-weight: 600; font-size: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.2); max-width: 90vw; }
 .cal-toast.bad { background: #b91c1c; }
 @media (max-width: 760px) { #cal-pane .cal-week { grid-template-columns: 1fr; } #cal-pane .cal-days { grid-auto-rows: minmax(64px, auto); } #cal-pane .cal-chip { font-size: 10.5px; padding: 1px 4px; } }`;
