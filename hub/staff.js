@@ -2050,6 +2050,7 @@ async function loadSickPane() {
 
 // ---- Home office: request rules ----
 async function openRulesPane() {
+  _boEditing = null;   // (a busy time being changed: back to adding)
   if (!_hoCan.view) return;
   showOnlyPane('rules-pane'); setActiveNav('nav-rules');
   const body = document.getElementById('rules-body');
@@ -2106,13 +2107,19 @@ async function openRulesPane() {
       <button class="ho-btn" onclick="hoSetPunchPin()">Set PIN</button><div id="hp-msg"></div></div>` : ''}
     <div class="ho-card" style="max-width:720px;margin-top:12px">
       <div class="ho-title" style="font-size:17px">Busy times (blackout dates)</div>
-      <div class="goal-note">Staff see these when asking for time off.</div>
-      ${(b.data || []).map(x => `<div class="me-list-row"><div class="what"><b>${esc(x.label)}</b><div>${esc(meFmtDate(x.start_date))} – ${esc(meFmtDate(x.end_date))} · ${x.mode === 'block' ? 'refused' : 'flagged'}${x.note ? ' · ' + esc(x.note) : ''}</div></div>
-        ${_hoCan.edit ? `<button class="ho-btn danger" onclick="deleteBlackout('${escAttr(x.id)}')">Delete</button>` : ''}</div>`).join('') || '<div class="goal-note" style="margin:8px 0">None yet.</div>'}
-      ${_hoCan.edit ? `<div class="me-form" style="margin-top:10px"><div class="two"><label>Name<input id="bo-label" placeholder="e.g. Summer camp weeks"></label><label>Requests then<select id="bo-mode"><option value="block">Refuse them</option><option value="flag">Let through, flagged</option></select></label></div>
+      <div class="goal-note">Staff see the ones that are for them when asking for time off.</div>
+      ${(_boRows = b.data || []).map(x => `<div class="me-list-row"><div class="what"><b>${esc(x.label)}</b><div>${esc(meFmtDate(x.start_date))} – ${esc(meFmtDate(x.end_date))} · ${x.mode === 'block' ? 'refused' : 'flagged'} · <b>${esc(boWho(x))}</b>${x.note ? ' · ' + esc(x.note) : ''}</div></div>
+        ${_hoCan.edit ? `<button class="ho-btn" onclick="editBlackout('${escAttr(x.id)}')">Edit</button><button class="ho-btn danger" onclick="deleteBlackout('${escAttr(x.id)}')">Delete</button>` : ''}</div>`).join('') || '<div class="goal-note" style="margin:8px 0">None yet.</div>'}
+      ${_hoCan.edit ? `<div class="me-form" style="margin-top:10px" id="bo-form"><div class="ho-title" style="font-size:15px" id="bo-form-title">Add a busy time</div><div class="two"><label>Name<input id="bo-label" placeholder="e.g. Summer camp weeks"></label><label>Requests then<select id="bo-mode"><option value="block">Refuse them</option><option value="flag">Let through, flagged</option></select></label></div>
         <div class="two"><label>From<input type="date" id="bo-start"></label><label>To<input type="date" id="bo-end"></label></div>
         <label>Note for staff (optional)<input id="bo-note" placeholder="e.g. Talk to your manager for anything urgent"></label>
-        <button class="ho-btn" onclick="addBlackout()">Add busy time</button></div>` : ''}
+        <div class="bo-who"><div class="bo-who-h">Who it’s for</div>
+          <label class="bo-chk"><input type="radio" name="bo-who" value="all" checked onchange="boWhoShow()"> Everyone</label>
+          <label class="bo-chk"><input type="radio" name="bo-who" value="some" onchange="boWhoShow()"> Only some provinces or studios</label>
+          <div id="bo-some" hidden><div class="bo-row">${['BC', 'AB', 'ON'].map(pv => `<label class="bo-chk"><input type="checkbox" class="bo-prov" value="${pv}"> All of ${pv}</label>`).join('')}</div>
+            <div class="goal-note" style="margin:6px 0 4px">…and/or these studios (staff who work there):</div>
+            <div class="bo-studios">${Object.keys(STUDIO_NAMES).sort((a, c) => a.localeCompare(c)).map(sid => `<label class="bo-chk"><input type="checkbox" class="bo-st" value="${escAttr(sid)}"> ${esc(STUDIO_NAMES[sid])}</label>`).join('')}</div></div></div>
+        <div style="display:flex;gap:8px"><button class="ho-btn primary" id="bo-save" onclick="addBlackout()">Add busy time</button><button class="ho-btn" id="bo-cancel" hidden onclick="openRulesPane()">Cancel</button></div></div>` : ''}
     </div>`;
 }
 function ruTierRow(t, ed) {
@@ -2192,12 +2199,39 @@ async function hoSetPunchPin() {
   box.innerHTML = error ? `<div class="me-msg err">${esc(error.message)}</div>` : '<div class="me-msg ok">Punch PIN set. Tell them in person.</div>';
   if (!error) document.getElementById('hp-pin').value = '';
 }
+// (Nov 13 2026) who a busy time is for: everyone, or provinces and/or studios (hub_blackout_applies decides it for each request)
+let _boRows = [], _boEditing = null;
+function boWho(x) {
+  const P = x.provinces || [], S = x.studio_ids || [];
+  if (!P.length && !S.length) return 'Everyone';
+  return [P.length ? P.join(', ') : '', S.length ? S.map(id => STUDIO_NAMES[id] || id).join(', ') : ''].filter(Boolean).join(' · ');
+}
+function boWhoShow() { const some = (document.querySelector('input[name="bo-who"]:checked') || {}).value === 'some'; document.getElementById('bo-some').hidden = !some; }
+function editBlackout(id) {
+  const x = _boRows.find(r => String(r.id) === String(id)); if (!x) return;
+  _boEditing = x.id;
+  const set = (k, v) => { document.getElementById(k).value = v || ''; };
+  set('bo-label', x.label); set('bo-mode', x.mode); set('bo-start', x.start_date); set('bo-end', x.end_date); set('bo-note', x.note);
+  const some = (x.provinces || []).length || (x.studio_ids || []).length;
+  document.querySelector(`input[name="bo-who"][value="${some ? 'some' : 'all'}"]`).checked = true; boWhoShow();
+  document.querySelectorAll('.bo-prov').forEach(c => { c.checked = (x.provinces || []).includes(c.value); });
+  document.querySelectorAll('.bo-st').forEach(c => { c.checked = (x.studio_ids || []).includes(c.value); });
+  document.getElementById('bo-form-title').textContent = 'Change “' + x.label + '”';
+  document.getElementById('bo-save').textContent = 'Save changes'; document.getElementById('bo-cancel').hidden = false;
+  document.getElementById('bo-form').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
 async function addBlackout() {
   const v = id => document.getElementById(id).value.trim();
   if (!v('bo-label') || !v('bo-start') || !v('bo-end')) { alert('Give it a name and both dates.'); return; }
-  const { error } = await sb.from('time_off_blackouts').insert({ label: v('bo-label'), start_date: v('bo-start'), end_date: v('bo-end'), mode: v('bo-mode'), note: v('bo-note') || null });
-  if (error) { alert(error.message); return; }
-  openRulesPane();
+  if (v('bo-end') < v('bo-start')) { alert('The last day is before the first day.'); return; }
+  const some = (document.querySelector('input[name="bo-who"]:checked') || {}).value === 'some';
+  const provinces = some ? Array.from(document.querySelectorAll('.bo-prov:checked')).map(c => c.value) : [];
+  const studio_ids = some ? Array.from(document.querySelectorAll('.bo-st:checked')).map(c => c.value) : [];
+  if (some && !provinces.length && !studio_ids.length) { alert('Tick at least one province or studio (or choose Everyone).'); return; }
+  const row = { label: v('bo-label'), start_date: v('bo-start'), end_date: v('bo-end'), mode: v('bo-mode'), note: v('bo-note') || null, provinces, studio_ids };
+  const { error } = _boEditing ? await sb.from('time_off_blackouts').update(row).eq('id', _boEditing) : await sb.from('time_off_blackouts').insert(row);
+  if (error) { alert(/provinces|studio_ids/.test(error.message) ? 'Run the busy-times SQL step first (provinces and studios).' : error.message); return; }
+  _boEditing = null; openRulesPane();
 }
 async function deleteBlackout(id) {
   if (!confirm('Delete this busy time?')) return;
@@ -2205,4 +2239,3 @@ async function deleteBlackout(id) {
   if (error) { alert(error.message); return; }
   openRulesPane();
 }
-
