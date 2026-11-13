@@ -70,6 +70,7 @@ function dashOpen(fn, arg) {
 
 // ---------- The block library ----------
 // type: { name, group, area, level, size (default), sizes, opts (defaults), settings(b) → html, open: [fn, arg], load(b) → html }
+// (Nov 12 2026: 📅 Coming up: hub_cal_range for the next 1–14 days, layers to choose; click opens it on 📅 Calendar.)
 const DASH_GROUPS = ['Layout', 'Mine', 'Studio day', 'Customers', 'People', 'Money', 'Warehouse', 'Comms', 'World', 'Community', 'Admin'];
 const DASH_ROWS_SETTING = b => `<label>Rows to show <select data-opt="rows">${[3, 5, 8, 12].map(n => `<option value="${n}"${+b.opts.rows === n ? ' selected' : ''}>${n}</option>`).join('')}</select></label>`;
 const DASH_BLOCKS = {
@@ -126,6 +127,38 @@ const DASH_BLOCKS = {
       if (_dash.target) return '<div class="dash-empty">Their punch clock shows here, with their own punches. (You can’t punch for them.)</div>';
       const S = await dashRpc('hub_ho_punch_state');
       return dashClockHtml(b, S);
+    }
+  },
+
+  coming_up: {
+    name: '📅 Coming up', group: 'Mine', area: null, size: 'm', opts: { days: 7, layers: ['meeting', 'event', 'planning', 'pay', 'time_off', 'newsletters', 'deals'] }, open: ['openCalPane'], every: 300000,
+    words: 'calendar agenda meetings schedule upcoming week', desc: 'Your calendar for the next few days: meetings and 1:1s (❔ if you haven’t answered), calls booked with you, events, paydays, time off, newsletters and deals.',
+    settings(b) {
+      const on = new Set(b.opts.layers || []);
+      return `<label>Show the next <select data-opt="days">${[[1, 'day (today)'], [3, '3 days'], [7, '7 days'], [14, '2 weeks']].map(([n, l]) => `<option value="${n}"${+b.opts.days === n ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+        <div class="dash-ticks">${(typeof CAL_LAYERS !== 'undefined' ? CAL_LAYERS : []).map(([k, l]) => `<label><input type="checkbox" data-cal-layer="${k}"${on.has(k) ? ' checked' : ''}> ${esc(l)}</label>`).join('')}</div>`;
+    },
+    async load(b) {
+      if (_dash.target) return '<div class="dash-empty">Their own calendar shows here when they’re signed in. (You see yours.)</div>';
+      const days = Math.max(1, Math.min(14, +b.opts.days || 7)), t = new Date();
+      const iso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      const from = iso(t), to = iso(new Date(t.getFullYear(), t.getMonth(), t.getDate() + days - 1, 12));
+      const L = (b.opts.layers && b.opts.layers.length) ? b.opts.layers : null;
+      const items = (await dashRpc('hub_cal_range', { p_from: from, p_to: to, p_layers: L })) || [];
+      const nowHM = String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0');
+      const by = {}; items.forEach(x => { const d = x.start_date < from ? from : x.start_date; (by[d] = by[d] || []).push(x); });
+      const keys = Object.keys(by).sort();
+      const next = (by[from] || []).filter(x => !x.all_day && (x.end_time || '') > nowHM && (x.layer === 'meeting'))[0];
+      const ask = items.filter(x => x.my_response === 'pending').length;
+      dashGlanceSet(b, next ? 'Next: ' + dashCalT(next.start_time) + ' ' + next.title : '');
+      if (!keys.length) return `<div class="dash-empty">Nothing on your calendar for ${days === 1 ? 'today' : 'the next ' + days + ' days'}.</div>`;
+      const label = d => d === from ? 'Today' : d === iso(new Date(t.getFullYear(), t.getMonth(), t.getDate() + 1, 12)) ? 'Tomorrow' : new Date(d + 'T12:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
+      const col = x => (typeof calCol === 'function' ? calCol(x.layer) : '#6d4aeb');
+      const row = x => { const past = x.start_date === from && !x.all_day && (x.end_time || '') <= nowHM;
+        return `<button class="dash-cal-row${past ? ' past' : ''}" style="--c:${escAttr(x.colour || col(x))}" onclick="dashCalGo('${escAttr(String(x.id))}', '${escAttr(x.start_date)}')">
+          <span class="dash-cal-t">${x.all_day ? 'All day' : esc(dashCalT(x.start_time))}</span><span class="dash-cal-x">${x.my_response === 'pending' ? '❔ ' : ''}${esc(x.title)}${x.location && /^https?:\/\//.test(x.location) && x.layer === 'meeting' ? ' <span class="dash-cal-z">🎥</span>' : ''}</span></button>`; };
+      return (ask ? `<div class="dash-chips"><span class="dash-pill warn">❔ ${ask} to answer</span></div>` : '') +
+        keys.map(d => `<div class="dash-cal-day"><div class="dash-cal-h">${esc(label(d))}</div>${by[d].map(row).join('')}</div>`).join('');
     }
   },
 
@@ -884,13 +917,13 @@ function dashLabourHtml(b, d) {
 
 // ---------- Role starter layouts (blocks not in the library yet, or not allowed, are skipped) ----------
 const DASH_STARTERS = [
-  { key: 'owner', name: 'Owner', blocks: [['for_you', 'm'], ['health', 'm'], ['labour', 's'], ['timesheets', 's'], ['sales_pace', 'm'], ['orders', 'm'], ['sched_check', 'm'], ['unattributed', 'm'], ['month_glance', 'm'], ['fill_rates', 'm'], ['open_close', 's'], ['sick_calls', 's'], ['concerns', 's'], ['unpaid_invoices', 's'], ['activity', 'm'], ['quick_links', 'm']] },
-  { key: 'home_office_ops', name: 'Home office ops', blocks: [['for_you', 'm'], ['flash', 'm'], ['orders', 'm'], ['paylinks', 's'], ['party_owing', 's'], ['open_close', 'm'], ['class_problems', 'm'], ['sick_calls', 's'], ['swaps', 's'], ['field_trips', 's'], ['buyouts', 's'], ['devices', 's'], ['retail_stock', 's'], ['announcements', 'm']] },
-  { key: 'hr', name: 'HR', blocks: [['for_you', 'm'], ['timesheets', 's'], ['sched_check', 'm'], ['sick_calls', 'm'], ['swaps', 's'], ['time_off', 's'], ['timesheets', 'm'], ['sign_offs', 'm'], ['concerns', 's'], ['missing_pins', 's'], ['staff_news', 'm']] },
-  { key: 'registration', name: 'Registration', blocks: [['for_you', 'm'], ['find_family', 'm'], ['party_owing', 's'], ['paylinks', 's'], ['find_membership', 's'], ['family_changes', 's'], ['date_suggestions', 's'], ['parties_chase', 's'], ['field_trips', 's'], ['unpaid_invoices', 's'], ['class_problems', 'm'], ['chat_unread', 's']] },
+  { key: 'owner', name: 'Owner', blocks: [['for_you', 'm'], ['coming_up', 'm'], ['health', 'm'], ['labour', 's'], ['timesheets', 's'], ['sales_pace', 'm'], ['orders', 'm'], ['sched_check', 'm'], ['unattributed', 'm'], ['month_glance', 'm'], ['fill_rates', 'm'], ['open_close', 's'], ['sick_calls', 's'], ['concerns', 's'], ['unpaid_invoices', 's'], ['activity', 'm'], ['quick_links', 'm']] },
+  { key: 'home_office_ops', name: 'Home office ops', blocks: [['for_you', 'm'], ['coming_up', 'm'], ['flash', 'm'], ['orders', 'm'], ['paylinks', 's'], ['party_owing', 's'], ['open_close', 'm'], ['class_problems', 'm'], ['sick_calls', 's'], ['swaps', 's'], ['field_trips', 's'], ['buyouts', 's'], ['devices', 's'], ['retail_stock', 's'], ['announcements', 'm']] },
+  { key: 'hr', name: 'HR', blocks: [['for_you', 'm'], ['coming_up', 'm'], ['timesheets', 's'], ['sched_check', 'm'], ['sick_calls', 'm'], ['swaps', 's'], ['time_off', 's'], ['timesheets', 'm'], ['sign_offs', 'm'], ['concerns', 's'], ['missing_pins', 's'], ['staff_news', 'm']] },
+  { key: 'registration', name: 'Registration', blocks: [['for_you', 'm'], ['coming_up', 'm'], ['find_family', 'm'], ['party_owing', 's'], ['paylinks', 's'], ['find_membership', 's'], ['family_changes', 's'], ['date_suggestions', 's'], ['parties_chase', 's'], ['field_trips', 's'], ['unpaid_invoices', 's'], ['class_problems', 'm'], ['chat_unread', 's']] },
   { key: 'warehouse', name: 'Warehouse', blocks: [['section', 'l', { text: '📦 Stock', style: 'line', colour: 'accent' }], ['wh_stock', 'm'], ['wh_held', 's'], ['quick_links', 's', { links: ['n_rp', 'n_sup', 'shipstation'] }],
     ['section', 'l', { text: '🏪 Studios', style: 'line', colour: 'accent' }], ['wh_studios_low', 'm'], ['for_you', 'm']] },
-  { key: 'marketing', name: 'Marketing', blocks: [['for_you', 'm'], ['newsletters', 'm'], ['studio_notes', 'm'], ['project_interest', 's'], ['donations', 's'], ['points', 's'], ['sales_pace', 's'], ['fill_rates', 'l']] }
+  { key: 'marketing', name: 'Marketing', blocks: [['for_you', 'm'], ['coming_up', 'm'], ['newsletters', 'm'], ['studio_notes', 'm'], ['project_interest', 's'], ['donations', 's'], ['points', 's'], ['sales_pace', 's'], ['fill_rates', 'l']] }
 ];
 function dashAllowed(type) { const t = DASH_BLOCKS[type]; return !!t && dashCan(t.area, t.level) && (!t.need || !!(_dash.me && _dash.me[t.need])); }
 function dashStarterBlocks(st) { return st.blocks.filter(([t]) => dashAllowed(t)); }
@@ -1174,6 +1207,16 @@ function dashAdd(type) {
   if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   if (type === 'section') setTimeout(() => { dashSettings(last.id); const i = document.querySelector('#dash-set input[data-opt="text"]'); if (i) { i.focus(); i.select(); } }, 60);   // (type its title straight away)
 }
+// 📅 Coming up: a time like "14:30" → "2:30pm"; open the calendar at an item (meetings and events open themselves)
+function dashCalT(t) { if (!t) return ''; const [h, m] = String(t).split(':').map(Number); return (h % 12 || 12) + (m ? ':' + String(m).padStart(2, '0') : '') + (h < 12 ? 'am' : 'pm'); }
+async function dashCalGo(id, date) {
+  if (typeof openCalPane !== 'function') return;
+  openCalPane();
+  if (typeof _cal === 'undefined') return;
+  _cal.day = calD(date); await calLoad();
+  const i = _cal.items.findIndex(y => String(y.id) === id && y.start_date === date) >= 0 ? _cal.items.findIndex(y => String(y.id) === id && y.start_date === date) : _cal.items.findIndex(y => String(y.id) === id);
+  if (i >= 0) calOpen(i);
+}
 function dashSettings(id) {
   const b = _dash.layout.blocks[dashIdx(id)]; if (!b) return; const t = DASH_BLOCKS[b.type];
   openDutySheet(`<h3 style="margin:0 0 10px">⚙ ${esc(t.name)}</h3><div class="dash-set" id="dash-set">${t.settings(b)}</div>
@@ -1185,6 +1228,8 @@ function dashSettingsSave(id) {
   box.querySelectorAll('[data-opt]').forEach(x => { b.opts[x.getAttribute('data-opt')] = x.value; });
   const ticks = box.querySelectorAll('[data-link]');
   if (ticks.length) b.opts.links = Array.from(ticks).filter(x => x.checked).map(x => x.getAttribute('data-link'));
+  const lay = box.querySelectorAll('[data-cal-layer]');   // (📅 Coming up: which calendar layers)
+  if (lay.length) b.opts.layers = Array.from(lay).filter(x => x.checked).map(x => x.getAttribute('data-cal-layer'));
   closeDutySheet(); delete _dash.cache[id]; dashSaveSoon(); dashDraw();
 }
 function dashNoteInput(id, text) {
@@ -1673,6 +1718,10 @@ function dashStyles() {
 .dash-tools button:disabled { opacity: .35; cursor: default; } .dash-tools .dash-sz.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .dash-grip { cursor: grab; font-size: 18px; line-height: 24px; color: var(--ink-soft); padding: 0 2px; }
 .dash-empty { color: var(--ink-soft); padding: 4px 0; } .dash-empty.bad { color: var(--red); }
+.dash-cal-day { margin-bottom: 8px; } .dash-cal-h { font-size: 12px; font-weight: 800; color: var(--ink-soft); text-transform: uppercase; letter-spacing: .03em; margin: 2px 0 3px; }
+.dash-cal-row { display: flex; gap: 10px; width: 100%; text-align: left; border: 0; border-left: 3px solid var(--c); background: none; padding: 4px 8px; font: inherit; font-size: 13.5px; color: var(--ink); cursor: pointer; border-radius: 4px; }
+.dash-cal-row:hover { background: #f7f6fb; } .dash-cal-row.past { opacity: .5; } .dash-cal-t { width: 62px; flex: none; color: var(--ink-soft); font-size: 12.5px; padding-top: 1px; }
+.dash-cal-x { min-width: 0; overflow: hidden; text-overflow: ellipsis; } .dash-cal-z { font-size: 12px; }
 .dash-list { display: flex; flex-direction: column; gap: 6px; }
 .dash-row { border-left: 3px solid var(--border); padding: 2px 0 2px 8px; } .dash-row.late { border-left-color: var(--red); } .dash-row.fresh { border-left-color: var(--accent); }
 .dash-main { font-weight: 600; } .dash-sub { color: var(--ink-soft); font-size: 12.5px; margin-top: 2px; }
