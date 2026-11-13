@@ -3,6 +3,8 @@
 // Moved out of hub.html (Nov 11 2026) and opened from the studio view with each staff member's own PIN (🔑 Who's selling).
 // Loaded by hub.html after its main script.
 // (The PIN box is a plain text box shown as dots, so browsers don't offer to save it as a password.)
+// (Nov 13 2026) 🚶 Walk-in form: Glazing, or a workshop: the project first, and its price follows from its World workshop (staff choose
+// only when a project has no World price, or tap “change”).
 // (Nov 13 2026) 🚶 Walk-ins (hub_walkins.sql): a walk-in for something not on the schedule (glazing, or a workshop at a price tier),
 // with the customer and project, paid on Shopify POS for now; and any sale paid here in person (QR code or card at the desk) for
 // something at this studio today is recorded as a walk-in too. Both go to hub_walk_ins, for schedule planning.
@@ -1190,11 +1192,12 @@ function fdWalkHtml() {
     <h3>🚶 Walk-in recorded</h3><div class="fd-paid">✓ ${esc(W.done.what)} · ${W.done.people} ${W.done.people === 1 ? 'person' : 'people'} · ${esc(W.done.name)}</div>
     <p class="fd-sm">They’re on today’s list under “🚶 Walk-ins” and counted for planning.</p>
     <div class="fd-sheet-btns"><button class="ho-btn" onclick="fdWalkUndo()">↩ Undo</button><button class="ho-btn" onclick="fdWalkOpen()">+ Another walk-in</button><button class="fd-pay" onclick="fdWalkClose()">Done</button></div></div></div>`;
+  const tierName = k => ((tiers.find(t => t[0] === k) || [])[1]) || k;
   const chip = (on, label, js) => `<button type="button" class="fd-chip${on ? ' on' : ''}" onclick="${js}">${esc(label)}</button>`;
-  const projBox = W.project ? `<div class="fd-walk-pick">🧩 <b>${esc(W.project.name)}</b> <button class="fd-link" onclick="_fdWalk.project=null;fdRender()">change</button></div>`
+  const projBox = W.project ? `<div class="fd-walk-pick">🧩 <b>${esc(W.project.name)}</b> <button class="fd-link" onclick="_fdWalk.project=null;_fdWalk.tier='';_fdWalk.tierPick=false;fdRender()">change</button></div>`
     : W.projNone ? `<div class="fd-walk-pick">${W.kind === 'glazing' ? 'Their own piece / pottery painting' : 'Not sure'} <button class="fd-link" onclick="_fdWalk.projNone=false;fdRender()">change</button></div>`
     : `<input id="fd-walk-proj" class="fd-in" placeholder="Search projects (e.g. mug, gnome)…" value="${escAttr(W.projQ)}" oninput="fdWalkProj(this.value)" autocomplete="off">
-       <div class="fd-walk-list">${(W.projL || []).map(p => `<button class="fd-rec" onclick="_fdWalk.project={id:'${escAttr(p.id)}',name:${escAttr(JSON.stringify(p.name))}};fdRender()">${esc(p.name)}</button>`).join('')}
+       <div class="fd-walk-list">${(W.projL || []).map((p, i) => `<button class="fd-rec" onclick="fdWalkPickProj(${i})">${esc(p.name)}${W.kind === 'workshop' && p.tier ? ` <span class="fd-sm">· ${esc(tierName(p.tier))}</span>` : ''}</button>`).join('')}
        <button class="fd-link" onclick="_fdWalk.projNone=true;fdRender()">${W.kind === 'glazing' ? 'Their own piece / pottery painting' : 'Not sure'}</button></div>`;
   const famBox = W.cid ? `<div class="fd-walk-pick">👪 <b>${esc(W.name)}</b> ${esc(W.email)} <button class="fd-link" onclick="_fdWalk.cid=null;_fdWalk.name='';_fdWalk.email='';fdRender()">change</button></div>`
     : `<input id="fd-walk-fam" class="fd-in" placeholder="Find them: name or email…" value="${escAttr(W.famQ)}" onkeydown="if(event.key==='Enter')fdWalkFind(this.value)" autocomplete="off"> <button class="ho-btn" onclick="fdWalkFind(document.getElementById('fd-walk-fam').value)">Find</button>
@@ -1205,8 +1208,10 @@ function fdWalkHtml() {
   return `<div class="fd-sheet-back" onclick="if(event.target===this)fdWalkClose()"><div class="fd-sheet fd-walk" role="dialog" aria-modal="true" style="max-width:640px">
     <h3>🚶 Walk-in (not on the schedule)</h3>
     <p class="fd-sm" style="margin:0">For glazing or a workshop that isn’t on today’s schedule. Walking into something that <i>is</i> running? Book them the usual way: it counts as a walk-in.</p>
-    <div><div class="fd-walk-lbl">What did they come in for?</div><div class="fd-chips">${chip(W.kind === 'glazing', '🎨 Glazing', "_fdWalk.kind='glazing';_fdWalk.tier='';fdRender()")}${tiers.map(t => chip(W.kind === 'workshop' && W.tier === t[0], t[1], `_fdWalk.kind='workshop';_fdWalk.tier='${escAttr(t[0])}';fdRender()`)).join('')}</div></div>
-    ${W.kind ? `<div><div class="fd-walk-lbl">Project</div>${projBox}</div>` : ''}
+    <div><div class="fd-walk-lbl">What did they come in for?</div><div class="fd-chips">${chip(W.kind === 'glazing', '🎨 Glazing', "_fdWalk.kind='glazing';_fdWalk.tier='';_fdWalk.project=null;_fdWalk.projNone=false;fdRender()")}${chip(W.kind === 'workshop', '🧩 Workshop', "_fdWalk.kind='workshop';_fdWalk.project=null;_fdWalk.projNone=false;_fdWalk.tier='';fdRender()")}</div></div>
+    ${W.kind ? `<div><div class="fd-walk-lbl">${W.kind === 'workshop' ? 'Which project?' : 'Project'}</div>${projBox}</div>` : ''}
+    ${W.kind === 'workshop' && (W.project || W.projNone) ? (W.tier && !W.tierPick ? `<div class="fd-walk-price">Price: <b>${esc(tierName(W.tier))}</b>${W.project && W.project.tier === W.tier ? ' <span class="fd-sm">(from World)</span>' : ''} <button class="fd-link" onclick="_fdWalk.tierPick=true;fdRender()">change</button></div>`
+      : `<div><div class="fd-walk-lbl">${W.project && !W.project.tier ? 'This project has no World price: choose the price' : 'Price'}</div><div class="fd-chips">${tiers.map(t => chip(W.tier === t[0], t[1], `_fdWalk.tier='${escAttr(t[0])}';_fdWalk.tierPick=false;fdRender()`)).join('')}</div></div>`) : ''}
     <div class="fd-walk-row"><div><div class="fd-walk-lbl">How many people?</div><div class="fd-qty"><button class="ho-btn" onclick="_fdWalk.people=Math.max(1,_fdWalk.people-1);fdRender()">−</button><b>${W.people}</b><button class="ho-btn" onclick="_fdWalk.people=Math.min(100,_fdWalk.people+1);fdRender()">+</button></div></div>
       <label class="fd-walk-lbl">Day<input type="date" class="fd-in" value="${escAttr(W.day)}" max="${fdToday()}" onchange="_fdWalk.day=this.value"></label>
       <label class="fd-walk-lbl">Time<input type="time" class="fd-in" step="900" value="${escAttr(W.at)}" onchange="_fdWalk.at=this.value"></label></div>
@@ -1216,6 +1221,12 @@ function fdWalkHtml() {
     <div class="fd-sheet-btns"><button class="ho-btn" onclick="fdWalkClose()">Cancel</button><button class="fd-pay" ${W.busy ? 'disabled' : ''} onclick="fdWalkSave()">${W.busy ? 'Saving…' : 'Record walk-in'}</button></div></div></div>`;
 }
 let _fdWalkT = null;
+function fdWalkPickProj(i) {   // (the price follows the project's World workshop)
+  const p = (_fdWalk.projL || [])[i]; if (!p) return;
+  _fdWalk.project = { id: p.id, name: p.name, tier: p.tier || null };
+  if (_fdWalk.kind === 'workshop') { _fdWalk.tier = p.tier || ''; _fdWalk.tierPick = !p.tier; }
+  fdRender();
+}
 function fdWalkProj(q) {
   _fdWalk.projQ = q; clearTimeout(_fdWalkT);
   _fdWalkT = setTimeout(async () => { if (String(q).trim().length < 2) { _fdWalk.projL = []; fdRender(); return; }
@@ -1233,6 +1244,7 @@ function fdWalkFam(i) {
 async function fdWalkSave() {
   const W = _fdWalk;
   const msg = !W.kind ? 'Choose what they came in for.' : !W.project && !W.projNone ? 'Choose the project (or “' + (W.kind === 'glazing' ? 'their own piece' : 'not sure') + '”).'
+    : W.kind === 'workshop' && !W.tier ? 'Choose the price.'
     : !String(W.name).trim() ? 'Add the customer’s name.' : !String(W.email).trim() && !String(W.phone).trim() ? 'Add their email or phone.'
     : !W.pos ? 'Tick “They paid on Shopify POS”.' : '';
   if (msg) { W.msg = msg; fdRender(); return; }
