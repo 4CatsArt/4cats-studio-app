@@ -482,9 +482,10 @@ function rpColHtml() {
   const secOf = r => { const t = tagsOf(r); const i = (E.sections || []).findIndex(s => (s.tags || []).some(x => t.has(String(x).toLowerCase()))); return i; };
   const groups = (E.sections || []).map((s, i) => ({ title: s.title || 'Section ' + (i + 1), list: inIt.filter(r => secOf(r) === i) })).concat([{ title: E.more_title || 'More', list: inIt.filter(r => secOf(r) < 0) }]).filter(g => g.list.length);
   const nopic = inIt.filter(r => !(r.images || []).length).length;
-  const tile = r => `<div class="rpc-tile${r.active ? '' : ' rp-off'}"><button onclick="_rp.back='col';rpOpen('${r.id}')" title="Open ${escAttr(r.name)}">${(r.images || [])[0] ? `<img src="${escAttr(r.images[0])}" alt="">` : '<span class="rpc-nopic">📷<br>No picture yet</span>'}
+  const isCover = r => !!E.image && (r.images || [])[0] === E.image;
+  const tile = r => `<div class="rpc-tile${r.active ? '' : ' rp-off'}" style="position:relative">${isCover(r) ? '<span title="The collection\u2019s cover" style="position:absolute;left:6px;top:6px;z-index:1;background:#fff;border-radius:999px;padding:2px 7px;font-size:12px;font-weight:700;box-shadow:0 1px 4px rgba(0,0,0,.2)">\u2b50 Cover</span>' : ''}<button onclick="_rp.back='col';rpOpen('${r.id}')" title="Open ${escAttr(r.name)}">${(r.images || [])[0] ? `<img src="${escAttr(r.images[0])}" alt="">` : '<span class="rpc-nopic">📷<br>No picture yet</span>'}
       <b>${esc(r.name)}</b><span class="fd-sm">${rpMoney(r.price)}${r.active ? '' : ' · off'}${r.sell_online ? ' · 🌐' : ''}${r.sell_in_studio ? ' · 🏪' : ''}</span></button>
-      <button class="fd-x" title="Leave it out of this collection" onclick="rpColHide('${r.id}')">×</button></div>`;
+      <button class="fd-x" title="Leave it out of this collection" onclick="rpColHide('${r.id}')">×</button>${(r.images || [])[0] && !isCover(r) ? `<button class="ho-btn sm" title="Use this product\u2019s picture as the collection\u2019s cover" style="margin:4px auto 0;display:block" onclick="rpColCover('${r.id}')">\u2b50 Cover</button>` : ''}</div>`;
   const others = R.filter(r => !rpInCol(r, E)).sort((a, b) => a.name.localeCompare(b.name));
   return `<div class="ho-head"><div class="pts-page-title" style="margin:0">🗂️ ${E.id ? esc(E.name || 'Collection') : 'New collection'}</div><span class="spacer"></span>
       <button class="ho-btn" onclick="rpColBack()">← Collections</button><button class="ho-btn primary" onclick="rpColSave()">Save</button></div>
@@ -492,6 +493,7 @@ function rpColHtml() {
     <div class="rp-grid"><section class="rp-card"><h4>The collection</h4>
       <label>Name<input value="${escAttr(E.name)}" placeholder="e.g. Ditto kits" oninput="rpCF('name',this.value)"></label>
       <label>Short description <span class="fd-sm">(for World’s shop)</span><input value="${escAttr(E.blurb || '')}" maxlength="160" oninput="rpCF('blurb',this.value)"></label>
+      ${rpColCoverHtml(E, inIt)}
       <label>Products with any of these tags <span class="fd-sm">(commas)</span><input value="${escAttr((E.tags || []).join(', '))}" onchange="rpCF('tags',this.value.split(',').map(x=>x.trim().toLowerCase()).filter(Boolean));rpDraw()"></label>
       <label class="fd-chk"><input type="checkbox" ${E.show_online ? 'checked' : ''} onchange="rpCF('show_online',this.checked)"> 🌐 Show on World’s shop</label>
       <label class="fd-chk"><input type="checkbox" ${E.active ? 'checked' : ''} onchange="rpCF('active',this.checked)"> <b>On</b></label></section>
@@ -564,6 +566,20 @@ async function rpBulkApply() {   // (named apart from 📷 Bulk pictures' rpBulk
   const { data, error } = await sb.rpc('hub_retail_bulk', { p_ids: ids, p });
   if (error) { alert(/hub_retail_bulk/.test(error.message) ? 'Run retail_bulk.sql in Supabase first.' : error.message); return; }
   _rp.msg = `✓ ${what}: ${data} product${data === 1 ? '' : 's'} changed.`; _rp.ba = ''; _rp.bv = ''; await rpLoad();
+}
+// ⭐ (Nov 13 2026) the collection's cover on World's Shop by Collection: a product's picture, or automatic (the first product's picture)
+function rpColCoverHtml(E, inIt) {
+  const pics = inIt.filter(r => (r.images || [])[0]), cur = pics.find(r => r.images[0] === E.image), show = E.image || (pics[0] && pics[0].images[0]) || '';
+  return `<label>Cover picture <span class="fd-sm">(on World’s Shop by Collection)</span><select onchange="rpColCover(this.value)">
+      <option value="">Automatic: the first product’s picture</option>${E.image && !cur ? '<option value="__own" selected>Its own picture</option>' : ''}
+      ${pics.map(r => `<option value="${r.id}"${cur && cur.id === r.id ? ' selected' : ''}>${esc(r.name)}</option>`).join('')}</select></label>
+    ${show ? `<div style="margin:6px 0 10px"><img src="${escAttr(show)}" alt="" style="width:100%;max-width:260px;border-radius:12px;display:block"><span class="fd-sm">${cur ? 'Cover: ' + esc(cur.name) : E.image ? 'Its own picture' : 'Automatic'}${E.image ? '' : ' (changes if the first product changes)'}</span></div>` : '<p class="fd-sm">No product pictures yet.</p>'}`;
+}
+function rpColCover(v) {
+  const E = _rp.colEdit; if (!E || v === '__own') return;
+  if (!v) E.image = null;
+  else { const r = (_rp.rows || []).find(x => x.id === v); if (!r || !(r.images || [])[0]) return; E.image = r.images[0]; }
+  E.dirty = true; _rp.msg = 'Cover chosen: press Save.'; rpDraw();
 }
 function rpColSec(i, d) { const S = _rp.colEdit.sections, j = i + d; [S[i], S[j]] = [S[j], S[i]]; _rp.colEdit.dirty = true; rpDraw(); }
 function rpColHide(id) { const E = _rp.colEdit; E.product_ids = (E.product_ids || []).filter(x => x !== id); if (!(E.hidden_ids || []).includes(id)) E.hidden_ids = (E.hidden_ids || []).concat(id); E.dirty = true; rpDraw(); }
