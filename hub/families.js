@@ -31,6 +31,7 @@ let _fam = { results: null, open: null, msg: '', sort: 'last_visit', desc: true,
 function openFamiliesPane() {
   const wasOpen = paneVisible('families-pane') || paneVisible('fd-pane');   // (Front desk and Families share one PIN unlock)
   showOnlyPane('families-pane'); setActiveNav('nav-families');
+  { const rb = document.getElementById('fam-receipt-btn'); if (rb) rb.style.display = _studioData && _studioData.isAdmin ? '' : 'none'; }   // (🧾 admin only)
   if (!wasOpen) _fdSeller = null;                                          // (opened fresh: whoever's at the desk enters their PIN)
   if (famDeskGate()) return;
   const sel = document.getElementById('fam-studio');
@@ -240,6 +241,7 @@ function famRender() {
         famEsc([e.date ? 'for ' + dl(e.date) : '', e.spots ? e.spots + (e.spots === 1 ? ' spot' : ' spots') : '', e.gift_last4 ? '$' + Number(e.amount).toFixed(2) + ' gift card ending ' + e.gift_last4 : e.credit_code ? '$' + Number(e.amount).toFixed(2) + ' credit ' + e.credit_code : 'no credit', 'by ' + (e.by || 'family')].filter(Boolean).join(' · ')) + '</span></span></div>'
       : '<div class="fam-tl-row"><span class="fam-tl-dot"></span><span class="fam-when"><b>' + famEsc(dl(e.at)) + '</b><span>Order ' + famEsc(e.order || '') + '</span></span><span class="fam-what"><b>' + famEsc(String(e.what || '').split(' · ').map(famTitle).join(' · ')) + '</b><span class="fam-meta">' +
         famEsc([sn(e.studio_id), e.spots ? e.spots + (e.spots === 1 ? ' spot' : ' spots') : '', e.refunded ? 'cancelled' : ''].filter(Boolean).join(' · ')) +
+        (!e.refunded && /^W\d+$/i.test(String(e.order || '')) && _studioData && _studioData.isAdmin ? ' <button class="ho-btn sm" onclick="famReceipt(\'' + famEsc(e.order) + '\')" title="A receipt for this order, to save as a PDF or print">🧾 Receipt</button>' : '') +
         (e.refunded && e.order && _studioData && _studioData.isAdmin ? ' <button class="ho-btn sm" onclick="famRefundOrder(\'' + famEsc(e.order) + '\')" title="If a gift card was given when it was cancelled: switch it off (if unused) and refund to how they paid">↩ Refund instead of the credit</button>' : '') + '</span></span></div>')).join('') + '</div>'
       : '<p class="fam-meta">No orders yet.</p>');
     // Cancellations
@@ -374,4 +376,54 @@ async function famSaveAdj(id) {
   const { error } = await sb.rpc('hub_participant_age_adjust', { p_id: id, p_adjust: n, p_note: note, p_until: until, p_pin: fdPin() });
   if (error) { m.textContent = famErr(error); return; }
   famOpen(_fam.open.shopify_customer_id);
+}
+
+
+// ---------- 🧾 Receipts (Nov 13 2026; hub_order_receipt.sql): a World order's receipt (W…), to save as a PDF or print ----------
+// From a family's Timeline (🧾 Receipt), or any order number (🧾 Receipt for an order, at the top of Families: field trips, buyouts).
+// Opens in a new tab laid out like a receipt, with the GST/HST number; "Save as PDF / Print" uses the browser's own Save as PDF.
+function famReceiptAsk() {
+  const n = prompt('The World order number (e.g. W100549):'); if (!n || !n.trim()) return;
+  famReceipt(n.trim());
+}
+async function famReceipt(order) {
+  const w = window.open('', '_blank');   // (opened right away, so the browser allows it)
+  if (w) w.document.write('<p style="font-family:Arial;padding:30px;color:#555">Making the receipt…</p>');
+  const { data: r, error } = await sb.rpc('hub_order_receipt', { p_order: order });
+  if (error || !r) { if (w) w.close(); alert(error && /hub_order_receipt/.test(error.message) && /function/i.test(error.message) ? 'Run hub_order_receipt.sql in Supabase first.' : (error ? error.message : 'That order wasn’t found.')); return; }
+  const e = t => String(t == null ? '' : t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+  const m = n => '$' + Number(n || 0).toFixed(2);
+  const day = d => d ? new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }) : '';
+  const paid = r.paid_at ? new Date(r.paid_at).toLocaleDateString('en-CA', { month: 'long', day: 'numeric', year: 'numeric' }) : '';
+  const studio = r.studio_id === 'WAREHOUSE' || r.studio_id === 'GIFTCARD' ? '4Cats Shop' : '4Cats ' + ((typeof STUDIO_NAMES !== 'undefined' && STUDIO_NAMES[r.studio_id]) || r.studio_id || '');
+  const L = Array.isArray(r.lines) ? r.lines : [];
+  const lineName = l => l.kind === 'world' ? `${l.program} (${l.qty} ${Number(l.qty) === 1 ? 'spot' : 'spots'})` : (l.kind === 'retail' || l.kind === 'treat') && Number(l.qty) > 1 ? `${l.program} × ${l.qty}`
+    : l.kind === 'aftercare' ? 'Aftercare' + (l.qty ? ` × ${l.qty}` : '') : (l.kind === 'camp' || l.kind === 'class') && (l.days || []).length ? `${l.program} (${l.days.length} ${l.kind === 'class' ? 'week' : 'day'}${l.days.length === 1 ? '' : 's'})` : (l.program || 'Item');
+  const lineSub = l => [l.date ? day(l.date) + (l.time ? ' ' + l.time : '') : '', (l.days || []).length > 1 ? (l.days || []).map(d => day(d).replace(/, \d{4}$/, '')).join(', ') : (l.days || []).length === 1 && !l.date ? day(l.days[0]) : '',
+    (l.participants || []).map(k => k && k.name).filter(Boolean).join(', '), (l.notes || []).join(', '), l.kind === 'giftcard' && l.gift && l.gift.to_name ? 'for ' + l.gift.to_name : ''].filter(Boolean).join(' · ');
+  const rows = L.map(l => `<tr><td><b>${e(lineName(l))}</b>${lineSub(l) ? `<div class="s">${e(lineSub(l))}</div>` : ''}</td><td class="r">${Number(l.discount) > 0 ? `<s>${m(l.regular)}</s><br>` : ''}${m(l.amount)}</td></tr>`).join('');
+  const taxes = [['GST', r.gst], ['PST', r.pst], ['HST', r.hst]].filter(x => Number(x[1]) > 0);
+  const gift = Number(r.gift_card_amount) > 0;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>4Cats receipt ${e(r.order_name)}</title><style>
+    body{font-family:Helvetica,Arial,sans-serif;color:#1f2a24;margin:0;background:#f4f1ea} .pg{background:#fff;max-width:760px;margin:24px auto;padding:44px 52px;border-top:10px solid #c3090c;box-shadow:0 4px 20px rgba(0,0,0,.08)}
+    .top{display:flex;justify-content:space-between;gap:20px} h1{margin:0;font-size:28px} .sm{color:#5c6670;font-size:13px;margin-top:4px} .rc{text-align:right} .rc h2{margin:0;font-size:22px;letter-spacing:1px}
+    hr{border:0;border-top:1px solid #e2d9c8;margin:26px 0} .two{display:flex;gap:40px} .two div{flex:1} .lab{font-size:11px;font-weight:700;color:#5c6670;letter-spacing:.5px;margin-bottom:6px}
+    table{width:100%;border-collapse:collapse;margin-top:24px} th{background:#faf6ee;text-align:left;font-size:11px;color:#5c6670;letter-spacing:.5px;padding:8px 10px} th.r,td.r{text-align:right}
+    td{padding:10px;border-bottom:1px solid #eee;vertical-align:top;font-size:14px} .s{color:#5c6670;font-size:12px;margin-top:3px} s{color:#999}
+    .tot{margin-left:auto;width:320px;margin-top:14px;font-size:14px} .tot div{display:flex;justify-content:space-between;padding:4px 0} .tot .big{border-top:2px solid #1f2a24;margin-top:6px;padding-top:8px;font-weight:700;font-size:17px}
+    .foot{color:#5c6670;font-size:12px;margin-top:40px} .bar{max-width:760px;margin:16px auto 0;text-align:right} .bar button{background:#c3090c;color:#fff;border:0;border-radius:999px;padding:10px 20px;font-weight:700;font-size:14px;cursor:pointer}
+    .test{color:#c3090c;font-weight:700} @media print{body{background:#fff}.pg{box-shadow:none;margin:0;max-width:none}.bar{display:none}}</style></head><body>
+    <div class="bar"><button onclick="window.print()">Save as PDF / Print</button></div><div class="pg">
+    <div class="top"><div><h1>4Cats Arts Studio</h1><div class="sm">hello@4cats.com · GST/HST number: 828575662RT0001</div></div>
+      <div class="rc"><h2>RECEIPT</h2><div class="sm">Order ${e(r.order_name)}</div><div class="sm">Paid ${e(paid)}</div>${r.test_mode ? '<div class="sm test">TEST ORDER</div>' : ''}</div></div><hr>
+    <div class="two"><div><div class="lab">BILLED TO</div>${e(r.customer_name || '')}<br>${e(r.customer_email && r.customer_email !== 'walk-in@4cats.com' ? r.customer_email : '')}</div>
+      <div><div class="lab">${r.ship_to ? 'SHIPPED TO' : 'STUDIO'}</div>${r.ship_to ? `${e(r.ship_to.name)}<br>${e(r.ship_to.line1)}${r.ship_to.line2 ? '<br>' + e(r.ship_to.line2) : ''}<br>${e(r.ship_to.city)}, ${e(r.ship_to.province)} ${e(r.ship_to.postal)}` : e(studio)}</div></div>
+    <table><thead><tr><th>DESCRIPTION</th><th class="r">AMOUNT (CAD)</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="tot"><div><span>Subtotal</span><span>${m(r.subtotal)}</span></div>${Number(r.discount_total) > 0 ? `<div><span>Includes discounts of</span><span>${m(r.discount_total)}</span></div>` : ''}
+      ${taxes.map(x => `<div><span>${x[0]}</span><span>${m(x[1])}</span></div>`).join('')}<div class="big"><span>Total</span><span>${m(r.total)}</span></div>
+      ${gift ? `<div><span>Gift card ending ${e(r.gift_card_last4 || '')}</span><span>−${m(r.gift_card_amount)}</span></div>` : ''}
+      <div><span>${Number(r.amount_charged) > 0 ? 'Paid by card (Stripe)' : 'Paid'}</span><span>${m(r.amount_charged != null ? r.amount_charged : r.total)}</span></div></div>
+    <div class="foot">Thank you for choosing 4Cats! · 4Cats Arts Studio · GST/HST number 828575662RT0001 · Questions? hello@4cats.com</div></div></body></html>`;
+  if (w) { w.document.open(); w.document.write(html); w.document.close(); }
+  else alert('Your browser blocked the receipt window. Allow pop-ups for the Hub, then try again.');
 }
