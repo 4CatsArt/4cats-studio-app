@@ -460,7 +460,8 @@ const DASH_BLOCKS = {
     desc: 'Parties in the last 45 days with the after-party form not filled in, or money still owing.',
     async load(b) {
       const t = dashToday(), f = new Date(); f.setDate(f.getDate() - 45);
-      const R = (await dashRpc('hub_party_balances', { p_from: localDateStr(f), p_to: t, p_studio: null })) || [];
+      const from = localDateStr(f) < '2026-11-01' ? '2026-11-01' : localDateStr(f);   // (forms started Nov 1 2026: nothing earlier to ask for)
+      const R = (await dashRpc('hub_party_balances', { p_from: from, p_to: t, p_studio: null })) || [];
       const st = r => typeof pbState === 'function' ? pbState(r, t) : (r.date > t ? 'upcoming' : !r.filled ? (r.date < '2026-11-01' ? 'before' : 'missing') : (r.owing != null && +r.owing > 0.004 ? 'owing' : 'ok'));   // (forms started Nov 1 2026)
       const miss = R.filter(r => st(r) === 'missing'), owe = R.filter(r => st(r) === 'owing'), sum = owe.reduce((x, r) => x + (+r.owing || 0), 0);
       dashGlanceSet(b, miss.length + owe.length ? dashPl(miss.length + owe.length, 'party balance', 'party balances') + ' to sort' : '');
