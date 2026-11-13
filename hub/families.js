@@ -108,6 +108,23 @@ async function famOpen(cid) {
     _fam.open.badges = bd.error ? null : (bd.data || []);   // null = hub_family_badges.sql not run yet
     famRender();
   }
+  if (_studioData && _studioData.isAdmin) famPointsLoad(cid);   // ⭐ Points & Rewards (home office)
+}
+// ⭐ (Nov 13 2026; world_points.sql) the family's Points & Rewards: balance, history, and Adjust (home office only)
+async function famPointsLoad(cid) {
+  const { data, error } = await sb.rpc('hub_family_points', { p_customer: cid });
+  if (!_fam.open || Number(_fam.open.shopify_customer_id) !== Number(cid)) return;
+  _fam.open.points = error ? (/hub_family_points/.test(error.message) && /function/i.test(error.message) ? null : { err: error.message }) : data;
+  famRender();
+}
+async function famPointsAdjust() {
+  const f = _fam.open; if (!f) return;
+  const n = parseInt((document.getElementById('fam-pts-n') || {}).value, 10), why = String((document.getElementById('fam-pts-why') || {}).value || '').trim();
+  if (!n) { alert('How many points? (A minus number takes some off.)'); return; }
+  if (!why) { alert('Say why: it shows in their points history.'); return; }
+  const { data, error } = await sb.rpc('hub_points_adjust', { p_customer: f.shopify_customer_id, p_points: n, p_reason: why });
+  if (error) { alert('Not changed: ' + error.message); return; }
+  f.points = data; _fam.secs = Object.assign(_fam.secs || {}, { points: true }); famRender();
 }
 // "4:45pm Fri Nov 13th | Make the Gift (Ages 5-10) | 3 Week Session" → "Make the Gift (Ages 5-10) · 3 Week Session"
 function famTitle(t) { const parts = String(t || '').split('|').map(x => x.trim()).filter(Boolean); if (parts.length > 1 && /^\*?\d/.test(parts[0])) parts.shift(); return parts.join(' · '); }
@@ -244,6 +261,17 @@ function famRender() {
         (!e.refunded && /^W\d+$/i.test(String(e.order || '')) && _studioData && _studioData.isAdmin ? ' <button class="ho-btn sm" onclick="famReceipt(\'' + famEsc(e.order) + '\')" title="A receipt for this order, to save as a PDF or print">🧾 Receipt</button>' : '') +
         (e.refunded && e.order && _studioData && _studioData.isAdmin ? ' <button class="ho-btn sm" onclick="famRefundOrder(\'' + famEsc(e.order) + '\')" title="If a gift card was given when it was cancelled: switch it off (if unused) and refund to how they paid">↩ Refund instead of the credit</button>' : '') + '</span></span></div>')).join('') + '</div>'
       : '<p class="fam-meta">No orders yet.</p>');
+    // ⭐ Points & Rewards (home office)
+    if (_studioData && _studioData.isAdmin && f.points !== undefined && f.points !== null) {
+      const P = f.points, KI = { vote: '🗳️', feedback: '💬', adjust: '⭐', purchase: '🛍️', other: '⭐' };
+      h += sec('points', '⭐ Points', P.err ? null : (P.balance || 0), P.err ? '<p class="fam-meta">' + famEsc(P.err) + '</p>'
+        : '<p style="margin:0 0 8px"><b style="font-size:22px">' + (P.balance || 0) + '</b> points <span class="fam-meta">· collected on World (votes for now)</span></p>' +
+          '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 10px"><input id="fam-pts-n" type="number" step="1" placeholder="+25 or -10" style="width:110px">' +
+          '<input id="fam-pts-why" placeholder="Why (shows in their history), e.g. Thanks for your feedback" style="flex:1;min-width:220px"><button class="ho-btn sm" onclick="famPointsAdjust()">Adjust</button></div>' +
+          ((P.lines || []).length ? '<div class="fam-rows">' + P.lines.map(l => '<div class="fam-row" style="display:flex;gap:10px"><span style="flex:1">' + (KI[l.kind] || '⭐') + ' ' + famEsc(l.reason || '') +
+            (l.by ? ' <span class="fam-meta">by ' + famEsc(l.by) + '</span>' : '') + '</span><span class="fam-meta">' + famEsc(new Date(l.at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' })) + '</span><b style="min-width:44px;text-align:right;color:' + (l.points < 0 ? '#b3261e' : '#2e7d4f') + '">' + (l.points > 0 ? '+' : '') + l.points + '</b></div>').join('') + '</div>'
+            : '<p class="fam-meta">No points yet. They collect points by voting on World.</p>'));
+    }
     // Cancellations
     const cx = f.cancellations || [];
     h += sec('cancels', 'Cancellations', cx.length, cx.length ? cx.map(c => '<p class="fam-line">↩️ ' + famEsc(famTitle(c.title)) + (c.date ? ' (' + famEsc(dl(c.date)) + ')' : '') + ' · ' +
