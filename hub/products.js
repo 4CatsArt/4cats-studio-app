@@ -464,7 +464,9 @@ function rpColsHtml() {
     ${_rp.colErr ? `<p class="fd-msg">${esc(_rp.colErr)}</p>` : ''}${_rp.msg ? `<p class="fd-ok">${esc(_rp.msg)}</p>` : ''}
     ${C === undefined || C === null ? '<p class="fd-sm">Loading…</p>' : !C.length ? '<p class="fd-sm">No collections yet.</p>' :
     `<div class="rpc-list">${C.map(c => { const P = c.products || [], nopic = P.filter(x => !x.pictures).length;
-      return `<button class="rpc-card${c.active ? '' : ' rp-off'}" onclick="rpColOpen('${c.id}')"><div class="rpc-pics">${P.filter(x => x.image).slice(0, 4).map(x => `<img src="${escAttr(x.image)}" alt="">`).join('') || '<span class="wsm-noimg"></span>'}</div>
+      return `<button class="rpc-card${c.active ? '' : ' rp-off'}" onclick="rpColOpen('${c.id}')"><div class="rpc-pics" style="position:relative">${c.image   // ⭐ its cover (World's Shop by Collection), else its first 4 products
+        ? `<img src="${escAttr(c.image)}" alt="" style="grid-column:1/-1;height:144px"><span style="position:absolute;left:6px;top:6px;background:#fff;border-radius:999px;padding:2px 8px;font-size:12px;font-weight:700;box-shadow:0 1px 4px rgba(0,0,0,.2)">\u2b50 Cover</span>`
+        : P.filter(x => x.image).slice(0, 4).map(x => `<img src="${escAttr(x.image)}" alt="">`).join('') || '<span class="wsm-noimg"></span>'}</div>
         <b>${esc(c.name)}</b>${c.active ? '' : ' <span class="fd-sm">(off)</span>'}<span class="fd-sm">${P.length} product${P.length === 1 ? '' : 's'}${(c.sections || []).length ? ' · ' + c.sections.map(s => esc(s.title)).join(', ') : ''}</span>
         ${nopic ? `<span class="rp-inv">📷 ${nopic} still need pictures</span>` : P.length ? '<span class="fd-ok" style="font-size:12px">✓ every product has a picture</span>' : ''}</button>`; }).join('')}</div>`}`;
 }
@@ -579,7 +581,17 @@ function rpColCover(v) {
   const E = _rp.colEdit; if (!E || v === '__own') return;
   if (!v) E.image = null;
   else { const r = (_rp.rows || []).find(x => x.id === v); if (!r || !(r.images || [])[0]) return; E.image = r.images[0]; }
-  E.dirty = true; _rp.msg = 'Cover chosen: press Save.'; rpDraw();
+  E.dirty = true; _rp.msg = 'Cover chosen: press Save.';
+  rpDrawKeep();   // (stay where you are on the page: big collections are long)
+  const r2 = v ? (_rp.rows || []).find(x => x.id === v) : null;
+  rpToast(r2 ? '\u2b50 ' + r2.name + ' is the cover: press Save' : 'Cover: automatic. Press Save');
+}
+// a short note at the bottom of the screen (wherever you are on a long page), with a Save button
+function rpToast(text, done) {
+  let t = document.getElementById('rp-toast');
+  if (!t) { t = document.createElement('div'); t.id = 'rp-toast'; t.style.cssText = 'position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:9999;background:#1f2a24;color:#fff;border-radius:999px;padding:10px 12px 10px 18px;font-weight:600;box-shadow:0 8px 24px rgba(0,0,0,.25);display:flex;gap:12px;align-items:center;max-width:92vw'; document.body.appendChild(t); }
+  t.innerHTML = `<span>${esc(text)}</span>${done ? '' : '<button class="ho-btn primary sm" onclick="rpColSave()">Save</button>'}<button class="ho-btn sm" onclick="this.parentNode.remove()" aria-label="Close">\u2715</button>`;
+  clearTimeout(rpToast._t); rpToast._t = setTimeout(() => { const x = document.getElementById('rp-toast'); if (x) x.remove(); }, 12000);
 }
 function rpColSec(i, d) { const S = _rp.colEdit.sections, j = i + d; [S[i], S[j]] = [S[j], S[i]]; _rp.colEdit.dirty = true; rpDraw(); }
 function rpColHide(id) { const E = _rp.colEdit; E.product_ids = (E.product_ids || []).filter(x => x !== id); if (!(E.hidden_ids || []).includes(id)) E.hidden_ids = (E.hidden_ids || []).concat(id); E.dirty = true; rpDraw(); }
@@ -591,8 +603,9 @@ async function rpColSave() {
   const p = { id: E.id || null, name: E.name, slug: E.slug, blurb: E.blurb, description: E.description, image: E.image, tags: E.tags || [], product_ids: E.product_ids || [], hidden_ids: E.hidden_ids || [],
     sections: (E.sections || []).filter(s => String(s.title || '').trim()), more_title: E.more_title, show_online: E.show_online !== false, active: E.active !== false, sort: E.sort };
   const { data, error } = await sb.rpc('hub_retail_collection_save', { p });
-  if (error) { _rp.msg = 'Not saved: ' + error.message; rpDraw(); return; }
-  _rp.colEdit = Object.assign(E, { id: data, dirty: false }); _rp.msg = ''; await rpColsLoad(); _rp.msg = '✓ Saved ' + E.name + '.'; rpDraw();
+  if (error) { _rp.msg = 'Not saved: ' + error.message; rpDraw(); alert('The collection wasn\u2019t saved:\n\n' + error.message); return; }
+  { const x = document.getElementById('rp-toast'); if (x) x.remove(); }
+  _rp.colEdit = Object.assign(E, { id: data, dirty: false }); _rp.msg = ''; await rpColsLoad(); _rp.msg = '✓ Saved ' + E.name + '.'; rpDrawKeep(); rpToast('\u2713 Saved ' + E.name, true);
 }
 async function rpColDelete() {
   const E = _rp.colEdit; if (!confirm(`Delete the collection “${E.name}”? Its products stay as they are.`)) return;
