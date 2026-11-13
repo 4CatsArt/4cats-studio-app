@@ -610,7 +610,9 @@ if (typeof PANES !== 'undefined' && PANES.indexOf('pb-pane') < 0) PANES.push('pb
 let _pb = { from: '', to: '', studio: '', show: 'attention', kind: '', q: '', rows: null, err: '' };
 const PB_KIND = { kids: 'Kids party', splatter: 'Splatter party', get_together: 'Get-together', field_trip: 'Field trip', buyout: 'Studio buyout' };
 const PB_ST = { paid: '✓ Paid', all_good: '✓ All good', credit_sent: '🎁 Gift card sent', invoice_later: '📋 Sent to the field trip tracker', link_sent: '✉️ Pay link sent', waived: '✓ Let go' };
-const PB_DONE = { paid: 1, all_good: 1, credit_sent: 1, invoice_later: 1, waived: 1 };   // (a pay link sent is still owing until it's paid)
+const PB_DONE = { paid: 1, all_good: 1, credit_sent: 1, invoice_later: 1, waived: 1 };
+// (Nov 13 2026) after-party forms started in November: an earlier party without one is never "form not filled in"
+const PB_FORMS_FROM = '2026-11-01';   // (a pay link sent is still owing until it's paid)
 async function openPbPane() {
   await hoAreaLoad('parties_events'); if (!hoA('parties_events', 'view')) { alert('Party balances need “Parties & events” on the Access page.'); return; }
   showOnlyPane('pb-pane'); setActiveNav('nav-pb');
@@ -626,7 +628,7 @@ async function pbLoad() {
 function pbState(r, t) {
   if (r.date > t) return 'upcoming';
   if (r.kind === 'buyout') return 'buyout';
-  if (!r.filled) return 'missing';
+  if (!r.filled) return r.date < PB_FORMS_FROM ? 'before' : 'missing';
   if (r.status && PB_DONE[r.status]) return 'settled';
   if (r.owing != null && Number(r.owing) > 0.004) return 'owing';
   return 'ok';
@@ -657,7 +659,7 @@ function pbDraw() {
   const total = rows.reduce((s, r) => s + (pbState(r, t) === 'owing' ? Number(r.owing || 0) : 0), 0);
   h += `<table class="fd-tbl sup-tbl"><thead><tr><th>Party</th><th>When</th><th>Paid (before tax)</th><th>After-party form</th><th>Owing</th><th></th></tr></thead><tbody>${rows.map(r => {
     const st = pbState(r, t), g = r.filled ? `${r.actual_guests} guests` : '';
-    const form = st === 'upcoming' ? '<span class="goal-note">not due yet</span>' : st === 'buyout' ? '<span class="goal-note">settled in Studio buyouts</span>'
+    const form = st === 'upcoming' ? '<span class="goal-note">not due yet</span>' : st === 'buyout' ? '<span class="goal-note">settled in Studio buyouts</span>' : st === 'before' ? '<span class="goal-note">before after-party forms</span>'
       : st === 'missing' ? '<b style="color:#b3261e">⚠️ Not filled in</b>' : `✓ Filled in · ${esc(g)}${r.status && PB_ST[r.status] ? ` · ${esc(PB_ST[r.status])}` : ''}`;
     const owe = st === 'owing' ? `<b>${m(r.owing)}</b>` : st === 'settled' || st === 'ok' ? '<span class="goal-note">–</span>' : st === 'missing' ? '<span class="goal-note">?</span>' : '';
     return `<tr><td><b>${esc(PB_KIND[r.kind] || 'Party')}</b>${r.reason ? ' · ' + esc(r.reason) : ''}<br><span class="goal-note">${esc(r.customer || '')}${r.order ? ' · ' + esc(r.order) : ''} · ${esc(String(STUDIO_NAMES[r.studio_id] || r.studio_id).replace(/^.*?\s-\s/, ''))}</span></td>
