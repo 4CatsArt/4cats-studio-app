@@ -4752,20 +4752,22 @@ function renderPreview() {
   if (!p.entries) html += '<div class="note info">This file has time off only, so repeating unavailability isn\'t touched.</div>'
   if (p.entries) {
   // recurring
-  html += '<div class="panel"><div class="panel-head"><h2>Repeating unavailability</h2><span class="muted small">Replaces what was imported from Sling before for ' + esc(region) + ' staff, from ' + fmtDate(p.windowStart) + ' on</span></div>' +
+  html += '<div class="panel"><div class="panel-head"><h2>Repeating unavailability</h2><span class="muted small">Replaces what was imported from Sling before for ' + esc(region) + ' staff, from ' + fmtDate(p.windowStart) + ' to ' + fmtDate(p.windowEnd) + ' (patterns starting after that are left alone). Set an end date in Until if you know one.</span></div>' +
+    (p.windowEnd < todayStr() ? '<div class="note info" style="margin:8px 14px">This export is from the past (it ends ' + fmtDate(p.windowEnd) + '). Patterns with no end date carry on from it, so check them in Until before importing.</div>' : '') +
     '<table class="list"><thead><tr><th>Person</th><th>Day</th><th>Time</th><th>From</th><th>Until</th><th>Note</th></tr></thead><tbody>' +
-    p.recurring.slice().sort((a, b) => a.name.localeCompare(b.name) || ((a.dow + 6) % 7) - ((b.dow + 6) % 7)).map(r =>
+    p.recurring.map((r, i) => [r, i]).sort((A, B) => A[0].name.localeCompare(B[0].name) || ((A[0].dow + 6) % 7) - ((B[0].dow + 6) % 7)).map(([r, i]) =>
       '<tr><td class="person">' + esc(r.name) + '</td><td>' + DAY_NAMES[r.dow] + '</td><td>' + fmtRange(r.start, r.end) + '</td><td>' + fmtDate(r.from) +
-      '</td><td>' + (r.to ? fmtDate(r.to) : '<span class="muted">No end date</span>') + '</td><td class="small">' +
+      '</td><td><input type="date" class="input" style="width:150px" value="' + esc(r.to || '') + '" min="' + esc(r.from) + '" onchange="imSetUntil(' + i + ', this)" title="Leave empty for no end date">' +
+      (r.to ? '' : ' <span class="muted small">no end date</span>') + '</td><td class="small">' +
       (r.pendingWeeks ? '<span class="pill pending">' + r.pendingWeeks + ' of ' + r.weeks + ' weeks pending in Sling</span>' : '') + '</td></tr>').join('') +
     '</tbody></table></div>'
 
   // one-offs
-  html += '<div class="panel"><div class="panel-head"><h2>One-off days, added as time off waiting for approval</h2></div>' +
+  html += '<div class="panel"><div class="panel-head"><h2>One-off days, added as time off</h2><span class="muted small">Days already past come in approved; upcoming ones wait for approval</span></div>' +
     (p.oneOffs.length ? '<table class="list"><thead><tr><th>Person</th><th>Dates</th><th>Time</th><th>Note</th></tr></thead><tbody>' +
       p.oneOffs.slice().sort((a, b) => a.name.localeCompare(b.name) || a.start_date.localeCompare(b.start_date)).map(o =>
         '<tr><td class="person">' + esc(o.name) + '</td><td>' + (o.start_date === o.end_date ? fmtDate(o.start_date) : fmtDate(o.start_date) + ' to ' + fmtDate(o.end_date)) +
-        '</td><td>' + fmtRange(o.start, o.end) + '</td><td class="small muted">' + (o.nearEnd ? 'At the end of the export, so this may be a new repeating pattern' : '') + '</td></tr>').join('') +
+        '</td><td>' + fmtRange(o.start, o.end) + ' <span class="pill ' + (o.end_date < todayStr() ? 'approved">approved' : 'pending">waiting') + '</span></td><td class="small muted">' + (o.nearEnd ? 'At the end of the export, so this may be a new repeating pattern' : '') + '</td></tr>').join('') +
       '</tbody></table>' : '<div class="empty">None</div>') + '</div>'
 
   }
@@ -4788,6 +4790,12 @@ function renderPreview() {
   out.innerHTML = html
 }
 
+// (Nov 13 2026) a repeating pattern's end date, set or changed before importing (empty: no end date)
+function imSetUntil(i, el) {
+  const r = importPlan.parsed.recurring[i]; if (!r) return
+  if (el.value && el.value < r.from) { toast('The end date is before it starts', true); el.value = r.to || ''; return }
+  r.to = el.value || null; renderPreview()
+}
 function setMatch(name, staffId) {
   importPlan.matches[name] = { staff_id: staffId, how: staffId && staffId !== '__skip' ? 'picked' : (staffId === '__skip' ? 'skip' : 'none') }
   renderPreview()
@@ -4817,7 +4825,8 @@ async function runImport() {
     const { data: oldRows, error: oldErr } = await sb.from('staff_unavailability').select('id, effective_from, effective_to')
       .eq('source', 'sling').in('staff_id', scopeIds)
     if (oldErr) throw oldErr
-    const overlapping = (oldRows || []).filter(r => !r.effective_to || r.effective_to >= p.windowStart)
+    // (Nov 13 2026) only patterns within this export's dates: ones starting after it ends are left alone
+    const overlapping = (oldRows || []).filter(r => (!r.effective_to || r.effective_to >= p.windowStart) && r.effective_from <= p.windowEnd)
     toTrim = overlapping.filter(r => r.effective_from < p.windowStart).map(r => r.id)
     toDelete = overlapping.filter(r => r.effective_from >= p.windowStart).map(r => r.id)
     if (toTrim.length) {
@@ -4841,7 +4850,7 @@ async function runImport() {
     // 4. one-offs as pending time off, skipping any already imported (so denied ones don't come back)
     const toRows = p.oneOffs.filter(o => idFor(o.name)).map(o => ({
       staff_id: idFor(o.name), start_date: o.start_date, end_date: o.end_date, start_time: o.start, end_time: o.end,
-      type: 'other', status: 'pending', source: 'sling',
+      type: 'other', status: o.end_date < todayStr() ? 'approved' : 'pending', source: 'sling',   // (Nov 13 2026: days already past come in approved)
       sling_ref: 'oneoff:' + idFor(o.name) + ':' + o.start_date + ':' + o.end_date + ':' + (o.start || 'allday')
     }))
     let addedTo = 0
@@ -4860,7 +4869,7 @@ async function runImport() {
     if (p.timeOffs.length) {
       const tRows = p.timeOffs.filter(t => idFor(t.name)).map(t => ({
         staff_id: idFor(t.name), start_date: t.start_date, end_date: t.end_date, start_time: t.start, end_time: t.end,
-        type: kindOf(t.kind), status: t.pending ? 'pending' : 'approved', source: 'sling',
+        type: kindOf(t.kind), status: t.pending && t.end_date >= todayStr() ? 'pending' : 'approved', source: 'sling',   // (past ones: approved)
         sling_ref: 'timeoff:' + idFor(t.name) + ':' + t.start_date + ':' + t.end_date + ':' + (t.start || 'allday')
       }))
       const { data: prev, error: pErr } = await sb.from('staff_time_off').select('id, sling_ref, status, start_date, staff_id')
