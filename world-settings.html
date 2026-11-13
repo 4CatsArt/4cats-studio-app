@@ -431,6 +431,15 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
 .sn-row.off { opacity: .55; } .sn-row.drag { opacity: .4; } .sn-row.over { border-color: #c8232c; box-shadow: 0 -2px 0 #c8232c inset; }
 .sn-b { min-height: 32px; padding: 0 10px; } .sn-b:disabled { opacity: .35; cursor: default; }
 .sn-grip { font-size: 18px; color: #999; } .sn-show { flex: 1; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; cursor: pointer; } .sn-mv { display: flex; gap: 4px; }
+
+/* 🎁 gift card designs */
+.gcd-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; max-width: 900px; }
+.gcd { margin: 0; border: 1px solid #e8dfcd; border-radius: 14px; overflow: hidden; background: #fff; }
+.gcd img { width: 100%; aspect-ratio: 1.6; object-fit: cover; display: block; }
+.gcd.off img { opacity: .4; }
+.gcd figcaption { padding: 8px; display: grid; gap: 6px; }
+.gcd input[data-gcdname] { width: 100%; }
+.gcd-acts { display: flex; justify-content: space-between; gap: 8px; }
 </style>
 </head>
 <body>
@@ -1273,6 +1282,8 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
     salesRows = slr.error ? null : (slr.data || []);
     var prr = await sb.rpc('hub_promos_list'); promoRows = prr.error ? null : (prr.data || []);   // Credit sales, under Sales (world_promos.sql)
     var wtr = await sb.rpc('world_setting_get', { p_key: 'workshop_tips' }); wtipsErr = wtr.error ? wtr.error.message : ''; wtips = wtr.error ? null : (wtr.data || null);
+    try { var gcr = await sb.rpc('hub_gift_settings_get'); giftSet = gcr.error ? null : (gcr.data || {}); } catch (e) { giftSet = null; }   // 🎁 (gift_card_manager.sql)
+    giftDraft = null;
     var gpr = await sb.rpc('world_setting_get', { p_key: 'glazing_page' });
     glazePage = gpr.error ? null : (gpr.data || { intro: '', steps: [], faqs: [] });
     var tr = await sb.rpc('world_setting_get', { p_key: 'typography' });
@@ -1463,6 +1474,7 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
     html += memInvitesHtml();
     html += prizeCodesHtml();
     html += salesHtml();
+    html += giftCardsHtml();
     html += stampHtml();
     html += taxReportHtml();
     html += glazingPageHtml();
@@ -1516,6 +1528,7 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
     bindCampPricing(); bindTaxes(); bindBuyout();
     bindSales();
     bindPromos();
+    bindGiftCards();
     bindStamps();
     bindMembership();
     bindMemCodes();
@@ -2256,7 +2269,7 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
     ['home', '\ud83c\udfe0', 'Home page', ['Home page layout', 'Home page cards', 'Collections', 'Videos', 'Votes', 'Kiln status', '\u201cHow do I\u2026?\u201d tiles', 'Ideas from customers']],
     ['look', '\ud83c\udfa8', 'Look', ['What World shows', 'Sidebar', 'Themes', 'Seasonal effects', 'Typography', 'Fonts']],
     ['pages', '\ud83d\udcc4', 'Pages', ['Deals pages', 'Glazing page', 'Kids classes', 'Pottery Wheel', 'World-only workshops', 'Workshop pages', 'Parties', 'Get-Togethers', 'Field Trips', 'Groups page', 'Policy pages']],
-    ['prices', '\ud83d\udcb2', 'Prices & sales', ['Membership', 'Membership codes', 'Membership invites', 'Prize codes', 'Credits', 'Price tiers', 'Party pricing', 'Member pricing', 'Camp pricing', 'Sales', 'Stamp card', 'Tax report']],
+    ['prices', '\ud83d\udcb2', 'Prices & sales', ['Membership', 'Membership codes', 'Membership invites', 'Prize codes', 'Credits', 'Price tiers', 'Party pricing', 'Member pricing', 'Camp pricing', 'Sales', 'Gift cards', 'Stamp card', 'Tax report']],
     ['site', '\ud83d\udd12', 'Site', ['Test site password']]
   ];
   var TAB_KEY = 'worldSettings.tab';
@@ -3314,6 +3327,139 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
       if (r.error) { $('slMsg').textContent = 'Not saved: ' + r.error.message; return; }
       var l = await sb.rpc('world_sales_list'); salesRows = l.error ? salesRows : (l.data || []);
       salesEditing = null; redrawSales();
+    });
+  }
+
+  // ---------------- 🎁 Gift cards (world_gift_cards.sql, gift_card_manager.sql): settings, card designs, look up and resend ----------------
+  // Settings: live on world.4cats.com (the test site always shows them), preset amounts, lowest/highest, the page's intro, card designs.
+  // Look up: World gift cards by last 4, email, name or order (resend, send now, try again), and older Shopify gift cards by last 4.
+  var giftSet = undefined, giftDraft = null, gcFound = null, gcQ = '';
+  function gcM(n) { n = Number(n) || 0; return '$' + (n % 1 ? n.toFixed(2) : n); }
+  function giftCardsHtml() {
+    if (giftSet === null) return '<section class="panel" style="margin-top:20px"><h2>Gift cards</h2><p class="sub">Run gift_card_manager.sql in Supabase to switch this on.</p></section>';
+    var g = giftDraft || (giftDraft = JSON.parse(JSON.stringify(giftSet || {})));
+    g.designs = g.designs || [];
+    var dis = canEdit ? '' : ' disabled';
+    return '<section class="panel" style="margin-top:20px"><h2>Gift cards</h2>' +
+      '<p class="sub">World\u2019s gift card page (#giftcards): the amounts, card designs and intro. Paid on World, made in Shopify, emailed on the day chosen. The test site always shows gift cards.</p>' +
+      '<label class="chk" style="display:flex;gap:8px;align-items:center;margin:6px 0 12px"><input type="checkbox" id="gc_live"' + (g.live ? ' checked' : '') + dis + '> <b>Gift cards are live on world.4cats.com</b> <span class="help">(with a \ud83c\udf81 Gift cards menu item, even before the shop is live)</span></label>' +
+      '<div class="two" style="max-width:720px"><div class="field"><label for="gc_amts">Preset amounts</label><input id="gc_amts" value="' + esc((g.amounts || [25, 50, 100]).join(', ')) + '"' + dis + '><p class="help">Separated by commas, e.g. 25, 50, 100. Families can also choose another amount.</p></div>' +
+      '<div class="field"><label>Another amount: lowest and highest</label><div style="display:flex;gap:8px;align-items:center"><input id="gc_min" type="number" min="1" step="1" style="max-width:110px" value="' + esc(g.min == null ? 10 : g.min) + '"' + dis + '> to <input id="gc_max" type="number" min="1" step="1" style="max-width:110px" value="' + esc(g.max == null ? 500 : g.max) + '"' + dis + '></div></div></div>' +
+      '<div class="field" style="max-width:720px"><label for="gc_intro">Intro on the gift card page</label><textarea id="gc_intro" rows="2" maxlength="600" placeholder="Give the gift of making: workshops, classes, camps, parties, kits and more\u2026"' + dis + '>' + esc(g.intro || '') + '</textarea></div>' +
+      '<h3 class="mem-h">Card designs</h3><p class="help">Families choose one on World; it shows on their card and at the top of the gift card email. Landscape pictures work best (about 8 \u00d7 5). With no designs, World shows the 4Cats card.</p>' +
+      '<div class="gcd-grid">' + (g.designs.length ? g.designs.map(function (d, i) {
+        return '<figure class="gcd' + (d.on === false ? ' off' : '') + '"><img src="' + esc(d.image) + '" alt=""><figcaption>' +
+          '<input data-gcdname="' + i + '" value="' + esc(d.name || '') + '" placeholder="Name (e.g. Holiday)" maxlength="40"' + dis + '>' +
+          '<label class="help"><input type="checkbox" data-gcdon="' + i + '"' + (d.on === false ? '' : ' checked') + dis + '> Shown on World</label>' +
+          (canEdit ? '<span class="gcd-acts">' + (i ? '<button class="link-btn" type="button" data-gcdup="' + i + '">\u2190 Move</button>' : '<b class="help">First (picked to start)</b>') +
+            '<button class="link-btn" type="button" data-gcddel="' + i + '">Remove</button></span>' : '') + '</figcaption></figure>';
+      }).join('') : '<p class="help" style="margin:0">No designs yet.</p>') + '</div>' +
+      (canEdit ? '<p style="margin:10px 0"><label class="btn btn-plain" style="cursor:pointer">+ Add a design (upload a picture)<input type="file" id="gc_up" accept="image/*" multiple hidden></label> <span class="help" id="gc_upmsg"></span></p>' +
+        '<div style="display:flex;gap:8px;align-items:center"><button class="btn btn-berry" type="button" id="gcSave">Save gift card settings</button><span class="help" id="gcMsg"></span></div>' : '') +
+      '<h3 class="mem-h" style="margin-top:22px">Look up a gift card</h3>' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;max-width:720px"><input id="gc_q" style="flex:1;min-width:220px" placeholder="Last 4 of the code, an email, a name or an order (W100600)" value="' + esc(gcQ) + '"><button class="btn btn-berry" type="button" id="gcFind">Look up</button></div>' +
+      '<p class="help">Empty: the 25 most recent. Full codes are never shown here.</p><div id="gcOut">' + gcResultsHtml() + '</div></section>';
+  }
+  function gcStatus(x) {
+    var nice = function (d) { return d ? new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' }) : ''; };
+    var today = new Date().toLocaleDateString('en-CA');
+    if (x.status === 'failed') return '<span class="pill err">Didn\u2019t go through</span>' + (x.error ? '<div class="tmeta">' + esc(String(x.error).slice(0, 120)) + '</div>' : '');
+    if (x.status === 'pending') return '<span class="pill">' + (x.send_now ? 'Trying again\u2026' : 'Being made') + '</span>';
+    if (x.status === 'created' && x.send_now) return '<span class="pill">Sending (within 2 minutes)</span>' + (x.resend_to ? '<div class="tmeta">to ' + esc(x.resend_to) + '</div>' : '');
+    if (x.status === 'created') return '<span class="pill">' + (x.send_on && String(x.send_on) > today ? 'Waiting for ' + esc(nice(x.send_on)) : 'Sending') + '</span>';
+    return '<span class="pill on">Sent</span><div class="tmeta">' + esc(nice(x.sent_at)) + '</div>';
+  }
+  function gcResultsHtml() {
+    if (!gcFound) return '';
+    if (gcFound.err) return '<p class="msg err">' + esc(gcFound.err) + '</p>';
+    var W = gcFound.world || [], S = gcFound.shopify || [];
+    if (!W.length && !S.length) return '<p class="help">Nothing found' + (gcQ ? ' for \u201c' + esc(gcQ) + '\u201d' : '') + '.</p>';
+    var h = '';
+    if (W.length) h += '<div class="tbl-wrap"><table><thead><tr><th></th><th>Card</th><th>To / from</th><th>Status</th><th>Balance</th><th>Order</th>' + (canEdit ? '<th></th>' : '') + '</tr></thead><tbody>' + W.map(function (x) {
+      var to = x.deliver === 'me' ? 'Sent to the buyer to give' + (x.to_name ? ' (for ' + esc(x.to_name) + ')' : '') : esc(x.to_name || '') + '<div class="tmeta">' + esc(x.to_email || '') + '</div>';
+      var acts = x.status === 'failed' ? '<button class="btn btn-plain" type="button" data-gca="retry" data-id="' + x.id + '">Try again</button>'
+        : (x.status === 'created' || x.status === 'sent') ? '<button class="btn btn-plain" type="button" data-gca="resend" data-id="' + x.id + '">' + (x.status === 'sent' ? 'Resend' : 'Send now') + '</button>' +
+          '<button class="btn btn-plain" type="button" data-gca="other" data-id="' + x.id + '">Send to another email\u2026</button>' : '';
+      return '<tr><td>' + (x.design_image ? '<img src="' + esc(x.design_image) + '" alt="" style="width:64px;aspect-ratio:1.6;object-fit:cover;border-radius:6px">' : '\ud83c\udf81') + '</td>' +
+        '<td><b>' + gcM(x.amount) + '</b>' + (x.test ? ' <span class="pill">TEST</span>' : '') + '<div class="tmeta">' + (x.last4 ? '\u2022\u2022\u2022\u2022 ' + esc(x.last4) : 'no code yet') + (x.design ? ' \u00b7 ' + esc(x.design) : '') + '</div></td>' +
+        '<td>' + to + '<div class="tmeta">From ' + esc(x.from_name || x.buyer_name || '') + (x.buyer_email ? ' \u00b7 ' + esc(x.buyer_email) : '') + '</div>' + (x.message ? '<div class="tmeta">\u201c' + esc(String(x.message).slice(0, 80)) + (String(x.message).length > 80 ? '\u2026' : '') + '\u201d</div>' : '') + '</td>' +
+        '<td>' + gcStatus(x) + '</td><td>' + (x.balance != null ? gcM(x.balance) : '<span class="help">' + (x.test ? 'test' : 'updates within a day') + '</span>') + '</td><td>' + esc(x.order_name || '') + '</td>' +
+        (canEdit ? '<td><div class="row-actions">' + acts + '</div></td>' : '') + '</tr>';
+    }).join('') + '</tbody></table></div>';
+    if (S.length) h += '<h4 style="margin:14px 0 6px">Older gift cards (Shopify)</h4><p class="help" style="margin-top:0">Bought on 4cats.com or made in Shopify. Shopify only shares the last 4, so these can\u2019t be resent from here; look them up in Shopify \u2192 Gift cards.</p>' +
+      '<div class="tbl-wrap"><table><thead><tr><th>Code</th><th>Balance</th><th>Details</th></tr></thead><tbody>' + S.map(function (x) {
+        var extra = Object.keys(x).filter(function (k) { return ['id', 'last_characters', 'balance'].indexOf(k) === -1 && x[k] != null && x[k] !== '' && typeof x[k] !== 'object'; }).slice(0, 4)
+          .map(function (k) { return esc(k.replace(/_/g, ' ')) + ': ' + esc(String(x[k]).slice(0, 40)); }).join(' \u00b7 ');
+        return '<tr><td>\u2022\u2022\u2022\u2022 ' + esc(x.last_characters || '') + '</td><td><b>' + gcM(x.balance) + '</b></td><td class="tmeta">' + extra + '</td></tr>'; }).join('') + '</tbody></table></div>';
+    return h;
+  }
+  function gcCollect() {   // the form into giftDraft (names and switches as typed)
+    var g = giftDraft; if (!g) return;
+    var v = function (id) { var el = document.getElementById(id); return el ? el.value : ''; };
+    g.live = !!(document.getElementById('gc_live') || {}).checked;
+    g.amounts = v('gc_amts').split(/[,\s]+/).map(Number).filter(function (n) { return n > 0; });
+    g.min = Number(v('gc_min')) || 10; g.max = Number(v('gc_max')) || 500; g.intro = v('gc_intro').trim();
+    app.querySelectorAll('[data-gcdname]').forEach(function (el) { var d = g.designs[+el.dataset.gcdname]; if (d) d.name = el.value.trim(); });
+    app.querySelectorAll('[data-gcdon]').forEach(function (el) { var d = g.designs[+el.dataset.gcdon]; if (d) d.on = el.checked; });
+  }
+  function gcRedraw() {
+    var old = app.querySelector('.panel.fold[data-fold="Gift cards"]'); if (!old) return;
+    var tmp = document.createElement('div'); tmp.innerHTML = giftCardsHtml();
+    var nu = tmp.firstChild; old.parentNode.replaceChild(nu, old); bindGiftCards();
+  }
+  async function gcSearch() {
+    var r = await sb.rpc('hub_giftcards_search', { p_q: gcQ });
+    gcFound = r.error ? { err: r.error.message } : (r.data || { world: [], shopify: [] });
+    var out = document.getElementById('gcOut'); if (out) out.innerHTML = gcResultsHtml();
+  }
+  function bindGiftCards() {
+    var find = document.getElementById('gcFind'); if (!find) return;
+    var q = document.getElementById('gc_q');
+    find.addEventListener('click', function () { gcQ = q.value.trim(); gcSearch(); });
+    q.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); gcQ = q.value.trim(); gcSearch(); } });
+    document.getElementById('gcOut').addEventListener('click', async function (e) {
+      var b = e.target.closest('[data-gca]'); if (!b) return;
+      var act = b.dataset.gca, email = null;
+      if (act === 'other') { email = prompt('Send this gift card to which email?'); if (!email) return; email = email.trim(); act = 'resend'; }
+      else if (act === 'resend' && !confirm('Send this gift card email again (to the same person)?')) return;
+      b.disabled = true;
+      var r = await sb.rpc('hub_giftcard_action', { p_id: b.dataset.id, p_action: act, p_email: email });
+      if (r.error) { b.disabled = false; alert('Not done: ' + r.error.message); return; }
+      await gcSearch();
+    });
+    if (!canEdit) return;
+    var up = document.getElementById('gc_up');
+    up.addEventListener('change', async function () {
+      gcCollect();
+      var files = Array.prototype.slice.call(up.files || []); if (!files.length) return;
+      $('gc_upmsg').textContent = 'Uploading\u2026';
+      try {
+        for (var i = 0; i < files.length; i++) {
+          var nm = files[i].name.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' ').slice(0, 40);
+          var url = await uploadToFolder(files[i], 'giftcards/', nm, 1200);
+          giftDraft.designs.push({ id: 'd' + Date.now().toString(36) + i, name: nm, image: url, on: true });
+        }
+        gcRedraw(); $('gc_upmsg').textContent = 'Uploaded \u2713 Name it, then press \u201cSave gift card settings\u201d.';
+      } catch (err) { $('gc_upmsg').textContent = 'Didn\u2019t upload: ' + err.message; }
+    });
+    app.querySelector('.gcd-grid').addEventListener('click', function (e) {
+      var up1 = e.target.closest('[data-gcdup]'), del = e.target.closest('[data-gcddel]');
+      if (!up1 && !del) return;
+      gcCollect(); var D = giftDraft.designs;
+      if (up1) { var i = +up1.dataset.gcdup; var t = D[i - 1]; D[i - 1] = D[i]; D[i] = t; }
+      if (del) { if (!confirm('Remove this design? Gift cards already bought with it keep their picture.')) return; D.splice(+del.dataset.gcddel, 1); }
+      gcRedraw();
+    });
+    document.getElementById('gcSave').addEventListener('click', async function () {
+      gcCollect(); var g = giftDraft, b = this;
+      if (!g.amounts.length) { $('gcMsg').textContent = 'Add at least one preset amount.'; return; }
+      if (g.designs.some(function (d) { return !d.name; })) { $('gcMsg').textContent = 'Give every design a name.'; return; }
+      b.disabled = true;
+      var r = await sb.rpc('hub_gift_settings_set', { p: g });
+      b.disabled = false;
+      if (r.error) { $('gcMsg').textContent = 'Not saved: ' + r.error.message; return; }
+      giftSet = r.data; giftDraft = JSON.parse(JSON.stringify(giftSet)); gcRedraw();
+      $('gcMsg').textContent = 'Saved \u2713 World shows it within a minute.';
     });
   }
 
