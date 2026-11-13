@@ -2,6 +2,7 @@
 // office sets up (e.g. "Coordinator check-in with Ani"): on the studio computer (Coordinator view, its PIN, choosing their name) or
 // on their own login (Team tab). Free times come from the server (open hours, minus anything booked or busy) and show in local time.
 // Their upcoming calls are listed with Join and Cancel (up to the cancel-by time). Loaded by hub.html after calendar.js.
+// 📞 Your calls strip on Today (coordinator view): the studio's calls in the next 2 weeks, with Join (apptStripLoad).
 
 if (typeof PANES !== 'undefined' && !PANES.includes('appt-pane')) PANES.push('appt-pane');
 const _appt = { host: null, studio: null, pin: null, phone: false, studios: [], types: [], upcoming: [], type: null, slots: null, day: null, slot: null, people: null, msg: '' };
@@ -140,6 +141,25 @@ function apptStyles() {
 .appt-slot.on { background: var(--accent); color: #fff; }
 .appt-form { border-top: 1px solid var(--border); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; max-width: 520px; }
 .appt-when { font-weight: 800; font-size: 16px; } .appt-f { display: flex; flex-direction: column; gap: 4px; font-weight: 600; font-size: 14px; }
+.appt-strip { background: #fff; border: 1px solid var(--border); border-left: 4px solid #0e7490; border-radius: 14px; padding: 10px 14px; margin: 0 0 12px; display: flex; flex-direction: column; gap: 6px; }
+.appt-strip-row { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; } .appt-strip-row.now { font-weight: 800; }
+.appt-strip > .ho-btn { align-self: flex-start; }
 .appt-f select, .appt-f textarea { padding: 9px; border: 1px solid #ddd; border-radius: 10px; font: inherit; font-weight: 400; font-size: 16px; }`;
   document.head.appendChild(st);
+}
+
+// ---- 📞 Your calls on Today (coordinator view on the studio computer): hidden when none are booked ----
+async function apptStripLoad(studioId) {
+  const el = document.getElementById('appt-strip'); if (!el) return;
+  let L = [];
+  try { const r = await sb.rpc('hub_appt_upcoming', { p_studio: studioId || _sessionStudioId, p_pin: typeof _sessionPin !== 'undefined' ? _sessionPin : null }); L = r.error ? [] : (r.data || []); } catch (e) { L = []; }
+  L = L.filter(c => new Date(c.start_at) - Date.now() < 14 * 864e5).slice(0, 3);
+  if (!L.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  apptStyles();
+  const soon = c => { const m = (new Date(c.start_at) - Date.now()) / 6e4; return m < 15 && m > -40; };
+  el.style.display = '';
+  el.innerHTML = `<div class="appt-strip"><b>📞 Your calls with home office</b>${L.map(c => `<div class="appt-strip-row${soon(c) ? ' now' : ''}">
+      <span>${esc(apptDay(c.start_at))} · ${esc(apptT(c.start_at))} · ${esc(c.title)} with ${esc(c.host || '')}${c.who ? ' (' + esc(c.who) + ')' : ''}</span>
+      ${c.location && /^https?:\/\//.test(c.location) ? `<a class="ho-btn ${soon(c) ? 'primary' : ''} sm" href="${escAttr(c.location)}" target="_blank" rel="noopener">🎥 Join</a>` : ''}</div>`).join('')}
+    <button class="ho-btn sm" onclick="openApptPane()">Book or change a call</button></div>`;
 }
