@@ -265,7 +265,8 @@ function famRender() {
     if (_studioData && _studioData.isAdmin && f.points !== undefined && f.points !== null) {
       const P = f.points, KI = { vote: '🗳️', feedback: '💬', adjust: '⭐', purchase: '🛍️', other: '⭐' };
       h += sec('points', '⭐ Points', P.err ? null : (P.balance || 0), P.err ? '<p class="fam-meta">' + famEsc(P.err) + '</p>'
-        : '<p style="margin:0 0 8px"><b style="font-size:22px">' + (P.balance || 0) + '</b> points <span class="fam-meta">· collected on World (votes for now)</span></p>' +
+        : '<p style="margin:0 0 8px"><b style="font-size:22px">' + (P.balance || 0) + '</b> points <span class="fam-meta">· collected on World (votes for now)</span>' +
+          (P.subscribed === false ? ' <span style="background:#eef0f2;color:#5c6670;border-radius:999px;padding:3px 10px;font-size:12px;font-weight:700" title="Points are for email subscribers. They\u2019re kept, but can\u2019t be earned or cashed in until they subscribe again (on World\u2019s Points & Rewards page).">⏸ Paused: not subscribed</span>' : '') + '</p>' +
           '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 10px"><input id="fam-pts-n" type="number" step="1" placeholder="+25 or -10" style="width:110px">' +
           '<input id="fam-pts-why" placeholder="Why (shows in their history), e.g. Thanks for your feedback" style="flex:1;min-width:220px"><button class="ho-btn sm" onclick="famPointsAdjust()">Adjust</button></div>' +
           ((P.lines || []).length ? '<div class="fam-rows">' + P.lines.map(l => '<div class="fam-row" style="display:flex;gap:10px"><span style="flex:1">' + (KI[l.kind] || '⭐') + ' ' + famEsc(l.reason || '') +
