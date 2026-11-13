@@ -254,6 +254,13 @@ td[data-date] .wk-chip:not([draggable="true"]) { cursor: default; }
 
 /* ===== plan offerings ===== */
 .content.wide { max-width: none; }
+/* (Nov 12 2026) Time off: Edit / Approve / Deny always in view (sticky on the right), long notes wrap, and the list scrolls in its
+   own box (headings stay put) so its sideways scroll bar is never off the bottom of the page */
+#to-body { max-height: 75vh; overflow: auto; }
+#to-body table.list thead th { position: sticky; top: 0; z-index: 2; }
+#to-body table.list td:nth-child(4), #to-body table.list td:nth-child(5) { white-space: normal; min-width: 170px; max-width: 360px; }
+#to-body table.list td.actions, #to-body table.list th:last-child { position: sticky; right: 0; background: var(--panel); box-shadow: -8px 0 8px -8px rgba(0,0,0,.18); z-index: 1; }
+#to-body table.list th:last-child { background: var(--soft); z-index: 3; }
 .pl-weekbar strong { min-width: 220px; text-align: center; }
 .pl-sum { border-collapse: collapse; font-size: 12px; }
 .pl-sum th, .pl-sum td { padding: 3px 10px; text-align: right; white-space: nowrap; }
@@ -479,6 +486,7 @@ table.pl-staff .bad { color: var(--bad); }
           </select>
         </label>
         <label><input type="checkbox" id="to-upcoming" checked onchange="renderTimeOff()"> Today onward</label>
+        <label title="Hidden: requests from people who are deactivated or past their last day, and requests that start after someone's last day"><input type="checkbox" id="to-former" onchange="renderTimeOff()"> Show archived (former staff, after a last day)</label>
         <span class="to-search-wrap"><input class="input" id="to-search" type="search" placeholder="Search name, date, type or note" oninput="renderTimeOff()" onkeydown="if(event.key==='Escape'){this.value='';renderTimeOff()}" autocomplete="off"></span>
         <button class="btn" id="to-clear" type="button" onclick="clearTimeOffFilters()" style="display:none">✕ Clear filters</button>
         <span class="muted small" id="to-count"></span>
@@ -853,7 +861,7 @@ function bdStudiosOn(ctx, p, date) {
 function switchView(v) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === v))
   document.querySelectorAll('.view').forEach(el => el.classList.toggle('active', el.id === 'view-' + v))
-  document.querySelector('.content').classList.toggle('wide', v === 'plan' || v === 'build')
+  document.querySelector('.content').classList.toggle('wide', v === 'plan' || v === 'build' || v === 'timeoff')   // (Nov 12 2026: Time off full width too)
 }
 
 /* ---------- staff (no wages: explicit columns only) ---------- */
@@ -923,14 +931,21 @@ function timeOffSummary(r) {
 }
 function clearTimeOffFilters() {
   document.getElementById('to-status').value = 'pending'; document.getElementById('to-upcoming').checked = true
-  document.getElementById('to-search').value = ''; renderTimeOff(); document.getElementById('to-search').focus()
+  document.getElementById('to-search').value = ''; const f = document.getElementById('to-former'); if (f) f.checked = false
+  renderTimeOff(); document.getElementById('to-search').focus()
 }
 function renderTimeOff() {
   const status = document.getElementById('to-status').value
   const upcoming = document.getElementById('to-upcoming').checked
   const q = document.getElementById('to-search').value.trim().toLowerCase()
   const today = todayStr()
-  const pendingCount = timeOffRows.filter(r => r.status === 'pending' && r.end_date >= today).length
+  // (Nov 12 2026) people who no longer work here (deactivated, or past their last day): their requests are hidden, not counted
+  const gone = id => { const p = staffById[id]; return !!p && (p.is_active === false || (p.termination_date && p.termination_date < today)) }
+  // ... and any request that starts after someone's last day (passed or coming up) is archived the same way
+  const afterLast = r => { const p = staffById[r.staff_id]; return !!(p && p.termination_date && r.start_date > p.termination_date) }
+  const archived = r => gone(r.staff_id) || afterLast(r)
+  const showFormer = !!(document.getElementById('to-former') || {}).checked
+  const pendingCount = timeOffRows.filter(r => r.status === 'pending' && r.end_date >= today && !archived(r)).length
   const pc = document.getElementById('pending-count')
   pc.textContent = pendingCount; pc.style.display = pendingCount ? 'inline-block' : 'none'
 
@@ -938,6 +953,7 @@ function renderTimeOff() {
     if (status === 'denied' && !(r.status === 'denied' || r.status === 'cancelled')) return false
     if (status !== 'all' && status !== 'denied' && r.status !== status) return false
     if (upcoming && r.end_date < today) return false
+    if (!showFormer && archived(r)) return false
     if (q) {
       const p = staffById[r.staff_id] || {}
       const hay = [staffName(r.staff_id), p.preferred_name, p.nickname, fmtDate(r.start_date), fmtDate(r.end_date), r.start_date, r.end_date, r.type,
@@ -946,7 +962,7 @@ function renderTimeOff() {
     }
     return true
   })
-  const clr = document.getElementById('to-clear'); if (clr) clr.style.display = (status !== 'pending' || !upcoming || q) ? '' : 'none'
+  const clr = document.getElementById('to-clear'); if (clr) clr.style.display = (status !== 'pending' || !upcoming || q || showFormer) ? '' : 'none'
   const cnt = document.getElementById('to-count'); if (cnt) cnt.textContent = rows.length + ' shown'
   const body = document.getElementById('to-body')
   if (!rows.length) { body.innerHTML = '<div class="empty">No time off matches these filters. <button class="btn small" type="button" onclick="clearTimeOffFilters()">Clear filters</button></div>'; return }
@@ -958,7 +974,8 @@ function renderTimeOff() {
       else if (r.status === 'approved') actions = '<button class="btn small" onclick="setTimeOffStatus(\'' + r.id + '\',\'cancelled\')">Cancel</button>'
       if (r.status === 'pending' || r.status === 'approved') actions = '<button class="btn small" onclick="editTimeOff(\'' + r.id + '\')">Edit</button>' + actions
       else actions = '<button class="btn small" onclick="setTimeOffStatus(\'' + r.id + '\',\'pending\')">Reopen</button>'
-      return '<tr><td class="person">' + esc(staffName(r.staff_id)) + '</td><td>' + dates + '</td><td>' + fmtRange(r.start_time, r.end_time) +
+      actions += '<button class="btn small" title="Delete this request for good" onclick="deleteTimeOff(\'' + r.id + '\')">🗑</button>'
+      return '<tr><td class="person">' + esc(staffName(r.staff_id)) + (gone(r.staff_id) ? ' <span class="muted small">(no longer here)</span>' : afterLast(r) ? ' <span class="muted small">(after their last day, ' + esc(fmtDate(staffById[r.staff_id].termination_date)) + ')</span>' : '') + '</td><td>' + dates + '</td><td>' + fmtRange(r.start_time, r.end_time) +
         '</td><td>' + esc(r.type === 'sick' ? (r.source === 'staff_sick' ? 'sick (called in)' : 'sick leave') : r.type === 'medical' ? 'medical leave' : r.type === 'vacation' ? 'time off' : r.type) +
         (r.note ? '<div class="muted small">“' + esc(r.note) + '”</div>' : '') +
         (Array.isArray(r.rule_flags) && r.rule_flags.length ? '<div class="small" style="color:#b45309;font-weight:600">⚑ ' + r.rule_flags.map(esc).join(' · ') + '</div>' : '') +
@@ -984,6 +1001,18 @@ async function setTimeOffStatus(id, status) {
   if (error) { toast(error.message, true); return }
   toast(status === 'approved' ? 'Approved' : status === 'denied' ? 'Denied' : status === 'cancelled' ? 'Cancelled' : 'Reopened')
   await loadTimeOff()
+}
+
+// (Nov 12 2026) 🗑 delete a request for good (e.g. a duplicate or a mistake), after a confirm
+async function deleteTimeOff(id) {
+  const r = timeOffRows.find(x => String(x.id) === String(id)); if (!r) return
+  const dates = r.start_date === r.end_date ? fmtDate(r.start_date) : fmtDate(r.start_date) + ' to ' + fmtDate(r.end_date)
+  if (!confirm('Delete ' + staffName(r.staff_id) + '’s time off (' + dates + ', ' + r.status + ') for good? This can’t be undone.')) return
+  if ((timeOffFiles[String(r.id)] || []).length) await sb.from('staff_time_off_files').delete().eq('time_off_id', r.id)   // (its attached notes first)
+  const { data, error } = await sb.from('staff_time_off').delete().eq('id', id).select('id')
+  if (error) { toast('Couldn’t delete: ' + error.message, true); return }
+  if (!data || !data.length) { toast('Couldn’t delete it (not allowed for this login). Deny or Cancel it instead.', true); return }
+  toast('Deleted'); await loadTimeOff()
 }
 
 let editingTimeOff = null
