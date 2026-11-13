@@ -3,6 +3,9 @@
 // Moved out of hub.html (Nov 11 2026) and opened from the studio view with each staff member's own PIN (🔑 Who's selling).
 // Loaded by hub.html after its main script.
 // (The PIN box is a plain text box shown as dots, so browsers don't offer to save it as a password.)
+// (Nov 13 2026) 🚶 Walk-ins (hub_walkins.sql): a walk-in for something not on the schedule (glazing, or a workshop at a price tier),
+// with the customer and project, paid on Shopify POS for now; and any sale paid here in person (QR code or card at the desk) for
+// something at this studio today is recorded as a walk-in too. Both go to hub_walk_ins, for schedule planning.
 
 // ---------- 🛒 Front desk (hub_pos.sql + camp-checkout staff mode) ----------
 // One cart on the right for everything; tabs across the top are different ways to add to it. Everything here is paid
@@ -172,7 +175,7 @@ function fdRender() {
   const F = _fd;
   let h = `<div class="fd-testing">🚧 <b>Being tested.</b> Please don’t use the Front desk for real bookings yet: keep booking the usual way until home office says it’s ready.</div>
     <div class="fd-top"><div class="pts-page-title" style="margin:0">🛒 Front desk</div><span class="fd-studio">${esc(STUDIO_NAMES[F.studio] || F.studio || '')}</span>${_fdSeller ? `<span class="fd-studio" title="Locks after 1 minute with no taps">🔑 Selling as <b>${esc(_fdSeller.name)}</b> <button class="ho-btn sm" onclick="fdSellerLock()">Lock</button></span>` : ''}<span class="spacer"></span>
-    ${fdWaitChipHtml()}<button class="ho-btn" onclick="fdRetOpen()" title="A kit brought back: credit, or swap it for another">↩ Returns & exchanges</button><button class="ho-btn" onclick="fdRecentOpen()">Recent orders</button></div>
+    ${fdWaitChipHtml()}<button class="ho-btn" onclick="fdWalkOpen()" title="Someone came in for glazing or a workshop that isn’t on the schedule">🚶 Walk-in</button><button class="ho-btn" onclick="fdRetOpen()" title="A kit brought back: credit, or swap it for another">↩ Returns & exchanges</button><button class="ho-btn" onclick="fdRecentOpen()">Recent orders</button></div>
     <div class="fd-tabs" role="tablist">${FD_TABS.map(t => `<button role="tab" class="fd-tab${F.tab === t[0] ? ' on' : ''}" onclick="_fd.tab='${t[0]}';fdRender();fdLoadTab()">${t[1]}</button>`).join('')}</div>
     <div class="fd-wrap"><div class="fd-main">${fdMainHtml()}</div><aside class="fd-cart">${fdCartHtml()}</aside></div>`;
   if (F.add) h += fdAddHtml();
@@ -183,6 +186,7 @@ function fdRender() {
   if (_fdWait.open) h += fdWaitHtml();
   if (_fdHere.open) h += fdHereHtml();
   if (_fdRet.open) h += fdRetHtml();
+  if (_fdWalk.open) h += fdWalkHtml();
   // keep typing where it was (search boxes redraw the table as you type)
   const ae = document.activeElement, keepId = ae && ae.id && el.contains(ae) ? ae.id : null, pos = keepId && typeof ae.selectionStart === 'number' ? ae.selectionStart : null;
   el.innerHTML = h;
@@ -893,7 +897,8 @@ function fdPoll() {
     const c = document.getElementById('fd-count'); if (c) c.textContent = left > 0 ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} left` : 'Time’s up';
     if ((o.mode === 'qr' || o.mode === 'here') && left <= 0) { clearInterval(_fdTimer); try { await fdCall({ action: 'staff_cancel', order_id: o.order_id }); } catch (e) {} o.status = 'expired'; fdRender(); return; }
     if (++n % 3) return;
-    try { const d = await fdCall({ action: 'staff_status', order_id: o.order_id }); if (d.status !== 'pending') { o.status = d.status; clearInterval(_fdTimer); fdRender(); } } catch (e) {}
+    try { const d = await fdCall({ action: 'staff_status', order_id: o.order_id }); if (d.status !== 'pending') { o.status = d.status; clearInterval(_fdTimer); fdRender();
+      if (d.status === 'paid' && (o.mode === 'qr' || o.mode === 'here')) fdWalkMark(o.order); } } catch (e) {}
   }, 1000);
 }
 async function fdCancel() {
@@ -1153,3 +1158,97 @@ function fdRecentHtml() {
   return h + '<div class="fd-sheet-btns"><button class="ho-btn" onclick="_fd.showRecent=false;fdRender()">Close</button></div></div></div>';
 }
 async function fdRecCancel(id) { if (!confirm('Cancel this order? The held spots go back.')) return; try { await fdCall({ action: 'staff_cancel', order_id: id }); fdAckCancelled(id); } catch (e) { alert(e.message); } fdRecentOpen(); }
+
+// ---------- 🚶 Walk-ins (hub_walkins.sql) ----------
+// Paid here in person (QR code or card at the desk): this order's bookings at this studio for today are walk-ins. Its bookings
+// appear a moment after payment, so it asks again after a few seconds and half a minute (never counted twice).
+function fdWalkMark(order) {
+  if (!order || !_fd) return;
+  const st = _fd.studio, pin = fdPin();
+  [0, 8000, 30000].forEach(ms => setTimeout(() => { sb.rpc('hub_walkin_mark_order', { p_order: order, p_studio: st, p_pin: pin }).then(() => {}, () => {}); }, ms));
+}
+// A walk-in for something not on the schedule: what, project, how many, when, the customer; paid on Shopify POS for now
+const FD_WALK_TIERS = [['t39', '$39 workshop'], ['t30', '$20 workshop'], ['tier1', 'Wheel workshop'], ['mini_make', 'Mini Make']];
+const _fdWalk = { open: false };
+function fdWalkNowHM() { const d = new Date(); d.setMinutes(Math.floor(d.getMinutes() / 15) * 15); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
+async function fdWalkOpen() {
+  const fam = _fd && _fd.fam && !_fd.fam.walk_in ? _fd.fam : null;
+  Object.assign(_fdWalk, { open: true, kind: '', tier: '', people: 1, day: fdToday(), at: fdWalkNowHM(), project: null, projQ: '', projL: [], projNone: false,
+    name: fam ? ((fam.first_name || '') + ' ' + (fam.last_name || '')).trim() : '', email: fam ? fam.email || '' : '', phone: '', cid: fam ? fam.customer_id || null : null,
+    famQ: '', famL: null, pos: false, busy: false, msg: '', done: null });
+  fdRender();
+  try {   // the price tiers as set in World settings (falls back to the usual four)
+    const { data } = await sb.from('world_site_settings').select('value').eq('key', 'price_tiers').maybeSingle();
+    const T = data && data.value ? (JSON.parse(data.value).tiers || []) : [];
+    if (T.length) { _fdWalk.tiers = T.map(t => [t.key, /workshop|make/i.test(t.name) ? t.name : t.name.replace(/\s*tier$/i, '') + ' workshop']); if (_fdWalk.open) fdRender(); }
+  } catch (e) { }
+}
+function fdWalkClose() { _fdWalk.open = false; fdRender(); }
+function fdWalkHtml() {
+  const W = _fdWalk, tiers = W.tiers || FD_WALK_TIERS;
+  if (W.done) return `<div class="fd-sheet-back" onclick="if(event.target===this)fdWalkClose()"><div class="fd-sheet" role="dialog" aria-modal="true" style="max-width:520px">
+    <h3>🚶 Walk-in recorded</h3><div class="fd-paid">✓ ${esc(W.done.what)} · ${W.done.people} ${W.done.people === 1 ? 'person' : 'people'} · ${esc(W.done.name)}</div>
+    <p class="fd-sm">They’re on today’s list under “🚶 Walk-ins” and counted for planning.</p>
+    <div class="fd-sheet-btns"><button class="ho-btn" onclick="fdWalkUndo()">↩ Undo</button><button class="ho-btn" onclick="fdWalkOpen()">+ Another walk-in</button><button class="fd-pay" onclick="fdWalkClose()">Done</button></div></div></div>`;
+  const chip = (on, label, js) => `<button type="button" class="fd-chip${on ? ' on' : ''}" onclick="${js}">${esc(label)}</button>`;
+  const projBox = W.project ? `<div class="fd-walk-pick">🧩 <b>${esc(W.project.name)}</b> <button class="fd-link" onclick="_fdWalk.project=null;fdRender()">change</button></div>`
+    : W.projNone ? `<div class="fd-walk-pick">${W.kind === 'glazing' ? 'Their own piece / pottery painting' : 'Not sure'} <button class="fd-link" onclick="_fdWalk.projNone=false;fdRender()">change</button></div>`
+    : `<input id="fd-walk-proj" class="fd-in" placeholder="Search projects (e.g. mug, gnome)…" value="${escAttr(W.projQ)}" oninput="fdWalkProj(this.value)" autocomplete="off">
+       <div class="fd-walk-list">${(W.projL || []).map(p => `<button class="fd-rec" onclick="_fdWalk.project={id:'${escAttr(p.id)}',name:${escAttr(JSON.stringify(p.name))}};fdRender()">${esc(p.name)}</button>`).join('')}
+       <button class="fd-link" onclick="_fdWalk.projNone=true;fdRender()">${W.kind === 'glazing' ? 'Their own piece / pottery painting' : 'Not sure'}</button></div>`;
+  const famBox = W.cid ? `<div class="fd-walk-pick">👪 <b>${esc(W.name)}</b> ${esc(W.email)} <button class="fd-link" onclick="_fdWalk.cid=null;_fdWalk.name='';_fdWalk.email='';fdRender()">change</button></div>`
+    : `<input id="fd-walk-fam" class="fd-in" placeholder="Find them: name or email…" value="${escAttr(W.famQ)}" onkeydown="if(event.key==='Enter')fdWalkFind(this.value)" autocomplete="off"> <button class="ho-btn" onclick="fdWalkFind(document.getElementById('fd-walk-fam').value)">Find</button>
+       ${W.famL ? `<div class="fd-walk-list">${W.famL.length ? W.famL.map((f, i) => `<button class="fd-rec" onclick="fdWalkFam(${i})"><b>${esc(f.parent_name || '')}</b> <span class="fd-sm">${esc(f.email || '')}${f.kids ? ' · ' + esc(f.kids) : ''}</span></button>`).join('') : '<span class="fd-sm">No one found: add them below.</span>'}</div>` : ''}
+       <div class="fd-walk-grid"><label>Name<input id="fd-walk-name" class="fd-in" value="${escAttr(W.name)}" oninput="_fdWalk.name=this.value" autocomplete="off"></label>
+       <label>Email<input id="fd-walk-email" class="fd-in" type="email" value="${escAttr(W.email)}" oninput="_fdWalk.email=this.value" autocomplete="off"></label>
+       <label>Phone<input id="fd-walk-phone" class="fd-in" type="tel" value="${escAttr(W.phone)}" oninput="_fdWalk.phone=this.value" autocomplete="off"></label></div>`;
+  return `<div class="fd-sheet-back" onclick="if(event.target===this)fdWalkClose()"><div class="fd-sheet fd-walk" role="dialog" aria-modal="true" style="max-width:640px">
+    <h3>🚶 Walk-in (not on the schedule)</h3>
+    <p class="fd-sm" style="margin:0">For glazing or a workshop that isn’t on today’s schedule. Walking into something that <i>is</i> running? Book them the usual way: it counts as a walk-in.</p>
+    <div><div class="fd-walk-lbl">What did they come in for?</div><div class="fd-chips">${chip(W.kind === 'glazing', '🎨 Glazing', "_fdWalk.kind='glazing';_fdWalk.tier='';fdRender()")}${tiers.map(t => chip(W.kind === 'workshop' && W.tier === t[0], t[1], `_fdWalk.kind='workshop';_fdWalk.tier='${escAttr(t[0])}';fdRender()`)).join('')}</div></div>
+    ${W.kind ? `<div><div class="fd-walk-lbl">Project</div>${projBox}</div>` : ''}
+    <div class="fd-walk-row"><div><div class="fd-walk-lbl">How many people?</div><div class="fd-qty"><button class="ho-btn" onclick="_fdWalk.people=Math.max(1,_fdWalk.people-1);fdRender()">−</button><b>${W.people}</b><button class="ho-btn" onclick="_fdWalk.people=Math.min(100,_fdWalk.people+1);fdRender()">+</button></div></div>
+      <label class="fd-walk-lbl">Day<input type="date" class="fd-in" value="${escAttr(W.day)}" max="${fdToday()}" onchange="_fdWalk.day=this.value"></label>
+      <label class="fd-walk-lbl">Time<input type="time" class="fd-in" step="900" value="${escAttr(W.at)}" onchange="_fdWalk.at=this.value"></label></div>
+    <div><div class="fd-walk-lbl">Customer</div>${famBox}</div>
+    <label class="fd-walk-pos"><input type="checkbox" ${W.pos ? 'checked' : ''} onchange="_fdWalk.pos=this.checked;fdRender()"> They paid on Shopify POS</label>
+    ${W.msg ? `<p class="fd-warn">${esc(W.msg)}</p>` : ''}
+    <div class="fd-sheet-btns"><button class="ho-btn" onclick="fdWalkClose()">Cancel</button><button class="fd-pay" ${W.busy ? 'disabled' : ''} onclick="fdWalkSave()">${W.busy ? 'Saving…' : 'Record walk-in'}</button></div></div></div>`;
+}
+let _fdWalkT = null;
+function fdWalkProj(q) {
+  _fdWalk.projQ = q; clearTimeout(_fdWalkT);
+  _fdWalkT = setTimeout(async () => { if (String(q).trim().length < 2) { _fdWalk.projL = []; fdRender(); return; }
+    const { data } = await sb.rpc('hub_walkin_projects', { p_q: q }); if (_fdWalk.projQ === q) { _fdWalk.projL = data || []; fdRender(); } }, 250);
+}
+async function fdWalkFind(q) {
+  _fdWalk.famQ = q || ''; if (String(q || '').trim().length < 2) return;
+  const { data, error } = await sb.rpc('hub_family_search', { p_q: q, p_pin: fdPin() });
+  _fdWalk.famL = error ? [] : (data || []); fdRender();
+}
+function fdWalkFam(i) {
+  const f = (_fdWalk.famL || [])[i]; if (!f) return;
+  Object.assign(_fdWalk, { cid: f.shopify_customer_id || null, name: f.parent_name || '', email: f.email || '', famL: null }); fdRender();
+}
+async function fdWalkSave() {
+  const W = _fdWalk;
+  const msg = !W.kind ? 'Choose what they came in for.' : !W.project && !W.projNone ? 'Choose the project (or “' + (W.kind === 'glazing' ? 'their own piece' : 'not sure') + '”).'
+    : !String(W.name).trim() ? 'Add the customer’s name.' : !String(W.email).trim() && !String(W.phone).trim() ? 'Add their email or phone.'
+    : !W.pos ? 'Tick “They paid on Shopify POS”.' : '';
+  if (msg) { W.msg = msg; fdRender(); return; }
+  W.busy = true; W.msg = ''; fdRender();
+  const p = { studio_id: _fd.studio, kind: W.kind, tier: W.tier || null, people: W.people, day: W.day, at: W.at, paid_on: 'pos',
+    project_id: W.project ? W.project.id : null, project_name: W.project ? null : (W.kind === 'glazing' ? 'Own piece' : null),
+    customer_name: String(W.name).trim(), customer_email: String(W.email).trim(), customer_phone: String(W.phone).trim(), shopify_customer_id: W.cid || null };
+  const { data, error } = await sb.rpc('hub_walkin_add', { p, p_pin: fdPin() });
+  W.busy = false;
+  if (error) { W.msg = /hub_walkin_add/.test(error.message) ? 'Walk-ins aren’t set up yet (home office: run the walk-ins SQL).' : error.message; fdRender(); return; }
+  W.done = { id: data.id, what: data.what, people: data.people, name: p.customer_name }; fdRender();
+  if (_fd.tab === 'today') fdLoadTab();
+}
+async function fdWalkUndo() {
+  const W = _fdWalk; if (!W.done || !confirm('Undo this walk-in?')) return;
+  const { error } = await sb.rpc('hub_walkin_remove', { p_id: W.done.id, p_pin: fdPin() });
+  if (error) { alert(error.message); return; }
+  W.open = false; fdRender(); if (_fd.tab === 'today') fdLoadTab();
+}
