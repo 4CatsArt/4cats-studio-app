@@ -62,7 +62,7 @@ function ftInvCell(r) {
     ${ed && ['sent', 'deposit_paid', 'balance_sent'].includes(i.status) ? `<select class="fti-act" onchange="if (this.value) { const a = this.value; this.value = ''; ftInvAct('${escAttr(i.id)}', a); }"><option value="">Actions…</option>${
       i.status === 'sent' ? b('send', i.sent_at ? 'Resend invoice' : 'Send invoice') + b('extend', 'Extend the deposit date') + b('pay_on_day', '🤝 Paying in full on the day (no deposit)') + b('cancel', 'Cancel')
       : i.status === 'deposit_paid' ? b('balance', 'Send the balance invoice') + b('paid_studio', 'Paid at the studio') + b('cancel', 'Cancel')
-      : b('send', 'Resend the balance invoice') + b('paid_studio', 'Paid at the studio')}</select>` : ''}`;
+      : b('send', 'Resend the balance invoice') + b('paid_studio', 'Paid at the studio')}</select>` : ''}${_studioData && _studioData.isAdmin && ['deposit_paid', 'balance_sent', 'paid', 'closed'].includes(i.status) ? ` <button class="ho-btn sm" onclick="famTripReceipts('ft','${escAttr(i.id)}',this)" title="A receipt for a payment on this invoice">🧾 Receipts</button>` : ''}`;
 }
 let _ftProjects = null;
 async function ftInvNew(reqId) {
@@ -210,7 +210,7 @@ function boInvCell(r) {
     ${ed && ['sent', 'deposit_paid', 'balance_sent'].includes(i.status) ? `<select class="fti-act" onchange="if (this.value) { const a = this.value; this.value = ''; boInvAct('${escAttr(i.id)}', a); }"><option value="">Actions…</option>${
       i.status === 'sent' ? o('send', i.sent_at ? 'Resend the invoice' : 'Send the invoice') + o('move', 'Change the date or time') + o('extend', 'Extend the deposit date') + o('cancel', 'Cancel (release the studio)')
       : i.status === 'deposit_paid' ? o('balance', 'Final numbers → send the balance') + o('paid_studio', 'Paid at the studio') + o('cancel', 'Cancel')
-      : o('send', 'Resend the balance invoice') + o('balance', 'Change the final numbers') + o('paid_studio', 'Paid at the studio')}</select>` : ''}`;
+      : o('send', 'Resend the balance invoice') + o('balance', 'Change the final numbers') + o('paid_studio', 'Paid at the studio')}</select>` : ''}${_studioData && _studioData.isAdmin && ['deposit_paid', 'balance_sent', 'paid', 'closed'].includes(i.status) ? ` <button class="ho-btn sm" onclick="famTripReceipts('bo','${escAttr(i.id)}',this)" title="A receipt for a payment on this invoice">🧾 Receipts</button>` : ''}`;
 }
 // ✏️ (Nov 11 2026) The date and time actually invoiced (held), shown plainly on the card, and ticked among the dates wanted
 function boActiveInv(r) { const i = boInvOf(r); return i && !['cancelled', 'released'].includes(i.status) ? i : null; }
