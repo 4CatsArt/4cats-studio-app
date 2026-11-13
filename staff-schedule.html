@@ -261,6 +261,8 @@ td[data-date] .wk-chip:not([draggable="true"]) { cursor: default; }
 #to-body table.list td:nth-child(4), #to-body table.list td:nth-child(5) { white-space: normal; min-width: 170px; max-width: 360px; }
 #to-body table.list td.actions, #to-body table.list th:last-child { position: sticky; right: 0; background: var(--panel); box-shadow: -8px 0 8px -8px rgba(0,0,0,.18); z-index: 1; }
 #to-body table.list th:last-child { background: var(--soft); z-index: 3; }
+.tohist table.list td:first-child { white-space: normal; min-width: 150px; max-width: 220px; } .tohist table.list td.actions { position: sticky; right: 0; background: var(--panel); white-space: nowrap; }
+.to-who { color: inherit; text-decoration: none; border-bottom: 1px dashed var(--line-2); } .to-who:hover { color: var(--accent, #6d4aeb); border-bottom-color: currentColor; }
 .pl-weekbar strong { min-width: 220px; text-align: center; }
 .pl-sum { border-collapse: collapse; font-size: 12px; }
 .pl-sum th, .pl-sum td { padding: 3px 10px; text-align: right; white-space: nowrap; }
@@ -976,7 +978,7 @@ function renderTimeOff() {
       if (r.status === 'pending' || r.status === 'approved') actions = '<button class="btn small" onclick="editTimeOff(\'' + r.id + '\')">Edit</button>' + actions
       else actions = '<button class="btn small" onclick="setTimeOffStatus(\'' + r.id + '\',\'pending\')">Reopen</button>'
       actions += '<button class="btn small" title="Delete this request for good" onclick="deleteTimeOff(\'' + r.id + '\')">🗑</button>'
-      return '<tr><td class="person">' + esc(staffName(r.staff_id)) + (gone(r.staff_id) ? ' <span class="muted small">(no longer here)</span>' : afterLast(r) ? ' <span class="muted small">(after their last day, ' + esc(fmtDate(staffById[r.staff_id].termination_date)) + ')</span>' : '') + '</td><td>' + dates + '</td><td>' + fmtRange(r.start_time, r.end_time) +
+      return '<tr><td class="person"><a href="#" class="to-who" title="All of their time off" onclick="toHistory(\'' + r.staff_id + '\');return false">' + esc(staffName(r.staff_id)) + '</a>' + (gone(r.staff_id) ? ' <span class="muted small">(no longer here)</span>' : afterLast(r) ? ' <span class="muted small">(after their last day, ' + esc(fmtDate(staffById[r.staff_id].termination_date)) + ')</span>' : '') + '</td><td>' + dates + '</td><td>' + fmtRange(r.start_time, r.end_time) +
         '</td><td>' + esc(r.type === 'sick' ? (r.source === 'staff_sick' ? 'sick (called in)' : 'sick leave') : r.type === 'medical' ? 'medical leave' : r.type === 'vacation' ? 'time off' : r.type) +
         (r.note ? '<div class="muted small">“' + esc(r.note) + '”</div>' : '') +
         (Array.isArray(r.rule_flags) && r.rule_flags.length ? '<div class="small" style="color:#b45309;font-weight:600">⚑ ' + r.rule_flags.map(esc).join(' · ') + '</div>' : '') +
@@ -1015,6 +1017,51 @@ async function deleteTimeOff(id) {
   if (!data || !data.length) { toast('Couldn’t delete it (not allowed for this login). Deny or Cancel it instead.', true); return }
   toast('Deleted'); await loadTimeOff()
 }
+
+// (Nov 13 2026) 👤 Click a name: all of that person's time off (approved, waiting, denied, cancelled), newest first, with the year's
+// days used against their allowance (counted the same way as the "This year" column), and Approve / Deny on waiting ones
+let toHistFor = null, toHistYear = null
+function toHistory(staffId) { toHistFor = staffId; toHistYear = toHistYear || todayStr().slice(0, 4); toHistDraw() }
+function toHistClose() { const ov = document.getElementById('tohist-overlay'); if (ov) ov.style.display = 'none'; toHistFor = null }
+function toHistDraw() {
+  if (!toHistFor) return
+  let ov = document.getElementById('tohist-overlay')
+  if (!ov) { ov = document.createElement('div'); ov.id = 'tohist-overlay'; ov.className = 'pp-overlay'; ov.onclick = e => { if (e.target === ov) toHistClose() }; document.body.appendChild(ov) }
+  const id = toHistFor, p = staffById[id] || {}, all = timeOffRows.filter(r => r.staff_id === id)
+  const years = Array.from(new Set(all.map(r => r.start_date.slice(0, 4)).concat([todayStr().slice(0, 4)]))).sort().reverse()
+  const yr = toHistYear, inYr = r => yr === 'all' || toDates(r).some(d => d.slice(0, 4) === yr)
+  const rows = all.filter(inYr).sort((a, b) => b.start_date.localeCompare(a.start_date) || String(b.created_at || '').localeCompare(String(a.created_at || '')))
+  const daysOf = r => toPartial(r) ? 0 : toDates(r).filter(d => yr === 'all' || d.slice(0, 4) === yr).length
+  const sum = st => all.filter(r => st.includes(r.status) && TO_COUNTED(r) && inYr(r)).reduce((t, r) => t + daysOf(r), 0)
+  const parts = st => all.filter(r => st.includes(r.status) && TO_COUNTED(r) && inYr(r) && toPartial(r)).length
+  const sick = all.filter(r => !TO_COUNTED(r) && r.status === 'approved' && inYr(r)).reduce((t, r) => t + (toPartial(r) ? 0 : daysOf(r)), 0)
+  const allow = yr === 'all' ? null : toAllowance(id, yr), used = sum(['approved'])
+  const chip = (n, label, cls, extra) => '<span class="pill ' + cls + '" style="font-size:12px;padding:3px 10px">' + n + ' ' + label + (extra ? ' <span class="muted">' + extra + '</span>' : '') + '</span>'
+  const kind = r => r.type === 'sick' ? (r.source === 'staff_sick' ? 'sick (called in)' : 'sick leave') : r.type === 'medical' ? 'medical leave' : r.type === 'vacation' ? 'time off' : (r.type || 'time off')
+  const when = r => (r.start_date === r.end_date ? fmtDate(r.start_date) : fmtDate(r.start_date) + ' to ' + fmtDate(r.end_date)) + (r.start_time ? ' · ' + fmtRange(r.start_time, r.end_time) : '')
+  const ndays = r => toPartial(r) ? 'part day' : (n => n + ' day' + (n === 1 ? '' : 's'))(toDates(r).length)
+  const reviewed = r => r.reviewed_at ? (r.status === 'approved' ? 'approved ' : r.status === 'denied' ? 'denied ' : r.status === 'cancelled' ? 'cancelled ' : 'reviewed ') + new Date(r.reviewed_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' }) : ''
+  const asked = r => r.created_at ? 'asked ' + new Date(r.created_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' }) : ''
+  ov.innerHTML = '<div class="pp-box tohist" style="max-width:980px"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="font-size:18px;margin:0">👤 ' + esc(staffName(id)) + ' · time off</h2>' +
+    (p.is_active === false ? '<span class="muted small">(no longer active)</span>' : p.termination_date ? '<span class="muted small">(last day ' + esc(fmtDate(p.termination_date)) + ')</span>' : '') +
+    '<span style="flex:1"></span><label class="small">Year <select class="input" onchange="toHistYear=this.value;toHistDraw()">' + years.map(y => '<option value="' + y + '"' + (y === yr ? ' selected' : '') + '>' + y + '</option>').join('') + '<option value="all"' + (yr === 'all' ? ' selected' : '') + '>All years</option></select></label>' +
+    '<button class="btn" onclick="toHistClose()">Close</button></div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0">' +
+      (allow != null ? '<span class="pill ' + (used > allow ? 'denied' : 'approved') + '" style="font-size:12px;padding:3px 10px"><b>' + used + ' of ' + allow + '</b> days used in ' + yr + '</span>' : chip(used, 'days approved', 'approved')) +
+      chip(sum(['pending']), 'days waiting', 'pending', parts(['pending']) ? '+' + parts(['pending']) + ' part' : '') +
+      chip(sum(['denied', 'cancelled']), 'days denied or cancelled', 'denied') +
+      (parts(['approved']) ? chip(parts(['approved']), 'part days approved', 'source') : '') +
+      (sick ? chip(sick, 'sick or medical days (not counted)', 'source') : '') + '</div>' +
+    (rows.length ? '<div style="overflow:auto"><table class="list"><thead><tr><th>Dates</th><th>Days</th><th>Type</th><th>Status</th><th>Note</th><th>From</th><th></th></tr></thead><tbody>' + rows.map(r =>
+      '<tr><td>' + esc(when(r)) + '</td><td>' + ndays(r) + '</td><td>' + esc(kind(r)) + '</td><td><span class="pill ' + esc(r.status) + '">' + esc(r.status === 'pending' ? 'waiting' : r.status) + '</span>' +
+        '<div class="muted small">' + esc([asked(r), reviewed(r)].filter(Boolean).join(' · ')) + '</div></td>' +
+      '<td class="wrap" style="max-width:240px">' + (r.note ? '“' + esc(r.note) + '”' : '<span class="muted">—</span>') + (Array.isArray(r.rule_flags) && r.rule_flags.length ? '<div class="small" style="color:#b45309">⚑ ' + r.rule_flags.map(esc).join(' · ') + '</div>' : '') + '</td>' +
+      '<td><span class="pill source">' + esc(r.source === 'staff' ? 'staff (Hub)' : r.source || '') + '</span></td>' +
+      '<td class="actions">' + (r.status === 'pending' ? '<button class="btn small good" onclick="toHistSet(\'' + r.id + '\',\'approved\')">Approve</button><button class="btn small bad" onclick="toHistSet(\'' + r.id + '\',\'denied\')">Deny</button>' : '') + '</td></tr>').join('') + '</tbody></table></div>'
+      : '<div class="empty">No time off ' + (yr === 'all' ? 'yet' : 'in ' + yr) + '.</div>') + '</div>'
+  ov.style.display = 'flex'
+}
+async function toHistSet(id, status) { await setTimeOffStatus(id, status); toHistDraw() }
 
 let editingTimeOff = null
 function editTimeOff(id) {
