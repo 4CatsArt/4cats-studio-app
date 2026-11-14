@@ -334,13 +334,23 @@ async function load() {
       if (isKids(x)) {
         if (!n) return;   // (nobody enrolled: not running)
         const len = Math.max(LEN.kids, +x.duration_minutes || 0);
+        // (Nov 14 2026) the same class at the same time (e.g. a retired "Part 2" copy still holding a child): one block, one teacher,
+        // everyone added together — as wheel times are
+        const kName = t => String(t || '').split('|')[0].replace(/\(retired\)/ig, '').replace(/\bpart\s*\d+\b/ig, '').replace(/\bclass\s+\d+\s+of\s+\d+\b/ig, '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const same = blocks.find(b => b.kind === 'kids' && !b.notNeeded && b.start === t0 && b.kname === kName(title));
+        if (same) {
+          same.sessions = (same.sessions || [same.session]).concat(x.id); same.n = (same.n || 0) + n;
+          same.sub = same.sub.replace(/^\d+ enrolled/, same.n + ' enrolled') + (same.sub.includes('combined') ? '' : ' · combined');
+          same.end = Math.max(same.end, t0 + len);
+          return;
+        }
         let p = findPerson((staffBy[x.id] || {}).teacher), auto = false;
         if ((staffBy[x.id] || {}).teacher === 'none') { blocks.push({ id: 'k-' + x.id, kind: 'kids', session: x.id, title: title.split('|')[0].trim(), sub: `${n} enrolled`, start: t0, end: t0 + len, person: null, notNeeded: true }); return; }
         // (Nov 10 2026) the class's assigned teacher (Class teacher in the Hub / the staff schedule), shown even when they aren't on shift
         const asg = String((staffBy[x.id] || {}).teacher || '').trim(), asgOff = asg && !p;
         if (!p) { p = demoers.find(d => !busyAt(d.id, t0, t0 + len)) || (director && !busyAt(director.id, t0, t0 + len) ? director : null); auto = !!p; }
         const tWho = asg ? ` · 👤 ${asg}${asgOff ? ' (not on shift)' : ''}` : ' · 👤 no teacher set';
-        blocks.push({ id: 'k-' + x.id, kind: 'kids', session: x.id, title: title.split('|')[0].trim(), sub: `${n} enrolled · ${len} min${tWho}${auto ? ' · auto' : ''}`, start: t0, end: t0 + len, person: p ? p.id : null, auto });
+        blocks.push({ id: 'k-' + x.id, kind: 'kids', session: x.id, sessions: [x.id], n, kname: kName(title), title: title.split('|')[0].replace(/\s*\(retired\)/ig, '').trim(), sub: `${n} enrolled · ${len} min${tWho}${auto ? ' · auto' : ''}`, start: t0, end: t0 + len, person: p ? p.id : null, auto });
       } else if (false) {   // (wheel times are handled above: one block, one teacher)
         const p = null;
         blocks.push({ id: 'w-' + x.id, kind: 'wheel', session: x.id, title, sub: `${n} booked · ${LEN.wheel} min`, start: t0, end: t0 + LEN.wheel, person: p ? p.id : null });
@@ -1203,7 +1213,7 @@ async function saveDay(quiet) {
   put('circler', circ[0]); put('circler2', circ[1]); put('circler3', circ[2]);
   const times = [], parties = {};
   D.blocks.forEach(b => {
-    if (b.kind === 'kids') times.push({ session_id: b.session, teacher: whoOf(b) });
+    if (b.kind === 'kids') (b.sessions || [b.session]).forEach(sid => times.push({ session_id: sid, teacher: whoOf(b) }));   // (a combined class: every time in it)
     else if (b.kind === 'wheel') (b.sessions || [b.session]).forEach(sid => times.push({ session_id: sid, wheel_teacher: whoOf(b) }));
     else if (b.kind === 'demo') times.push({ session_id: b.session, demo_by: whoOf(b) });
     else if (b.kind === 'party' && b.booking) { const x = parties[b.booking] = parties[b.booking] || { booking_id: b.booking, t1: '', t2: '' }; x[b.slot === 2 ? 't2' : 't1'] = whoOf(b); }
@@ -1332,7 +1342,11 @@ function askClassScope(b) {
   $('cs-day').onclick = () => { closePop(); D.flash = `${b.title}: ${who} for ${D.date} only. Save the day to keep it.`; draw(); };
   $('cs-term').onclick = async () => {
     $('cs-term').disabled = true; $('cs-msg').textContent = 'Saving…';
-    const { data, error } = await sb.rpc('hub_set_class_teacher', { p_session_id: b.session, p_staff_id: b.notNeeded ? null : (p ? p.id : null), p_scope: 'term' });
+    let data = null, error = null;
+    for (const sid of (b.sessions || [b.session])) {   // (a combined class: every time in it gets the term teacher)
+      const r = await sb.rpc('hub_set_class_teacher', { p_session_id: sid, p_staff_id: b.notNeeded ? null : (p ? p.id : null), p_scope: 'term' });
+      if (r.error) { error = r.error; break; } if (sid === b.session) data = r.data;
+    }
     if (error) { $('cs-term').disabled = false; $('cs-msg').textContent = error.message; return; }
     D.staffBy = D.staffBy || {}; closePop();
     D.flash = `${b.title}: ${who} is the term teacher from ${D.date} on (${(data && data.weeks) || 'the rest of the'} week${data && data.weeks === 1 ? '' : 's'}). Staff schedule shows it too.`; draw();
