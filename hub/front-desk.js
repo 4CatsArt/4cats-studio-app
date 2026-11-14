@@ -84,8 +84,11 @@ async function fdPinGo(pin, quiet) {
   if (paneVisible('families-pane') && typeof openFamiliesPane === 'function') { openFamiliesPane(); return; }
   fdRender(); fdLoadTab(); fdWaitLoad(); fdWaitTick();
 }
-document.addEventListener('pointerdown', e => { if (_fdSeller && e.target && e.target.closest && e.target.closest('#fd-pane, #families-pane')) _fdSeller.last = Date.now(); }, true);
-document.addEventListener('keydown', e => { if (_fdSeller && e.target && e.target.closest && e.target.closest('#fd-pane, #families-pane')) _fdSeller.last = Date.now(); }, true);
+// (Nov 14 2026) taps and typing in the Front desk's pop-ups count too (a gift card, membership or buyer form), so the desk doesn't lock mid-form
+const FD_ACTIVE = '#fd-pane, #families-pane, #duty-sheet-back, #hub-lib';
+document.addEventListener('pointerdown', e => { if (_fdSeller && e.target && e.target.closest && e.target.closest(FD_ACTIVE)) _fdSeller.last = Date.now(); }, true);
+document.addEventListener('keydown', e => { if (_fdSeller && e.target && e.target.closest && e.target.closest(FD_ACTIVE)) _fdSeller.last = Date.now(); }, true);
+document.addEventListener('input', e => { if (_fdSeller && e.target && e.target.closest && e.target.closest(FD_ACTIVE)) _fdSeller.last = Date.now(); }, true);
 setInterval(() => {
   if (!_fdSeller) return;
   if (_fd && _fd.order && _fd.order.status === 'pending' && paneVisible('fd-pane')) { _fdSeller.last = Date.now(); return; }   // (waiting for a family to pay: never lock mid-payment)
@@ -851,8 +854,14 @@ function fdQuoteHtml() {
 }
 // ---------- Paying (camp-checkout, staff mode) ----------
 async function fdCall(body) {
+  // (Nov 14 2026) locked (no PIN): ask for it first, rather than sending a payment without one; and if checkout says it needs the PIN
+  // anyway, lock and show the PIN box (the cart stays), so they can enter it and tap pay again
+  const money = /^staff_(checkout|return|card_remove)$/.test(String(body && body.action || ''));
+  if (money && fdNeedsPin()) { fdSellerLock(); throw new Error('Enter your PIN, then tap it again.'); }   // (the desk's own unlock, not an older coordinator PIN)
   const r = await fetch(`${SUPABASE_URL}/functions/v1/camp-checkout`, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify(Object.assign({ staff: true, staff_pin: fdPin() || undefined }, body)) });
-  const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status)); return d;
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok && d.need_pin) { _fdSeller = null; setTimeout(fdSellerLock, 0); throw new Error('Enter your PIN, then tap it again (your cart is still here).'); }
+  if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status)); return d;
 }
 async function fdPay(mode) {
   const F = _fd; if (F.busy) return;
