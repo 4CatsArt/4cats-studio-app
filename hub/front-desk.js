@@ -281,7 +281,7 @@ function fdShopHtml(snacks, extras) {
     P = P.filter(p => !fdShopIn(p, XC) || others.some(c => fdShopIn(p, c))); C = C.filter(c => c !== XC);
   }
   const q = (F.shopQ || '').trim().toLowerCase(), col = extras ? XC : C.find(c => c.id === F.shopCol) || null;
-  let h = `<div class="fd-filters">${!snacks && !extras ? '<button class="ho-btn primary" onclick="fdGiftOpen()" title="An emailed 4Cats gift card, the same as on World">🎁 Sell a gift card</button>' : ''}<button class="ho-btn" onclick="fdStockOpen(${snacks ? 'true' : 'false'})" title="What this studio has, and making up or opening kits">📦 Stock here</button><input id="fd-shopq" type="search" placeholder="Search a name, tag or SKU" value="${esc(F.shopQ || '')}" oninput="_fd.shopQ=this.value;clearTimeout(_fd.qt);_fd.qt=setTimeout(fdRender,200)" onkeydown="if(event.key==='Enter'){event.preventDefault();fdShopScan(this.value)}">
+  let h = `<div class="fd-filters">${!snacks && !extras ? '<button class="ho-btn primary" onclick="fdGiftOpen()" title="An emailed 4Cats gift card, the same as on World">🎁 Sell a gift card</button><button class="ho-btn primary" onclick="fdMemOpen()" title="A 4Cats membership that renews each year">⭐ Sell a membership</button>' : ''}<button class="ho-btn" onclick="fdStockOpen(${snacks ? 'true' : 'false'})" title="What this studio has, and making up or opening kits">📦 Stock here</button><input id="fd-shopq" type="search" placeholder="Search a name, tag or SKU" value="${esc(F.shopQ || '')}" oninput="_fd.shopQ=this.value;clearTimeout(_fd.qt);_fd.qt=setTimeout(fdRender,200)" onkeydown="if(event.key==='Enter'){event.preventDefault();fdShopScan(this.value)}">
     <span class="fd-chips"${extras ? ' hidden' : ''}><button class="fd-chip${!col ? ' on' : ''}" onclick="_fd.shopCol='';fdRender()">All</button>${C.map(c => `<button class="fd-chip${col && col.id === c.id ? ' on' : ''}" onclick="_fd.shopCol='${c.id}';fdRender()">${esc(c.name)}</button>`).join('')}</span></div>`;
   if (!P.length) return h + '<div class="fd-soon"><div class="fd-soon-ic">' + (snacks ? '🧃' : '🛍️') + '</div><b>Nothing to sell here yet.</b><p class="fd-sm">In Home office → 🛍️ Products, tick <b>At the front desk</b> on a product (and this studio, or every studio).</p></div>';
   const match = p => !q || (p.name + ' ' + (p.tags || []).join(' ') + ' ' + (p.variants || []).map(v => (v.sku || '') + ' ' + (v.barcode || '')).join(' ')).toLowerCase().includes(q);
@@ -608,14 +608,15 @@ function fdCartHtml() {
   if (F.cart.length) h += fdQuoteHtml();
   if (F.cart.length) {
     const needFam = !F.fam;
-    const hasGc = F.cart.some(l => l.type === 'giftcard'); if (hasGc) F.gift = '';   // (🎁 a gift card can't be paid with another gift card: no code box)
+    const hasMem = F.cart.some(l => l.type === 'membership');
+    const hasGc = F.cart.some(l => l.type === 'giftcard') || hasMem; if (hasGc) F.gift = '';   // (🎁 a gift card can't be paid with another gift card: no code box)
     h += `${hasGc ? '' : `<label class="fd-sm fd-giftl">Gift card <input value="${esc(F.gift)}" placeholder="Code (optional)" oninput="_fd.gift=this.value"></label>`}
       ${needFam ? `<p class="fd-warn">${F.cart.every(l => l.type === 'retail') ? 'Choose the family (for member prices and an emailed receipt), or 🛍️ Walk-in above.' : 'Choose the family to pay for bookings.'}</p>` : ''}
       ${F.fam && F.fam.walk_in && F.cart.some(l => l.type !== 'retail') ? '<p class="fd-warn">A walk-in can buy shop items only. Choose the family for the bookings.</p>' : ''}
-      ${fdCardsHtml(needFam)}
+      ${hasMem ? '<p class="fd-warn" style="background:#f3f0ff;color:#3d2fa0">⭐ A membership renews each year with their card, so it’s paid on Stripe’s page: <b>Card here</b>, the <b>QR code</b>, or a <b>pay link</b>.</p>' : fdCardsHtml(needFam)}
       <div class="fd-paybtns"><button class="fd-pay" ${needFam || F.busy ? 'disabled' : ''} onclick="fdPay('here')">💳 Card here</button><button class="fd-pay fd-pay2" ${needFam || F.busy ? 'disabled' : ''} onclick="fdPay('qr')">📱 Pay now (QR code)</button>
       <button class="ho-btn" ${needFam || F.busy || (F.fam && F.fam.walk_in) ? 'disabled' : ''} onclick="fdPay('email')">✉️ Email pay link</button><button class="ho-btn" ${needFam || F.busy || (F.fam && F.fam.walk_in) ? 'disabled' : ''} onclick="fdPay('link')">🔗 Copy pay link</button></div>
-      <div class="fd-invrow"><button class="ho-btn" ${needFam || F.busy || (F.fam && F.fam.walk_in) ? 'disabled' : ''} onclick="fdPay('invoice')">🧾 Send invoice</button>
+      <div class="fd-invrow"${hasMem ? ' hidden' : ''}><button class="ho-btn" ${needFam || F.busy || (F.fam && F.fam.walk_in) ? 'disabled' : ''} onclick="fdPay('invoice')">🧾 Send invoice</button>
         <label class="fd-sm">Pay by <input type="date" value="${esc(F.payBy || fdAddDays(fdToday(), 2))}" min="${fdToday()}" max="${fdAddDays(fdToday(), 60)}" onchange="_fd.payBy=this.value"></label></div>
       <p class="fd-sm">Card here and QR: 10 minutes to pay. Links: 24 hours. Invoice: held until the end of its pay-by date, with a reminder the day before.</p>`;
   }
@@ -897,11 +898,12 @@ function fdPayHtml() {
     `<div class="fd-pl fd-ptotal"><span>Total</span><span>${fdMoney(o.total)}</span></div>` + (o.amount_due != null && o.amount_due < o.total - 0.001 ? `<div class="fd-pl"><span>After gift card</span><b>${fdMoney(o.amount_due)}</b></div>` : '');
   let h = `<div class="fd-sheet-back"><div class="fd-sheet fd-paysheet" role="dialog" aria-modal="true"><h3>${esc(o.order || '')} · ${esc(F.fam ? F.fam.first_name + ' ' + (F.fam.last_name || '') : '')}</h3><div class="fd-plines">${lines}</div>`;
   // (Nov 14 2026) what was bought decides the words: shop items, gift cards (how each is delivered), and/or bookings
-  const gcs = F.cart.filter(l => l.type === 'giftcard'), hasShop = F.cart.some(l => l.type === 'retail'), booked = F.cart.some(l => !['retail', 'giftcard', 'charge'].includes(l.type));
+  const gcs = F.cart.filter(l => l.type === 'giftcard'), hasShop = F.cart.some(l => l.type === 'retail'), booked = F.cart.some(l => !['retail', 'giftcard', 'charge', 'membership'].includes(l.type)), memL = F.cart.find(l => l.type === 'membership');
   const tdy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Vancouver' }), nice = d => new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' });
   const gcWords = gcs.map(l => l.physical ? `🎴 The card ending ${esc(String(l.code || '').slice(-4))} is ready to use: hand it over.`
     : l.deliver === 'me' ? `🎁 The ${fdMoney(l.amount)} gift card is emailed to ${esc((F.fam && F.fam.email) || 'them')} to give.`
-    : `🎁 The ${fdMoney(l.amount)} gift card is emailed to ${esc(l.to_name || 'them')} ${!l.send_on || l.send_on <= tdy ? 'now' : 'on ' + esc(nice(l.send_on))}.`).join('<br>');
+    : `🎁 The ${fdMoney(l.amount)} gift card is emailed to ${esc(l.to_name || 'them')} ${!l.send_on || l.send_on <= tdy ? 'now' : 'on ' + esc(nice(l.send_on))}.`).join('<br>')
+    + (memL ? `${gcs.length ? '<br>' : ''}⭐ Their ${memL.plan === 'workshops' ? 'Workshops Only' : '4Cats'} membership is active now, renewing each year with their card. A welcome email is on its way.` : '');
   if (o.status === 'paid' && F.cart.length && !booked) h += `<div class="fd-paid">✓ Paid. Thank you!</div><p class="fd-sm">${gcWords ? gcWords + '<br>' : ''}${F.fam && F.fam.walk_in ? (hasShop ? 'Hand them their items.' : '') : 'Their receipt is on its way by email.' + (hasShop ? ' Hand them their items.' : '')}</p>`;
   else if (o.status === 'paid') h += `<div class="fd-paid">✓ Paid. They’re booked!</div><p class="fd-sm">${gcWords ? gcWords + '<br>' : ''}Their confirmation email is on its way; the booking is in My 4Cats and on the class list.</p>`;
   else if (o.status === 'expired' || o.status === 'failed') h += '<div class="fd-expired">Not paid in time, so the spots went back.</div>';
@@ -1347,6 +1349,7 @@ async function fdWalkUndo() {
 // It goes in the cart (no tax) and is paid like anything else; once paid, it's made and emailed on its date, as on World.
 let _fdGc = { set: null, phys: null };
 async function fdGiftOpen(kind) {
+  if (kind === 'membership') return fdMemOpen();   // (⭐ the Buyer section is shared with the membership form)
   if (!_fdGc.set) { try { const { data } = await sb.rpc('world_gift_settings'); _fdGc.set = data || {}; } catch (e) { _fdGc.set = {}; } }
   if (!_fdGc.phys) { try { const { data, error } = await sb.rpc('hub_gift_physical_list'); _fdGc.phys = error ? [] : (data || []); } catch (e) { _fdGc.phys = []; } }
   // 🎴 (Nov 14 2026) a studio with physical gift cards: physical or digital first
@@ -1487,3 +1490,36 @@ function fdGiftPhysAdd(lo, hi) {
 .fd-gc-new summary { cursor: pointer; color: var(--accent, #4f3bd1); font-weight: 700; margin-top: 6px; } .fd-gc-new[open] { padding: 8px 0 0; }
 .fd-gc-code { font-family: Menlo, Consolas, monospace; letter-spacing: 1px; font-size: 18px !important; }
 @media (max-width: 560px) { .fd-gc-to, .fd-gc-grid { grid-template-columns: 1fr; } }`; document.head.appendChild(st); })();
+
+
+// ---------- ⭐ (Nov 14 2026) Selling a membership at the desk: 4Cats Member or Workshops Only (and the discounted one), for the family.
+// It goes in the cart; the whole cart is paid on Stripe's page (Card here, QR or a link), where the membership becomes a yearly
+// renewal with their card. Member prices apply to the rest of the cart. stripe-webhook saves it once paid.
+let _fdMem = { info: null };
+async function fdMemOpen() {
+  if (!_fdMem.info) { try { const r = await fetch(SUPABASE_URL + '/functions/v1/membership-checkout', { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + SUPABASE_ANON_KEY }, body: JSON.stringify({ action: 'info' }) }); _fdMem.info = await r.json(); } catch (e) { _fdMem.info = null; } }
+  const I = _fdMem.info || {}, P = I.prices || { member: 159, discounted: 79, workshops: 79 }, K = Array.isArray(I.discount_kinds) ? I.discount_kinds : [];
+  if (_fd.cart.some(l => l.type === 'membership')) { alert('There’s already a membership in the cart.'); return; }
+  openDutySheet(`<div class="fd-gc"><h3>⭐ Sell a membership</h3>${fdGiftBuyerHtml('membership')}
+    <div class="fd-gc-f"><span class="fd-gc-l">Membership</span><div class="fd-gc-to fd-mem-plans">
+      <label class="fd-gc-opt"><input type="radio" name="fd-mem-plan" value="member" checked><span><b>4Cats Member · $${P.member}</b><small>Member prices on everything, for a year</small></span></label>
+      <label class="fd-gc-opt"><input type="radio" name="fd-mem-plan" value="workshops"><span><b>Workshops Only · $${P.workshops}</b><small>Member prices on workshops, Mini Make and glazing</small></span></label></div></div>
+    ${K.length ? `<div class="fd-gc-f" id="fd-mem-disc"><label class="fd-gc-opt" style="align-items:center"><input type="checkbox" id="fd-mem-d"><span><b>Discounted · $${P.discounted}</b><small>For</small></span>
+      <select id="fd-mem-k" style="margin-left:auto;padding:8px;border-radius:10px;border:1px solid #ddd8ef;font:inherit">${K.map(k => `<option value="${escAttr(k[0])}">${esc(k[1])}</option>`).join('')}</select></label></div>` : ''}
+    <p class="fd-gc-hint" style="margin:-4px 0 12px">Renews every year with their card (they can turn off auto-renew in My 4Cats). Plus tax. Member prices apply to the rest of the cart right away.</p>
+    <div id="fd-gc-msgbox" class="fd-msg" hidden></div></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="fdMemAdd()">Add to cart</button></div>`);
+  const sync = () => { const w = (document.querySelector('[name="fd-mem-plan"]:checked') || {}).value === 'workshops', d = document.getElementById('fd-mem-disc'); if (d) d.style.display = w ? 'none' : ''; };
+  document.querySelectorAll('[name="fd-mem-plan"]').forEach(r => r.onchange = sync); sync();
+}
+function fdMemAdd() {
+  const box = document.getElementById('fd-gc-msgbox'), say = t => { box.textContent = t; box.hidden = false; };
+  if (!(_fd.fam && !_fd.fam.walk_in && _fd.fam.email)) { say('Choose the family first (or add a new family).'); return; }
+  const I = _fdMem.info || {}, P = I.prices || { member: 159, discounted: 79, workshops: 79 }, K = Array.isArray(I.discount_kinds) ? I.discount_kinds : [];
+  const plan = (document.querySelector('[name="fd-mem-plan"]:checked') || {}).value === 'workshops' ? 'workshops' : 'member';
+  const disc = plan === 'member' && document.getElementById('fd-mem-d') && document.getElementById('fd-mem-d').checked ? document.getElementById('fd-mem-k').value : null;
+  const kName = disc ? ((K.find(k => k[0] === disc) || [])[1] || '') : '';
+  const amt = plan === 'workshops' ? P.workshops : disc ? P.discounted : P.member;
+  _fd.cart.push({ type: 'membership', plan, discount_kind: disc, title: `⭐ ${plan === 'workshops' ? 'Workshops Only' : '4Cats'} membership${kName ? ' (' + kName + ')' : ''}, 1 year`, desc: `$${amt} plus tax · renews yearly · member prices on this cart` });
+  _fd.gift = ''; closeDutySheet(); _fd.msg = ''; fdRender();
+}
