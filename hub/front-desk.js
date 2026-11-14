@@ -18,7 +18,9 @@
 // (10 minutes) or an emailed / copied pay link (24 hours). Paid → bookings, emails and class lists as from World.
 const FD_BANDS = [['k57', 'Kids 5–7'], ['k811', 'Kids 8–11'], ['k1215', 'Kids 12–15'], ['adult', 'Adults (16+)']];
 const FD_DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const FD_TABS = [['today', '📅 Today'], ['ws', '🎨 Workshops & glazing'], ['classes', '🧒 Kids classes'], ['parties', '🎉 Parties'], ['camps', '🏕️ Camps'], ['retail', '🛍️ Retail'], ['snacks', '🧃 Drinks & snacks']];
+const FD_TABS = [['today', '📅 Today'], ['ws', '🎨 Workshops & glazing'], ['classes', '🧒 Kids classes'], ['parties', '🎉 Parties'], ['camps', '🏕️ Camps'], ['retail', '🛍️ Retail'], ['extras', '➕ Extras & add-ons'], ['snacks', '🧃 Drinks & snacks']];
+// (Nov 14 2026) the Extras & Add-ons collection (Hub → Products → Collections) has its own tab; its products come off Retail
+const FD_EXTRAS = c => /extras?\s*(&|and|\+)\s*add[\s-]*ons?/i.test(String((c && c.name) || ''));
 let _fd = null;
 function fdNew() {
   return { studio: _sessionStudioId, tab: 'today', date: null, cart: [], fam: null, people: [], q: '', hits: null, newFam: false, gift: '', msg: '', busy: false,
@@ -133,7 +135,7 @@ async function fdLoadTab() {
     if (!F.ptyP) { try { const r = await sb.from('world_site_settings').select('value').eq('key', 'party_pricing').maybeSingle(); F.ptyP = r.data && r.data.value ? JSON.parse(r.data.value) : {}; } catch (e) { F.ptyP = {}; } }
     // World settings → Parties: which studios offer splatter, and each one's maximum (the same list World's Parties page uses)
     if (!F.ptyPage || F.ptyPage.__err) await fdPtyPageLoad();   // (World settings → Parties: project lists, colours, splatter studios)
-  } else if ((F.tab === 'retail' || F.tab === 'snacks') && !F.shop) {
+  } else if ((F.tab === 'retail' || F.tab === 'snacks' || F.tab === 'extras') && !F.shop) {
     fdRender();
     const { data, error } = await sb.rpc('hub_fd_retail', { p_studio: st });
     F.shop = error ? { err: /hub_fd_retail/.test(error.message) ? 'Run fd_retail.sql in Supabase first.' : error.message } : (data || { products: [], collections: [] });
@@ -207,7 +209,8 @@ function fdMainHtml() {
   if (F.tab === 'camps') return fdCampsHtml();
   if (F.tab === 'parties') return fdPtyHtml();
   if (F.tab === 'retail') return fdShopHtml(false);
-  if (F.tab === 'snacks') return fdShopHtml(true);   // (Nov 10 2026: drinks and snacks are products of the kind "Snack or drink")
+  if (F.tab === 'snacks') return fdShopHtml(true);
+  if (F.tab === 'extras') return fdShopHtml(false, true);   // (Nov 10 2026: drinks and snacks are products of the kind "Snack or drink")
   const soon = { retail: ['🛍️', 'Retail', 'Product tiles to tap, once the product list (names, prices, tax) is set up.'], snacks: ['🧃', 'Drinks & snacks', 'Drinks and snack tiles to tap, once the product list (names, prices, tax) is set up.'] }[F.tab];
   return `<div class="fd-soon"><div class="fd-soon-ic">${soon[0]}</div><b>${soon[1]}</b><p class="fd-sm">${soon[2]}</p></div>`;
 }
@@ -265,13 +268,21 @@ function fdShopPrice(p, v) {
   if (fam && mem != null && Number(mem) < now) { now = Number(mem); lab = '⭐ member'; }
   return { reg, now, lab, mem: !fam && mem != null && Number(mem) < reg ? Number(mem) : null };
 }
-function fdShopHtml(snacks) {
+function fdShopHtml(snacks, extras) {
   const F = _fd, S = F.shop;
   if (!S) return fdLoading; if (S.err) return '<p class="fd-msg">' + esc(S.err) + '</p>';
-  const P = (S.products || []).filter(p => (p.category === 'snack') === !!snacks), C = (S.collections || []).filter(c => P.some(p => fdShopIn(p, c)));
-  const q = (F.shopQ || '').trim().toLowerCase(), col = C.find(c => c.id === F.shopCol) || null;
+  const XC = (S.collections || []).find(FD_EXTRAS) || null;
+  let P = (S.products || []).filter(p => (p.category === 'snack') === !!snacks), C = (S.collections || []).filter(c => P.some(p => fdShopIn(p, c)));
+  if (extras) {   // ➕ the Extras & add-ons tab: that collection only (any kind of product)
+    if (!XC) return '<div class="fd-soon"><div class="fd-soon-ic">➕</div><b>No Extras & add-ons yet.</b><p class="fd-sm">In Home office → 🛍️ Products → 🗂️ Collections, make a collection called “Extras & Add-ons” and tick <b>At the front desk</b> on its products.</p></div>';
+    P = (S.products || []).filter(p => fdShopIn(p, XC)); C = [];
+  } else if (XC) {   // Retail: the extras live on their own tab (unless they're in another collection too)
+    const others = (S.collections || []).filter(c => c !== XC);
+    P = P.filter(p => !fdShopIn(p, XC) || others.some(c => fdShopIn(p, c))); C = C.filter(c => c !== XC);
+  }
+  const q = (F.shopQ || '').trim().toLowerCase(), col = extras ? XC : C.find(c => c.id === F.shopCol) || null;
   let h = `<div class="fd-filters"><button class="ho-btn" onclick="fdStockOpen(${snacks ? 'true' : 'false'})" title="What this studio has, and making up or opening kits">📦 Stock here</button><input id="fd-shopq" type="search" placeholder="Search a name, tag or SKU" value="${esc(F.shopQ || '')}" oninput="_fd.shopQ=this.value;clearTimeout(_fd.qt);_fd.qt=setTimeout(fdRender,200)" onkeydown="if(event.key==='Enter'){event.preventDefault();fdShopScan(this.value)}">
-    <span class="fd-chips"><button class="fd-chip${!col ? ' on' : ''}" onclick="_fd.shopCol='';fdRender()">All</button>${C.map(c => `<button class="fd-chip${col && col.id === c.id ? ' on' : ''}" onclick="_fd.shopCol='${c.id}';fdRender()">${esc(c.name)}</button>`).join('')}</span></div>`;
+    <span class="fd-chips"${extras ? ' hidden' : ''}><button class="fd-chip${!col ? ' on' : ''}" onclick="_fd.shopCol='';fdRender()">All</button>${C.map(c => `<button class="fd-chip${col && col.id === c.id ? ' on' : ''}" onclick="_fd.shopCol='${c.id}';fdRender()">${esc(c.name)}</button>`).join('')}</span></div>`;
   if (!P.length) return h + '<div class="fd-soon"><div class="fd-soon-ic">' + (snacks ? '🧃' : '🛍️') + '</div><b>Nothing to sell here yet.</b><p class="fd-sm">In Home office → 🛍️ Products, tick <b>At the front desk</b> on a product (and this studio, or every studio).</p></div>';
   const match = p => !q || (p.name + ' ' + (p.tags || []).join(' ') + ' ' + (p.variants || []).map(v => (v.sku || '') + ' ' + (v.barcode || '')).join(' ')).toLowerCase().includes(q);
   const tile = p => { const V = p.variants || [], pr = fdShopPrice(p, V[0]), pic = (p.images || [])[0], inCart = F.cart.filter(l => l.type === 'retail' && l.product_id === p.id).reduce((t, l) => t + l.qty, 0);
@@ -961,8 +972,8 @@ function fdWaitHtml() {
     return `<div class="fd-wait-row ${k}"><div><b>${esc(o.name || '')}</b> <span class="fd-sm">${esc(o.order || '')} · ${fdMoney(o.total)} · ${o.mode === 'invoice' ? 'invoice' : o.mode === 'link' ? 'link' : 'emailed'} ${esc(when)}${o.by ? ' · by ' + esc(String(o.by).split('@')[0]) : ''}</span>
         <div class="fd-sm">${esc(o.what || '')}</div></div>
       <div class="fd-wait-act">${k === 'paid' ? `<span class="fd-st ok">✓ Paid</span><button class="ho-btn primary sm" onclick="fdWaitAck('${o.id}','paid')">Acknowledge</button>`
-        : k === 'wait' ? `<span class="fd-st wait">Waiting</span>${o.mode === 'email' ? `<button class="ho-btn sm" onclick="fdResend('${o.id}')">Send again</button>` : ''}<button class="ho-btn sm" onclick="fdWaitOther('${o.id}')">Paid another way</button>`
-        : `<span class="fd-st off">⚠ Not paid</span><button class="ho-btn sm" onclick="fdWaitAgain('${o.id}')" title="The same items, back in the cart to send a new link">New link</button><button class="ho-btn sm" onclick="fdWaitOther('${o.id}')">Paid another way</button><button class="ho-btn sm" onclick="fdWaitOff('${o.id}')">Not paid…</button>`}</div></div>`; };
+        : k === 'wait' ? `<span class="fd-st wait">Waiting</span>${o.mode === 'email' ? `<button class="ho-btn sm" onclick="fdResend('${o.id}')">Send again</button>` : ''}<button class="ho-btn sm" onclick="fdWaitPayOther('${o.id}')" title="Turn off the emailed link and take payment here instead">Pay another way</button><button class="ho-btn sm" onclick="fdWaitCancel('${o.id}')">Cancel order</button>`
+        : `<span class="fd-st off">⚠ Not paid</span><button class="ho-btn sm" onclick="fdWaitAgain('${o.id}')" title="The same items, back in the cart to send a new link">New link</button><button class="ho-btn sm" onclick="fdWaitPayOther('${o.id}')" title="Take payment here instead">Pay another way</button><button class="ho-btn sm" onclick="fdWaitCancel('${o.id}')">Cancel order</button><button class="ho-btn sm" onclick="fdWaitOff('${o.id}')">Not paid…</button>`}</div></div>`; };
   const A = Array.isArray(L) ? L : [], groups = [['unpaid', '⚠ Not paid: needs someone to deal with it'], ['paid', '✓ Paid: acknowledge'], ['wait', 'Waiting to pay']];
   return `<div class="fd-sheet-back" onclick="if(event.target===this){_fdWait.open=false;fdRender()}"><div class="fd-sheet" style="max-width:760px"><h3>🧾 Sent to pay</h3>
     <p class="fd-sm">Orders this desk emailed or sent as a link. Each stays here until it’s dealt with, so nobody forgets one: paid ones need a tap to acknowledge, and unpaid ones (especially drinks and snacks already had) stay until someone decides.</p>
@@ -979,6 +990,22 @@ async function fdWaitOther(id) {
   if (o.status === 'pending') { try { await fdCall({ action: 'staff_cancel', order_id: id }); } catch (e) { } }   // (the link is turned off, so it can't be paid twice)
   fdWaitAck(id, 'paid_other', how || 'Paid another way');
 }
+// (Nov 14 2026) Pay another way: the emailed link turned off, and the same items back in the cart to pay here (card, QR on their phone…)
+async function fdWaitPayOther(id) {
+  const o = (_fdWait.list || []).find(x => x.id === id); if (!o) return;
+  const L = o.lines || [], movable = L.filter(l => (l.kind === 'retail' && l.variant_id) || l.kind === 'charge');
+  if (!movable.length || movable.length < L.length) { alert('This order has bookings in it (classes, workshops…), so it can’t go back in the cart by itself.\n\nCancel the order, then book it again from the tabs and choose how they’ll pay.'); return; }
+  if (!confirm(`Pay another way: the emailed link for ${fdMoney(o.total)} is turned off, and the items go back in the cart so ${o.name || 'they'} can pay here. Go ahead?`)) return;
+  if (o.status === 'pending') { try { await fdCall({ action: 'staff_cancel', order_id: id }); } catch (e) { } }   // (so it can't be paid twice)
+  await fdWaitAgain(id, true);
+}
+// (Nov 14 2026) Cancel order: the link turned off, and the order off the list (with a reason, kept with it)
+async function fdWaitCancel(id) {
+  const o = (_fdWait.list || []).find(x => x.id === id); if (!o) return;
+  const why = prompt(`Cancel this order? ${o.name || ''} · ${o.what || ''} (${fdMoney(o.total)}).\n\nThe pay link stops working. Why? (optional, kept with the order)`, ''); if (why === null) return;
+  if (o.status === 'pending') { try { await fdCall({ action: 'staff_cancel', order_id: id }); } catch (e) { } }
+  await fdWaitAck(id, 'cancelled', why.trim() || 'Cancelled at the desk');
+}
 async function fdWaitOff(id) {
   const o = (_fdWait.list || []).find(x => x.id === id); if (!o) return;
   const why = prompt(`Not paid: ${o.what || ''} (${fdMoney(o.total)}).\n\nWhy? (kept with the order; any shop items come off stock as given)`, ''); if (!why || !why.trim()) return;
@@ -986,7 +1013,7 @@ async function fdWaitOff(id) {
   fdWaitAck(id, 'written_off', why.trim());
 }
 // not paid: the same items back in the cart (with the family), to send a new link; the old one comes off the list
-async function fdWaitAgain(id) {
+async function fdWaitAgain(id, payHere) {
   const o = (_fdWait.list || []).find(x => x.id === id); if (!o) return;
   if (_fd.cart.length && !confirm('Replace what’s in the cart now with this order’s items?')) return;
   const L = (o.lines || []), cart = [];
@@ -995,7 +1022,7 @@ async function fdWaitAgain(id) {
   const skipped = L.length - cart.length;
   if (!cart.length) { alert('This order has bookings, not shop items: book them again from the tabs.'); return; }
   _fd.cart = cart; _fd.fam = { customer_id: null, email: o.email, first_name: String(o.name || 'Family').split(' ')[0], last_name: String(o.name || '').split(' ').slice(1).join(' ') };
-  await fdWaitAck(id, 'cancelled', 'A new link was sent');
+  await fdWaitAck(id, 'cancelled', payHere ? 'Paid another way at the desk' : 'A new link was sent');
   _fdWait.open = false; _fd.msg = skipped ? 'Back in the cart (bookings in it need adding again from the tabs). Choose how they’ll pay.' : 'Back in the cart: choose how they’ll pay.'; fdRender();
 }
 function fdAckCancelled(id) { sb.rpc('hub_pos_ack', { p_order: id, p_kind: 'cancelled', p_note: 'Cancelled at the desk' }).then(() => fdWaitLoad()).catch(() => {}); }
