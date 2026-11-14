@@ -7391,7 +7391,8 @@ async function wuOpen(pt) {
   W.promo = /yes/i.test(String(props['Promotional party'] || '')) || /promotional/i.test(JSON.stringify(props));   // 🎁 the party itself was free
   W.booked = { guests: bookedGuests, art: addons.artTime || (/90/.test(props['Art time'] || '') ? '90 min' : k === 'get_together' || k === 'field_trip' ? '90 min' : '60 min'),
     party: addons.partyTime || (/45/.test(props['Party time after'] || '') ? '45 min' : /60/.test(props['Party time after'] || '') ? '60 min' : /30/.test(props['Party time after'] || '') ? '30 min' : 'none'),
-    upgrade: !!addons.projectUpgrade || !!props['Project upgrade'], canvas: !!addons.canvasUpgrade || /yes/i.test(props['Canvas'] || ''), custom: /custom/i.test(JSON.stringify(props)) };
+    // (Nov 14 2026) a kids party booked with a clay project: the $40 clay upgrade was booked (and paid) too
+    upgrade: !!addons.projectUpgrade || !!props['Project upgrade'] || (k === 'kids' && (() => { try { return mapProjectTypeToMedium(getProjectTypeFromPayload(b.raw_payload) || props['Project Type'] || '') === 'clay'; } catch (e) { return false; } })()), canvas: !!addons.canvasUpgrade || /yes/i.test(props['Canvas'] || ''), custom: /custom/i.test(JSON.stringify(props)) };
   W.f = { contact_name: d.contact_name || b.customer_name || '', contacted: d.contacted || '', expected_guests: d.expected_guests || bookedGuests,
     project: d.project || b.project_preference || props['Project Type'] || props['Project'] || '', party_reason: d.party_reason || d.occasion || b.reason_for_gathering || props['Reason for Celebration'] || props['Reason for get-together'] || '',
     medium: d.medium || (() => { try { return mapProjectTypeToMedium(getProjectTypeFromPayload(b.raw_payload) || props['Project Type'] || '') || ''; } catch (e) { return ''; } })() || (k === 'field_trip' ? 'obc' : k === 'get_together' ? 'clay' : ''),
@@ -7400,12 +7401,13 @@ async function wuOpen(pt) {
     extra_adults: d.extra_adults || '', outcome_notes: d.outcome_notes || '',
     upgrade: d.extras && d.extras.upgrade != null ? !!d.extras.upgrade : W.booked.upgrade, custom: d.extras && d.extras.custom != null ? !!d.extras.custom : W.booked.custom,
     canvas: d.extras && d.extras.canvas != null ? !!d.extras.canvas : W.booked.canvas };
-  W.detail = d; W.loading = false; wuDraw(id);
+  W.detail = d; W.loading = false; wuDraw(id); wuMemberAltRestore(id);
 }
 // the actual total, before tax, from Party pricing (the same sums World uses), with the member price and the terms' minimums
 function wuCalc(W) {
   const k = W.kind, f = W.f, P = (W.pr && W.pr.P) || {}, n = parseInt(f.actual_guests, 10) || 0, r2 = x => Math.round(x * 100) / 100;
-  const member = !!(W.paid && W.paid.member) && !(W.paid.plan === 'workshops' && k !== 'get_together'), rate = +P.rate || 0;
+  const MO = W.memberAlt || null;   // (★ a membership under another email, checked by staff)
+  const member = (!!(W.paid && W.paid.member) && !(W.paid.plan === 'workshops' && k !== 'get_together')) || (!!MO && !(MO.plan === 'workshops' && k !== 'get_together')), rate = +P.rate || 0;
   const after = wuMin(f.actual_party_time === 'none' ? 0 : f.actual_party_time), lines = [];
   if (!n || k === 'buyout') return null;   // (a studio buyout settles through its balance invoice: Hub → Studio buyouts)
   if (k === 'kids' || k === 'splatter') {
@@ -7463,7 +7465,9 @@ function wuDraw(id) {
   const sel = (n, l, opts) => `<label class="wu-f"><span>${l}</span><select data-wu="${n}">${opts.map(o => `<option value="${escAttr(o[0])}"${String(f[n]) === o[0] ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select></label>`;
   const is11 = /^11:/.test(String(s.session_time || '')), d = W.detail || {};
   let h = `<div class="wu-card"><div class="wu-head"><b>${esc(WU_LABEL[k])}</b> · ${esc(b.customer_name || '')} <span class="goal-note">${esc(b.customer_email || '')} · ${esc(b.shopify_order_name || '')}</span>
-      ${W.paid && W.paid.member ? `<span class="cust-st cust-booked" title="${escAttr('From their ' + (W.paid.member_source === 'membership' ? 'membership' : 'member tags'))}">★ Member${W.paid.plan === 'workshops' ? ' (Workshops Only)' : ''}</span>` : '<span class="cust-st">Not a member</span>'}</div>`;
+      ${W.paid && W.paid.member ? `<span class="cust-st cust-booked" title="${escAttr('From their ' + (W.paid.member_source === 'membership' ? 'membership' : 'member tags'))}">★ Member${W.paid.plan === 'workshops' ? ' (Workshops Only)' : ''}</span>`
+        : W.memberAlt ? `<span class="cust-st cust-booked" title="They booked signed in to 4Cats World as a member (the order went through under another email)">★ Member (booked signed in as ${esc(W.memberAlt.email)})${W.memberAlt.plan === 'workshops' ? ' · Workshops Only' : ''}</span>`
+        : `<span class="cust-st">Not a member</span>`}</div>`;   // (★ "member under another email": on hold, Nov 14 2026, until it can be proven safely)
   if (W.err) h += `<p class="fd-msg">${esc(W.err)}</p>`;
   // (Nov 10 2026) what they booked and paid for, so staff can see it (Expected guests below is just for planning)
   { const B = W.booked || {}, paidB = Number((W.paid && W.paid.paid) || 0);
@@ -7480,7 +7484,7 @@ function wuDraw(id) {
       ${k !== 'field_trip' ? sel('actual_party_time', 'Party time after', [['none', 'None'], ['30 min', '30 min'], ['45 min', '45 min'], ['60 min', '60 min']]) : ''}
       ${is11 && k === 'kids' ? i('extra_adults', 'Extra adults ($5 observers, beyond the 2 included)', 'number', 'min="0"') : ''}</div>
       ${(() => { const K = ((W.pr && W.pr.P) || {})[k] || {}, cb = (n, l, price, was) => `<label class="wu-chk"><input type="checkbox" data-wu="${n}"${f[n] ? ' checked' : ''}> ${l}${price ? ` <span class="goal-note">$${Number(price).toFixed(2)}${n === 'canvas' ? ' per guest' : ''}</span>` : ''}${was ? ' <span class="goal-note">(booked)</span>' : ''}</label>`;
-        return k === 'kids' ? `<div class="wu-extras"><b>Extras</b>${cb('upgrade', 'Project upgrade', K.upgrade, W.booked.upgrade)}${cb('custom', 'Custom project', K.custom, W.booked.custom)}</div>`
+        return k === 'kids' ? `<div class="wu-extras"><b>Extras</b>${cb('upgrade', 'Project upgrade (clay)', K.upgrade, W.booked.upgrade)}${cb('custom', 'Custom project', K.custom, W.booked.custom)}</div>`
           : k === 'splatter' ? `<div class="wu-extras"><b>Extras</b>${cb('canvas', 'Canvas', K.canvas, W.booked.canvas)}</div>` : ''; })()}
       <p class="goal-note">${k === 'field_trip' ? 'Children only: teachers and adults aren\u2019t charged.' : is11 && k === 'kids' ? 'At 11am, adults beyond the 2 included are $5 observers.' : 'Adults who join in count as guests.'}</p>
       <label class="wu-f wide"><span>How it went (notes)</span><input data-wu="outcome_notes" value="${escAttr(f.outcome_notes || '')}"></label></div>`;
@@ -7513,6 +7517,8 @@ function wuDraw(id) {
   el.innerHTML = h;
 }
 document.addEventListener('input', ev => { const t = ev.target; if (!t.dataset || !t.dataset.wu || t.type === 'checkbox') return; const card = t.closest('.pf-wrap'); const id = card && card.dataset.pf; if (!id || !_wu[id]) return; _wu[id].f[t.dataset.wu] = t.value; });
+document.addEventListener('change', ev => { const t = ev.target; if (!t.dataset || t.dataset.wu !== 'medium') return; const card = t.closest('.pf-wrap'); const id = card && card.dataset.pf, W = id && _wu[id];
+  if (W && W.kind === 'kids') { const was = W.f.medium; W.f.medium = t.value; if (t.value === 'clay') W.f.upgrade = true; else if (was === 'clay') W.f.upgrade = false; wuDraw(id); } }, true);   // (🏺 clay is the $40 project upgrade)
 document.addEventListener('change', ev => { const t = ev.target; if (!t.dataset || !t.dataset.wu) return; const card = t.closest('.pf-wrap'); const id = card && card.dataset.pf; if (!id || !_wu[id]) return; _wu[id].f[t.dataset.wu] = t.type === 'checkbox' ? t.checked : t.value;
   if (['actual_guests', 'actual_art_time', 'actual_party_time', 'extra_adults', 'project', 'upgrade', 'custom', 'canvas'].includes(t.dataset.wu)) wuDraw(id); });
 function wuFields(W) {
@@ -7522,6 +7528,13 @@ function wuFields(W) {
   if (W.calc) { p.settle_total = String(W.calc.total); p.settle_paid_before = String(W.calc.paidBefore); p.settle_member = !!W.calc.member;
     p.outcome = W.calc.diff > 0.004 ? 'Charge extra' : W.calc.diff < -0.004 ? 'Issue credit' : 'All good'; p.outcome_amount = W.calc.withTax ? W.calc.withTax.toFixed(2) : ''; }
   return p;
+}
+// ★ (Nov 14 2026) booked signed in to 4Cats World as a member, but the order went under another email: World's discount code on the
+// order records the signed-in account, and if that account has an active membership, the party settles at member prices
+// (hub_party_member_signed_in). Nothing typed by staff.
+async function wuMemberAltRestore(id) {
+  const W = _wu[id]; if (!W || W.memberAlt || (W.paid && W.paid.member)) return;
+  try { const { data } = await sb.rpc('hub_party_member_signed_in', { p_booking: id }); if (data && data.member) { W.memberAlt = { email: data.email || '', plan: data.plan, ends_on: data.ends_on }; wuDraw(id); } } catch (e) { }
 }
 async function wuSave(id, extra, quiet) {
   const W = _wu[id]; if (!W) return;
