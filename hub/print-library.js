@@ -24,7 +24,7 @@
 
   // ---------- studios: current brochures and print-outs ----------
   window.openPrintPane = async function () {
-    showOnlyPane('print-pane'); if (typeof setActiveNav === 'function') setActiveNav('nav-print');
+    pane('print-pane'); showOnlyPane('print-pane');   // (the page first, then show it) if (typeof setActiveNav === 'function') setActiveNav('nav-print');
     drawStudio(); const { data, error } = await sb.rpc('hub_print_list', { p_studio: (typeof _sessionStudioId !== 'undefined' && _sessionStudioId) || null });
     P.list = error ? { err: /hub_print_list/.test(error.message) && /function/i.test(error.message) ? 'The Print library isn’t set up yet.' : error.message } : (data || []); drawStudio();
   };
@@ -52,7 +52,7 @@
     const x = Array.isArray(P.list) && P.list.find(z => z.id === id); if (x && !x.downloaded) { x.downloaded = true; setTimeout(drawStudio, 400); } };
 
   // ---------- home office: upload and manage ----------
-  window.openPrintAdmin = async function () { showOnlyPane('printadm-pane'); if (typeof setActiveNav === 'function') setActiveNav('nav-print-admin'); P.edit = null; drawAdmin(); await loadAdmin(); };
+  window.openPrintAdmin = async function () { pane('printadm-pane'); showOnlyPane('printadm-pane'); if (typeof setActiveNav === 'function') setActiveNav('nav-print-admin'); P.edit = null; drawAdmin(); await loadAdmin(); };
   async function loadAdmin() { const { data, error } = await sb.rpc('hub_print_admin_list'); P.admin = error ? { err: /hub_print_admin_list/.test(error.message) && /function/i.test(error.message) ? 'Run hub_print_library.sql in Supabase first.' : error.message } : (data || []); drawAdmin(); }
   function drawAdmin() {
     const el = pane('printadm-pane'), L = P.admin, n = allStudios().length;
@@ -135,6 +135,7 @@
     const files = [data && data.file_path, data && data.cover_path].filter(f => f && !/^https?:\/\//i.test(f)); if (files.length) sb.storage.from(BUCKET).remove(files).then(() => {}, () => {});
     P.msg = 'Deleted ' + x.title + '.'; await loadAdmin();
   };
+  pane('print-pane'); pane('printadm-pane');   // (Nov 14 2026: made when the Hub loads, so showing them always works)
   const css = document.createElement('style');
   css.textContent = `.pl-cats { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; } .pl-cats button { border: 1px solid #e3e0f3; background: #fff; border-radius: 999px; padding: 6px 14px; font: inherit; font-weight: 600; cursor: pointer; }
 .pl-cats button.on { background: var(--accent, #4f3bd1); color: #fff; border-color: transparent; }
