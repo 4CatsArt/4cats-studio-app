@@ -289,6 +289,7 @@ function ctAddSum() { const n = document.querySelectorAll('.cta-st:checked').len
 function ctAddTime() { const v = document.getElementById('cta-time').value; if (v && !_cta.times.includes(v)) { _cta.times.push(v); _cta.times.sort(); }
   document.getElementById('cta-times').innerHTML = _cta.times.map((t, i) => `<span class="bk-chip">${esc(shortTime(t + ':00'))} <button type="button" onclick="_cta.times.splice(${i},1);ctAddTime()">×</button></span>`).join(''); }
 async function ctAddPreview() {
+  { const t0 = (document.getElementById('cta-time') || {}).value; if (t0 && !_cta.times.includes(t0)) ctAddTime(); }   // (a typed time counts, even before + Add time)
   const v = id => document.getElementById(id).value, out = document.getElementById('cta-out');
   const page = v('cta-page'), studios = [...document.querySelectorAll('.cta-st:checked')].map(x => x.value), days = [...document.querySelectorAll('.cta-day:checked')].map(x => +x.value);
   const start = v('cta-start'), weeks = +v('cta-weeks') || 0;
@@ -613,6 +614,12 @@ function bulkProv(pv) { document.querySelectorAll('.bk-st').forEach(x => { if (x
 function bulkAddTime() { const v = bulkVal('bk-time'); bulkKeep(); if (v && !_bulk.times.includes(v)) { _bulk.times.push(v); _bulk.times.sort(); } _bulk.res = null; bulkDraw(); }
 function bulkAddSkip() { const v = bulkVal('bk-skip'); bulkKeep(); if (v && !_bulk.skip.includes(v)) { _bulk.skip.push(v); _bulk.skip.sort(); } _bulk.res = null; bulkDraw(); }
 async function bulkRun(preview) {
+  { // (Nov 13 2026) a time or skip date typed in its box but not added yet counts too (it's what people expect)
+    const t0 = bulkVal('bk-time'), k0 = bulkVal('bk-skip');
+    if (t0 && !_bulk.times.includes(t0)) { _bulk.times.push(t0); _bulk.times.sort(); _bulk.res = null; }
+    if (k0 && !_bulk.skip.includes(k0)) { _bulk.skip.push(k0); _bulk.skip.sort(); _bulk.res = null; }
+    if (t0 || k0) { bulkKeep(); bulkDraw(); }
+  }
   bulkKeep(); const B = _bulk, msg = document.getElementById('bk-msg');
   const what = B.kind === 'workshop' ? ((bulkItem() || {}).title || 'workshop') + ' times' : B.kind === 'get_together' ? 'Adult Get-Together time slots' : B.kind === 'kids' ? 'Kids party times' : B.kind === 'splatter' ? 'Splatter party times' : 'glazing times';
   if (B.kind === 'workshop' && !B.item) { msg.textContent = 'Choose the workshop first.'; return; }
