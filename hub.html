@@ -7391,8 +7391,12 @@ async function wuOpen(pt) {
   W.promo = /yes/i.test(String(props['Promotional party'] || '')) || /promotional/i.test(JSON.stringify(props));   // 🎁 the party itself was free
   W.booked = { guests: bookedGuests, art: addons.artTime || (/90/.test(props['Art time'] || '') ? '90 min' : k === 'get_together' || k === 'field_trip' ? '90 min' : '60 min'),
     party: addons.partyTime || (/45/.test(props['Party time after'] || '') ? '45 min' : /60/.test(props['Party time after'] || '') ? '60 min' : /30/.test(props['Party time after'] || '') ? '30 min' : 'none'),
-    // (Nov 14 2026) a kids party booked with a clay project: the $40 clay upgrade was booked (and paid) too
-    upgrade: !!addons.projectUpgrade || !!props['Project upgrade'] || (k === 'kids' && (() => { try { return mapProjectTypeToMedium(getProjectTypeFromPayload(b.raw_payload) || props['Project Type'] || '') === 'clay'; } catch (e) { return false; } })()), canvas: !!addons.canvasUpgrade || /yes/i.test(props['Canvas'] || ''), custom: /custom/i.test(JSON.stringify(props)) };
+    // (Nov 14 2026) kids parties: the $40 project upgrade is Clay, Painting or Besties (Oven-bake clay is included), or a "Project
+    // Upgrade" line on the order; a custom project is a "custom party theme" / "custom project" line (a splatter party's custom
+    // colours aren't one)
+    upgrade: !!addons.projectUpgrade || !!props['Project upgrade'] || (k === 'kids' && (WU_UPGRADE_MEDIA.includes(wuBookedMedium(b, props)) || LI.some(li => /project\s*upgrade|party\s*upgrade/i.test(String(li.title || ''))))),
+    canvas: !!addons.canvasUpgrade || /yes/i.test(props['Canvas'] || ''),
+    custom: k === 'kids' && (LI.some(li => /custom\s*(party\s*theme|project)/i.test(String(li.title || ''))) || /^yes/i.test(String(props['Custom project'] || ''))) };
   W.f = { contact_name: d.contact_name || b.customer_name || '', contacted: d.contacted || '', expected_guests: d.expected_guests || bookedGuests,
     project: d.project || b.project_preference || props['Project Type'] || props['Project'] || '', party_reason: d.party_reason || d.occasion || b.reason_for_gathering || props['Reason for Celebration'] || props['Reason for get-together'] || '',
     medium: d.medium || (() => { try { return mapProjectTypeToMedium(getProjectTypeFromPayload(b.raw_payload) || props['Project Type'] || '') || ''; } catch (e) { return ''; } })() || (k === 'field_trip' ? 'obc' : k === 'get_together' ? 'clay' : ''),
@@ -7484,7 +7488,7 @@ function wuDraw(id) {
       ${k !== 'field_trip' ? sel('actual_party_time', 'Party time after', [['none', 'None'], ['30 min', '30 min'], ['45 min', '45 min'], ['60 min', '60 min']]) : ''}
       ${is11 && k === 'kids' ? i('extra_adults', 'Extra adults ($5 observers, beyond the 2 included)', 'number', 'min="0"') : ''}</div>
       ${(() => { const K = ((W.pr && W.pr.P) || {})[k] || {}, cb = (n, l, price, was) => `<label class="wu-chk"><input type="checkbox" data-wu="${n}"${f[n] ? ' checked' : ''}> ${l}${price ? ` <span class="goal-note">$${Number(price).toFixed(2)}${n === 'canvas' ? ' per guest' : ''}</span>` : ''}${was ? ' <span class="goal-note">(booked)</span>' : ''}</label>`;
-        return k === 'kids' ? `<div class="wu-extras"><b>Extras</b>${cb('upgrade', 'Project upgrade (clay)', K.upgrade, W.booked.upgrade)}${cb('custom', 'Custom project', K.custom, W.booked.custom)}</div>`
+        return k === 'kids' ? `<div class="wu-extras"><b>Extras</b>${cb('upgrade', 'Project upgrade', K.upgrade, W.booked.upgrade)}${cb('custom', 'Custom project', K.custom, W.booked.custom)}</div>`
           : k === 'splatter' ? `<div class="wu-extras"><b>Extras</b>${cb('canvas', 'Canvas', K.canvas, W.booked.canvas)}</div>` : ''; })()}
       <p class="goal-note">${k === 'field_trip' ? 'Children only: teachers and adults aren\u2019t charged.' : is11 && k === 'kids' ? 'At 11am, adults beyond the 2 included are $5 observers.' : 'Adults who join in count as guests.'}</p>
       <label class="wu-f wide"><span>How it went (notes)</span><input data-wu="outcome_notes" value="${escAttr(f.outcome_notes || '')}"></label></div>`;
@@ -7518,7 +7522,7 @@ function wuDraw(id) {
 }
 document.addEventListener('input', ev => { const t = ev.target; if (!t.dataset || !t.dataset.wu || t.type === 'checkbox') return; const card = t.closest('.pf-wrap'); const id = card && card.dataset.pf; if (!id || !_wu[id]) return; _wu[id].f[t.dataset.wu] = t.value; });
 document.addEventListener('change', ev => { const t = ev.target; if (!t.dataset || t.dataset.wu !== 'medium') return; const card = t.closest('.pf-wrap'); const id = card && card.dataset.pf, W = id && _wu[id];
-  if (W && W.kind === 'kids') { const was = W.f.medium; W.f.medium = t.value; if (t.value === 'clay') W.f.upgrade = true; else if (was === 'clay') W.f.upgrade = false; wuDraw(id); } }, true);   // (🏺 clay is the $40 project upgrade)
+  if (W && W.kind === 'kids') { const was = W.f.medium; W.f.medium = t.value; if (WU_UPGRADE_MEDIA.includes(t.value)) W.f.upgrade = true; else if (WU_UPGRADE_MEDIA.includes(was)) W.f.upgrade = false; wuDraw(id); } }, true);   // (🏺 clay, 🎨 painting and 💕 besties are the $40 project upgrade)
 document.addEventListener('change', ev => { const t = ev.target; if (!t.dataset || !t.dataset.wu) return; const card = t.closest('.pf-wrap'); const id = card && card.dataset.pf; if (!id || !_wu[id]) return; _wu[id].f[t.dataset.wu] = t.type === 'checkbox' ? t.checked : t.value;
   if (['actual_guests', 'actual_art_time', 'actual_party_time', 'extra_adults', 'project', 'upgrade', 'custom', 'canvas'].includes(t.dataset.wu)) wuDraw(id); });
 function wuFields(W) {
@@ -7536,6 +7540,9 @@ async function wuMemberAltRestore(id) {
   const W = _wu[id]; if (!W || W.memberAlt || (W.paid && W.paid.member)) return;
   try { const { data } = await sb.rpc('hub_party_member_signed_in', { p_booking: id }); if (data && data.member) { W.memberAlt = { email: data.email || '', plan: data.plan, ends_on: data.ends_on }; wuDraw(id); } } catch (e) { }
 }
+// the kids party projects that are the $40 project upgrade (Oven-bake clay is included)
+const WU_UPGRADE_MEDIA = ['clay', 'painting', 'besties'];
+function wuBookedMedium(b, props) { try { return mapProjectTypeToMedium(getProjectTypeFromPayload(b && b.raw_payload) || (props && props['Project Type']) || '') || ''; } catch (e) { return ''; } }
 async function wuSave(id, extra, quiet) {
   const W = _wu[id]; if (!W) return;
   const { data, error } = await sb.rpc('hub_party_wrapup_save', { p_booking: id, p: Object.assign(wuFields(W), extra || {}) });
