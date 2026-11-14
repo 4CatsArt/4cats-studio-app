@@ -4,7 +4,7 @@
 (function () {
   const BUCKET = 'print-library', CATS = ['Brochures', 'Posters', 'Signs', 'Price lists', 'Flyers', 'Forms', 'Other'];
   const P = { list: null, cat: '', admin: null, edit: null, msg: '' };
-  const url = path => path ? `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${String(path).split('/').map(encodeURIComponent).join('/')}` : '';
+  const url = path => !path ? '' : /^https?:\/\//i.test(path) ? path : `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${String(path).split('/').map(encodeURIComponent).join('/')}`;   // (a library picture: its own address)
   const isImg = t => /^image\//.test(t || ''), isPdf = (t, n) => /pdf/.test(t || '') || /\.pdf$/i.test(n || '');
   const size = n => !n ? '' : n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
   const day = d => d ? new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
@@ -75,8 +75,8 @@
     const S = allStudios(), on = new Set(E.studio_ids || []);
     const byProv = {}; S.forEach(s => (byProv[s.slice(0, 2)] = byProv[s.slice(0, 2)] || []).push(s));
     return `<div class="ho-card pl-form"><h3 style="margin:0 0 8px">${E.id ? 'Edit' : 'Add a print-out'}</h3>
-      <label class="dash-set-row">File (PDF or picture) <input type="file" id="pl-file" accept=".pdf,image/*,.doc,.docx,.ppt,.pptx">${E.file_path ? ` <span class="fd-sm">now: ${esc(E.file_name || E.file_path)}</span>` : ''}</label>
-      <label class="dash-set-row">Cover picture (optional, for a PDF) <input type="file" id="pl-cover" accept="image/*">${E.cover_path ? ' <span class="fd-sm">has one</span>' : ''}</label>
+      <div class="dash-set-row">File (PDF or picture) <input type="file" id="pl-file" accept=".pdf,image/*,.doc,.docx,.ppt,.pptx"> <button type="button" class="ho-btn sm" onclick="printLib('file')">🖼️ Choose from library</button>${E.file_path ? ` <span class="fd-sm" id="pl-file-now">now: ${esc(E.file_name || E.file_path)}</span>` : '<span class="fd-sm" id="pl-file-now"></span>'}</div>
+      <div class="dash-set-row">Cover picture (optional, for a PDF) <input type="file" id="pl-cover" accept="image/*"> <button type="button" class="ho-btn sm" onclick="printLib('cover')">🖼️ Choose from library</button>${E.cover_path ? `<img class="pl-pv" src="${escAttr(url(E.cover_path))}" alt="">` : ''}${E.cover_path ? ' <button type="button" class="ho-btn sm" onclick="printLib(\'nocover\')">Remove</button>' : ''}</div>
       <label class="dash-set-row">Title <input type="text" id="pl-title" maxlength="100" value="${escAttr(E.title || '')}" placeholder="e.g. Winter 2027 brochure"></label>
       <label class="dash-set-row">Category <select id="pl-cat">${CATS.map(c => `<option${(E.category || 'Brochures') === c ? ' selected' : ''}>${c}</option>`).join('')}</select></label>
       <label class="dash-set-row">Note for studios (optional) <input type="text" id="pl-desc" maxlength="200" value="${escAttr(E.description || '')}" placeholder="e.g. Print on 11×17, double-sided"></label>
@@ -86,6 +86,16 @@
       <label class="dash-set-row"><input type="checkbox" id="pl-active"${E.active === false ? '' : ' checked'}> Showing to studios</label>
       <div style="display:flex;gap:8px;align-items:center;margin-top:8px"><button class="ho-btn primary" onclick="printSave()">Save</button><button class="ho-btn" onclick="printEdit(null)">Cancel</button><span class="fd-sm" id="pl-msg"></span></div></div>`;
   }
+  window.printLib = function (what) {   // 🖼️ a picture already in storage (the file itself, or the cover)
+    const E = P.edit; if (!E) return;
+    const keep = () => { E.title = document.getElementById('pl-title').value; E.category = document.getElementById('pl-cat').value; E.description = document.getElementById('pl-desc').value;
+      E.studio_ids = [...document.querySelectorAll('[data-plst]:checked')].map(x => x.dataset.plst); E.show_from = document.getElementById('pl-from').value || null;
+      E.show_until = document.getElementById('pl-until').value || null; E.active = document.getElementById('pl-active').checked; };
+    if (what === 'nocover') { keep(); E.cover_path = ''; drawAdmin(); return; }
+    if (typeof hubPicPick !== 'function') { alert('The picture library isn’t loaded.'); return; }
+    hubPicPick(u => { keep(); if (what === 'cover') E.cover_path = u; else { E.file_path = u; E.file_name = decodeURIComponent(u.split('/').pop()); E.file_type = /\.png$/i.test(u) ? 'image/png' : /\.svg$/i.test(u) ? 'image/svg+xml' : /\.webp$/i.test(u) ? 'image/webp' : /\.gif$/i.test(u) ? 'image/gif' : 'image/jpeg'; E.file_size = null; }
+      drawAdmin(); });
+  };
   window.printEdit = function (id) {
     P.msg = ''; P.edit = id === 'new' ? { studio_ids: [], active: true } : id ? JSON.parse(JSON.stringify((P.admin || []).find(x => x.id === id) || null)) : null; drawAdmin();
     const f = document.querySelector('.pl-form'); if (f) f.scrollIntoView({ block: 'start', behavior: 'smooth' });
@@ -117,12 +127,12 @@
     say('Saving…');
     const { error } = await sb.rpc('hub_print_save', { p: rec });
     if (error) { say('Not saved: ' + error.message); return; }
-    P.edit = null; P.msg = '✓ Saved ' + rec.title + '.'; await loadAdmin();
+    P.edit = null; P.msg = '✓ Saved ' + rec.title + '.'; if (typeof hubPicReset === 'function' && (f || c)) hubPicReset(); await loadAdmin();
   };
   window.printDel = async function (id) {
     const x = (P.admin || []).find(z => z.id === id); if (!x || !confirm('Delete “' + x.title + '” from the Print library? Studios won’t see it any more.')) return;
     const { data, error } = await sb.rpc('hub_print_delete', { p_id: id }); if (error) { alert('Not deleted: ' + error.message); return; }
-    const files = [data && data.file_path, data && data.cover_path].filter(Boolean); if (files.length) sb.storage.from(BUCKET).remove(files).then(() => {}, () => {});
+    const files = [data && data.file_path, data && data.cover_path].filter(f => f && !/^https?:\/\//i.test(f)); if (files.length) sb.storage.from(BUCKET).remove(files).then(() => {}, () => {});
     P.msg = 'Deleted ' + x.title + '.'; await loadAdmin();
   };
   const css = document.createElement('style');
@@ -138,6 +148,6 @@
 .pl-row { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 8px; } .pl-mini { width: 74px; height: 56px; flex: none; border-radius: 8px; overflow: hidden; background: #f4f2fb; } .pl-mini img { width: 100%; height: 100%; object-fit: cover; } .pl-mini .pl-ic { font-size: 24px; }
 .pl-info { flex: 1; min-width: 0; } .pl-act { display: flex; gap: 6px; flex-wrap: wrap; } .pl-on { color: #1e7a45; font-weight: 700; font-size: 12px; } .pl-off { color: #8a6d00; font-weight: 700; font-size: 12px; }
 .pl-dl summary { cursor: pointer; font-size: 13px; margin-top: 4px; } .pl-form .dash-set-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
-.pl-studios { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px 16px; width: 100%; margin-top: 4px; } .pl-studios label { display: block; font-size: 13px; }`;
+.pl-pv { width: 60px; height: 44px; object-fit: cover; border-radius: 6px; } .pl-studios { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px 16px; width: 100%; margin-top: 4px; } .pl-studios label { display: block; font-size: 13px; }`;
   document.head.appendChild(css);
 })();
