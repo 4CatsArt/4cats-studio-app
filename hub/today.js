@@ -502,12 +502,13 @@ async function meAnnAck(id, btn) {
 
 
 // The 📣 Announcements page (studio computer): everything showing, in full, with who's read it here
-let _annReaders = {}, _annPeople = null;
+let _annReaders = {}, _annPeople = null, _annAway = [];
 async function openAnnPane(focusId) {
   showOnlyPane('ann-pane'); setActiveNav('nav-ann');
   await loadAnnouncements(_sessionStudioId);
   try { const r = await sb.rpc('hub_announcements_readers', { p_studio_id: _sessionStudioId || null }); _annReaders = r.error ? null : (r.data || {}); } catch (e) { _annReaders = null; }
   try { const r = await sb.rpc('hub_chat_people', { p_studio: _sessionStudioId }); _annPeople = r.error ? null : (r.data || []); } catch (e) { _annPeople = null; }   // (⏳ who still needs to read)
+  try { const r = await sb.rpc('hub_ann_away_ids'); _annAway = r.error ? [] : (r.data || []); } catch (e) { _annAway = []; }   // (on extended leave, or no longer working: left out)
   renderAnnPane();
   if (focusId) { const c = document.getElementById('ann-' + focusId); if (c) c.scrollIntoView({ block: 'start', behavior: 'smooth' }); }
 }
@@ -515,9 +516,10 @@ async function openAnnPane(focusId) {
 function annFirst(p) { return String(p.first || String(p.name || '').trim().split(/\s+/)[0] || ''); }
 function annPending(a) {
   if (!Array.isArray(_annPeople) || !_annPeople.length || _annReaders === null) return null;
-  const done = new Set(((_annReaders || {})[a.id] || []).map(r => String(r.name || '').toLowerCase()));
-  const today = new Set((_teamPeople || []).map(p => p.staff_id));
-  return _annPeople.filter(p => !done.has(annFirst(p).toLowerCase())).map(p => Object.assign({}, p, { today: today.has(p.staff_id) }))
+  const R = (_annReaders || {})[a.id] || [], byId = new Set(R.filter(r => r.staff_id).map(r => r.staff_id));
+  const byName = new Set(R.filter(r => !r.staff_id).map(r => String(r.name || '').toLowerCase()));   // (before the SQL with ids: by first name)
+  const today = new Set((_teamPeople || []).map(p => p.staff_id)), away = new Set(_annAway || []);
+  return _annPeople.filter(p => !away.has(p.staff_id) && !byId.has(p.staff_id) && !byName.has(annFirst(p).toLowerCase())).map(p => Object.assign({}, p, { today: today.has(p.staff_id) }))
     .sort((x, y) => (y.today - x.today) || annFirst(x).localeCompare(annFirst(y)));
 }
 function annPendingHtml(a, canAck) {
