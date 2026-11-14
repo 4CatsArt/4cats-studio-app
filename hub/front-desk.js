@@ -918,7 +918,7 @@ function fdPayHtml() {
       <div class="fd-inline"><input readonly value="${esc(o.url || '')}" onclick="this.select()"><button class="ho-btn" onclick="navigator.clipboard.writeText(_fd.order.url).then(()=>{_fd.order.copied=true;fdRender()})">Copy</button>${o.mode === 'email' ? '<button class="ho-btn" onclick="fdResend(_fd.order.order_id)">Send again</button>' : ''}</div>`;
   h += '<div class="fd-sheet-btns">' + (o.status === 'pending' || o.status === 'expired' || o.status === 'failed' ? '<button class="ho-btn fd-backcart" onclick="fdBackToCart()" title="Nothing is lost: the family and everything in the cart stay, to pay another way">← Back to the cart <small>(pay another way)</small></button>' : '') +
     (o.status === 'pending' ? `<button class="ho-btn" onclick="fdCancel()">${F.cart.length && F.cart.every(l => l.type === 'retail') ? 'Cancel this sale' : 'Cancel (spots go back)'}</button>` : '') +
-    (o.status === 'pending' && o.mode !== 'qr' && o.mode !== 'here' ? '<button class="fd-pay" onclick="fdDone()">Done (they’ll pay later)</button>' : `<button class="fd-pay" onclick="fdDone()">${o.status === 'paid' ? 'Next family' : 'Close'}</button>`) + '</div></div></div>';
+    (o.status === 'pending' && o.mode !== 'qr' && o.mode !== 'here' ? '<button class="fd-pay" onclick="fdDone()">Send the link</button>' : `<button class="fd-pay" onclick="fdDone()">${o.status === 'paid' ? 'Next family' : 'Close'}</button>`) + '</div></div></div>';
   return h;
 }
 function fdQrDraw() {
