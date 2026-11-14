@@ -1347,21 +1347,26 @@ async function fdGiftOpen(kind) {
   const presets = (Array.isArray(G.amounts) && G.amounts.length ? G.amounts : [25, 50, 75, 100]).filter(a => +a >= lo && +a <= hi);
   const designs = (Array.isArray(G.designs) ? G.designs : []).filter(d => d && d.id && d.on !== false);
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Vancouver' });
-  openDutySheet(`<h3 style="margin:0 0 6px">🎁 Sell a gift card</h3>
-    <div class="fd-gc-amts">${presets.map(a => `<button type="button" class="fd-chip" data-gca="${a}">$${a}</button>`).join('')}<label class="fd-sm">Other $<input type="number" id="fd-gc-amt" min="${lo}" max="${hi}" step="1" style="width:90px"></label></div>
-    <p class="fd-sm" style="margin:4px 0 10px">From $${lo} to $${hi}. No tax. Never expires.</p>
-    <div class="fd-gc-to"><label><input type="radio" name="fd-gc-to" value="me" ${walk ? 'disabled' : 'checked'}> Email it to ${walk ? 'the family (choose a family first)' : esc(fam.first_name || 'the family') + (fam.email ? ' (' + esc(fam.email) + ')' : '')} to give</label>
-      <label><input type="radio" name="fd-gc-to" value="email" ${walk ? 'checked' : ''}> Email it to someone else</label></div>
-    <div id="fd-gc-who" ${walk ? '' : 'hidden'}><label class="dash-set-row">Their name <input type="text" id="fd-gc-name" maxlength="80"></label>
-      <label class="dash-set-row">Their email <input type="email" id="fd-gc-email" maxlength="120"></label>
-      <label class="dash-set-row">Send it on <input type="date" id="fd-gc-date" min="${today}" value="${today}"> <span class="fd-sm">(from 8am Pacific that day)</span></label></div>
-    <label class="dash-set-row">From <input type="text" id="fd-gc-from" maxlength="80" value="${escAttr(walk ? '' : [fam.first_name, fam.last_name].filter(Boolean).join(' '))}"></label>
-    <label class="dash-set-row">Message (optional) <input type="text" id="fd-gc-msg" maxlength="500" placeholder="Happy birthday!"></label>
-    ${designs.length ? `<div class="fd-sm" style="margin-top:6px"><b>Card design</b></div><div class="fd-gc-designs">${designs.map((d, i) => `<label class="fd-gc-d"><input type="radio" name="fd-gc-design" value="${escAttr(d.id)}" ${i ? '' : 'checked'}>${d.image ? `<img src="${escAttr(d.image)}" alt="">` : ''}<span>${esc(d.name || 'Design')}</span></label>`).join('')}</div>` : ''}
-    <div id="fd-gc-msgbox" class="fd-msg" hidden></div>
+  openDutySheet(`<div class="fd-gc"><h3>🎁 Sell a gift card</h3>
+    <div class="fd-gc-f"><span class="fd-gc-l">Amount</span><div class="fd-gc-amts">${presets.map(a => `<button type="button" class="fd-gc-amt" data-gca="${a}">$${a}</button>`).join('')}
+      <span class="fd-gc-other">Other $<input type="number" id="fd-gc-amt" min="${lo}" max="${hi}" step="1" inputmode="decimal"></span></div>
+      <span class="fd-gc-hint">From $${lo} to $${hi} · no tax · never expires</span></div>
+    <div class="fd-gc-f"><span class="fd-gc-l">Who it’s for</span><div class="fd-gc-to">
+      <label class="fd-gc-opt${walk ? ' off' : ''}"><input type="radio" name="fd-gc-to" value="me" ${walk ? 'disabled' : 'checked'}><span><b>Email it to ${walk ? 'the family' : esc(fam.first_name || 'the family')}</b><small>${walk ? 'Choose a family first' : esc(fam.email || '') + ', to give it themselves'}</small></span></label>
+      <label class="fd-gc-opt"><input type="radio" name="fd-gc-to" value="email" ${walk ? 'checked' : ''}><span><b>Email it to someone else</b><small>Now, or on a date you choose</small></span></label></div></div>
+    <div id="fd-gc-who" class="fd-gc-grid" ${walk ? '' : 'hidden'}>
+      <label class="fd-gc-f"><span class="fd-gc-l">Their name</span><input type="text" id="fd-gc-name" maxlength="80"></label>
+      <label class="fd-gc-f"><span class="fd-gc-l">Their email</span><input type="email" id="fd-gc-email" maxlength="120"></label>
+      <label class="fd-gc-f"><span class="fd-gc-l">Send it on</span><input type="date" id="fd-gc-date" min="${today}" value="${today}"><span class="fd-gc-hint">From 8am Pacific that day</span></label></div>
+    <div class="fd-gc-grid">
+      <label class="fd-gc-f"><span class="fd-gc-l">From</span><input type="text" id="fd-gc-from" maxlength="80" value="${escAttr(walk ? '' : [fam.first_name, fam.last_name].filter(Boolean).join(' '))}"></label>
+      <label class="fd-gc-f"><span class="fd-gc-l">Message <i>(optional)</i></span><input type="text" id="fd-gc-msg" maxlength="500" placeholder="Happy birthday!"></label></div>
+    ${designs.length ? `<div class="fd-gc-f"><span class="fd-gc-l">Card design</span><div class="fd-gc-designs">${designs.map((d, i) => `<label class="fd-gc-d"><input type="radio" name="fd-gc-design" value="${escAttr(d.id)}" ${i ? '' : 'checked'}>${d.image ? `<img src="${escAttr(d.image)}" alt="">` : '<span class="fd-gc-noimg">🎁</span>'}<span>${esc(d.name || 'Design')}</span></label>`).join('')}</div></div>` : ''}
+    <div id="fd-gc-msgbox" class="fd-msg" hidden></div></div>
     <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="fdGiftAdd(${lo},${hi})">Add to cart</button></div>`);
   document.querySelectorAll('[data-gca]').forEach(b => b.onclick = () => { document.getElementById('fd-gc-amt').value = b.dataset.gca; document.querySelectorAll('[data-gca]').forEach(x => x.classList.toggle('on', x === b)); });
   document.querySelectorAll('[name="fd-gc-to"]').forEach(r => r.onchange = () => { document.getElementById('fd-gc-who').hidden = document.querySelector('[name="fd-gc-to"]:checked').value !== 'email'; });
+  document.getElementById('fd-gc-amt').addEventListener('input', () => document.querySelectorAll('[data-gca]').forEach(x => x.classList.remove('on')));
 }
 function fdGiftAdd(lo, hi) {
   const box = document.getElementById('fd-gc-msgbox'), say = t => { box.textContent = t; box.hidden = false; };
@@ -1383,11 +1388,12 @@ function fdGiftAdd(lo, hi) {
 function fdGiftPhysOpen() {
   const G = _fdGc.set || {}, lo = +G.min > 0 ? +G.min : 10, hi = +G.max > 0 ? +G.max : 500;
   const presets = (Array.isArray(G.amounts) && G.amounts.length ? G.amounts : [25, 50, 75, 100]).filter(a => +a >= lo && +a <= hi);
-  openDutySheet(`<h3 style="margin:0 0 6px">🎴 Physical gift card</h3>
-    <label class="dash-set-row"><b>Card code</b> <input type="text" id="fd-gc-code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Scan or type the code on the card" style="min-width:240px;font-family:monospace;letter-spacing:1px"></label>
-    <div class="fd-gc-amts" style="margin-top:8px">${presets.map(a => `<button type="button" class="fd-chip" data-gca="${a}">$${a}</button>`).join('')}<label class="fd-sm">Other $<input type="number" id="fd-gc-amt" min="${lo}" max="${hi}" step="1" style="width:90px"></label></div>
-    <p class="fd-sm" style="margin:4px 0 10px">From $${lo} to $${hi}. No tax. Never expires. The card works once it’s paid.</p>
-    <div id="fd-gc-msgbox" class="fd-msg" hidden></div>
+  openDutySheet(`<div class="fd-gc"><h3>🎴 Physical gift card</h3>
+    <label class="fd-gc-f"><span class="fd-gc-l">Card code</span><input type="text" id="fd-gc-code" class="fd-gc-code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Scan or type the code on the card"></label>
+    <div class="fd-gc-f"><span class="fd-gc-l">Amount</span><div class="fd-gc-amts">${presets.map(a => `<button type="button" class="fd-gc-amt" data-gca="${a}">$${a}</button>`).join('')}
+      <span class="fd-gc-other">Other $<input type="number" id="fd-gc-amt" min="${lo}" max="${hi}" step="1" inputmode="decimal"></span></div>
+      <span class="fd-gc-hint">From $${lo} to $${hi} · no tax · never expires · the card works once it’s paid</span></div>
+    <div id="fd-gc-msgbox" class="fd-msg" hidden></div></div>
     <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="fdGiftPhysAdd(${lo},${hi})">Add to cart</button></div>`);
   document.querySelectorAll('[data-gca]').forEach(b => b.onclick = () => { document.getElementById('fd-gc-amt').value = b.dataset.gca; document.querySelectorAll('[data-gca]').forEach(x => x.classList.toggle('on', x === b)); });
   const c = document.getElementById('fd-gc-code'); setTimeout(() => c.focus(), 30);
@@ -1407,6 +1413,20 @@ function fdGiftPhysAdd(lo, hi) {
 (function () { const st = document.createElement('style'); st.textContent = `.fd-gc-kind { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .fd-gc-k { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 18px 10px; border: 2px solid #e8e4f6; border-radius: 14px; background: #fff; cursor: pointer; font: inherit; }
 .fd-gc-k:hover { border-color: var(--accent, #4f3bd1); } .fd-gc-k span { font-size: 34px; } .fd-gc-k small { color: #6b6890; font-size: 12px; text-align: center; }
-.fd-gc-amts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; } .fd-gc-to label { display: block; margin: 4px 0; }
-.fd-gc-designs { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-top: 4px; } .fd-gc-d { display: flex; flex-direction: column; gap: 4px; font-size: 12px; cursor: pointer; }
-.fd-gc-d img { width: 100%; aspect-ratio: 16 / 10; object-fit: cover; border-radius: 8px; border: 2px solid transparent; } .fd-gc-d input:checked + img { border-color: var(--accent, #4f3bd1); }`; document.head.appendChild(st); })();
+.fd-gc h3 { margin: 0 0 12px; } .fd-gc-f { display: flex; flex-direction: column; gap: 6px; margin: 0 0 14px; min-width: 0; }
+.fd-gc-l { font-size: 12px; font-weight: 800; letter-spacing: .03em; text-transform: uppercase; color: #6b6890; } .fd-gc-l i { text-transform: none; font-weight: 600; font-style: normal; }
+.fd-gc input[type=text], .fd-gc input[type=email], .fd-gc input[type=date], .fd-gc input[type=number] { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid #ddd8ef; border-radius: 10px; font: inherit; font-size: 15px; background: #fff; }
+.fd-gc input:focus { outline: none; border-color: var(--accent, #4f3bd1); box-shadow: 0 0 0 3px rgba(79,59,209,.12); }
+.fd-gc-hint { font-size: 12px; color: #8a86a3; }
+.fd-gc-amts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; } .fd-gc-amt { min-width: 70px; padding: 10px 16px; border-radius: 12px; border: 2px solid #e8e4f6; background: #fff; font: inherit; font-weight: 800; font-size: 16px; cursor: pointer; }
+.fd-gc-amt.on { border-color: var(--accent, #4f3bd1); background: #f3f0ff; } .fd-gc-other { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; color: #6b6890; } .fd-gc-other input { width: 110px !important; }
+.fd-gc-to { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; } .fd-gc-opt { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 2px solid #e8e4f6; border-radius: 12px; cursor: pointer; }
+.fd-gc-opt:has(input:checked) { border-color: var(--accent, #4f3bd1); background: #f8f6ff; } .fd-gc-opt.off { opacity: .55; cursor: default; } .fd-gc-opt input { margin-top: 3px; }
+.fd-gc-opt span { display: flex; flex-direction: column; gap: 2px; min-width: 0; } .fd-gc-opt small { color: #6b6890; font-size: 12px; overflow-wrap: anywhere; }
+.fd-gc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; } .fd-gc-grid[hidden] { display: none; }
+.fd-gc-designs { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px; } .fd-gc-d > span:last-child { font-size: 12px; line-height: 1.25; }
+.fd-gc-d { display: flex; flex-direction: column; gap: 4px; font-size: 13px; cursor: pointer; } .fd-gc-d input { position: absolute; opacity: 0; pointer-events: none; }
+.fd-gc-d img, .fd-gc-noimg { width: 100%; aspect-ratio: 16 / 10; object-fit: cover; border-radius: 10px; border: 3px solid transparent; box-sizing: border-box; display: flex; align-items: center; justify-content: center; background: #f4f2fb; font-size: 28px; }
+.fd-gc-d:has(input:checked) img, .fd-gc-d:has(input:checked) .fd-gc-noimg { border-color: var(--accent, #4f3bd1); } .fd-gc-d:has(input:checked) > span:last-child { font-weight: 800; }
+.fd-gc-code { font-family: Menlo, Consolas, monospace; letter-spacing: 1px; font-size: 18px !important; }
+@media (max-width: 560px) { .fd-gc-to, .fd-gc-grid { grid-template-columns: 1fr; } }`; document.head.appendChild(st); })();
