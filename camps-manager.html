@@ -83,6 +83,12 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
 .req-more { width: 100%; } .req-more summary { cursor: pointer; font-size: 13px; color: #6b5a3a; } .req-st { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 4px 10px; margin: 6px 0; font-size: 13px; }
 .req-st > div { display: flex; flex-direction: column; } @media (max-width: 760px) { .req-row { grid-template-columns: 1fr; } }
 .req-al { display: block; margin: 0 0 4px 26px; font-size: 13px; font-weight: 700; color: #1d6b39; }
+
+.ms { position: relative; align-self: flex-end; } .ms > summary { list-style: none; cursor: pointer; } .ms > summary::-webkit-details-marker { display: none; }
+.ms-pop { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; background: #fff; border: 1px solid #e8dfcd; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.15); padding: 10px 12px; min-width: 260px; max-height: 60vh; overflow: auto; }
+.ms-pop .check { display: flex; gap: 6px; align-items: center; padding: 3px 0; } .ms-tools { display: flex; gap: 12px; margin-bottom: 6px; } .ms-grp { margin: 6px 0; } .ms-prov { border-bottom: 1px solid #f1eadc; }
+.bulk-bar { position: sticky; top: 0; z-index: 15; display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; background: #fff7e6; border: 1px solid #f3dc9a; border-radius: 12px; padding: 10px 14px; margin: 8px 0 10px; }
+.bulk-grp { display: inline-flex; gap: 6px; align-items: center; } .bulk-bar .spaces-in { width: 70px; } tr.sel-row td { background: #fffaf0; }
 </style>
 </head>
 <body>
@@ -136,7 +142,7 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
   var KINDS = { full: 'Full day', half: 'Half day', pa: 'PA/PD day' };
   var SEASON = { winter: 'Winter', passover: 'Passover', spring: 'Spring', summer: 'Summer', fall: 'Fall', pa: 'PA/PD days' };
   var canEdit = false, programs = [], days = [], flash = null, studioSpaces = {};
-  var filt = { from: todayStr(), to: addDays(todayStr(), 120), studio: '', program: '', empty: false };
+  var filt = { from: todayStr(), to: addDays(todayStr(), 120), studio: '', program: '', studios: [], programs: [], empty: false };   // (studios/programs: ☑️ several; none = all)
 
   function $(id) { return document.getElementById(id); }
   function esc(v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
@@ -251,8 +257,12 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
     await loadReqs(); render();
   }
   async function loadDays() {
-    var r = await sb.rpc('camp_days_list', { p_from: filt.from, p_to: filt.to, p_studio: filt.studio || null, p_program: filt.program || null });
-    days = r.error ? [] : (r.data || []);
+    var one = function (a) { return a.length === 1 ? a[0] : null; };
+    var r = await sb.rpc('camp_days_list', { p_from: filt.from, p_to: filt.to, p_studio: one(filt.studios), p_program: one(filt.programs) });
+    var progNames = filt.programs.map(function (id) { return ((programs.filter(function (p) { return p.id === id; })[0]) || {}).name; });
+    days = r.error ? [] : (r.data || []).filter(function (d) { return (!filt.studios.length || filt.studios.indexOf(d.studio_id) !== -1) &&
+      (!filt.programs.length || (d.program_id ? filt.programs.indexOf(d.program_id) !== -1 : progNames.indexOf(d.program) !== -1)); });
+    var keep = {}; days.forEach(function (d) { if (sel[d.id]) keep[d.id] = 1; }); sel = keep;   // (ticks stay on days still shown)
     if (r.error) flash = ['err', 'Camp days didn\u2019t load: ' + r.error.message];
     render();
   }
@@ -309,8 +319,8 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
     var h = '<section class="panel"><h2>Camp days</h2><p class="sub">Spaces, booked and left for each camp day. Change spaces any time; families mid-payment keep their spots.</p>' +
       '<div class="toolbar"><div class="field" style="margin:0"><label for="f_from">From</label><input id="f_from" type="date" value="' + filt.from + '"></div>' +
       '<div class="field" style="margin:0"><label for="f_to">To</label><input id="f_to" type="date" value="' + filt.to + '"></div>' +
-      '<div class="field" style="margin:0"><label for="f_studio">Studio</label><select id="f_studio">' + stOpts + '</select></div>' +
-      '<div class="field" style="margin:0"><label for="f_prog">Program</label><select id="f_prog">' + progOpts + '</select></div>' +
+      '<details class="ms" id="msSt"><summary class="btn btn-plain">' + esc(msLabel('st')) + ' \u25be</summary><div class="ms-pop">' + msList('st') + '</div></details>' +
+      '<details class="ms" id="msProg"><summary class="btn btn-plain">' + esc(msLabel('prog')) + ' \u25be</summary><div class="ms-pop">' + msList('prog') + '</div></details>' +
       '<button class="btn btn-plain" type="button" id="fGo" style="align-self:flex-end">Show</button>' +
       '<label class="check" style="align-self:flex-end;padding-bottom:10px"><input type="checkbox" id="fEmpty"' + (filt.empty ? ' checked' : '') + '> Show 0-space days</label></div>';
     // Days with no spaces and nobody booked (e.g. a studio not running that PA/PD day) are hidden unless asked for.
@@ -327,13 +337,15 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
     var groups = [], byKey = {};
     days.forEach(function (d, i) { var k = d.studio_id + '|' + d.session_date; if (!byKey[k]) { byKey[k] = { studio: d.studio_id, date: d.session_date, rows: [] }; groups.push(byKey[k]); } byKey[k].rows.push([d, i]); });
     var PART = { full: 'Full day', am: 'Morning', pm: 'Afternoon' };
-    h += '<table><thead><tr><th>Camp</th><th>Time</th><th>Booked</th><th>Left</th><th></th></tr></thead>';
+    var selectable = days.filter(function (d) { return d.source !== 'shopify'; }), allOn = canEdit && selectable.length && selectable.every(function (d) { return sel[d.id]; });
+    h += (canEdit ? bulkBarHtml() : '') + '<table><thead><tr>' + (canEdit ? '<th style="width:28px"><input type="checkbox" id="selAll" title="Select all shown"' + (allOn ? ' checked' : '') + ' aria-label="Select all shown"></th>' : '') + '<th>Camp</th><th>Time</th><th>Booked</th><th>Left</th><th></th></tr></thead>';
     groups.forEach(function (g) {
       var world = g.rows.filter(function (x) { return x[0].source === 'world'; });
       var cap = world.length ? world[0][0].capacity : null, changed = world.some(function (x) { return x[0].day_changed; });
       var am = world.filter(function (x) { return x[0].part === 'am'; })[0], pm = world.filter(function (x) { return x[0].part === 'pm'; })[0];
       var key = g.studio + '|' + g.date;
-      h += '<tbody class="day-group"><tr class="day-head"><td colspan="5"><b>' + esc(niceDate(g.date)) + '</b> \u00b7 ' + esc(nameById[g.studio] || g.studio) +
+      var gs = g.rows.filter(function (x) { return x[0].source !== 'shopify'; }), gOn = gs.length && gs.every(function (x) { return sel[x[0].id]; }), gSome = gs.some(function (x) { return sel[x[0].id]; });
+      h += '<tbody class="day-group"><tr class="day-head">' + (canEdit ? '<td>' + (gs.length ? '<input type="checkbox" data-selg="' + esc(key) + '"' + (gOn ? ' checked' : '') + (gSome && !gOn ? ' data-mixed="1"' : '') + ' aria-label="Select this day">' : '') + '</td>' : '') + '<td colspan="5"><b>' + esc(niceDate(g.date)) + '</b> \u00b7 ' + esc(nameById[g.studio] || g.studio) +
         (world.length ? ' <span class="day-sp">Shared spaces: ' + (canEdit ? '<input class="spaces-in" type="number" min="0" max="300" value="' + (cap == null ? '' : cap) + '" data-dayspaces="' + key + '" aria-label="Spaces this day">' +
           ' <button class="link" type="button" data-daysave="' + key + '">Save</button>' + (changed ? '<button class="link" type="button" data-dayreset="' + key + '">Back to ' + (studioSpaces[g.studio] == null ? 'default' : studioSpaces[g.studio]) + '</button>' : '') : '<b>' + cap + '</b>') +
           (changed ? ' <span class="pill" title="Changed for this day only">this day only</span>' : '') +
@@ -341,13 +353,13 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
       g.rows.forEach(function (x) {
         var d = x[0], i = x[1], shop = d.source === 'shopify', moved = d.source === 'moved', edit = canEdit && !shop;
         var st = d.closed ? '<span class="pill closed">Closed</span>' : (d.spaces_left <= 0 ? '<span class="pill full">Full</span>' : '<span class="pill ok">' + d.spaces_left + ' left</span>');
-        h += '<tr' + (shop ? ' class="shop-row"' : '') + '><td>' + esc(d.program) + (shop ? ' <span class="pill shop" title="Still sold on Shopify: move it to World in the Hub (Move to World \u2192 Camps & PA/PD days) to change it here">Shopify</span>'
+        h += '<tr' + (shop ? ' class="shop-row"' : sel[d.id] ? ' class="sel-row"' : '') + '>' + (canEdit ? '<td>' + (shop ? '' : '<input type="checkbox" data-sel="' + esc(d.id) + '"' + (sel[d.id] ? ' checked' : '') + ' aria-label="Select">') + '</td>' : '') + '<td>' + esc(d.program) + (shop ? ' <span class="pill shop" title="Still sold on Shopify: move it to World in the Hub (Move to World \u2192 Camps & PA/PD days) to change it here">Shopify</span>'
             : moved ? ' <span class="pill wr" title="Booked on World, with its own spots (moved from Shopify)">World-run</span>' : ' <span class="help">' + esc(PART[d.part] || '') + '</span>') + '</td>' +
           '<td>' + esc(timeLabel(d.session_time)) + '</td><td>' + d.booked + ((shop || moved) && d.capacity != null ? ' of ' + d.capacity : '') + '</td><td>' + st + '</td>' +
           '<td style="white-space:nowrap">' + (edit ? '<button class="link" type="button" data-open="' + i + '">' + (d.closed ? 'Reopen' : 'Close') + '</button>' +
           (d.booked ? '' : '<button class="btn-danger link" type="button" data-del="' + i + '">Delete</button>') : '') +
           (canEdit && moved ? '<button class="link" type="button" data-ownadj="' + i + '">Change spots</button>' : '') + '</td></tr>' +
-          (canEdit && moved ? '<tr class="shop-adj" id="ownadj-' + i + '" hidden><td colspan="5"></td></tr>' : '');
+          (canEdit && moved ? '<tr class="shop-adj" id="ownadj-' + i + '" hidden><td colspan="6"></td></tr>' : '');
       });
       h += '</tbody>';
     });
@@ -355,6 +367,71 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
     return h;
   }
 
+  // ---- ☑️ (Nov 14 2026) several camps and studios at once, tick boxes on days, and changing many days in one go ----
+  var sel = {};   // ticked camp days (by session id)
+  document.addEventListener('click', function (e) { document.querySelectorAll('.ms[open]').forEach(function (d) { if (!d.contains(e.target)) d.open = false; }); });   // (a click elsewhere closes the lists)
+  function msList(kind) {   // the Camps / Studios tick lists
+    if (kind === 'prog') {
+      return '<div class="ms-tools"><button class="link" type="button" data-msall="prog">All camps</button><span class="help">Tick some to show only those.</span></div>' +
+        programs.map(function (p) { return '<label class="check"><input type="checkbox" data-msprog="' + esc(p.id) + '"' + (filt.programs.indexOf(p.id) !== -1 ? ' checked' : '') + '> ' + esc(p.name) + (p.active ? '' : ' <span class="help">(off)</span>') + '</label>'; }).join('');
+    }
+    return '<div class="ms-tools"><button class="link" type="button" data-msall="st">All studios</button><span class="help">Tick a province or studios to show only those.</span></div>' +
+      STUDIOS.map(function (g) { var ids = g.list.map(function (s) { return s[0]; }), on = ids.filter(function (k) { return filt.studios.indexOf(k) !== -1; }).length;
+        return '<div class="ms-grp"><label class="check ms-prov"><input type="checkbox" data-msprov="' + esc(g.group) + '"' + (on === ids.length ? ' checked' : '') + (on && on < ids.length ? ' data-mixed="1"' : '') + '> <b>' + esc(g.group) + '</b> <span class="help">all</span></label>' +
+          g.list.map(function (s) { return '<label class="check"><input type="checkbox" data-msst="' + s[0] + '"' + (filt.studios.indexOf(s[0]) !== -1 ? ' checked' : '') + '> ' + esc(s[1]) + '</label>'; }).join('') + '</div>'; }).join('');
+  }
+  function msLabel(kind) {
+    var n = kind === 'prog' ? filt.programs.length : filt.studios.length, all = kind === 'prog' ? programs.length : STUDIOS.reduce(function (t, g) { return t + g.list.length; }, 0);
+    return (kind === 'prog' ? 'Camps: ' : 'Studios: ') + (!n || n === all ? 'all' : n === 1 ? (kind === 'prog' ? (programs.filter(function (p) { return p.id === filt.programs[0]; })[0] || {}).name : nameById[filt.studios[0]]) || '1' : n);
+  }
+  function bulkBarHtml() {
+    var ids = Object.keys(sel); if (!ids.length) return '';
+    var rows = days.filter(function (d) { return sel[d.id]; }), keys = {};
+    rows.forEach(function (d) { keys[d.studio_id + '|' + d.session_date] = 1; });
+    return '<div class="bulk-bar" id="bulkBar"><b>' + rows.length + ' camp day' + (rows.length === 1 ? '' : 's') + ' selected</b> <span class="help">(' + Object.keys(keys).length + ' studio-day' + (Object.keys(keys).length === 1 ? '' : 's') + ')</span>' +
+      '<span class="bulk-grp"><label>Set spaces <input type="number" min="0" max="300" id="bkSpaces" class="spaces-in"></label><button class="btn btn-berry" type="button" data-bulk="spaces">Set</button>' +
+      '<button class="btn btn-plain" type="button" data-bulk="reset" title="Back to each studio’s usual camp spaces">Back to usual spaces</button></span>' +
+      '<span class="bulk-grp"><button class="btn btn-plain" type="button" data-bulk="close">Close</button><button class="btn btn-plain" type="button" data-bulk="open">Reopen</button></span>' +
+      '<span class="bulk-grp"><button class="btn btn-danger" type="button" data-bulk="delete">Delete</button><button class="link" type="button" data-bulk="clear">Clear</button></span>' +
+      '<span class="help" id="bulkMsg"></span></div>';
+  }
+  async function bulkRun(act) {
+    var rows = days.filter(function (d) { return sel[d.id] && d.source !== 'shopify'; }), done = 0, skip = [], errs = [], msg = document.getElementById('bulkMsg');
+    var say = function (t) { if (msg) msg.textContent = t; };
+    if (!rows.length) return;
+    if (act === 'clear') { sel = {}; render(); return; }
+    var btns = app.querySelectorAll('[data-bulk]'); var lock = function (on) { btns.forEach(function (b) { b.disabled = on; }); };
+    if (act === 'spaces' || act === 'reset') {
+      var v = act === 'spaces' ? parseInt((document.getElementById('bkSpaces') || {}).value, 10) : null;
+      if (act === 'spaces' && !(v >= 0)) { say('Enter how many spaces.'); return; }
+      var keys = {}, moved = 0; rows.forEach(function (d) { if (d.source === 'moved') moved++; else keys[d.studio_id + '|' + d.session_date] = 1; });
+      var K = Object.keys(keys);
+      if (!K.length) { say('Those are World-run days: use “Change spots” on each.'); return; }
+      if (!confirm((act === 'spaces' ? 'Set spaces to ' + v : 'Put back each studio’s usual spaces') + ' for ' + K.length + ' studio-day' + (K.length === 1 ? '' : 's') + '?')) return;
+      lock(true);
+      for (var i = 0; i < K.length; i++) { var k = K[i].split('|'); say('Saving ' + (i + 1) + ' of ' + K.length + '…');
+        var r = await sb.rpc('camp_day_spaces_set', { p_studio: k[0], p_day: k[1], p_spaces: v }); if (r.error) errs.push((nameById[k[0]] || k[0]) + ' ' + k[1] + ': ' + r.error.message); else done++; }
+      if (moved) skip.push(moved + ' World-run (use Change spots)');
+      flash = [errs.length ? 'err' : 'ok', (act === 'spaces' ? 'Spaces set to ' + v : 'Back to usual spaces') + ' for ' + done + ' studio-day' + (done === 1 ? '' : 's') + (skip.length ? ' · skipped ' + skip.join(', ') : '') + (errs.length ? ' · not saved: ' + errs.slice(0, 3).join('; ') : '') + '.'];
+    } else if (act === 'close' || act === 'open') {
+      var want = act === 'close', todo = rows.filter(function (d) { return !!d.closed !== want; }), same = rows.length - todo.length;
+      if (!todo.length) { say('They’re already ' + (want ? 'closed' : 'open') + '.'); return; }
+      if (!confirm((want ? 'Close ' : 'Reopen ') + todo.length + ' camp day' + (todo.length === 1 ? '' : 's') + '?')) return;
+      lock(true);
+      for (var j = 0; j < todo.length; j++) { var d = todo[j]; say((want ? 'Closing ' : 'Reopening ') + (j + 1) + ' of ' + todo.length + '…');
+        var r2 = await sb.rpc('camp_day_set_open', { p_session: d.id, p_open: !want }); if (r2.error) errs.push((nameById[d.studio_id] || d.studio_id) + ' ' + d.session_date + ': ' + r2.error.message); else done++; }
+      flash = [errs.length ? 'err' : 'ok', (want ? 'Closed ' : 'Reopened ') + done + (same ? ' · skipped ' + same + ' (already ' + (want ? 'closed' : 'open') + ')' : '') + (errs.length ? ' · not changed: ' + errs.slice(0, 3).join('; ') : '') + '.'];
+    } else if (act === 'delete') {
+      var del = rows.filter(function (d) { return !d.booked; }), booked = rows.length - del.length;
+      if (!del.length) { say('Every one of those has bookings, so none can be deleted.'); return; }
+      if (!confirm('Delete ' + del.length + ' camp day' + (del.length === 1 ? '' : 's') + ' with nobody booked?' + (booked ? '\n\n' + booked + ' with bookings will be left as they are.' : '') + '\n\nThis can’t be undone.')) return;
+      lock(true);
+      for (var m = 0; m < del.length; m++) { var e = del[m]; say('Deleting ' + (m + 1) + ' of ' + del.length + '…');
+        var r3 = await sb.rpc('camp_day_delete', { p_session: e.id }); if (r3.error) errs.push((nameById[e.studio_id] || e.studio_id) + ' ' + e.session_date + ': ' + r3.error.message); else done++; }
+      flash = [errs.length ? 'err' : 'ok', 'Deleted ' + done + (booked ? ' · skipped ' + booked + ' with bookings' : '') + (errs.length ? ' · not deleted: ' + errs.slice(0, 3).join('; ') : '') + '.'];
+    }
+    sel = {}; await loadDays();
+  }
   // ---- Spots for World-run camp days (moved from Shopify; Nov 11 2026) ----
   // Everything is set in World (camp_day_own_spaces_set). Nothing here touches Shopify inventory.
   function ownAdjustOpen(i) {
@@ -501,7 +578,30 @@ dialog.editor::backdrop { background: rgba(0,0,0,.4); }
       });
     }
     $('fEmpty').addEventListener('change', function () { filt.empty = this.checked; loadDays(); });
-    $('fGo').addEventListener('click', function () { filt.from = $('f_from').value || todayStr(); filt.to = $('f_to').value || addDays(filt.from, 120); filt.studio = $('f_studio').value; filt.program = $('f_prog').value; loadDays(); });
+    $('fGo').addEventListener('click', function () { filt.from = $('f_from').value || todayStr(); filt.to = $('f_to').value || addDays(filt.from, 120); loadDays(); });
+    // ☑️ the Camps / Studios lists (Show applies them)
+    app.querySelectorAll('[data-mixed]').forEach(function (c) { c.indeterminate = true; });
+    var msRedraw = function (id, kind) { var d = document.getElementById(id); d.querySelector('.ms-pop').innerHTML = msList(kind); d.querySelector('summary').textContent = msLabel(kind) + ' \u25be'; d.querySelectorAll('[data-mixed]').forEach(function (c) { c.indeterminate = true; }); };
+    app.querySelectorAll('.ms').forEach(function (box) { box.addEventListener('change', function (e) {
+      var t = e.target, allSt = STUDIOS.reduce(function (a, g) { return a.concat(g.list.map(function (s) { return s[0]; })); }, []);
+      var tog = function (arr, k, on) { var i = arr.indexOf(k); if (on && i === -1) arr.push(k); if (!on && i !== -1) arr.splice(i, 1); };
+      if (t.dataset.msprog) tog(filt.programs, t.dataset.msprog, t.checked);
+      if (t.dataset.msst) tog(filt.studios, t.dataset.msst, t.checked);
+      if (t.dataset.msprov) { var g = STUDIOS.filter(function (x) { return x.group === t.dataset.msprov; })[0]; if (g) g.list.forEach(function (s) { tog(filt.studios, s[0], t.checked); }); }
+      if (filt.studios.length === allSt.length) filt.studios = [];
+      if (filt.programs.length === programs.length) filt.programs = [];
+      msRedraw(box.id, box.id === 'msSt' ? 'st' : 'prog');
+    }); box.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-msall]'); if (!b) return; var kind = b.dataset.msall;
+      if (kind === 'st') filt.studios = []; else filt.programs = [];
+      msRedraw(box.id, kind);
+    }); });
+    // ☑️ tick boxes and the bar
+    var sa = $('selAll'); if (sa) sa.addEventListener('change', function () { days.forEach(function (d) { if (d.source === 'shopify') return; if (sa.checked) sel[d.id] = 1; else delete sel[d.id]; }); render(); });
+    app.querySelectorAll('[data-sel]').forEach(function (c) { c.addEventListener('change', function () { if (c.checked) sel[c.dataset.sel] = 1; else delete sel[c.dataset.sel]; render(); }); });
+    app.querySelectorAll('[data-selg]').forEach(function (c) { c.addEventListener('change', function () { var k = c.dataset.selg.split('|');
+      days.forEach(function (d) { if (d.studio_id === k[0] && d.session_date === k[1] && d.source !== 'shopify') { if (c.checked) sel[d.id] = 1; else delete sel[d.id]; } }); render(); }); });
+    app.querySelectorAll('[data-bulk]').forEach(function (b) { b.addEventListener('click', function () { bulkRun(b.dataset.bulk); }); });
     app.querySelectorAll('[data-ownadj]').forEach(function (b) { b.addEventListener('click', function () { ownAdjustOpen(+b.dataset.ownadj); }); });
     app.querySelectorAll('[data-daysave],[data-dayreset]').forEach(function (b) { b.addEventListener('click', async function () {
       var key = b.dataset.daysave || b.dataset.dayreset, k = key.split('|');
