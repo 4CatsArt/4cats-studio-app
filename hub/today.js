@@ -502,27 +502,51 @@ async function meAnnAck(id, btn) {
 
 
 // The 📣 Announcements page (studio computer): everything showing, in full, with who's read it here
-let _annReaders = {};
+let _annReaders = {}, _annPeople = null;
 async function openAnnPane(focusId) {
   showOnlyPane('ann-pane'); setActiveNav('nav-ann');
   await loadAnnouncements(_sessionStudioId);
   try { const r = await sb.rpc('hub_announcements_readers', { p_studio_id: _sessionStudioId || null }); _annReaders = r.error ? null : (r.data || {}); } catch (e) { _annReaders = null; }
+  try { const r = await sb.rpc('hub_chat_people', { p_studio: _sessionStudioId }); _annPeople = r.error ? null : (r.data || []); } catch (e) { _annPeople = null; }   // (⏳ who still needs to read)
   renderAnnPane();
   if (focusId) { const c = document.getElementById('ann-' + focusId); if (c) c.scrollIntoView({ block: 'start', behavior: 'smooth' }); }
+}
+// ⏳ (Nov 14 2026) who on this studio's team hasn't read an announcement yet (people working today first)
+function annFirst(p) { return String(p.first || String(p.name || '').trim().split(/\s+/)[0] || ''); }
+function annPending(a) {
+  if (!Array.isArray(_annPeople) || !_annPeople.length || _annReaders === null) return null;
+  const done = new Set(((_annReaders || {})[a.id] || []).map(r => String(r.name || '').toLowerCase()));
+  const today = new Set((_teamPeople || []).map(p => p.staff_id));
+  return _annPeople.filter(p => !done.has(annFirst(p).toLowerCase())).map(p => Object.assign({}, p, { today: today.has(p.staff_id) }))
+    .sort((x, y) => (y.today - x.today) || annFirst(x).localeCompare(annFirst(y)));
+}
+function annPendingHtml(a, canAck) {
+  const P = annPending(a); if (P === null) return '';
+  if (!P.length) return '<div class="ann-pend done">🎉 Everyone has read it</div>';
+  return `<div class="ann-pend"${canAck ? ` role="button" tabindex="0" onclick="annWho('${escAttr(a.id)}')" title="Tick who has read it"` : ''}><b>⏳ Still to read (${P.length}):</b> ` +
+    P.map(p => `<span class="ann-pp${p.today ? ' today' : ''}">${hubAvatarHtml({ staff_id: p.staff_id, name: p.name, avatar_key: p.avatar_key }, 22)} ${esc(annFirst(p))}${p.today ? ' <i>on today</i>' : ''}</span>`).join('') + '</div>';
+}
+function annSummaryHtml(list) {
+  if (!Array.isArray(_annPeople) || !_annPeople.length || _annReaders === null || !list.length) return '';
+  const count = {}; list.forEach(a => (annPending(a) || []).forEach(p => { const k = p.staff_id; count[k] = count[k] || { p, n: 0 }; count[k].n++; }));
+  const L = Object.values(count).sort((x, y) => (y.p.today - x.p.today) || (y.n - x.n));
+  if (!L.length) return '<div class="ann-sum done">🎉 Everyone has read every announcement.</div>';
+  return `<div class="ann-sum"><b>⏳ ${L.length} ${L.length === 1 ? 'person still needs' : 'people still need'} to read:</b> ` +
+    L.map(x => `<span class="ann-pp${x.p.today ? ' today' : ''}">${hubAvatarHtml({ staff_id: x.p.staff_id, name: x.p.name, avatar_key: x.p.avatar_key }, 22)} ${esc(annFirst(x.p))} <em>${x.n}</em></span>`).join('') + '</div>';
 }
 function renderAnnPane() {
   const box = document.getElementById('ann-list'); if (!box) return;
   const canAck = !(_studioData && _studioData.isAdmin);
   const list = _annData.slice().sort((a, b) => (!!a.read_at - !!b.read_at) || ((b.priority === 'urgent') - (a.priority === 'urgent')));
-  box.innerHTML = list.length ? list.map(a => {
+  box.innerHTML = annSummaryHtml(list) + (list.length ? list.map(a => {
     const readers = (_annReaders && _annReaders[a.id]) || [];
     return `<div class="ann-card${a.priority === 'urgent' ? ' urgent' : ''}${a.read_at ? ' read' : ''}" id="ann-${escAttr(a.id)}">
       <div class="ann-eyebrow">${a.priority === 'urgent' ? '🚨 Urgent · ' : ''}From home office · ${esc(annReadLabel(a.created_at))}${a.show_until ? ` · until ${esc(hoFmtDate(a.show_until))}` : ''}</div>
       <div class="ann-title">${annTitleMd(a.title)}</div>
       ${a.body ? `<div class="ann-full">${annMd(a.body)}</div>` : ''}
       <div class="ann-foot">${readers.length ? `<span class="ann-readby">✓ Read by ${readers.map(r => esc(r.name)).join(', ')}</span>` : a.read_at ? '<span class="ann-readby">✓ Read here</span>' : '<span class="ann-note">Not read yet</span>'}
-        ${canAck ? `<button class="ann-btn" onclick="annWho('${escAttr(a.id)}')">${readers.length || a.read_at ? 'I’ve read it too' : 'Got it'}</button>` : ''}</div></div>`;
-  }).join('') : '<div class="ho-card"><div class="goal-note">No announcements right now.</div></div>';
+        ${canAck ? `<button class="ann-btn" onclick="annWho('${escAttr(a.id)}')">${readers.length || a.read_at ? 'I’ve read it too' : 'Got it'}</button>` : ''}</div>${annPendingHtml(a, canAck)}</div>`;
+  }).join('') : '<div class="ho-card"><div class="goal-note">No announcements right now.</div></div>');
 }
 // "Who's read it?": tick the people (this studio's team), no PIN, like duties
 async function annWho(id) {
@@ -1229,3 +1253,12 @@ function renderTodaysProjects(data, forecastDays) {
   card.innerHTML = head + eventLine + mainHtml + miniHtml;
 }
 
+
+// ⏳ the "still to read" styles
+(function () { const st = document.createElement('style'); st.textContent = `
+.ann-pend { margin-top: 10px; padding: 8px 10px; border-radius: 10px; background: #fff4dc; border: 1px solid #f3d38b; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 13px; color: #6b4a00; cursor: pointer; }
+.ann-pend.done, .ann-sum.done { background: #e9f7ee; border-color: #bfe5cc; color: #1e6b3d; cursor: default; font-weight: 700; }
+.ann-sum { margin: 0 0 12px; padding: 10px 12px; border-radius: 12px; background: #fff4dc; border: 1px solid #f3d38b; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 14px; color: #6b4a00; }
+.ann-pp { display: inline-flex; align-items: center; gap: 4px; background: #fff; border-radius: 999px; padding: 2px 8px 2px 2px; font-weight: 600; }
+.ann-pp.today { box-shadow: 0 0 0 2px #e8a33c; } .ann-pp i { font-style: normal; font-size: 11px; color: #b06d00; } .ann-pp em { font-style: normal; background: #f3d38b; border-radius: 999px; padding: 0 6px; font-size: 11px; }
+`; document.head.appendChild(st); })();
