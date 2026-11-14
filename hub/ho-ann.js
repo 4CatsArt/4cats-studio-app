@@ -29,9 +29,9 @@
     if (L === null) h += '<div class="ho-card">Loading…</div>';
     else if (L.err) h += `<div class="ho-card">${esc(L.err)}</div>`;
     else if (!L.length) h += '<div class="ho-card">Nothing showing right now.</div>';
-    else h += L.map(a => `<div class="ho-card hoa-card${a.my_read_at ? ' read' : ''}"><div class="hoa-top"><b class="hoa-t">${a.priority === 'urgent' ? '🔴 ' : ''}${esc(a.title || '')}</b>
+    else h += L.map(a => `<div class="ho-card hoa-card${a.my_read_at ? ' read' : ''}"><div class="hoa-top"><b class="hoa-t">${a.priority === 'urgent' ? '🔴 ' : ''}${typeof annTitleMd === 'function' ? annTitleMd(a.title) : esc(a.title || '')}</b>
         <span class="fd-sm">${esc(where(a))} · ${esc(day(a.show_from))}${a.show_until ? ' – ' + esc(day(a.show_until)) : ''}</span></div>
-        <div class="hoa-body">${esc(a.body || '').replace(/\n/g, '<br>')}</div>
+        <div class="hoa-body ann-full">${typeof annMd === 'function' ? annMd(a.body || '') : esc(a.body || '').replace(/\n/g, '<br>')}</div>   ${''/* (the same formatting the studios see: bold, lists, links) */}
         <div class="hoa-foot">${a.my_read_at ? `<span class="hoa-read">✓ You read it ${esc(day(a.my_read_at))}</span>` : `<button class="ho-btn primary" onclick="hoAnnAck('${escAttr(a.id)}', this)">Got it</button>`}</div></div>`).join('');
     pane.innerHTML = h;
   }
