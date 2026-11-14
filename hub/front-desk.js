@@ -594,7 +594,7 @@ function fdCartHtml() {
       <button class="ho-btn" onclick="_fd.fam=null;fdRender()">Change</button></div>`;
     else h += `<div class="fd-fam"><div><b>${esc(F.fam.first_name + (F.fam.last_name ? ' ' + F.fam.last_name : ''))}</b>${F.fam.table ? ` <span class="fd-pill">🪑 ${esc(F.fam.table)}</span>` : ''}${F.fam.member ? ' <span class="fd-pill">⭐ Member</span>' : ''}${F.fam.customer_id || F.fam.table ? '' : ' <span class="fd-pill">new</span>'}<br><span class="fd-sm">${esc(F.fam.email)}</span></div>
       <button class="ho-btn" onclick="fdFamClear()">Change</button></div>
-      <div class="fd-people">${F.people.map((p, i) => `<span class="fd-person">${esc(p.name)}${p.dob ? ' · ' + fdAge(p.dob) : ''}${p.mine ? '' : ` <button onclick="_fd.people.splice(${i},1);fdRender()" aria-label="Remove">×</button>`}</span>`).join('')}
+      <div class="fd-people">${F.people.map((p, i) => `<span class="fd-person${p.self ? ' fd-self' : ''}">${esc(p.name)}${p.dob ? ' · ' + fdAge(p.dob) : p.self ? ' · adult' : ''}${p.mine ? '' : ` <button onclick="_fd.people.splice(${i},1);fdRender()" aria-label="Remove">×</button>`}</span>`).join('')}
       <button class="fd-link" onclick="_fd.addPerson=!_fd.addPerson;fdRender()">+ person</button></div>` +
       (F.addPerson ? `<div class="fd-inline"><input id="fd-pn" placeholder="Name"><input id="fd-pd" type="date" title="Birthdate"><button class="ho-btn" onclick="fdAddPerson()">Add</button></div>` : '');
   } else {
@@ -630,6 +630,14 @@ async function fdFind() {
   const { data, error } = await sb.rpc('hub_family_list', { p_q: q, p_limit: 8, p_pin: fdPin() });
   _fd.hits = error ? [] : (data || []); _fd.msg = error ? error.message : ''; fdRender();
 }
+// (Nov 14 2026) the customer is a participant too (an adult), first on the list, unless they're already on it
+function fdWithSelf(people, fam) {
+  const L = Array.isArray(people) ? people.slice() : [], nm = fam ? [fam.first_name, fam.last_name].filter(Boolean).join(' ').trim() : '';
+  if (!nm || /^(family|walk-in)$/i.test(nm)) return L;
+  const k = s => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (L.some(p => k(p.name) === k(nm) || (k(p.name) === k(fam.first_name) && !fam.last_name))) return L;
+  return [{ name: nm, dob: null, adult: true, mine: true, self: true }].concat(L);
+}
 async function fdPick(cid) {
   _fd.msg = 'Opening…'; fdRender();
   const { data, error } = await sb.rpc('hub_family_card', { p_customer: cid, p_pin: fdPin() });
@@ -637,14 +645,14 @@ async function fdPick(cid) {
   if (!data.email) { _fd.msg = 'This family has no email on file. Add them as a new family with an email.'; fdRender(); return; }
   const nm = String(data.parent_name || '').trim().split(/\s+/);
   _fd.fam = { customer_id: cid, email: data.email, first_name: nm[0] || 'Family', last_name: nm.slice(1).join(' '), member: !!data.member };
-  _fd.people = (data.people || []).map(p => ({ name: (p.first_name + (p.last_name ? ' ' + p.last_name : '')).trim(), dob: p.birthdate || null, adult: !!p.is_16_plus, mine: true }));
+  _fd.people = fdWithSelf((data.people || []).map(p => ({ name: (p.first_name + (p.last_name ? ' ' + p.last_name : '')).trim(), dob: p.birthdate || null, adult: !!p.is_16_plus, mine: true })), _fd.fam);
   _fd.hits = null; _fd.msg = ''; fdRender();
 }
 function fdNewFam() {
   const v = id => ((document.getElementById(id) || {}).value || '').trim();
   const f = v('fd-nf'), l = v('fd-nl'), e = v('fd-ne').toLowerCase();
   if (!f || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) { _fd.msg = 'Add a first name and a real email.'; fdRender(); return; }
-  _fd.fam = { customer_id: null, email: e, first_name: f, last_name: l }; _fd.people = []; _fd.newFam = false; _fd.msg = ''; fdRender();
+  _fd.fam = { customer_id: null, email: e, first_name: f, last_name: l }; _fd.people = fdWithSelf([], _fd.fam); _fd.newFam = false; _fd.msg = ''; fdRender();
 }
 function fdFamClear() { if (_fd.cart.length && !confirm('Change the family? Items already in the cart stay, but check who’s coming on each.')) return; _fd.fam = null; _fd.people = []; _fd.hits = null; fdRender(); }
 function fdAddPerson(fromSheet) {
@@ -1117,7 +1125,7 @@ async function fdHerePick(bid, sid) {
   if (Number(f.customer_id) > 0) { await fdPick(Number(f.customer_id)); if (_fd.fam) { _fd.fam.table = f.tables || ''; fdRender(); return; } }
   if (!f.email) { _fd.msg = 'No email on that booking: find the family by name instead.'; fdRender(); return; }
   const nm = String(f.name || 'Family').trim().split(/\s+/);
-  _fd.fam = { customer_id: null, email: f.email, first_name: nm[0] || 'Family', last_name: nm.slice(1).join(' '), table: f.tables || '' }; _fd.people = []; _fd.msg = ''; fdRender();
+  _fd.fam = { customer_id: null, email: f.email, first_name: nm[0] || 'Family', last_name: nm.slice(1).join(' '), table: f.tables || '' }; _fd.people = fdWithSelf([], _fd.fam); _fd.msg = ''; fdRender();
 }
 // ---------- ↩ Returns & exchanges (camp-checkout staff_return): shop items bought here, credit only or swapped ----------
 let _fdRet = { open: false, q: '', list: null, ord: null, qty: {}, shelf: true, exch: [], note: '', busy: false, done: null };
@@ -1317,7 +1325,7 @@ async function fdWalkCart() {
   W.busy = false;
   if (error) { W.msg = /hub_walkin_prepare/.test(error.message) ? 'Paying for walk-ins isn’t set up yet (home office: run the walk-ins SQL).' : error.message; fdRender(); return; }
   if (!fam) {   // the customer becomes the family at the front desk (found: their card, with member pricing; new: name and email)
-    if (W.cid) await fdPick(W.cid); else { const nm = name.split(/\s+/); F.fam = { customer_id: null, email, first_name: nm[0], last_name: nm.slice(1).join(' ') }; F.people = []; }
+    if (W.cid) await fdPick(W.cid); else { const nm = name.split(/\s+/); F.fam = { customer_id: null, email, first_name: nm[0], last_name: nm.slice(1).join(' ') }; F.people = fdWithSelf([], F.fam); }
     if (!F.fam) { W.msg = F.msg || 'Couldn’t open that family.'; fdRender(); return; }
   }
   const tiers = W.tiers || FD_WALK_TIERS, tierLabel = ((tiers.find(t => t[0] === W.tier) || [])[1]) || '';
@@ -1423,7 +1431,7 @@ function fdGiftNewFam(kind) {
   const v = id => ((document.getElementById(id) || {}).value || '').trim();
   const f = v('fd-gc-nf'), l = v('fd-gc-nl'), e = v('fd-gc-ne').toLowerCase();
   if (!f || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) { const box = document.getElementById('fd-gc-hits'); if (box) box.innerHTML = '<p class="fd-msg">Add a first name and a real email.</p>'; return; }
-  _fd.fam = { customer_id: null, email: e, first_name: f, last_name: l }; _fd.people = []; _fd.msg = ''; fdRender(); fdGiftOpen(kind || 'digital');
+  _fd.fam = { customer_id: null, email: e, first_name: f, last_name: l }; _fd.people = fdWithSelf([], _fd.fam); _fd.msg = ''; fdRender(); fdGiftOpen(kind || 'digital');
 }
 // 🎴 a physical card: type the code printed on it, choose the amount; made in Shopify with that code once paid
 function fdGiftPhysOpen() {
