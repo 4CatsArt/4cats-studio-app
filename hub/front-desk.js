@@ -741,7 +741,7 @@ function fdWhoHtml(needDob, onDate) {
   const A = _fd.add, F = _fd;
   if (!F.fam) return '<p class="fd-warn">Choose the family first (in the cart), so you can tick who’s coming.</p>';
   const g = fdAges(A);
-  return '<div class="fd-who"><b>Who’s coming</b> <span class="fd-sm">' + (g.kidsOnly ? `kids ${g.min}–${g.max} only (drop-off)` : g.family ? 'family class: adults and kids' : g.max < 199 ? `ages ${g.min}–${g.max}` : `ages ${g.min}+`) + '</span>' +
+  return '<div class="fd-who"><b>' + (A.kind === 'camp' ? 'Which child?' : 'Who’s coming') + '</b> <span class="fd-sm">' + (g.kidsOnly ? `kids ${g.min}–${g.max} only (drop-off)` : g.family ? 'family class: adults and kids' : g.max < 199 ? `ages ${g.min}–${g.max}` : `ages ${g.min}+`) + '</span>' +
     (F.people.length ? F.people.map((p, i) => { const k = fdPersonOk(A, p, onDate); if (!k.ok && A.who[i]) A.who[i] = false;
     return `<label class="fd-chk${k.ok ? '' : ' off'}"><input type="checkbox" ${A.who[i] ? 'checked' : ''} ${k.ok ? '' : 'disabled'} onchange="_fd.add.who[${i}]=this.checked;fdRender()"> ${esc(p.name)}${k.age != null ? ` <span class="fd-sm">(${k.age})</span>` : ''}${k.ok ? '' : ` <span class="fd-warn">${esc(k.why)}</span>`}</label>`; }).join('') : '<span class="fd-sm">No people on this family yet.</span>') +
     `<div class="fd-inline"><input id="fd-apn" placeholder="Add someone: name"><input id="fd-apd" type="date" title="Birthdate"><button class="ho-btn" onclick="fdAddPerson(true)">Add</button></div></div>`;
@@ -771,12 +771,16 @@ function fdAddHtml() {
         <span><b>Also book ${esc(linked ? p2.name : (p2.part || 'Part 2'))}</b> <span class="fd-sm">(the part that follows)</span><br>
         <span class="fd-sm">Starts ${fdDay(p2.first.session_date)}, ${fdTime(p2.first.session_time)} · ${p2.weeks} week${p2.weeks === 1 ? '' : 's'}${p2.min != null ? ' · ages ' + p2.min + (p2.max != null && p2.max < 99 ? '–' + p2.max : '+') : ''} · ${p2.left > 0 ? p2.left + ' left' : 'full'}${pct ? ` · <b>${pct}% off</b> with ${esc(c.part || c.name)}${all ? '' : ' (members)'}` : ''}</span></span></label>`; }
   } else {
-    const acDays = A.days.filter(d => !fdIsHalf(d.title) && !fdIsPa(d.title) || fdIsPa(d.title));   // (half days have no aftercare)
+    const acDays = A.days.filter(d => !fdIsHalf(d.title));   // (full camp days and PA/PD days: half days have no aftercare)
+    const allPa = A.days.every(d => fdIsPa(d.title));
     h += `<h3>${esc([...new Set(A.days.map(fdCampProg))].join(' + '))}</h3><p class="fd-sm">${A.days.map(d => fdDay(d.session_date) + (A.days.filter(y => y.session_date === d.session_date).length > 1 ? ' ' + fdTime(d.session_time) : '')).join(', ')}</p>` + fdWhoHtml(true, A.days[0].session_date);
     if (acDays.length) {
+      // (Nov 14 2026) aftercare is asked every time: Yes / No, nothing chosen to start; Yes = every day, tap a day off if not needed
       if (A.acInit !== true) { acDays.forEach(d => { if (A.after[d.id] === undefined) A.after[d.id] = true; }); A.acInit = true; }
-      h += `<div class="fd-field"><label class="fd-chk"><input type="checkbox" ${A.aftercare ? 'checked' : ''} onchange="_fd.add.aftercare=this.checked;fdRender()"> <b>Add aftercare</b></label>` +
-        (A.aftercare ? '<span class="fd-sm">On which days? Tap a day to add or remove it.</span><div class="fd-chips2">' + acDays.map(d => `<button class="fd-chip${A.after[d.id] ? ' on' : ''}" onclick="_fd.add.after['${d.id}']=!_fd.add.after['${d.id}'];fdRender()">${fdDay(d.session_date)}</button>`).join('') + '</div>' : '') + '</div>';
+      const ans = A.aftercare === true ? 'yes' : A.aftercare === false ? 'no' : '';
+      h += `<div class="fd-field fd-ac${ans ? '' : ' ask'}"><b>Do they need aftercare?</b> <span class="fd-sm">(${allPa ? 'after the PA/PD day' : 'after camp'})</span>
+        <div class="fd-seg" style="margin-top:6px"><button class="fd-chip${ans === 'yes' ? ' on' : ''}" onclick="_fd.add.aftercare=true;_fd.addMsg='';fdRender()">Yes</button><button class="fd-chip${ans === 'no' ? ' on' : ''}" onclick="_fd.add.aftercare=false;_fd.addMsg='';fdRender()">No</button></div>` +
+        (ans === 'yes' ? (acDays.length > 1 ? '<span class="fd-sm">On which days? Tap a day to take it off.</span><div class="fd-chips2">' + acDays.map(d => `<button class="fd-chip${A.after[d.id] ? ' on' : ''}" onclick="_fd.add.after['${d.id}']=!_fd.add.after['${d.id}'];fdRender()">${fdDay(d.session_date)}</button>`).join('') + '</div>' : '') : '') + '</div>';
     }
   }
   if (A.kind !== 'party') h += `<div class="fd-field"><b>Giveaway or credit code</b> <span class="fd-sm">(optional)</span><input value="${esc(A.prize || '')}" oninput="_fd.add.prize=this.value" placeholder="${A.kind === 'ws' ? 'e.g. 2026ABJE 2026ABJE2' : 'Code'}">${A.kind === 'ws' ? '<span class="fd-sm">Two codes (one per person)? Type both, with a space between.</span>' : ''}</div>`;
@@ -815,11 +819,15 @@ function fdAddDone() {
       title: `${A.c.name}${A.c.part ? ' · ' + A.c.part : ''}${both ? ' + ' + (both.page && both.page !== A.c.page ? both.name : (both.part || 'Part 2')) : ''} · from ${fdDay(A.c.first.session_date)}`,
       kids: who.map(p => ({ name: p.name, dob: p.dob, adult: !!p.adult })), prize, desc: who.map(p => p.name).join(', ') + (both ? ' · both parts' : '') + (prize ? ' · code ' + prize : '') });
   } else {
-    if (!who.length) return fail('Tick who’s coming.');
+    if (!who.length) return fail('Tick which child is coming.');
     if (who.some(p => !p.dob)) return fail('Every camper needs a birthdate.');
+    const acAsk = A.days.some(d => !fdIsHalf(d.title));
+    if (acAsk && A.aftercare !== true && A.aftercare !== false) return fail('Do they need aftercare? Tap Yes or No.');
     const days = A.days.map(d => d.id), after = A.aftercare ? days.filter(k => A.after[k]) : [];
+    if (A.aftercare === true && !after.length) return fail('Choose the aftercare days, or tap No.');
+    const allPa = A.days.every(d => fdIsPa(d.title));
     F.cart.push({ type: 'camp', days, aftercare: after, kids: who.map(p => ({ name: p.name, dob: p.dob })), prize,
-      title: `Camp · ${days.length} day${days.length === 1 ? '' : 's'} (${A.days.map(d => fdDay(d.session_date)).join(', ')})`,
+      title: `${allPa ? 'PA/PD day' : 'Camp'}${days.length === 1 && allPa ? '' : ` · ${days.length} day${days.length === 1 ? '' : 's'}`} (${A.days.map(d => fdDay(d.session_date)).join(', ')})`,
       desc: [who.map(p => p.name).join(', '), after.length ? after.length + ' aftercare' : '', prize ? 'code ' + prize : ''].filter(Boolean).join(' · ') });
     F.campPick = {};
   }
