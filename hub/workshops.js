@@ -255,6 +255,9 @@ function wsmAddHtml() {
         ${T.length ? `<label class="f">Price tier<select id="wsm-tier">${T.map(t => `<option value="${escAttr(t.key)}"${t.key === (A.pick.tier || 't39') ? ' selected' : ''}>${esc(t.name || t.key)}</option>`).join('')}</select></label>` : '<label class="f">Price per person<input type="number" id="wsm-price" step="0.01" min="0"></label>'}
         <label class="f">Ages from<input type="number" id="wsm-amin" placeholder="6"></label><label class="f">to<input type="number" id="wsm-amax" placeholder="(no limit)"></label>
         <label class="f">Paid by<select id="wsm-pay"><option value="stripe">Stripe</option><option value="shopify">Shopify invoice</option></select></label></div>
+      <div class="bk-row"><label class="f">Offered from<input type="date" id="wsm-from" title="The first date it’s offered (leave blank for no start)"></label>
+        <label class="f">to<input type="date" id="wsm-until" title="The last date it’s offered (leave blank for no end)"></label>
+        <p class="fd-sm" style="align-self:end;margin:0 0 8px">The dates it can be scheduled (e.g. a holiday workshop: Nov 15 to Dec 31). Blank: no limit.</p></div>
       <label class="fd-chk"><input type="checkbox" id="wsm-live"> <b>Make live</b>: show it on World’s Workshops page now (even before it has dates)</label>
       <button class="ho-btn primary" onclick="wsmAddSave()">Add to the list</button></div>`;
   }
@@ -267,13 +270,19 @@ function wsmProjSearch(q) { _wsm.add.q = q; clearTimeout(_wsmPT); _wsmPT = setTi
 function wsmPick(i) { const p = _wsm.add.hits[i]; if (!p) return; _wsm.add.pick = { id: p.id, name: p.name, image: p.image || null, tier: null }; wsmDraw(); }
 async function wsmAddSave() {
   const v = id => (document.getElementById(id) || {}).value, P = _wsm.add.pick, live = document.getElementById('wsm-live').checked;
-  const tier = document.getElementById('wsm-tier') ? v('wsm-tier') : null;
+  const tier = document.getElementById('wsm-tier') ? v('wsm-tier') : null, from = v('wsm-from') || null, until = v('wsm-until') || null;
+  if (from && until && until < from) { alert('The “to” date is before the “from” date.'); return; }
   const { data, error } = await sb.rpc('world_item_save', { p: { project_id: P.id, kind: v('wsm-kind'), minutes: +v('wsm-min') || 90, price: +v('wsm-price') || 0,
     min_age: v('wsm-amin') || null, max_age: v('wsm-amax') || null, payment: v('wsm-pay'), treats: true, active: true, ...(tier !== null ? { price_tier: tier } : {}) } });
   if (error) { alert('Not added: ' + error.message); return; }
   const id = typeof data === 'string' ? data : (data && data.id);
   if (id) await sb.rpc('hub_workshop_set', { p: { id, live } });
-  _wsm.msg = `${P.name} added${live ? ' and live on World' : ''}. Schedule its dates with ➕ Bulk add → Workshop times.`;
+  let datesMsg = '';
+  if (id && (from || until)) {   // (Nov 14 2026) the dates it's offered, set here too (the same as the Offered dates on its row)
+    const { error: de } = await sb.rpc('hub_workshop_dates', { p_id: id, p_from: from, p_until: until });
+    datesMsg = de ? ' (Its offered dates weren’t saved: set them on its row.)' : ` Offered ${from || 'any time'} to ${until || 'no end date'}.`;
+  }
+  _wsm.msg = `${P.name} added${live ? ' and live on World' : ''}.${datesMsg} Schedule its dates with ➕ Bulk add → Workshop times.`;
   _wsm.add = null; await wsmLoad();
 }
 // ---------- Home office → 🔁 Move to World (hub_move_to_world.sql): Shopify workshop products → World-only workshops ----------
