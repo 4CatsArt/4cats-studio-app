@@ -104,11 +104,11 @@ const DASH_BLOCKS = {
     desc: 'Buttons for the pages and tools you use most.',
     settings(b) {
       const on = new Set(b.opts.links || []);
-      return '<div class="dash-ticks">' + DASH_LINKS.filter(l => dashCan(l.area, l.level)).map(l =>
+      return '<div class="dash-ticks">' + DASH_LINKS.filter(dashLinkOk).map(l =>
         `<label><input type="checkbox" data-link="${escAttr(l.key)}"${on.has(l.key) ? ' checked' : ''}> ${esc(l.name)}</label>`).join('') + '</div>';
     },
     load(b) {
-      const L = DASH_LINKS.filter(l => (b.opts.links || []).includes(l.key) && dashCan(l.area, l.level));
+      const L = DASH_LINKS.filter(l => (b.opts.links || []).includes(l.key) && dashLinkOk(l));
       if (!L.length) return '<div class="dash-empty">No links yet. Choose some in ✏️ Customize → ⚙.</div>';
       return '<div class="dash-links">' + L.map(l => `<button class="ho-btn sm" onclick="dashLinkGo('${escAttr(l.key)}')">${esc(l.name)}</button>`).join('') + '</div>';
     }
@@ -621,6 +621,63 @@ const DASH_BLOCKS = {
             <button class="ho-btn sm" onclick="dashKitSend('${escAttr(r.x.variant_id)}')" title="Send from the warehouse">🚚 Send</button></div>`, 'Every studio has enough kits. ✓');
     }
   },
+  // ---------- 🌍 World (Nov 14 2026; hub_dash_world.sql): Points & Rewards, gift cards, shop orders, vote results ----------
+  world_points: {
+    name: '⭐ Points & Rewards', group: 'World', area: 'world_site_deals', level: 'view', size: 's', opts: { rows: 5 }, settings: DASH_ROWS_SETTING, open: ['dashOpenUrl', 'world-settings.html'], words: 'points rewards subscribers votes loyalty',
+    desc: 'Points families collected this week, who subscribed through Points & Rewards, and the latest points.',
+    async load(b) {
+      const d = await dashRpc('hub_dash_world', { p_what: 'points' }), KI = { vote: '🗳️', feedback: '💬', adjust: '⭐', purchase: '🛍️' };
+      dashStatSet(b, [[String(d.week_points || 0), 'points this week', ''], [String(d.week_joined || 0), 'subscribed', d.week_joined ? 'ok' : '']]);
+      return `<div class="dash-chips">${dashBig(d.week_points || 0, 'points this week')}<span class="dash-pill">${d.week_families || 0} families</span><span class="dash-pill ${d.week_joined ? 'ok' : ''}">${d.week_joined || 0} subscribed for points</span></div>
+        <div class="dash-sub" style="margin:4px 0 6px">All time: ${(+d.all_points || 0).toLocaleString()} points · ${d.all_families || 0} families</div>` +
+        dashRows(d.recent || [], +b.opts.rows || 5, r => dashLine(`${KI[r.kind] || '⭐'} ${esc(r.reason || '')}`, `${r.points > 0 ? '+' : ''}${r.points} · ${esc(new Date(r.created_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }))}`, ''), 'No points yet.');
+    }
+  },
+  world_giftcards: {
+    name: '🎁 Gift cards', group: 'World', area: 'world_site_deals', level: 'view', size: 's', opts: { rows: 5 }, settings: DASH_ROWS_SETTING, open: ['dashOpenUrl', 'world-settings.html'], words: 'gift cards sold send failed',
+    desc: 'Gift cards sold this month, ones waiting for their send date, and any that failed (to try again in World settings).',
+    async load(b) {
+      const d = await dashRpc('hub_dash_world', { p_what: 'giftcards' }), F = d.failed || [], U = d.upcoming || [];
+      dashGlanceSet(b, F.length ? `${F.length} gift card${F.length === 1 ? '' : 's'} to try again` : '');
+      dashStatSet(b, [[String(d.month_count || 0), 'sold this month', ''], [String(F.length), 'failed', F.length ? 'bad' : 'ok']]);
+      return `<div class="dash-chips">${dashBig('$' + Math.round(+d.month_amount || 0).toLocaleString(), 'this month')}<span class="dash-pill">${d.month_count || 0} sold</span><span class="dash-pill">${d.waiting || 0} made</span><span class="dash-pill ${F.length ? 'bad' : 'ok'}">${F.length} failed</span></div>` +
+        (F.length ? dashRows(F, +b.opts.rows || 5, r => dashLine(`⚠️ $${(+r.amount || 0).toFixed(0)} for ${esc(r.to || '?')}`, esc(String(r.error || 'not made yet').slice(0, 80)), 'late'))
+          : dashRows(U, +b.opts.rows || 5, r => dashLine(`$${(+r.amount || 0).toFixed(0)} for ${esc(r.to || '?')}`, 'sends ' + esc(new Date(String(r.send_on) + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })), ''), 'Nothing waiting to be sent.'));
+    }
+  },
+  world_shop: {
+    name: '🛍️ Shop orders', group: 'World', area: 'retail_products', level: 'view', size: 's', opts: { rows: 6 }, settings: DASH_ROWS_SETTING, open: ['dashOpenUrl', 'https://ship.shipstation.com'], words: 'orders shipping shipstation warehouse world shop',
+    desc: 'World shop orders paid in the last 14 days, and any that didn’t reach ShipStation (so they’re never stuck unnoticed).',
+    async load(b) {
+      const d = await dashRpc('hub_dash_world', { p_what: 'shop' }), O = (d.orders || []).filter(o => !o.test), bad = O.filter(o => o.error || !o.sent);
+      dashGlanceSet(b, bad.length ? `${bad.length} shop order${bad.length === 1 ? '' : 's'} not in ShipStation` : '');
+      dashStatSet(b, [[String(O.length), 'orders (14 days)', ''], [String(bad.length), 'not in ShipStation', bad.length ? 'bad' : 'ok']]);
+      const rows = bad.concat(O.filter(o => !(o.error || !o.sent)));
+      return `<div class="dash-chips"><span class="dash-pill">${O.length} paid (14 days)</span><span class="dash-pill ${bad.length ? 'bad' : 'ok'}">${bad.length ? bad.length + ' not in ShipStation' : '✓ all in ShipStation'}</span></div>` +
+        dashRows(rows, +b.opts.rows || 6, o => dashLine(`${esc(o.order)} · ${esc(o.name || '')}`, `$${(+o.total || 0).toFixed(2)} · ${o.error ? '<b>⚠️ ' + esc(String(o.error).slice(0, 60)) + '</b>' : o.sent ? 'in ShipStation' : '<b>⚠️ not sent yet</b>'}`, o.error || !o.sent ? 'late' : ''), 'No shop orders in the last 14 days.');
+    }
+  },
+  world_votes: {
+    name: '🗳️ Vote results', group: 'World', area: 'world_site_deals', level: 'view', size: 's', opts: { rows: 5 }, settings: DASH_ROWS_SETTING, open: ['dashOpenUrl', 'world-settings.html'], words: 'votes poll results ranking favourites',
+    desc: 'The vote showing on World now, and its leaders: by score for ranked and medal votes, average stars for ratings, picks or hearts for the rest.',
+    async load(b) {
+      const [P, X] = await Promise.all([dashRpc('world_polls_admin'), dashRpc('hub_poll_extras_list').catch(() => ({}))]);
+      const t = localDateStr(new Date()), polls = ((P && P.polls) || []).filter(p => p.active !== false && (!p.starts_on || p.starts_on <= t) && (!p.ends_on || p.ends_on >= t));
+      const pl = polls.sort((a, c) => String(c.starts_on || '').localeCompare(String(a.starts_on || '')))[0];
+      if (!pl) return '<div class="dash-empty">No vote showing right now.</div>';
+      const ex = (X && X[pl.id]) || {}, type = ex.type || 'react', mx = +ex.max || 5;
+      const opts = (P.options || []).filter(o => o.poll_id === pl.id).map(o => { const c = {}; (P.counts || []).forEach(x => { if (x.option_id === o.id) c[x.reaction] = +x.n || 0; });
+        let score = 0, n = 0, sum = 0, label = '';
+        if (type === 'rank' || type === 'medal') { for (let k = 1; k <= mx; k++) score += (mx + 1 - k) * (c['k' + k] || 0); label = score + ' pts · ' + (c.k1 || 0) + ' first'; }
+        else if (type === 'rate') { for (let r = 1; r <= 5; r++) { n += c['r' + r] || 0; sum += r * (c['r' + r] || 0); } score = n ? sum / n : 0; label = n ? '★ ' + score.toFixed(1) + ' · ' + n + ' ratings' : 'no ratings'; }
+        else if (type === 'pick') { score = c.pick || 0; label = score + ' picks'; }
+        else { score = (c.love || 0) * 2 + (c.like || 0); label = (c.love || 0) + ' ❤️ · ' + (c.like || 0) + ' 👍'; }
+        return { o, score, label }; }).sort((a, c) => c.score - a.score);
+      return `<div class="dash-sub" style="margin:0 0 6px"><b>${esc(pl.title || 'Vote')}</b>${pl.ends_on ? ' · until ' + esc(new Date(pl.ends_on + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })) : ''}</div>` +
+        dashRows(opts, +b.opts.rows || 5, (r, i) => dashLine(`${['🥇', '🥈', '🥉'][i] || (i + 1) + '.'} ${esc(r.o.label || '')}`, esc(r.label), ''), 'No choices yet.');
+    }
+  },
+
   wh_held: {
     name: '☕ Held for bookings', group: 'Warehouse', area: 'retail_products', level: 'view', size: 's', opts: { rows: 6 }, settings: DASH_ROWS_SETTING, open: ['dashLinkGo', 'n_rp'], words: 'hot chocolate candy snacks add-ons booked',
     desc: 'Hot chocolates and candy bags booked with upcoming bookings, and studios that don’t have enough on hand for them.',
@@ -730,8 +787,43 @@ const DASH_LINKS = [
   { key: 'n_cal', name: '📅 Calendar', nav: 'nav-cal', area: null },
   { key: 'n_rp', name: '🛍️ Products', nav: 'nav-rp', area: 'retail_products', level: 'view' },
   { key: 'n_sup', name: '🧺 Supplies list', nav: 'nav-sup', area: 'supplies_inventory', level: 'view' },
-  { key: 'shipstation', name: '📮 ShipStation', url: 'https://ship.shipstation.com', area: 'retail_products', level: 'view' }
+  { key: 'shipstation', name: '📮 ShipStation', url: 'https://ship.shipstation.com', area: 'retail_products', level: 'view' },
+  // (Nov 14 2026) more pages from the repo, the Hub's own pages and outside tools (iPad pages left out on purpose)
+  { key: 'projects', name: '🎨 Projects library', url: 'projects.html', area: 'programs_curriculum', level: 'view' },
+  { key: 'dayboard', name: '🗓️ Day & week board', url: 'day-board.html?view=week', area: null },
+  { key: 'inventory', name: '📦 Inventory', url: 'inventory.html', area: 'supplies_inventory', level: 'view' },
+  { key: 'invadmin', name: '🧰 Inventory admin', url: 'inventory-admin.html', area: 'supplies_inventory', level: 'edit' },
+  { key: 'kbview', name: '📖 Knowledge base (staff view)', url: 'kb-view.html', area: null },
+  { key: 'training', name: '🎓 Training', url: 'training.html', area: null },
+  { key: 'kiln', name: '🔥 Kiln', url: 'kiln.html', area: null },
+  { key: 'setup2026', name: '🏗️ Studio setup 2026', url: 'studio-setup-2026.html', area: null },
+  { key: 'n_pb', name: '🎉 Party balances', nav: 'nav-pb' },
+  { key: 'n_walkins', name: '🚶 Walk-ins', nav: 'nav-walkins' },
+  { key: 'n_ct', name: '📚 Class times', nav: 'nav-ct' },
+  { key: 'n_bulk', name: '➕ Bulk add', nav: 'nav-bulk' },
+  { key: 'n_as', name: '🗓️ Auto-schedule', nav: 'nav-as' },
+  { key: 'n_wsm', name: '🖼️ Workshops', nav: 'nav-wsm' },
+  { key: 'n_memb', name: '⭐ Memberships', nav: 'nav-memb' },
+  { key: 'n_snotes', name: '✍️ Studio notes', nav: 'nav-snotes' },
+  { key: 'n_oc', name: '✅ Open & close', nav: 'nav-oc-overview' },
+  { key: 'n_sick', name: '🤒 Sick calls', nav: 'nav-sick' },
+  { key: 'n_swaps', name: '🔁 Shift swaps', nav: 'nav-swaps' },
+  { key: 'n_devices', name: '🖥 Devices', nav: 'nav-devices' },
+  { key: 'n_act', name: '🕘 Activity log', nav: 'nav-act' },
+  { key: 'n_hoann', name: '📣 Announcements (read)', nav: 'nav-ho-ann' },
+  { key: 'world_live', name: '🌍 World', url: 'https://world.4cats.com', area: null },
+  { key: 'world_dev', name: '🧪 World test site', url: 'https://world-dev.4cats.com', area: 'world_site_deals', level: 'view' },
+  { key: 'shopify', name: '🛍️ Shopify admin', url: 'https://admin.shopify.com', area: 'retail_products', level: 'view' },
+  { key: 'stripe', name: '💳 Stripe', url: 'https://dashboard.stripe.com', area: 'finance', level: 'view' },
+  { key: 'supabase', name: '🗄️ Supabase', url: 'https://supabase.com/dashboard/project/snxibhbhhchjthfmjtaj', area: 'users_access', level: 'manage' },
+  { key: 'resend', name: '✉️ Resend', url: 'https://resend.com/emails', area: 'newsletters', level: 'view' },
+  { key: 'vimeo', name: '🎬 Vimeo', url: 'https://vimeo.com/manage/videos', area: 'support', level: 'view' }
 ];
+function dashLinkOk(l) {   // their access, and for the Hub's own pages: only ones in their sidebar
+  if (!dashCan(l.area, l.level)) return false;
+  if (l.nav) { const el = document.getElementById(l.nav); return !!el && el.style.display !== 'none' && !el.hidden; }
+  return true;
+}
 function dashLinkGo(key) {
   const l = DASH_LINKS.find(x => x.key === key); if (!l) return;
   if (l.url) { window.open(l.url, '_blank'); return; }
