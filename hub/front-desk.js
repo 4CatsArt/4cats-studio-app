@@ -725,6 +725,7 @@ async function fdAddFrom(kind, id) {
   if (kind === 'ws') {
     const x = (F.today || []).concat(Array.isArray(F.ws) ? F.ws : []).find(y => y.id === id); if (!x) return;
     F.add = { kind, x, who: {}, guests: {}, extras: {} };
+    fdBookedCount(F.add);   // (➕ do they already have a booking at this time? then "Add to their booking")
   } else if (kind === 'class') {
     if (!Array.isArray(F.cls)) { F.msg = 'Loading the class…'; fdRender(); await fdLoadClasses(); F.msg = ''; }
     let c = Array.isArray(F.cls) ? F.cls.find(y => y.slot_id === id) : null;
@@ -753,13 +754,17 @@ function fdAddHtml() {
   if (A.kind === 'party') h += fdPtyAddHtml();
   else if (A.kind === 'ws') {
     const x = A.x, I = x.item || {};
-    h += `<h3>${esc(fdClean(x.title))}</h3><p class="fd-sm">${fdDay(x.session_date)}, ${fdTime(x.session_time)} · ${esc(FD_KIND[I.kind] || 'Workshop')} · ${(x.spaces_left_cache ?? 0)} left${x.kids_only ? ' · kids only (drop-off)' : ''}</p>` + fdWhoHtml(false, x.session_date);
+    h += `<h3>${esc(fdClean(x.title))}</h3><p class="fd-sm">${fdDay(x.session_date)}, ${fdTime(x.session_time)} · ${esc(FD_KIND[I.kind] || 'Workshop')} · ${(x.spaces_left_cache ?? 0)} left${x.kids_only ? ' · kids only (drop-off)' : ''}</p>`;
+    if (A.existing > 0) h += `<div class="fd-field fd-addto"><b>➕ They already have ${A.existing} booked at this time.</b>
+      <label class="fd-chk"><input type="checkbox" ${A.addTo ? 'checked' : ''} onchange="_fd.add.addTo=this.checked;fdRender()"> <b>Add to their booking</b>: priced as one group with the ${A.existing} they have (e.g. 3 for $49, then the 4th at the group price)</label>
+      ${A.addTo ? '<span class="fd-sm">Tick only the <b>extra</b> people below.</span>' : '<span class="fd-sm">Unticked: a separate booking, priced on its own.</span>'}</div>`;
+    h += fdWhoHtml(false, x.session_date);
     const g = fdAges(A), BR = { k57: [5, 7], k811: [8, 11], k1215: [12, 15], adult: [16, 199] };
     if (!x.kids_only) h += '<div class="fd-field"><b>Guests not on their list</b><div class="fd-bands">' + FD_BANDS.filter(b => BR[b[0]][1] >= g.min && BR[b[0]][0] <= g.max).map(b => {
       const lo = Math.max(BR[b[0]][0], g.min), hi = Math.min(BR[b[0]][1], g.max), lab = b[0] === 'adult' ? 'Adults (16+)' : `Kids ${lo}–${hi}`;
       const help = b[0] === 'k57' ? 'need 1 adult each' : b[0] === 'k811' ? (g.wheel ? 'need 1 adult each' : '1 adult per 2 kids') : b[0] === 'k1215' ? 'can come alone' : '';
       return `<label>${lab}${help ? ` <span class="fd-help">${help}</span>` : ''}<input type="number" min="0" max="20" value="${A.guests[b[0]] || 0}" onchange="_fd.add.guests['${b[0]}']=Math.max(0,+this.value||0);fdRender()"></label>`; }).join('') + '</div></div>';
-    const chk = fdWsCheck(A); if (chk.msg) h += `<p class="${chk.bad ? 'fd-warn' : 'fd-ok'}">${esc(chk.msg)}</p>`;
+    const chk = fdWsCheck(A); if (chk.msg) h += A.addTo && A.existing > 0 && chk.bad ? `<p class="fd-ok">👀 Make sure an adult from their booking is with them (${esc(chk.msg.replace(/^Add [^.]*\.\s*/, ''))})</p>` : `<p class="${chk.bad ? 'fd-warn' : 'fd-ok'}">${esc(chk.msg)}</p>`;
     if (I.treats) h += `<div class="fd-field"><b>Treats</b><div class="fd-bands"><label>Hot chocolate<input type="number" min="0" max="20" value="${A.extras.hot || 0}" oninput="_fd.add.extras.hot=+this.value||0"></label><label>Candy bags<input type="number" min="0" max="20" value="${A.extras.candy || 0}" oninput="_fd.add.extras.candy=+this.value||0"></label></div></div>`;
     if (I.kind === 'glazing') h += `<div class="fd-field"><b>What are they glazing?</b><input value="${esc(A.glaze || '')}" oninput="_fd.add.glaze=this.value"></div>`;
     if (x.kids_only) h += `<div class="fd-field"><b>Who’s picking up?</b><div class="fd-inline"><input placeholder="Name" value="${esc(A.puName || '')}" oninput="_fd.add.puName=this.value"><input placeholder="Phone" value="${esc(A.puPhone || '')}" oninput="_fd.add.puPhone=this.value"></div></div>`;
@@ -802,11 +807,12 @@ function fdAddDone() {
   if (A.kind === 'ws') {
     const x = A.x, guests = FD_BANDS.map(b => ({ label: b[1], n: A.guests[b[0]] || 0 })).filter(g => g.n > 0);
     if (!who.length && !guests.length) return fail('Tick who’s coming, or add guests.');
-    const chk = fdWsCheck(A); if (chk.bad) return fail(chk.msg);
+    const chk = fdWsCheck(A); if (chk.bad && !(A.addTo && A.existing > 0)) return fail(chk.msg);   // (adding to their booking: their adults are already in it)
     if ((x.item || {}).kind === 'glazing' && !(A.glaze || '').trim()) return fail('Add what they’re glazing.');
     if (x.kids_only && (!(A.puName || '').trim() || String(A.puPhone || '').replace(/\D/g, '').length < 7)) return fail('Add who’s picking up (name and phone).');
     const n = who.length + guests.reduce((t, g) => t + g.n, 0);
-    F.cart.push({ type: 'world', session_id: x.id, title: `${fdClean(x.title)} · ${fdDay(x.session_date)}, ${fdTime(x.session_time)}`,
+    const addTo = !!(A.addTo && A.existing > 0);
+    F.cart.push({ type: 'world', session_id: x.id, add_to: addTo || undefined, title: `${fdClean(x.title)} · ${fdDay(x.session_date)}, ${fdTime(x.session_time)}${addTo ? ` · adding to their ${A.existing}` : ''}`,
       people: who.map(p => ({ name: p.name, dob: p.dob })), guests, extras: { hot: A.extras.hot || 0, candy: A.extras.candy || 0 }, glaze: A.glaze || undefined,
       pickup: x.kids_only ? { name: A.puName, phone: A.puPhone } : undefined, prize, prizes_more: prizesMore.length ? prizesMore : undefined,
       desc: [who.map(p => p.name).join(', '), guests.map(g => g.n + ' × ' + g.label).join(', '), n + (n === 1 ? ' spot' : ' spots'), (A.extras.hot ? A.extras.hot + ' hot choc' : ''), (A.extras.candy ? A.extras.candy + ' candy' : ''), prize ? (codes.length > 1 ? 'codes ' + codes.join(' + ') : 'code ' + prize) : ''].filter(Boolean).join(' · ') });
@@ -1546,4 +1552,16 @@ function fdMemAdd() {
   const amt = plan === 'workshops' ? P.workshops : disc ? P.discounted : P.member;
   _fd.cart.push({ type: 'membership', plan, discount_kind: disc, title: `⭐ ${plan === 'workshops' ? 'Workshops Only' : '4Cats'} membership${kName ? ' (' + kName + ')' : ''}, 1 year`, desc: `$${amt} plus tax · renews yearly · member prices on this cart` });
   _fd.gift = ''; closeDutySheet(); _fd.msg = ''; fdRender();
+}
+
+
+// ---------- ➕ (Nov 14 2026) Adding people to a family's booking: how many they already have at this time (camp-checkout
+// staff_booked_count). When they have some, "Add to their booking" is ticked: the extra people are priced as one group with them. ----------
+async function fdBookedCount(A) {
+  const F = _fd; A.existing = 0; A.addTo = false;
+  if (!F.fam || F.fam.walk_in || !A.x) return;
+  try {
+    const d = await fdCall({ action: 'staff_booked_count', studio: F.studio, session_id: A.x.id, family: { customer_id: F.fam.customer_id || null, email: F.fam.email || null } });
+    if (_fd.add === A && d && d.count > 0) { A.existing = d.count; A.addTo = true; fdRender(); }
+  } catch (e) { /* (not available yet: book as usual) */ }
 }
