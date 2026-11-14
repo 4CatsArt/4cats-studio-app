@@ -3,7 +3,7 @@
 // existing buttons, so each one keeps its own click and who-can-see-it rules; a section with nothing visible hides itself.
 (function () {
   const SECTIONS = [
-    ['mine', '⭐ Mine', ['nav-mydash', 'nav-cal']],
+    ['mine', '⭐ Mine', ['nav-mydash', 'nav-cal', 'nav-ho-ann']],
     ['sched', '📅 Schedule & classes', ['nav-ct', 'nav-bulk', 'nav-sessions-table', 'nav-day-board', 'nav-as', 'nav-wsm', 'nav-curriculum', 'nav-camps']],
     ['ideas', '💡 Customer ideas', ['nav-ideas', 'nav-interest']],
     ['groups', '🎉 Parties & groups', ['nav-pb', 'nav-ft', 'nav-bo', 'nav-don']],
