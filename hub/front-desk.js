@@ -281,7 +281,7 @@ function fdShopHtml(snacks, extras) {
     P = P.filter(p => !fdShopIn(p, XC) || others.some(c => fdShopIn(p, c))); C = C.filter(c => c !== XC);
   }
   const q = (F.shopQ || '').trim().toLowerCase(), col = extras ? XC : C.find(c => c.id === F.shopCol) || null;
-  let h = `<div class="fd-filters"><button class="ho-btn" onclick="fdStockOpen(${snacks ? 'true' : 'false'})" title="What this studio has, and making up or opening kits">📦 Stock here</button><input id="fd-shopq" type="search" placeholder="Search a name, tag or SKU" value="${esc(F.shopQ || '')}" oninput="_fd.shopQ=this.value;clearTimeout(_fd.qt);_fd.qt=setTimeout(fdRender,200)" onkeydown="if(event.key==='Enter'){event.preventDefault();fdShopScan(this.value)}">
+  let h = `<div class="fd-filters">${!snacks && !extras ? '<button class="ho-btn primary" onclick="fdGiftOpen()" title="An emailed 4Cats gift card, the same as on World">🎁 Sell a gift card</button>' : ''}<button class="ho-btn" onclick="fdStockOpen(${snacks ? 'true' : 'false'})" title="What this studio has, and making up or opening kits">📦 Stock here</button><input id="fd-shopq" type="search" placeholder="Search a name, tag or SKU" value="${esc(F.shopQ || '')}" oninput="_fd.shopQ=this.value;clearTimeout(_fd.qt);_fd.qt=setTimeout(fdRender,200)" onkeydown="if(event.key==='Enter'){event.preventDefault();fdShopScan(this.value)}">
     <span class="fd-chips"${extras ? ' hidden' : ''}><button class="fd-chip${!col ? ' on' : ''}" onclick="_fd.shopCol='';fdRender()">All</button>${C.map(c => `<button class="fd-chip${col && col.id === c.id ? ' on' : ''}" onclick="_fd.shopCol='${c.id}';fdRender()">${esc(c.name)}</button>`).join('')}</span></div>`;
   if (!P.length) return h + '<div class="fd-soon"><div class="fd-soon-ic">' + (snacks ? '🧃' : '🛍️') + '</div><b>Nothing to sell here yet.</b><p class="fd-sm">In Home office → 🛍️ Products, tick <b>At the front desk</b> on a product (and this studio, or every studio).</p></div>';
   const match = p => !q || (p.name + ' ' + (p.tags || []).join(' ') + ' ' + (p.variants || []).map(v => (v.sku || '') + ' ' + (v.barcode || '')).join(' ')).toLowerCase().includes(q);
@@ -1327,3 +1327,86 @@ async function fdWalkUndo() {
   if (error) { alert(error.message); return; }
   W.open = false; fdRender(); if (_fd.tab === 'today') fdLoadTab();
 }
+
+// ---------- 🎁 (Nov 14 2026) Selling a gift card at the desk: the same as World's (amount, who it's for and when, from, message, design).
+// It goes in the cart (no tax) and is paid like anything else; once paid, it's made and emailed on its date, as on World.
+let _fdGc = { set: null, phys: null };
+async function fdGiftOpen(kind) {
+  if (!_fdGc.set) { try { const { data } = await sb.rpc('world_gift_settings'); _fdGc.set = data || {}; } catch (e) { _fdGc.set = {}; } }
+  if (!_fdGc.phys) { try { const { data, error } = await sb.rpc('hub_gift_physical_list'); _fdGc.phys = error ? [] : (data || []); } catch (e) { _fdGc.phys = []; } }
+  // 🎴 (Nov 14 2026) a studio with physical gift cards: physical or digital first
+  if (!kind && _fdGc.phys.includes(_fd.studio)) {
+    openDutySheet(`<h3 style="margin:0 0 10px">🎁 Sell a gift card</h3><div class="fd-gc-kind">
+      <button class="fd-gc-k" onclick="fdGiftOpen('physical')"><span>🎴</span><b>Physical card</b><small>Scan the card from the studio’s stack</small></button>
+      <button class="fd-gc-k" onclick="fdGiftOpen('digital')"><span>📧</span><b>Digital</b><small>Emailed, now or on a date</small></button></div>
+      <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button></div>`);
+    return;
+  }
+  if (kind === 'physical') return fdGiftPhysOpen();
+  const G = _fdGc.set, lo = +G.min > 0 ? +G.min : 10, hi = +G.max > 0 ? +G.max : 500, fam = _fd.fam, walk = !fam || fam.walk_in;
+  const presets = (Array.isArray(G.amounts) && G.amounts.length ? G.amounts : [25, 50, 75, 100]).filter(a => +a >= lo && +a <= hi);
+  const designs = (Array.isArray(G.designs) ? G.designs : []).filter(d => d && d.id && d.on !== false);
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Vancouver' });
+  openDutySheet(`<h3 style="margin:0 0 6px">🎁 Sell a gift card</h3>
+    <div class="fd-gc-amts">${presets.map(a => `<button type="button" class="fd-chip" data-gca="${a}">$${a}</button>`).join('')}<label class="fd-sm">Other $<input type="number" id="fd-gc-amt" min="${lo}" max="${hi}" step="1" style="width:90px"></label></div>
+    <p class="fd-sm" style="margin:4px 0 10px">From $${lo} to $${hi}. No tax. Never expires.</p>
+    <div class="fd-gc-to"><label><input type="radio" name="fd-gc-to" value="me" ${walk ? 'disabled' : 'checked'}> Email it to ${walk ? 'the family (choose a family first)' : esc(fam.first_name || 'the family') + (fam.email ? ' (' + esc(fam.email) + ')' : '')} to give</label>
+      <label><input type="radio" name="fd-gc-to" value="email" ${walk ? 'checked' : ''}> Email it to someone else</label></div>
+    <div id="fd-gc-who" ${walk ? '' : 'hidden'}><label class="dash-set-row">Their name <input type="text" id="fd-gc-name" maxlength="80"></label>
+      <label class="dash-set-row">Their email <input type="email" id="fd-gc-email" maxlength="120"></label>
+      <label class="dash-set-row">Send it on <input type="date" id="fd-gc-date" min="${today}" value="${today}"> <span class="fd-sm">(from 8am Pacific that day)</span></label></div>
+    <label class="dash-set-row">From <input type="text" id="fd-gc-from" maxlength="80" value="${escAttr(walk ? '' : [fam.first_name, fam.last_name].filter(Boolean).join(' '))}"></label>
+    <label class="dash-set-row">Message (optional) <input type="text" id="fd-gc-msg" maxlength="500" placeholder="Happy birthday!"></label>
+    ${designs.length ? `<div class="fd-sm" style="margin-top:6px"><b>Card design</b></div><div class="fd-gc-designs">${designs.map((d, i) => `<label class="fd-gc-d"><input type="radio" name="fd-gc-design" value="${escAttr(d.id)}" ${i ? '' : 'checked'}>${d.image ? `<img src="${escAttr(d.image)}" alt="">` : ''}<span>${esc(d.name || 'Design')}</span></label>`).join('')}</div>` : ''}
+    <div id="fd-gc-msgbox" class="fd-msg" hidden></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="fdGiftAdd(${lo},${hi})">Add to cart</button></div>`);
+  document.querySelectorAll('[data-gca]').forEach(b => b.onclick = () => { document.getElementById('fd-gc-amt').value = b.dataset.gca; document.querySelectorAll('[data-gca]').forEach(x => x.classList.toggle('on', x === b)); });
+  document.querySelectorAll('[name="fd-gc-to"]').forEach(r => r.onchange = () => { document.getElementById('fd-gc-who').hidden = document.querySelector('[name="fd-gc-to"]:checked').value !== 'email'; });
+}
+function fdGiftAdd(lo, hi) {
+  const box = document.getElementById('fd-gc-msgbox'), say = t => { box.textContent = t; box.hidden = false; };
+  const amount = Math.round(+document.getElementById('fd-gc-amt').value * 100) / 100;
+  if (!(amount >= lo && amount <= hi)) { say(`Choose an amount from $${lo} to $${hi}.`); return; }
+  const deliver = (document.querySelector('[name="fd-gc-to"]:checked') || {}).value || 'email';
+  const to_name = document.getElementById('fd-gc-name').value.trim(), to_email = document.getElementById('fd-gc-email').value.trim(), send_on = document.getElementById('fd-gc-date').value;
+  const from_name = document.getElementById('fd-gc-from').value.trim(), message = document.getElementById('fd-gc-msg').value.trim();
+  const design = (document.querySelector('[name="fd-gc-design"]:checked') || {}).value || null;
+  if (deliver === 'me' && !(_fd.fam && !_fd.fam.walk_in && _fd.fam.email)) { say('That family has no email: email it to someone instead.'); return; }
+  if (deliver === 'email' && (!to_name || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to_email))) { say('Add their name and email.'); return; }
+  if (!from_name) { say('Add who it’s from.'); return; }
+  const label = '$' + (amount % 1 ? amount.toFixed(2) : amount);
+  _fd.cart.push({ type: 'giftcard', amount, deliver, to_name: deliver === 'email' ? to_name : '', to_email: deliver === 'email' ? to_email : '', send_on: deliver === 'email' ? send_on : '', from_name, message, design,
+    title: `🎁 4Cats gift card ${label}`, desc: deliver === 'me' ? `Emailed to ${_fd.fam.email} to give · from ${from_name}` : `For ${to_name} · emailed ${send_on} · from ${from_name}` });
+  closeDutySheet(); _fd.msg = ''; fdRender();
+}
+// 🎴 a physical card: scan (or type) the code printed on it, choose the amount; made in Shopify with that code once paid
+function fdGiftPhysOpen() {
+  const G = _fdGc.set || {}, lo = +G.min > 0 ? +G.min : 10, hi = +G.max > 0 ? +G.max : 500;
+  const presets = (Array.isArray(G.amounts) && G.amounts.length ? G.amounts : [25, 50, 75, 100]).filter(a => +a >= lo && +a <= hi);
+  openDutySheet(`<h3 style="margin:0 0 6px">🎴 Physical gift card</h3>
+    <label class="dash-set-row"><b>Card code</b> <input type="text" id="fd-gc-code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Scan or type the code on the card" style="min-width:240px;font-family:monospace;letter-spacing:1px"></label>
+    <div class="fd-gc-amts" style="margin-top:8px">${presets.map(a => `<button type="button" class="fd-chip" data-gca="${a}">$${a}</button>`).join('')}<label class="fd-sm">Other $<input type="number" id="fd-gc-amt" min="${lo}" max="${hi}" step="1" style="width:90px"></label></div>
+    <p class="fd-sm" style="margin:4px 0 10px">From $${lo} to $${hi}. No tax. Never expires. The card works once it’s paid.</p>
+    <div id="fd-gc-msgbox" class="fd-msg" hidden></div>
+    <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="fdGiftPhysAdd(${lo},${hi})">Add to cart</button></div>`);
+  document.querySelectorAll('[data-gca]').forEach(b => b.onclick = () => { document.getElementById('fd-gc-amt').value = b.dataset.gca; document.querySelectorAll('[data-gca]').forEach(x => x.classList.toggle('on', x === b)); });
+  const c = document.getElementById('fd-gc-code'); setTimeout(() => c.focus(), 30);
+  c.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); const a = document.querySelector('[data-gca]'); if (a && !document.getElementById('fd-gc-amt').value) a.focus(); } });   // (a scanner ends with Enter)
+}
+function fdGiftPhysAdd(lo, hi) {
+  const box = document.getElementById('fd-gc-msgbox'), say = t => { box.textContent = t; box.hidden = false; };
+  const code = document.getElementById('fd-gc-code').value.replace(/[\s-]+/g, '').toUpperCase(), amount = Math.round(+document.getElementById('fd-gc-amt').value * 100) / 100;
+  if (!/^[A-Z0-9]{8,20}$/.test(code)) { say('Scan or type the code on the card (8 to 20 letters and numbers).'); return; }
+  if (_fd.cart.some(l => l.type === 'giftcard' && l.physical && l.code === code)) { say('That card is already in the cart.'); return; }
+  if (!(amount >= lo && amount <= hi)) { say(`Choose an amount from $${lo} to $${hi}.`); return; }
+  const fam = _fd.fam && !_fd.fam.walk_in ? _fd.fam : null, label = '$' + (amount % 1 ? amount.toFixed(2) : amount);
+  _fd.cart.push({ type: 'giftcard', physical: true, code, amount, from_name: fam ? [fam.first_name, fam.last_name].filter(Boolean).join(' ') : '',
+    title: `🎴 4Cats gift card ${label} (physical)`, desc: `Card ending ${code.slice(-4)} · works once paid` });
+  closeDutySheet(); _fd.msg = ''; fdRender();
+}
+(function () { const st = document.createElement('style'); st.textContent = `.fd-gc-kind { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.fd-gc-k { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 18px 10px; border: 2px solid #e8e4f6; border-radius: 14px; background: #fff; cursor: pointer; font: inherit; }
+.fd-gc-k:hover { border-color: var(--accent, #4f3bd1); } .fd-gc-k span { font-size: 34px; } .fd-gc-k small { color: #6b6890; font-size: 12px; text-align: center; }
+.fd-gc-amts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; } .fd-gc-to label { display: block; margin: 4px 0; }
+.fd-gc-designs { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-top: 4px; } .fd-gc-d { display: flex; flex-direction: column; gap: 4px; font-size: 12px; cursor: pointer; }
+.fd-gc-d img { width: 100%; aspect-ratio: 16 / 10; object-fit: cover; border-radius: 8px; border: 2px solid transparent; } .fd-gc-d input:checked + img { border-color: var(--accent, #4f3bd1); }`; document.head.appendChild(st); })();
