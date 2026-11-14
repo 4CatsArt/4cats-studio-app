@@ -183,7 +183,7 @@ function fdRender() {
   const el = document.getElementById('fd-pane'); if (!el || !_fd) return;
   if (fdNeedsPin()) { el.innerHTML = fdPinHtml(); setTimeout(() => { const i = document.getElementById('fd-pin'); if (i && document.activeElement !== i) i.focus(); }, 60); return; }
   const F = _fd;
-  let h = `<div class="fd-testing">🚧 <b>Being tested.</b> Please don’t use the Front desk for real bookings yet: keep booking the usual way until home office says it’s ready.</div>
+  let h = `
     <div class="fd-top"><div class="pts-page-title" style="margin:0">🛒 Front desk</div><span class="fd-studio">${esc(STUDIO_NAMES[F.studio] || F.studio || '')}</span>${_fdSeller ? `<span class="fd-studio" title="Locks after 1 minute with no taps">🔑 Selling as <b>${esc(_fdSeller.name)}</b> <button class="ho-btn sm" onclick="fdSellerLock()">Lock</button></span>` : ''}<span class="spacer"></span>
     ${fdWaitChipHtml()}<button class="ho-btn" onclick="fdWalkOpen()" title="Someone came in for glazing or a workshop that isn’t on the schedule">🚶 Walk-in</button><button class="ho-btn" onclick="fdRetOpen()" title="A kit brought back: credit, or swap it for another">↩ Returns & exchanges</button><button class="ho-btn" onclick="fdRecentOpen()">Recent orders</button></div>
     <div class="fd-tabs" role="tablist">${FD_TABS.map(t => `<button role="tab" class="fd-tab${F.tab === t[0] ? ' on' : ''}" onclick="_fd.tab='${t[0]}';fdRender();fdLoadTab()">${t[1]}</button>`).join('')}</div>
