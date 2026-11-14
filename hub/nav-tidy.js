@@ -12,7 +12,7 @@
     ['staff', '👥 Staff', ['nav-stf', 'nav-sick', 'nav-swaps', 'nav-hist', 'nav-ts', 'nav-rules', 'nav-ack-ho', 'nav-concerns']],
     ['msgs', '📣 Messages', ['nav-announce', 'nav-sn', 'nav-se', 'nav-news', 'nav-snotes']],
     ['mkt', '🎨 Marketing', ['nav-print-admin']],
-    ['ops', '🏪 Studio operations', ['nav-oc-overview', 'nav-walkins', 'nav-devices', 'nav-act']],
+    ['ops', '🏪 Studio operations', ['nav-health', 'nav-oc-overview', 'nav-walkins', 'nav-devices', 'nav-act']],
   ];
   const OPEN_KEY = 'hub.navOpen', PIN_KEY = 'hub.navPins';
   const store = (k, d) => { try { return JSON.parse(localStorage.getItem(k) || 'null') || d; } catch (e) { return d; } };
