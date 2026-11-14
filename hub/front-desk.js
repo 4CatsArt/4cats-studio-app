@@ -1134,8 +1134,14 @@ let _fdRet = { open: false, q: '', list: null, ord: null, qty: {}, shelf: true, 
 async function fdRetOpen() { _fdRet = { open: true, q: '', list: null, ord: null, qty: {}, shelf: true, exch: [], note: '', busy: false, done: null }; fdRender(); fdRetFind();
   if (!_fd.shop) { _fd.tab = _fd.tab; try { const { data } = await sb.rpc('hub_fd_retail', { p_studio: _fd.studio }); if (data && !_fd.shop) _fd.shop = data; } catch (e) { } } }
 async function fdRetFind() {
-  const { data, error } = await sb.rpc('hub_pos_find_paid', { p_studio: _fd.studio, p_q: _fdRet.q || '' });
-  _fdRet.list = error ? { err: /hub_pos_find_paid/.test(error.message) ? 'Run fd_waiting_returns.sql in Supabase first.' : error.message } : (data || []); fdRender();
+  const q = (_fdRet.q || '').trim(); _fdRet.findNote = '';
+  const [hub, shop] = await Promise.all([sb.rpc('hub_pos_find_paid', { p_studio: _fd.studio, p_q: q }),
+    /^#?\d{4,8}$/.test(q) ? fdCall({ action: 'staff_find_shopify', studio: _fd.studio, q }).catch(e => ({ orders: [], note: e.message })) : Promise.resolve(null)]);   // (↩ a Shopify order number too)
+  const { data, error } = hub;
+  const L = error ? null : (data || []);
+  if (shop && shop.note) _fdRet.findNote = shop.note;
+  _fdRet.list = error && !(shop && (shop.orders || []).length) ? { err: /hub_pos_find_paid/.test(error.message) ? 'Run fd_waiting_returns.sql in Supabase first.' : error.message } : ((shop && shop.orders) || []).concat(L || []);
+  fdRender();
 }
 function fdRetHtml() {
   const R = _fdRet, close = `<button class="ho-btn" onclick="_fdRet.open=false;fdRender()">Close</button>`;
@@ -1149,10 +1155,10 @@ function fdRetHtml() {
     return h;
   }
   if (!R.ord) {
-    h += `<p class="fd-sm">Kits bought at this studio in the last 90 days. Returns are for credit only (a World credit code for what they paid, before tax), or swap for another product.</p>
+    h += `<p class="fd-sm">Kits bought in the last 90 days: at this studio or on World (W… orders), or on Shopify (type the Shopify order number). Returns are for credit only (a World credit code for what they paid, before tax), or swap for another product.</p>
       <div class="fd-inline"><input id="fd-retq" placeholder="Order number, name or email" value="${escAttr(R.q)}" oninput="_fdRet.q=this.value" onkeydown="if(event.key==='Enter')fdRetFind()"><button class="ho-btn" onclick="fdRetFind()">Find</button></div>
-      ${!R.list ? fdLoading : R.list.err ? `<p class="fd-msg">${esc(R.list.err)}</p>` : !R.list.length ? '<p class="fd-sm">No paid shop orders found.</p>' :
-        R.list.map(o => `<button class="fd-rec fd-ret-pick" onclick="fdRetPick('${o.id}')"><span><b>${esc(o.order || '')}</b> ${esc(o.name || '')} <span class="fd-sm">${esc((o.lines || []).filter(l => l.kind === 'retail').map(l => l.program + (l.qty > 1 ? ' × ' + l.qty : '')).join(', '))}</span><br>
+      ${!R.list ? fdLoading : R.list.err ? `<p class="fd-msg">${esc(R.list.err)}</p>` : !R.list.length ? `<p class="fd-sm">${esc(R.findNote || 'No paid shop orders found.')}</p>` :
+        R.list.map(o => `<button class="fd-rec fd-ret-pick" onclick="fdRetPick('${escAttr(o.id)}')"><span><b>${esc(o.order || '')}</b>${o.shopify ? ' <span class="fd-pill">Shopify</span>' : ''} ${esc(o.name || '')} <span class="fd-sm">${esc((o.lines || []).filter(l => l.kind === 'retail').map(l => l.program + (l.qty > 1 ? ' × ' + l.qty : '')).join(', '))}</span><br>
           <span class="fd-sm">${esc(new Date(o.at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' }))} · ${fdMoney(o.total)}</span></span><span>›</span></button>`).join('')}
       <div class="fd-sheet-btns">${close}</div></div></div>`;
     return h;
