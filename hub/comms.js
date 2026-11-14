@@ -829,7 +829,8 @@ function renderHoList() {
 // Who it went to (active staff at the targeted studios) and who's read it, by person
 async function hoLoadReach(id) {
   const el = document.getElementById('reach-' + id); if (!el) return;
-  const { data, error } = await sb.rpc('hub_announcement_reach', { p_announcement_id: String(id) });
+  const [{ data, error }, mg] = await Promise.all([sb.rpc('hub_announcement_reach', { p_announcement_id: String(id) }),
+    sb.rpc('hub_ann_manager_reach', { p_announcement_id: String(id) }).then(r => r, () => ({ error: true }))]);   // 👑 (Nov 14 2026)
   if (error || !data) { el.innerHTML = el.dataset.fallback || ''; return; }   // before hub_announcements_v2.sql: by studio, as before
   const pct = data.total ? Math.round(data.read / data.total * 100) : 0;
   const notYet = (data.people || []).filter(p => !p.read_at), done = (data.people || []).filter(p => p.read_at);
@@ -838,7 +839,10 @@ async function hoLoadReach(id) {
     <div class="dm-bar"><i style="width:${pct}%"></i></div>
     <details class="ho-reads"><summary>By studio</summary><div class="reach-studios">${(data.by_studio || []).map(g => `<div><span>${esc(studioName(g.studio_id))}</span><b>${g.read} / ${g.total}</b></div>`).join('')}</div></details>
     ${notYet.length ? `<details class="ho-reads"><summary>Not read yet (${notYet.length})</summary><div class="list">${notYet.map(p => `<div>${esc(p.name)} <span class="goal-note">· ${esc(studioName(p.studio_id))}</span></div>`).join('')}</div></details>` : ''}
-    ${done.length ? `<details class="ho-reads"><summary>Read (${done.length})</summary><div class="list">${done.map(p => `<div>✓ ${esc(p.name)} <span class="goal-note">· ${esc(annReadLabel(p.read_at))} · ${p.via === 'studio' ? 'at the studio' : 'on their phone'}</span></div>`).join('')}</div></details>` : ''}`;
+    ${done.length ? `<details class="ho-reads"><summary>Read (${done.length})</summary><div class="list">${done.map(p => `<div>✓ ${esc(p.name)} <span class="goal-note">· ${esc(annReadLabel(p.read_at))} · ${p.via === 'studio' ? 'at the studio' : 'on their phone'}</span></div>`).join('')}</div></details>` : ''}${(() => { const M = mg && !mg.error && mg.data; if (!M || !M.total) return '';   // 👑 managers: how many have read it, and who hasn't
+      const left = (M.people || []).filter(x => !x.read_at), ok = left.length === 0, pctM = Math.round(M.read / M.total * 100);
+      return `<div class="reach-mgr${ok ? ' ok' : ''}"><b>👑 Managers: ${M.read} of ${M.total} read</b> <span class="goal-note">(${pctM}%)</span>${ok ? ' ✓' : ''}</div>` +
+        (left.length ? `<details class="ho-reads" open><summary>Managers not read yet (${left.length})</summary><div class="list">${left.map(x => `<div>${esc(x.name)} <span class="goal-note">· ${esc((x.studios || []).map(studioName).join(', ') || 'no studio')}</span></div>`).join('')}</div></details>` : ''); })()}`;
 }
 
 
@@ -968,3 +972,7 @@ async function hoDeleteAnnouncement(id) {
   if (_studioViewStarted) loadAnnouncements(_sessionStudioId);
 }
 
+
+// 👑 the managers line (Nov 14 2026)
+(function () { const st = document.createElement('style'); st.textContent = `.reach-mgr { margin: 10px 0 2px; padding: 6px 10px; border-radius: 10px; background: #fff4dc; color: #6b4a00; font-size: 14px; }
+.reach-mgr.ok { background: #e9f7ee; color: #1e6b3d; }`; document.head.appendChild(st); })();
