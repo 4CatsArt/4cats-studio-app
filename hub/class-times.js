@@ -584,7 +584,7 @@ function bulkDraw() {
     <div class="bk-sec"><b>Skip these dates</b> <span class="goal-note">(holidays, closures)</span>
       <div class="bk-chips">${B.skip.map((d, i) => `<span class="bk-chip">${esc(new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' }))} <button onclick="_bulk.skip.splice(${i},1);bulkKeep();bulkDraw()" aria-label="Remove">×</button></span>`).join('')}
         <input type="date" id="bk-skip" min="${today}"><button class="ho-btn sm" onclick="bulkAddSkip()">+ Skip date</button></div></div>
-    <div class="bk-actions"><button class="ho-btn" onclick="bulkRun(true)">Preview</button><button class="ho-btn primary" onclick="bulkRun(false)"${R && R.preview && R.made ? '' : ' disabled title="Preview first"'}>Make ${R && R.preview ? R.made : ''} times</button>
+    <div class="bk-actions"><button class="ho-btn" onclick="bulkRun(true)">Preview</button><button class="ho-btn primary" onclick="bulkRun(false)"${R && R.preview && R.made ? '' : ' disabled title="Preview first"'}>${R && R.preview ? `Make ${R.made} time${R.made === 1 ? '' : 's'}${R.made ? '' : ' (nothing new to make)'}` : 'Make times (preview first)'}</button>
       <span class="goal-note" id="bk-msg"></span></div>
     ${R ? `<div class="bk-res">${R.preview ? `<b>${R.made}</b> new time${R.made === 1 ? '' : 's'} would be made${R.skipped ? `, <b>${R.skipped}</b> already there (skipped)` : ''}.`
         : `✅ Made <b>${R.made}</b> ${B.kind === 'workshop' ? esc((bulkItem() || {}).title || 'workshop') + ' time' : B.kind === 'get_together' ? 'time slot' : bulkParty() ? 'party time' : 'time'}${R.made === 1 ? '' : 's'}${R.skipped ? ` (${R.skipped} already there, skipped)` : ''}. They’re on World now.`}
