@@ -680,5 +680,7 @@ async function invTransfer(transferId, transferAction) {
 
 if (INVENTORY_LIVE) {
   const navInv = document.getElementById('nav-inventory');
-  if (navInv) navInv.classList.remove('dev-only');
+  if (navInv) { navInv.classList.remove('dev-only'); const g = navInv.closest('.nav-group'); if (g) g.classList.remove('dev-only'); }   // (Nov 14 2026: its section too)
+} else {
+  const navInv = document.getElementById('nav-inventory'); if (navInv) navInv.classList.add('dev-only');   // (not live: admin preview only)
 }
