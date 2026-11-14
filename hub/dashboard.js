@@ -988,11 +988,13 @@ async function openMyDash() {
   if (!_dash.me) { dashDraw(); await dashLoadMe(); }
   dashDraw(); dashStartRefresh();
 }
-const DASH_PERSONAL = ['theme', 'avatar', 'name', 'greet', 'start'];   // (a person's own choices: a starting dashboard never overwrites them)
+const DASH_PERSONAL = ['theme', 'pattern', 'small', 'avatar', 'name', 'greet', 'start'];   // (a person's own choices: a starting dashboard never overwrites them)
 function dashNormalize(L) {
   if (!L || !Array.isArray(L.blocks)) return null;
   const out = { v: 1, start: !!L.start, starter: L.starter || '', blocks: L.blocks.filter(b => b && DASH_BLOCKS[b.type]).map(b => Object.assign({ id: b.id || dashNewId(), type: b.type, size: ['xs', 's', 'm', 'l'].includes(b.size) ? b.size : 'm', opts: Object.assign({}, DASH_BLOCKS[b.type].opts || {}, b.opts || {}) }, dashHeightOk(b.h) ? { h: dashHeightOk(b.h) } : {}, b.view === 'stat' ? { view: 'stat' } : {}, Number.isInteger(b.x) && b.x >= 0 && b.x < 8 ? { x: b.x } : {})) };
   if (L.theme && DASH_THEMES.some(t => t.key === L.theme)) out.theme = L.theme;
+  if (L.pattern && DASH_PATTERNS.some(t => t.key === L.pattern)) out.pattern = L.pattern;
+  if (L.small === 'narrow' || L.small === 'fit') out.small = L.small;
   if (L.avatar && typeof L.avatar === 'object' && (L.avatar.key || L.avatar.emoji)) out.avatar = { key: L.avatar.key ? String(L.avatar.key).slice(0, 300) : undefined, emoji: L.avatar.emoji ? String(L.avatar.emoji).slice(0, 16) : undefined };
   if (L.name) out.name = String(L.name).slice(0, 40);
   if (L.greet === false) out.greet = false;
@@ -1047,7 +1049,7 @@ async function dashSaveNow() {
 function dashStatus() { const el = document.getElementById('dash-status'); if (el) { el.textContent = _dash.saving || ''; el.className = 'dash-status' + (/^Not saved/.test(_dash.saving) ? ' bad' : ''); } }
 
 // ---------- Drawing ----------
-function dashDraw(noLoad) {   // noLoad: redraw from blocks already loaded, without asking the database again
+function dashDraw0(noLoad) {   // noLoad: redraw from blocks already loaded, without asking the database again
   const el = document.getElementById('mydash-pane'); if (!el) return;
   dashApplyTheme();
   if (!noLoad) _dash.glance = {};
@@ -1073,8 +1075,9 @@ function dashDraw(noLoad) {   // noLoad: redraw from blocks already loaded, with
       <button class="ho-btn" onclick="dashReset()">${!T && _dash.me.template ? '↺ Back to my starting dashboard' : '↺ Start again from a role’s layout'}</button>
       ${T ? '' : `<label class="dash-start"><input type="checkbox" ${L.start ? 'checked' : ''} onchange="_dash.layout.start=this.checked;dashSaveSoon()"> Open My dashboard when the Hub starts</label>`}
       <button class="ho-btn${_dash.preview ? ' primary' : ''}" onclick="dashPreview()">${_dash.preview ? '✏️ Back to editing' : '👁 Preview'}</button>
+      <button class="ho-btn" onclick="dashZoom()" title="See more of your dashboard while you arrange it (only while customizing)">🔍 ${dashZoomNow() === 1 ? 'Zoom out' : dashZoomNow() === .75 ? 'Smaller (75%)' : 'Smallest (55%)'}</button>
       <span class="fd-sm">${_dash.preview ? 'This is how it will look. Click ✏️ Back to editing to change it.' : 'Drag ⠿ to move a block (into any column, even empty space). ✏️ on a block: width, view, settings or remove. Drag a block’s bottom-right corner to change its height.'}</span></div>` : '';
-  el.innerHTML = head + bar + `<div class="dash-grid${_dash.edit ? ' editing' : ''}${_dash.edit && _dash.preview ? ' preview' : ''}" id="dash-grid"${_dash.edit ? ' ondragover="dashDragOver(event)" ondrop="dashDrop(event)"' : ''}>${L.blocks.map(dashBlockShell).join('')}</div>` +
+  el.innerHTML = head + bar + `<div class="dash-grid${L && (L.small === 'narrow' || L.small === 'fit') ? ' keep8' : ''}${_dash.edit ? ' editing' : ''}${_dash.edit && _dash.preview ? ' preview' : ''}" id="dash-grid"${_dash.edit && dashZoomNow() !== 1 ? ` style="zoom:${dashZoomNow()}"` : ''}${_dash.edit ? ' ondragover="dashDragOver(event)" ondrop="dashDrop(event)"' : ''}>${L.blocks.map(dashBlockShell).join('')}</div>` +
     (!L.blocks.length ? `<div class="ho-card"><div class="goal-note">No blocks yet.</div><button class="ho-btn primary" onclick="${_dash.edit ? '' : 'dashToggleEdit();'}dashAddOpen()">+ Add a block</button></div>` : '');
   dashStatus(); dashGlanceDraw();
   dashPackStart();
@@ -1143,7 +1146,7 @@ function dashChoose() {
   const keep = _dash.keep || _dash.layout; _dash.keep = null;
   _dash.layout = dashBuild([r.value]); _dash.choose = false;
   if (_dash.me && _dash.me.clock) { _dash.layout.blocks.unshift({ id: dashNewId(), type: 'punch_clock', size: 's', opts: {} }); _dash.layout.clock_added = true; }
-  if (keep) ['theme', 'avatar', 'name', 'greet', 'start', 'note', 'note_by'].forEach(k => { if (keep[k] !== undefined) _dash.layout[k] = keep[k]; });
+  if (keep) ['theme', 'pattern', 'small', 'avatar', 'name', 'greet', 'start', 'note', 'note_by'].forEach(k => { if (keep[k] !== undefined) _dash.layout[k] = keep[k]; });
   if (_dash.target) _dash.edit = true;
   dashSaveSoon(); dashDraw();
 }
@@ -1412,9 +1415,47 @@ function dashApplyTheme() {
   const t = DASH_THEMES.find(x => x.key === (_dash.layout && _dash.layout.theme)) || DASH_THEMES[0];
   ['--dash-bg', '--card-bg', '--accent', '--accent-soft', '--ink', '--ink-soft', '--border', '--dash-on'].forEach(v => el.style.removeProperty(v));
   el.classList.toggle('themed', !!t.bg); el.classList.toggle('dark', !!t.dark);
+  { const pt = DASH_PATTERNS.find(x => x.key === ((_dash.layout && _dash.layout.pattern) || '')); const u = pt && pt.svg ? dashPatternUrl(pt, t.accent || '#7c6fd6', t.dark ? .16 : .12) : '';
+    el.style.backgroundImage = u || ''; el.style.backgroundAttachment = u ? 'fixed' : ''; el.classList.toggle('patterned', !!u); }   // 🌸
   if (!t.bg) return;
   [['--dash-bg', t.bg], ['--card-bg', t.card], ['--accent', t.accent], ['--accent-soft', t.soft], ['--ink', t.ink], ['--ink-soft', t.inkSoft], ['--border', t.border], ['--dash-on', t.on]].forEach(([k, v]) => el.style.setProperty(k, v));
 }
+// 🌸 (Nov 13 2026) background patterns, drawn softly in the theme's colour (a person's own choice, like the colour)
+const DASH_PATTERNS = [
+  { key: '', name: 'None' },
+  { key: 'dots', name: 'Dots', size: 22, svg: c => `<circle cx="11" cy="11" r="2.2" fill="${c}"/>` },
+  { key: 'grid', name: 'Grid', size: 28, svg: c => `<path d="M28 0H0V28" fill="none" stroke="${c}" stroke-width="1.2"/>` },
+  { key: 'stripes', name: 'Stripes', size: 18, svg: c => `<path d="M-4 22L22 -4M14 32L32 14" stroke="${c}" stroke-width="3"/>` },
+  { key: 'waves', name: 'Waves', size: 40, h: 20, svg: c => `<path d="M0 10 Q10 2 20 10 T40 10" fill="none" stroke="${c}" stroke-width="1.8"/>` },
+  { key: 'confetti', name: 'Confetti', size: 60, svg: c => `<rect x="6" y="8" width="7" height="3" rx="1.5" fill="${c}" transform="rotate(25 9 9)"/><circle cx="38" cy="14" r="2.6" fill="${c}"/><rect x="44" y="40" width="7" height="3" rx="1.5" fill="${c}" transform="rotate(-30 47 41)"/><circle cx="16" cy="44" r="2" fill="${c}"/><path d="M28 28l3 6 3-6z" fill="${c}"/>` },
+  { key: 'paws', name: 'Cat paws', size: 64, svg: c => `<g fill="${c}"><ellipse cx="18" cy="22" rx="6" ry="5"/><circle cx="11" cy="14" r="2.4"/><circle cx="16" cy="11" r="2.4"/><circle cx="21" cy="11" r="2.4"/><circle cx="26" cy="14" r="2.4"/></g><g fill="${c}" transform="translate(30 32) rotate(18)"><ellipse cx="10" cy="14" rx="6" ry="5"/><circle cx="3" cy="6" r="2.4"/><circle cx="8" cy="3" r="2.4"/><circle cx="13" cy="3" r="2.4"/><circle cx="18" cy="6" r="2.4"/></g>` },
+  { key: 'stars', name: 'Stars', size: 56, svg: c => `<path fill="${c}" d="M14 6l2.4 5 5.4.6-4 3.7 1.1 5.3L14 18l-4.9 2.6 1.1-5.3-4-3.7 5.4-.6zM42 32l1.6 3.3 3.6.4-2.7 2.5.8 3.5L42 40l-3.3 1.7.8-3.5-2.7-2.5 3.6-.4z"/>` },
+  { key: 'checks', name: 'Checks', size: 32, svg: c => `<rect width="16" height="16" fill="${c}"/><rect x="16" y="16" width="16" height="16" fill="${c}"/>` },
+];
+function dashPatternUrl(p, color, alpha) {
+  if (!p || !p.svg) return '';
+  const w = p.size, h = p.h || p.size;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><g opacity="${alpha}">${p.svg(color)}</g></svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+}
+function dashSetPattern(k) {
+  if (!_dash.layout) return;
+  if (!k) delete _dash.layout.pattern; else _dash.layout.pattern = k;
+  dashApplyTheme(); dashSaveSoon();
+  const box = document.querySelector('.dash-pats'); if (box) box.innerHTML = dashPatternChoicesHtml();
+}
+function dashPatternChoicesHtml() {
+  const t = DASH_THEMES.find(x => x.key === (_dash.layout && _dash.layout.theme)) || DASH_THEMES[0], cur = (_dash.layout && _dash.layout.pattern) || '';
+  const col = t.accent || '#7c6fd6', bg = t.bg || '#f5f4fb';
+  return DASH_PATTERNS.map(p => `<button class="dash-pat${p.key === cur ? ' on' : ''}" onclick="dashSetPattern('${p.key}')" title="${escAttr(p.name)}"><span class="dash-pat-pic" style="background-color:${bg};background-image:${p.svg ? dashPatternUrl(p, col, t.dark ? .35 : .3) : 'none'}"></span><span>${esc(p.name)}${p.key === cur ? ' ✓' : ''}</span></button>`).join('');
+}
+// 🔍 (Nov 13 2026) Customize: a smaller view (100% → 75% → 55%) to see more of the dashboard while arranging it (remembered on this computer)
+function dashZoom() {
+  const steps = [1, .75, .55], cur = +(localStorage.getItem('hub.dashZoom') || 1), next = steps[(steps.indexOf(cur) + 1) % steps.length] || 1;
+  try { localStorage.setItem('hub.dashZoom', String(next)); } catch (e) { }
+  dashDraw(true);
+}
+function dashZoomNow() { const z = +(localStorage.getItem('hub.dashZoom') || 1); return [1, .75, .55].includes(z) ? z : 1; }
 function dashThemeSwatch(t, on) {
   const bg = t.bg || '#f5f4fb', card = t.card || '#ffffff', acc = t.accent || 'var(--accent)', line = t.border || '#eceaf6';
   return `<button class="dash-sw${on ? ' on' : ''}" onclick="dashSetTheme('${t.key}')"><span class="dash-sw-pic" style="background:${bg}"><i style="background:${acc}"></i><i style="background:${card};border-color:${line}"></i><b style="background:${card};border-color:${line}"></b><b style="background:${card};border-color:${line}"></b></span>
@@ -1424,7 +1465,9 @@ async function dashPersonalize() {
   if (!_dash.layout) return;
   const L = _dash.layout, cur = L.theme || 'classic', T = _dash.target;
   let h = `<h3 style="margin:0 0 4px">🎨 ${T ? esc(T.name) + '’s colour' : 'Make it yours'}</h3><p class="fd-sm" style="margin:0 0 10px">${T ? 'The colour their dashboard starts with. They can change it any time.' : 'Only My dashboard changes colour; the rest of the Hub stays the same.'}</p>
-    <div class="dash-sws">${DASH_THEMES.map(t => dashThemeSwatch(t, t.key === cur)).join('')}</div>`;
+    <div class="dash-sws">${DASH_THEMES.map(t => dashThemeSwatch(t, t.key === cur)).join('')}</div>
+    <h4 class="dash-sh">Background pattern</h4><div class="dash-pats">${dashPatternChoicesHtml()}</div>
+    <h4 class="dash-sh">On a smaller screen (like a laptop)</h4><div class="dash-small">${dashSmallChoicesHtml()}</div>`;
   if (!T) {
     h += `<h4 class="dash-sh">Your picture</h4><div class="dash-avs" id="dash-avs">${dashAvatarChoicesHtml()}</div>
       <h4 class="dash-sh">Greeting</h4><label class="dash-set-row">What should it call you? <input type="text" maxlength="40" value="${escAttr(L.name || '')}" placeholder="${escAttr(dashMyName() || 'Your name')}" onchange="dashSetName(this.value)"></label>
@@ -1439,6 +1482,7 @@ function dashSetTheme(k) {
   if (k === 'classic') delete _dash.layout.theme; else _dash.layout.theme = k;
   dashApplyTheme(); dashSaveSoon();
   const box = document.querySelector('.dash-sws'); if (box) box.innerHTML = DASH_THEMES.map(t => dashThemeSwatch(t, t.key === (_dash.layout.theme || 'classic'))).join('');
+  const pb = document.querySelector('.dash-pats'); if (pb) pb.innerHTML = dashPatternChoicesHtml();
 }
 function dashSetName(v) { v = String(v || '').trim().slice(0, 40); if (v) _dash.layout.name = v; else delete _dash.layout.name; dashSaveSoon(); dashDraw(true); }
 function dashSetGreet(on) { if (on) delete _dash.layout.greet; else _dash.layout.greet = false; dashSaveSoon(); dashDraw(true); }
@@ -1867,7 +1911,10 @@ function dashStyles() {
 .dash-avc { width: 44px; height: 44px; border-radius: 999px; border: 2px solid transparent; background: #f3f1f8; padding: 0; overflow: hidden; cursor: pointer; font-size: 22px; } .dash-avc img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .dash-avc.on { border-color: #111; }
 .dash-avtabs { display: flex; flex-wrap: wrap; gap: 4px; width: 100%; margin-bottom: 4px; } .dash-avtabs button { border: 1px solid #e6e3ee; background: #fff; border-radius: 999px; padding: 3px 10px; font-size: 12px; cursor: pointer; } .dash-avtabs button.on { background: #1f1b3a; color: #fff; border-color: #1f1b3a; }
-#mydash-pane.themed { background: var(--dash-bg); min-height: 100vh; box-sizing: border-box; }
+.dash-pats { display: flex; flex-wrap: wrap; gap: 8px; } .dash-pat { display: flex; flex-direction: column; align-items: center; gap: 4px; border: 2px solid #eceaf6; background: #fff; border-radius: 12px; padding: 6px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 700; }
+.dash-pat.on { border-color: var(--accent); } .dash-pat-pic { width: 62px; height: 44px; border-radius: 8px; border: 1px solid #eceaf6; background-size: auto; }
+#mydash-pane.patterned { min-height: 100vh; box-sizing: border-box; }
+#mydash-pane.themed { background-color: var(--dash-bg); min-height: 100vh; box-sizing: border-box; }
 #mydash-pane.themed .ho-btn { background: var(--card-bg); color: var(--ink); border-color: var(--border); }
 #mydash-pane.themed .ho-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--dash-on); }
 #mydash-pane.themed input, #mydash-pane.themed select, #mydash-pane.themed textarea { background: var(--card-bg); color: var(--ink); border-color: var(--border); }
@@ -1877,6 +1924,7 @@ function dashStyles() {
 .dash-back { display: inline-flex; align-items: center; gap: 4px; margin: -8px 0 10px; padding: 4px 12px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 13px; text-decoration: none; }
 .dash-back:hover { filter: brightness(.96); }
 @media (max-width: 1100px) { .dash-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } .dash-block.sz-m, .dash-block.sz-l { grid-column: 1 / -1; } }
+@media (max-width: 1100px) and (min-width: 641px) { .dash-grid.keep8 { grid-template-columns: repeat(8, minmax(0, 1fr)); } .dash-grid.keep8 .dash-block.sz-xs { grid-column: span 1; } .dash-grid.keep8 .dash-block.sz-s { grid-column: span 2; } .dash-grid.keep8 .dash-block.sz-m { grid-column: span 4; } .dash-grid.keep8 .dash-block.sz-l { grid-column: 1 / -1; } }
 @media (max-width: 640px) { .dash-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .dash-block.sz-s, .dash-block.sz-m, .dash-block.sz-l { grid-column: 1 / -1; } }
 .dash-block { position: relative; } .dash-block.tile { padding: 10px 12px; } .dash-block.tile header b { font-size: 13px; }
 .dash-block.tile .dash-body { cursor: pointer; } .dash-grid.editing .dash-block.tile .dash-body { cursor: default; }
@@ -1898,4 +1946,26 @@ function dashStyles() {
 .dash-bmenu .bm-del { color: #c62828; border-top: 1px solid #f0eef6; margin-top: 4px; border-radius: 0 0 7px 7px; }
 .dash-search { width: 100%; box-sizing: border-box; padding: 9px 12px; border: 1px solid #ddd; border-radius: 10px; font: inherit; margin-bottom: 6px; }`;
   document.head.appendChild(s);
+}
+
+// 📐 (Nov 13 2026) on a smaller screen (like a laptop), each person chooses: rearrange to fit (as before), keep the layout with
+// narrower blocks, or keep the layout and shrink it to fit. Phones always stack. (Customize's own zoom comes first while customizing.)
+const DASH_FIT_W = 1180;   // (the width the 8 columns are laid out for)
+function dashDraw(...a) { const r = dashDraw0(...a); dashFit(); return r; }
+function dashFit() {
+  const g = document.getElementById('dash-grid'); if (!g) return;
+  if (_dash.edit && dashZoomNow() !== 1) return;   // (Customize: its zoom)
+  const L = _dash.layout || {}, phone = window.innerWidth <= 640;
+  if (L.small !== 'fit' || phone) { g.style.zoom = ''; return; }
+  const w = (g.parentElement || g).clientWidth || window.innerWidth;
+  const z = Math.min(1, Math.max(.5, w / DASH_FIT_W));
+  g.style.zoom = z < .995 ? String(Math.round(z * 1000) / 1000) : '';
+}
+window.addEventListener('resize', () => { clearTimeout(dashFit._t); dashFit._t = setTimeout(dashFit, 120); });
+function dashSetSmall(v) { if (!_dash.layout) return; if (v === 'narrow' || v === 'fit') _dash.layout.small = v; else delete _dash.layout.small; dashSaveSoon(); dashDraw(true);
+  const box = document.querySelector('.dash-small'); if (box) box.innerHTML = dashSmallChoicesHtml(); }
+function dashSmallChoicesHtml() {
+  const cur = (_dash.layout && _dash.layout.small) || '';
+  return [['', 'Rearrange to fit', 'Fewer columns, wider blocks (as before)'], ['narrow', 'Keep my layout, narrower blocks', 'Same arrangement, slimmer blocks'], ['fit', 'Keep my layout, shrink it to fit', 'Same arrangement, scaled down like zooming out']]
+    .map(([k, n, d]) => `<label class="dash-set-row"><input type="radio" name="dash-small" ${k === cur ? 'checked' : ''} onchange="dashSetSmall('${k}')"> <b>${esc(n)}</b> <span class="fd-sm">${esc(d)}</span></label>`).join('');
 }
