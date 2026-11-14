@@ -539,9 +539,15 @@ function annSummaryHtml(list) {
 function renderAnnPane() {
   const box = document.getElementById('ann-list'); if (!box) return;
   const canAck = !(_studioData && _studioData.isAdmin);
-  const list = _annData.slice().sort((a, b) => (!!a.read_at - !!b.read_at) || ((b.priority === 'urgent') - (a.priority === 'urgent')));
+  const allRead = a => { const P = annPending(a); return Array.isArray(P) && P.length === 0; };   // (Nov 14 2026) everyone here has read it: folded to its header
+  const list = _annData.slice().sort((a, b) => (allRead(a) - allRead(b)) || (!!a.read_at - !!b.read_at) || ((b.priority === 'urgent') - (a.priority === 'urgent')));
   box.innerHTML = annSummaryHtml(list) + (list.length ? list.map(a => {
     const readers = (_annReaders && _annReaders[a.id]) || [];
+    if (allRead(a)) return `<details class="ann-card read ann-done${a.priority === 'urgent' ? ' urgent' : ''}" id="ann-${escAttr(a.id)}"><summary>
+      <div class="ann-eyebrow">${a.priority === 'urgent' ? '🚨 Urgent · ' : ''}From home office · ${esc(annReadLabel(a.created_at))}${a.show_until ? ` · until ${esc(hoFmtDate(a.show_until))}` : ''}</div>
+      <div class="ann-title">${annTitleMd(a.title)}</div><span class="ann-done-chip">🎉 Everyone has read it</span><span class="ann-done-more">Show</span></summary>
+      ${a.body ? `<div class="ann-full">${annMd(a.body)}</div>` : ''}
+      <div class="ann-foot">${readers.length ? `<span class="ann-readby">✓ Read by ${readers.map(r => esc(r.name)).join(', ')}</span>` : ''}</div></details>`;
     return `<div class="ann-card${a.priority === 'urgent' ? ' urgent' : ''}${a.read_at ? ' read' : ''}" id="ann-${escAttr(a.id)}">
       <div class="ann-eyebrow">${a.priority === 'urgent' ? '🚨 Urgent · ' : ''}From home office · ${esc(annReadLabel(a.created_at))}${a.show_until ? ` · until ${esc(hoFmtDate(a.show_until))}` : ''}</div>
       <div class="ann-title">${annTitleMd(a.title)}</div>
@@ -1262,5 +1268,9 @@ function renderTodaysProjects(data, forecastDays) {
 .ann-pend.done, .ann-sum.done { background: #e9f7ee; border-color: #bfe5cc; color: #1e6b3d; cursor: default; font-weight: 700; }
 .ann-sum { margin: 0 0 12px; padding: 10px 12px; border-radius: 12px; background: #fff4dc; border: 1px solid #f3d38b; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 14px; color: #6b4a00; }
 .ann-pp { display: inline-flex; align-items: center; gap: 4px; background: #fff; border-radius: 999px; padding: 2px 8px 2px 2px; font-weight: 600; }
-.ann-pp.today { box-shadow: 0 0 0 2px #e8a33c; } .ann-pp i { font-style: normal; font-size: 11px; color: #b06d00; } .ann-pp em { font-style: normal; background: #f3d38b; border-radius: 999px; padding: 0 6px; font-size: 11px; }
+.ann-pp.today { box-shadow: 0 0 0 2px #e8a33c; }
+details.ann-done > summary { list-style: none; cursor: pointer; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; } details.ann-done > summary::-webkit-details-marker { display: none; }
+details.ann-done > summary .ann-eyebrow { flex-basis: 100%; } details.ann-done > summary .ann-title { flex: 1; min-width: 200px; }
+.ann-done-chip { background: #e9f7ee; color: #1e6b3d; border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: 700; }
+.ann-done-more { font-size: 12px; font-weight: 700; color: var(--accent, #4f3bd1); } details.ann-done[open] .ann-done-more { display: none; } details.ann-done[open] > summary { margin-bottom: 6px; } .ann-pp i { font-style: normal; font-size: 11px; color: #b06d00; } .ann-pp em { font-style: normal; background: #f3d38b; border-radius: 999px; padding: 0 6px; font-size: 11px; }
 `; document.head.appendChild(st); })();
