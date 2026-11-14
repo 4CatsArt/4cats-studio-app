@@ -11,6 +11,7 @@
     ['memb', '⭐ Memberships', ['nav-memb']],   // (🔁 Move to World is retired, Nov 14 2026: everything has moved off Shopify)
     ['staff', '👥 Staff', ['nav-stf', 'nav-sick', 'nav-swaps', 'nav-hist', 'nav-ts', 'nav-rules', 'nav-ack-ho', 'nav-concerns']],
     ['msgs', '📣 Messages', ['nav-announce', 'nav-sn', 'nav-se', 'nav-news', 'nav-snotes']],
+    ['mkt', '🎨 Marketing', ['nav-print-admin']],
     ['ops', '🏪 Studio operations', ['nav-oc-overview', 'nav-walkins', 'nav-devices', 'nav-act']],
   ];
   const OPEN_KEY = 'hub.navOpen', PIN_KEY = 'hub.navPins';
