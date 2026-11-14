@@ -6826,9 +6826,40 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
   // ---------------- Votes ("Choose your favourite…") ----------------
   function pollTotals(optId) {
     var t = { love: 0, like: 0, no: 0 };
-    (pollData.counts || []).forEach(function (c) { if (c.option_id === optId) t[c.reaction] = c.n; });
+    (pollData.counts || []).forEach(function (c) { if (c.option_id === optId) t[c.reaction] = +c.n || 0; });   // (picks, stars and places too)
     return t;
   }
+  // 📊 (Nov 13 2026) a vote's results, by its type: hearts (love / like), picks, star ratings, or ranks and medals (a score: 1st = N points … Nth = 1)
+  function pollStats(p, opts) {
+    var ex = (pollExtras && pollExtras[p.id]) || {}, vt = ex.type || 'react', mx = +ex.max || 5;
+    var img = function (o) { return o.image_url ? '<img src="' + esc(o.image_url) + '" alt="" style="width:34px;height:34px;object-fit:cover;border-radius:6px;vertical-align:middle;margin-right:8px">' : ''; };
+    var name = function (x, i, lead) { return '<td>' + img(x.o) + (i === 0 && lead ? '\ud83c\udfc6 ' : '') + (p.rounds && p.rounds.length > 1 ? '<span class="pill">Round ' + (x.o.round || 1) + '</span> ' : '') + (x.o.project_id ? '\ud83c\udfa8 ' : '') + esc(x.o.label) + '</td>'; };
+    opts.forEach(function (x) { var t = x.t, s = { picks: t.pick || 0, n: 0, sum: 0, dist: [], ranked: 0, score: 0, firsts: t.k1 || 0, placeSum: 0 };
+      for (var r = 5; r >= 1; r--) { var c = t['r' + r] || 0; s.n += c; s.sum += r * c; if (c) s.dist.push(r + '\u2605 ' + c); }
+      for (var k = 1; k <= 10; k++) { var c2 = t['k' + k] || 0; s.ranked += c2; s.placeSum += k * c2; if (k <= mx) s.score += (mx + 1 - k) * c2; }
+      s.avg = s.n ? s.sum / s.n : 0; s.avgPlace = s.ranked ? s.placeSum / s.ranked : 0; x.s = s; });
+    if (vt === 'pick') {
+      opts.sort(function (a, b) { return b.s.picks - a.s.picks; });
+      return { total: opts.reduce(function (n, x) { return n + x.s.picks; }, 0), unit: ['pick', 'picks'],
+        table: '<table><thead><tr><th>Choice</th><th>\u2b50 Picked</th></tr></thead><tbody>' + opts.map(function (x, i) { return '<tr>' + name(x, i, x.s.picks) + '<td><b>' + x.s.picks + '</b></td></tr>'; }).join('') + '</tbody></table>' };
+    }
+    if (vt === 'rate') {
+      opts.sort(function (a, b) { return (b.s.avg - a.s.avg) || (b.s.n - a.s.n); });
+      return { total: opts.reduce(function (n, x) { return n + x.s.n; }, 0), unit: ['rating', 'ratings'],
+        table: '<table><thead><tr><th>Choice</th><th>Average</th><th>Ratings</th><th>Spread</th></tr></thead><tbody>' + opts.map(function (x, i) {
+          return '<tr>' + name(x, i, x.s.n) + '<td><b>' + (x.s.n ? '\u2605 ' + x.s.avg.toFixed(1) : '\u2013') + '</b></td><td>' + x.s.n + '</td><td class="tmeta">' + esc(x.s.dist.join(' \u00b7 ')) + '</td></tr>'; }).join('') + '</tbody></table>' };
+    }
+    if (vt === 'rank' || vt === 'medal') {
+      opts.sort(function (a, b) { return (b.s.score - a.s.score) || (b.s.firsts - a.s.firsts) || (a.s.avgPlace - b.s.avgPlace); });
+      return { total: opts.reduce(function (n, x) { return n + x.s.ranked; }, 0), unit: [vt === 'medal' ? 'medal' : 'place', vt === 'medal' ? 'medals' : 'places'],
+        table: '<p class="tmeta" style="margin:0 0 6px">Score: 1st = ' + mx + ' points, 2nd = ' + Math.max(1, mx - 1) + '\u2026 ' + pvOrdS(mx) + ' = 1.</p>' +
+          '<table><thead><tr><th>Choice</th><th>Score</th><th>' + (vt === 'medal' ? '\ud83e\udd47' : '1st') + ' places</th><th>Average place</th><th>Times ' + (vt === 'medal' ? 'given a medal' : 'ranked') + '</th></tr></thead><tbody>' + opts.map(function (x, i) {
+          return '<tr>' + name(x, i, x.s.score) + '<td><b>' + x.s.score + '</b></td><td>' + x.s.firsts + '</td><td>' + (x.s.ranked ? x.s.avgPlace.toFixed(1) : '\u2013') + '</td><td class="tmeta">' + x.s.ranked + '</td></tr>'; }).join('') + '</tbody></table>' };
+    }
+    return null;   // (hearts: as before)
+  }
+  function pvOrdS(n) { return n + (n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th'); }
+
   function pollsHtml() {
     if (pollData === null) return '<section class="panel" style="margin-top:20px"><h2>Votes</h2><p class="sub">Run world_polls.sql in Supabase to switch this on.</p></section>';
     var today = new Date().toISOString().slice(0, 10);
@@ -6841,16 +6872,18 @@ body.pw-on .cls-float { left: calc((100vw - 430px) / 2); } body.pw-on.pw-desk .c
         var t = pollTotals(o.id); return { o: o, t: t, all: t.love + t.like };
       }).sort(function (a, b) { return (b.t.love - a.t.love) || (b.t.like - a.t.like); });
       var st = !p.active ? ['notready', 'Switched off'] : (p.starts_on && p.starts_on > today ? ['soon', 'Starts ' + niceDate(p.starts_on)] : (p.ends_on && p.ends_on < today ? ['', 'Finished'] : ['ready', 'Showing']));
-      var votes = opts.reduce(function (n, x) { return n + x.all; }, 0), nr = p.rounds && p.rounds.length > 1 ? p.rounds.length : 1;
+      var ST = pollStats(p, opts);
+      var votes = ST ? ST.total : opts.reduce(function (n, x) { return n + x.all; }, 0), nr = p.rounds && p.rounds.length > 1 ? p.rounds.length : 1;
+      var unit = ST ? ST.unit : ['vote', 'votes'];
       var isOpen = pollOpenState.hasOwnProperty(p.id) ? pollOpenState[p.id] : st[1] === 'Showing';
       h += '<details class="poll-card" data-pollcard="' + esc(p.id) + '"' + (isOpen ? ' open' : '') + '><summary>' +
         '<span class="grow"><span class="tname">' + esc(p.title) + '</span><span class="tmeta">' +
         (p.starts_on || p.ends_on ? esc((p.starts_on ? niceDate(p.starts_on) : '') + ' \u2013 ' + (p.ends_on ? niceDate(p.ends_on) : '')) : 'Always') +
-        (nr > 1 ? ' \u00b7 ' + nr + ' rounds' : '') + ' \u00b7 ' + opts.length + (opts.length === 1 ? ' choice' : ' choices') + ' \u00b7 ' + votes + (votes === 1 ? ' vote' : ' votes') + '</span></span>' +
+        (nr > 1 ? ' \u00b7 ' + nr + ' rounds' : '') + ' \u00b7 ' + opts.length + (opts.length === 1 ? ' choice' : ' choices') + ' \u00b7 ' + votes + ' ' + (votes === 1 ? unit[0] : unit[1]) + '</span></span>' +
         '<span class="pill ' + st[0] + '">' + esc(st[1]) + '</span></summary><div class="poll-card-body">' +
         '<div class="row-actions" style="margin:0 0 8px"><button class="btn btn-plain" type="button" data-polledit="' + esc(p.id) + '">' + (canEdit ? 'Edit' : 'View') + '</button>' +
         (canEdit ? '<button class="btn btn-danger" type="button" data-polldel="' + esc(p.id) + '">Delete</button>' : '') + '</div>' +
-        (opts.length ? '<table><thead><tr><th>Choice</th><th>\u2764\ufe0f Love it</th><th>\ud83d\udc4d Like it</th><th>Votes</th></tr></thead><tbody>' + opts.map(function (x, i) {
+        (opts.length && ST ? ST.table : opts.length ? '<table><thead><tr><th>Choice</th><th>\u2764\ufe0f Love it</th><th>\ud83d\udc4d Like it</th><th>Votes</th></tr></thead><tbody>' + opts.map(function (x, i) {
           return '<tr><td>' + (x.o.image_url ? '<img src="' + esc(x.o.image_url) + '" alt="" style="width:34px;height:34px;object-fit:cover;border-radius:6px;vertical-align:middle;margin-right:8px">' : '') +
             (i === 0 && x.all ? '\ud83c\udfc6 ' : '') + (p.rounds && p.rounds.length > 1 ? '<span class="pill">Round ' + (x.o.round || 1) + '</span> ' : '') + (x.o.project_id ? '\ud83c\udfa8 ' : '') + esc(x.o.label) + '</td><td><b>' + x.t.love + '</b></td><td>' + x.t.like + '</td><td class="tmeta">' + x.all + '</td></tr>';
         }).join('') + '</tbody></table>' : '<div class="empty">No choices yet.</div>') + '</div></details>';
