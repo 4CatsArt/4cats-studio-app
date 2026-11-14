@@ -1347,7 +1347,7 @@ async function fdGiftOpen(kind) {
   const presets = (Array.isArray(G.amounts) && G.amounts.length ? G.amounts : [25, 50, 75, 100]).filter(a => +a >= lo && +a <= hi);
   const designs = (Array.isArray(G.designs) ? G.designs : []).filter(d => d && d.id && d.on !== false);
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Vancouver' });
-  openDutySheet(`<div class="fd-gc"><h3>🎁 Sell a gift card</h3>
+  openDutySheet(`<div class="fd-gc"><h3>🎁 Sell a gift card</h3>${fdGiftBuyerHtml('digital')}
     <div class="fd-gc-f"><span class="fd-gc-l">Amount</span><div class="fd-gc-amts">${presets.map(a => `<button type="button" class="fd-gc-amt" data-gca="${a}">$${a}</button>`).join('')}
       <span class="fd-gc-other">Other $<input type="number" id="fd-gc-amt" min="${lo}" max="${hi}" step="1" inputmode="decimal"></span></div>
       <span class="fd-gc-hint">From $${lo} to $${hi} · no tax · never expires</span></div>
@@ -1370,6 +1370,7 @@ async function fdGiftOpen(kind) {
 }
 function fdGiftAdd(lo, hi) {
   const box = document.getElementById('fd-gc-msgbox'), say = t => { box.textContent = t; box.hidden = false; };
+  if (!(_fd.fam && !_fd.fam.walk_in && _fd.fam.email)) { say('Choose the buyer’s family first (or add a new family).'); return; }
   const amount = Math.round(+document.getElementById('fd-gc-amt').value * 100) / 100;
   if (!(amount >= lo && amount <= hi)) { say(`Choose an amount from $${lo} to $${hi}.`); return; }
   const deliver = (document.querySelector('[name="fd-gc-to"]:checked') || {}).value || 'email';
@@ -1384,11 +1385,44 @@ function fdGiftAdd(lo, hi) {
     title: `🎁 4Cats gift card ${label}`, desc: deliver === 'me' ? `Emailed to ${_fd.fam.email} to give · from ${from_name}` : `For ${to_name} · emailed ${send_on} · from ${from_name}` });
   closeDutySheet(); _fd.msg = ''; fdRender();
 }
+// 👪 (Nov 14 2026) every gift card has a buyer: the cart's family (chosen or found here; a new one can be added)
+function fdGiftBuyerHtml(kind) {
+  const f = _fd.fam && !_fd.fam.walk_in && _fd.fam.email ? _fd.fam : null;
+  if (f) return `<div class="fd-gc-f"><span class="fd-gc-l">Buyer</span><div class="fd-gc-buyer"><span>👪 <b>${esc([f.first_name, f.last_name].filter(Boolean).join(' '))}</b> · ${esc(f.email)}</span>
+    <button type="button" class="fd-gc-link" onclick="fdGiftBuyerChange('${kind}')">Change</button></div></div>`;
+  return `<div class="fd-gc-f"><span class="fd-gc-l">Buyer</span><div class="fd-gc-find"><input type="search" id="fd-gc-fq" placeholder="Find the family: name, email or phone" autocomplete="off">
+      <button type="button" class="fd-gc-amt" onclick="fdGiftFamFind('${kind}')">Find</button></div>
+    <div id="fd-gc-hits"></div>
+    <details class="fd-gc-new"><summary>+ New family</summary><div class="fd-gc-grid"><label class="fd-gc-f"><span class="fd-gc-l">First name</span><input type="text" id="fd-gc-nf"></label>
+      <label class="fd-gc-f"><span class="fd-gc-l">Last name</span><input type="text" id="fd-gc-nl"></label></div>
+      <label class="fd-gc-f"><span class="fd-gc-l">Email</span><input type="email" id="fd-gc-ne"></label><button type="button" class="fd-gc-amt" onclick="fdGiftNewFam('${kind}')">Use this family</button></details></div>`;
+}
+function fdGiftBuyerChange(kind) { _fd.fam = null; _fd.people = []; fdRender(); fdGiftOpen(kind || 'digital'); }
+async function fdGiftFamFind(kind) {
+  const q = ((document.getElementById('fd-gc-fq') || {}).value || '').trim(), box = document.getElementById('fd-gc-hits');
+  if (q.length < 2) { box.innerHTML = '<p class="fd-gc-hint">Type at least 2 letters.</p>'; return; }
+  box.innerHTML = '<p class="fd-gc-hint">Searching…</p>';
+  const { data, error } = await sb.rpc('hub_family_list', { p_q: q, p_limit: 8, p_pin: fdPin() });
+  const L = error ? [] : (data || []);
+  box.innerHTML = error ? `<p class="fd-msg">${esc(error.message)}</p>` : !L.length ? '<p class="fd-gc-hint">No family found. Add them with + New family.</p>'
+    : '<div class="fd-gc-hitlist">' + L.map(h => `<button type="button" onclick="fdGiftFamPick(${Number(h.shopify_customer_id)},'${kind}')"><b>${esc(h.parent_name || 'Family')}</b><small>${esc(h.email || '')}</small></button>`).join('') + '</div>';
+}
+async function fdGiftFamPick(cid, kind) {
+  await fdPick(cid);
+  if (_fd.fam && String(_fd.fam.customer_id) === String(cid)) fdGiftOpen(kind || 'digital');
+  else { const box = document.getElementById('fd-gc-hits'); if (box) box.innerHTML = `<p class="fd-msg">${esc(_fd.msg || 'Couldn’t open that family.')}</p>`; }
+}
+function fdGiftNewFam(kind) {
+  const v = id => ((document.getElementById(id) || {}).value || '').trim();
+  const f = v('fd-gc-nf'), l = v('fd-gc-nl'), e = v('fd-gc-ne').toLowerCase();
+  if (!f || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) { const box = document.getElementById('fd-gc-hits'); if (box) box.innerHTML = '<p class="fd-msg">Add a first name and a real email.</p>'; return; }
+  _fd.fam = { customer_id: null, email: e, first_name: f, last_name: l }; _fd.people = []; _fd.msg = ''; fdRender(); fdGiftOpen(kind || 'digital');
+}
 // 🎴 a physical card: scan (or type) the code printed on it, choose the amount; made in Shopify with that code once paid
 function fdGiftPhysOpen() {
   const G = _fdGc.set || {}, lo = +G.min > 0 ? +G.min : 10, hi = +G.max > 0 ? +G.max : 500;
   const presets = (Array.isArray(G.amounts) && G.amounts.length ? G.amounts : [25, 50, 75, 100]).filter(a => +a >= lo && +a <= hi);
-  openDutySheet(`<div class="fd-gc"><h3>🎴 Physical gift card</h3>
+  openDutySheet(`<div class="fd-gc"><h3>🎴 Physical gift card</h3>${fdGiftBuyerHtml('physical')}
     <label class="fd-gc-f"><span class="fd-gc-l">Card code</span><input type="text" id="fd-gc-code" class="fd-gc-code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Scan or type the code on the card"></label>
     <div class="fd-gc-f"><span class="fd-gc-l">Amount</span><div class="fd-gc-amts">${presets.map(a => `<button type="button" class="fd-gc-amt" data-gca="${a}">$${a}</button>`).join('')}
       <span class="fd-gc-other">Other $<input type="number" id="fd-gc-amt" min="${lo}" max="${hi}" step="1" inputmode="decimal"></span></div>
@@ -1402,6 +1436,7 @@ function fdGiftPhysOpen() {
 function fdGiftPhysAdd(lo, hi) {
   const box = document.getElementById('fd-gc-msgbox'), say = t => { box.textContent = t; box.hidden = false; };
   const code = document.getElementById('fd-gc-code').value.replace(/[\s-]+/g, '').toUpperCase(), amount = Math.round(+document.getElementById('fd-gc-amt').value * 100) / 100;
+  if (!(_fd.fam && !_fd.fam.walk_in && _fd.fam.email)) { say('Choose the buyer’s family first (or add a new family).'); return; }
   if (!/^[A-Z0-9]{8,20}$/.test(code)) { say('Scan or type the code on the card (8 to 20 letters and numbers).'); return; }
   if (_fd.cart.some(l => l.type === 'giftcard' && l.physical && l.code === code)) { say('That card is already in the cart.'); return; }
   if (!(amount >= lo && amount <= hi)) { say(`Choose an amount from $${lo} to $${hi}.`); return; }
@@ -1428,5 +1463,12 @@ function fdGiftPhysAdd(lo, hi) {
 .fd-gc-d { display: flex; flex-direction: column; gap: 4px; font-size: 13px; cursor: pointer; } .fd-gc-d input { position: absolute; opacity: 0; pointer-events: none; }
 .fd-gc-d img, .fd-gc-noimg { width: 100%; aspect-ratio: 16 / 10; object-fit: cover; border-radius: 10px; border: 3px solid transparent; box-sizing: border-box; display: flex; align-items: center; justify-content: center; background: #f4f2fb; font-size: 28px; }
 .fd-gc-d:has(input:checked) img, .fd-gc-d:has(input:checked) .fd-gc-noimg { border-color: var(--accent, #4f3bd1); } .fd-gc-d:has(input:checked) > span:last-child { font-weight: 800; }
+.fd-gc-buyer { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px; background: #f3f0ff; }
+.fd-gc-link { border: none; background: none; color: var(--accent, #4f3bd1); font: inherit; font-weight: 700; cursor: pointer; }
+.fd-gc-find { display: flex; gap: 8px; } .fd-gc-find input { flex: 1; width: auto !important; padding: 10px 12px; border: 1px solid #ddd8ef; border-radius: 10px; font: inherit; }
+.fd-gc-hitlist { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: 220px; overflow: auto; }
+.fd-gc-hitlist button { display: flex; justify-content: space-between; gap: 10px; text-align: left; padding: 8px 12px; border: 1px solid #e8e4f6; border-radius: 10px; background: #fff; font: inherit; cursor: pointer; }
+.fd-gc-hitlist button:hover { border-color: var(--accent, #4f3bd1); } .fd-gc-hitlist small { color: #6b6890; }
+.fd-gc-new summary { cursor: pointer; color: var(--accent, #4f3bd1); font-weight: 700; margin-top: 6px; } .fd-gc-new[open] { padding: 8px 0 0; }
 .fd-gc-code { font-family: Menlo, Consolas, monospace; letter-spacing: 1px; font-size: 18px !important; }
 @media (max-width: 560px) { .fd-gc-to, .fd-gc-grid { grid-template-columns: 1fr; } }`; document.head.appendChild(st); })();
