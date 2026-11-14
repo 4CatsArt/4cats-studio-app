@@ -755,7 +755,7 @@ function fdAddHtml() {
         (A.aftercare ? '<span class="fd-sm">On which days? Tap a day to add or remove it.</span><div class="fd-chips2">' + acDays.map(d => `<button class="fd-chip${A.after[d.id] ? ' on' : ''}" onclick="_fd.add.after['${d.id}']=!_fd.add.after['${d.id}'];fdRender()">${fdDay(d.session_date)}</button>`).join('') + '</div>' : '') + '</div>';
     }
   }
-  if (A.kind !== 'party') h += `<div class="fd-field"><b>Giveaway or credit code</b> <span class="fd-sm">(optional)</span><input value="${esc(A.prize || '')}" oninput="_fd.add.prize=this.value"></div>`;
+  if (A.kind !== 'party') h += `<div class="fd-field"><b>Giveaway or credit code</b> <span class="fd-sm">(optional)</span><input value="${esc(A.prize || '')}" oninput="_fd.add.prize=this.value" placeholder="${A.kind === 'ws' ? 'e.g. 2026ABJE 2026ABJE2' : 'Code'}">${A.kind === 'ws' ? '<span class="fd-sm">Two codes (one per person)? Type both, with a space between.</span>' : ''}</div>`;
   h += `
     ${_fd.addMsg ? `<p class="fd-warn">${esc(_fd.addMsg)}</p>` : ''}
     <div class="fd-sheet-btns"><button class="ho-btn" onclick="_fd.add=null;_fd.addMsg='';fdRender()">Cancel</button><button class="fd-pay" onclick="fdAddDone()">Add to cart</button></div></div></div>`;
@@ -763,9 +763,13 @@ function fdAddHtml() {
 }
 function fdAddDone() {
   if (_fd.add && _fd.add.kind === 'party') return fdPtyAddDone();
-  const F = _fd, A = F.add, who = F.people.filter((p, i) => A.who[i]), prize = (A.prize || '').trim() || undefined;
+  const F = _fd, A = F.add, who = F.people.filter((p, i) => A.who[i]);
+  // (Nov 13 2026) several codes on a workshop booking (one per spot, e.g. a coupon for 2 that came as two codes): space or comma between
+  const codes = [...new Set(String(A.prize || '').toUpperCase().split(/[\s,;]+/).map(c => c.replace(/[^A-Z0-9-]/g, '')).filter(Boolean))];
+  const prize = codes[0] || undefined, prizesMore = codes.slice(1);
   const fail = m => { F.addMsg = m; fdRender(); };
   if (!F.fam) return fail('Choose the family first.');
+  if (prizesMore.length && A.kind !== 'ws') return fail('One code for a class or camp booking (several codes work on workshops).');
   if (A.kind === 'ws') {
     const x = A.x, guests = FD_BANDS.map(b => ({ label: b[1], n: A.guests[b[0]] || 0 })).filter(g => g.n > 0);
     if (!who.length && !guests.length) return fail('Tick who’s coming, or add guests.');
@@ -775,8 +779,8 @@ function fdAddDone() {
     const n = who.length + guests.reduce((t, g) => t + g.n, 0);
     F.cart.push({ type: 'world', session_id: x.id, title: `${fdClean(x.title)} · ${fdDay(x.session_date)}, ${fdTime(x.session_time)}`,
       people: who.map(p => ({ name: p.name, dob: p.dob })), guests, extras: { hot: A.extras.hot || 0, candy: A.extras.candy || 0 }, glaze: A.glaze || undefined,
-      pickup: x.kids_only ? { name: A.puName, phone: A.puPhone } : undefined, prize,
-      desc: [who.map(p => p.name).join(', '), guests.map(g => g.n + ' × ' + g.label).join(', '), n + (n === 1 ? ' spot' : ' spots'), (A.extras.hot ? A.extras.hot + ' hot choc' : ''), (A.extras.candy ? A.extras.candy + ' candy' : ''), prize ? 'code ' + prize : ''].filter(Boolean).join(' · ') });
+      pickup: x.kids_only ? { name: A.puName, phone: A.puPhone } : undefined, prize, prizes_more: prizesMore.length ? prizesMore : undefined,
+      desc: [who.map(p => p.name).join(', '), guests.map(g => g.n + ' × ' + g.label).join(', '), n + (n === 1 ? ' spot' : ' spots'), (A.extras.hot ? A.extras.hot + ' hot choc' : ''), (A.extras.candy ? A.extras.candy + ' candy' : ''), prize ? (codes.length > 1 ? 'codes ' + codes.join(' + ') : 'code ' + prize) : ''].filter(Boolean).join(' · ') });
   } else if (A.kind === 'class') {
     if (!who.length) return fail('Tick who’s coming.');
     if (who.some(p => !p.dob && !p.adult)) return fail('Every child needs a birthdate for a class.');
@@ -799,7 +803,7 @@ function fdAddDone() {
 }
 
 // ---------- The running subtotal (camp-checkout staff_quote: prices only, nothing held) ----------
-function fdQuoteKey() { const F = _fd; return F.fam && F.cart.length ? JSON.stringify([F.studio, F.fam.customer_id, F.fam.email, F.cart.map(l => { const o = Object.assign({}, l); delete o.desc; delete o.prize; return o; })]) : ''; }
+function fdQuoteKey() { const F = _fd; return F.fam && F.cart.length ? JSON.stringify([F.studio, F.fam.customer_id, F.fam.email, F.cart.map(l => { const o = Object.assign({}, l); delete o.desc; delete o.prize; delete o.prizes_more; return o; })]) : ''; }
 function fdQuoteSoon() {
   const F = _fd, k = fdQuoteKey(); if (!F || k === F.qKey) return;
   F.qKey = k; F.quote = k ? { loading: true } : null;
