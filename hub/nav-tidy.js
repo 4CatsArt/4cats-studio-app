@@ -8,7 +8,7 @@
     ['ideas', '💡 Customer ideas', ['nav-ideas', 'nav-interest']],
     ['groups', '🎉 Parties & groups', ['nav-pb', 'nav-ft', 'nav-bo', 'nav-don']],
     ['shop', '🛍️ Shop', ['nav-rp', 'nav-sup']],
-    ['memb', '⭐ Memberships', ['nav-memb', 'nav-mv']],
+    ['memb', '⭐ Memberships', ['nav-memb']],   // (🔁 Move to World is retired, Nov 14 2026: everything has moved off Shopify)
     ['staff', '👥 Staff', ['nav-stf', 'nav-sick', 'nav-swaps', 'nav-hist', 'nav-ts', 'nav-rules', 'nav-ack-ho', 'nav-concerns']],
     ['msgs', '📣 Messages', ['nav-announce', 'nav-sn', 'nav-se', 'nav-news', 'nav-snotes']],
     ['ops', '🏪 Studio operations', ['nav-oc-overview', 'nav-walkins', 'nav-devices', 'nav-act']],
@@ -97,7 +97,8 @@
 .nav-sec-b { display: flex; flex-direction: column; gap: 2px; padding-left: 10px; margin-bottom: 4px; }
 .nav-item { position: relative; } .nav-pin { margin-left: auto; padding: 0 4px; opacity: 0; font-size: 14px; color: #ffd36b; cursor: pointer; } .nav-item:hover .nav-pin, .nav-pin.on { opacity: .9; }
 .nav-item:focus-visible .nav-pin { opacity: .9; } .nav-pinned { margin-bottom: 8px; }
-.nav-miss { display: none !important; }`;
+.nav-miss { display: none !important; }
+#nav-mv { display: none !important; }`;
   document.head.appendChild(css);
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', build); else build();
 })();
