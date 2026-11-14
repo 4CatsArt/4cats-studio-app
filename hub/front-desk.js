@@ -608,7 +608,8 @@ function fdCartHtml() {
   if (F.cart.length) h += fdQuoteHtml();
   if (F.cart.length) {
     const needFam = !F.fam;
-    h += `<label class="fd-sm fd-giftl">Gift card <input value="${esc(F.gift)}" placeholder="Code (optional)" oninput="_fd.gift=this.value"></label>
+    const hasGc = F.cart.some(l => l.type === 'giftcard'); if (hasGc) F.gift = '';   // (🎁 a gift card can't be paid with another gift card: no code box)
+    h += `${hasGc ? '' : `<label class="fd-sm fd-giftl">Gift card <input value="${esc(F.gift)}" placeholder="Code (optional)" oninput="_fd.gift=this.value"></label>`}
       ${needFam ? `<p class="fd-warn">${F.cart.every(l => l.type === 'retail') ? 'Choose the family (for member prices and an emailed receipt), or 🛍️ Walk-in above.' : 'Choose the family to pay for bookings.'}</p>` : ''}
       ${F.fam && F.fam.walk_in && F.cart.some(l => l.type !== 'retail') ? '<p class="fd-warn">A walk-in can buy shop items only. Choose the family for the bookings.</p>' : ''}
       ${fdCardsHtml(needFam)}
@@ -853,7 +854,7 @@ async function fdPay(mode) {
   F.busy = true; F.msg = mode === 'card' ? 'Charging their card…' : mode === 'qr' || mode === 'here' ? 'Getting the payment ready…' : mode === 'email' ? 'Sending the pay link…' : mode === 'invoice' ? 'Sending the invoice…' : 'Making the pay link…'; fdRender();
   try {
     const lines = F.cart.map(l => { const o = Object.assign({}, l); delete o.desc; return o; });
-    const d = await fdCall({ action: 'staff_checkout', studio: F.studio, family: F.fam, lines, mode: mode === 'here' ? 'qr' : mode, gift_code: F.gift.trim() || null,
+    const d = await fdCall({ action: 'staff_checkout', studio: F.studio, family: F.fam, lines, mode: mode === 'here' ? 'qr' : mode, gift_code: F.cart.some(l => l.type === 'giftcard') ? null : (F.gift.trim() || null),
       payment_method: mode === 'card' ? F.cardPick : undefined,
       pay_by: mode === 'invoice' ? (F.payBy || fdAddDays(fdToday(), 2)) : undefined });
     if (win) { if (d.url && !d.paid) win.location = d.url; else win.close(); }
@@ -887,8 +888,14 @@ function fdPayHtml() {
     (o.taxes || []).map(t => `<div class="fd-pl fd-sm"><span>${esc(t.type)} (${t.rate}%)</span><span>${fdMoney(t.amount)}</span></div>`).join('') +
     `<div class="fd-pl fd-ptotal"><span>Total</span><span>${fdMoney(o.total)}</span></div>` + (o.amount_due != null && o.amount_due < o.total - 0.001 ? `<div class="fd-pl"><span>After gift card</span><b>${fdMoney(o.amount_due)}</b></div>` : '');
   let h = `<div class="fd-sheet-back"><div class="fd-sheet fd-paysheet" role="dialog" aria-modal="true"><h3>${esc(o.order || '')} · ${esc(F.fam ? F.fam.first_name + ' ' + (F.fam.last_name || '') : '')}</h3><div class="fd-plines">${lines}</div>`;
-  if (o.status === 'paid' && F.cart.length && F.cart.every(l => l.type === 'retail')) h += `<div class="fd-paid">✓ Paid. Thank you!</div><p class="fd-sm">${F.fam && F.fam.walk_in ? 'Hand them their items.' : 'Their receipt is on its way by email. Hand them their items.'}</p>`;
-  else if (o.status === 'paid') h += '<div class="fd-paid">✓ Paid. They’re booked!</div><p class="fd-sm">Their confirmation email is on its way; the booking is in My 4Cats and on the class list.</p>';
+  // (Nov 14 2026) what was bought decides the words: shop items, gift cards (how each is delivered), and/or bookings
+  const gcs = F.cart.filter(l => l.type === 'giftcard'), hasShop = F.cart.some(l => l.type === 'retail'), booked = F.cart.some(l => !['retail', 'giftcard', 'charge'].includes(l.type));
+  const tdy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Vancouver' }), nice = d => new Date(d + 'T12:00:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' });
+  const gcWords = gcs.map(l => l.physical ? `🎴 The card ending ${esc(String(l.code || '').slice(-4))} is ready to use: hand it over.`
+    : l.deliver === 'me' ? `🎁 The ${fdMoney(l.amount)} gift card is emailed to ${esc((F.fam && F.fam.email) || 'them')} to give.`
+    : `🎁 The ${fdMoney(l.amount)} gift card is emailed to ${esc(l.to_name || 'them')} ${!l.send_on || l.send_on <= tdy ? 'now' : 'on ' + esc(nice(l.send_on))}.`).join('<br>');
+  if (o.status === 'paid' && F.cart.length && !booked) h += `<div class="fd-paid">✓ Paid. Thank you!</div><p class="fd-sm">${gcWords ? gcWords + '<br>' : ''}${F.fam && F.fam.walk_in ? (hasShop ? 'Hand them their items.' : '') : 'Their receipt is on its way by email.' + (hasShop ? ' Hand them their items.' : '')}</p>`;
+  else if (o.status === 'paid') h += `<div class="fd-paid">✓ Paid. They’re booked!</div><p class="fd-sm">${gcWords ? gcWords + '<br>' : ''}Their confirmation email is on its way; the booking is in My 4Cats and on the class list.</p>`;
   else if (o.status === 'expired' || o.status === 'failed') h += '<div class="fd-expired">Not paid in time, so the spots went back.</div>';
   else if (o.mode === 'here') h += `<div class="fd-qrwrap"><div><p><b>💳 Stripe is open in another tab.</b> Type the card there for ${fdMoney(o.amount_due ?? o.total)}, then come back to this tab: it turns green when it’s paid.</p>
       <p class="fd-count-down" id="fd-count">${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} left</p><p class="fd-sm">If their bank asks for an extra check, they approve it on their phone.</p>
@@ -1337,7 +1344,7 @@ async function fdGiftOpen(kind) {
   // 🎴 (Nov 14 2026) a studio with physical gift cards: physical or digital first
   if (!kind && _fdGc.phys.includes(_fd.studio)) {
     openDutySheet(`<h3 style="margin:0 0 10px">🎁 Sell a gift card</h3><div class="fd-gc-kind">
-      <button class="fd-gc-k" onclick="fdGiftOpen('physical')"><span>🎴</span><b>Physical card</b><small>Scan the card from the studio’s stack</small></button>
+      <button class="fd-gc-k" onclick="fdGiftOpen('physical')"><span>🎴</span><b>Physical card</b><small>Type the code from a card in the studio’s stack</small></button>
       <button class="fd-gc-k" onclick="fdGiftOpen('digital')"><span>📧</span><b>Digital</b><small>Emailed, now or on a date</small></button></div>
       <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button></div>`);
     return;
@@ -1418,12 +1425,12 @@ function fdGiftNewFam(kind) {
   if (!f || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) { const box = document.getElementById('fd-gc-hits'); if (box) box.innerHTML = '<p class="fd-msg">Add a first name and a real email.</p>'; return; }
   _fd.fam = { customer_id: null, email: e, first_name: f, last_name: l }; _fd.people = []; _fd.msg = ''; fdRender(); fdGiftOpen(kind || 'digital');
 }
-// 🎴 a physical card: scan (or type) the code printed on it, choose the amount; made in Shopify with that code once paid
+// 🎴 a physical card: type the code printed on it, choose the amount; made in Shopify with that code once paid
 function fdGiftPhysOpen() {
   const G = _fdGc.set || {}, lo = +G.min > 0 ? +G.min : 10, hi = +G.max > 0 ? +G.max : 500;
   const presets = (Array.isArray(G.amounts) && G.amounts.length ? G.amounts : [25, 50, 75, 100]).filter(a => +a >= lo && +a <= hi);
   openDutySheet(`<div class="fd-gc"><h3>🎴 Physical gift card</h3>${fdGiftBuyerHtml('physical')}
-    <label class="fd-gc-f"><span class="fd-gc-l">Card code</span><input type="text" id="fd-gc-code" class="fd-gc-code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Scan or type the code on the card"></label>
+    <label class="fd-gc-f"><span class="fd-gc-l">Card code</span><input type="text" id="fd-gc-code" class="fd-gc-code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Type the code printed on the card"></label>
     <div class="fd-gc-f"><span class="fd-gc-l">Amount</span><div class="fd-gc-amts">${presets.map(a => `<button type="button" class="fd-gc-amt" data-gca="${a}">$${a}</button>`).join('')}
       <span class="fd-gc-other">Other $<input type="number" id="fd-gc-amt" min="${lo}" max="${hi}" step="1" inputmode="decimal"></span></div>
       <span class="fd-gc-hint">From $${lo} to $${hi} · no tax · never expires · the card works once it’s paid</span></div>
@@ -1431,13 +1438,13 @@ function fdGiftPhysOpen() {
     <div class="sheet-actions"><button onclick="closeDutySheet()">Cancel</button><button class="primary" onclick="fdGiftPhysAdd(${lo},${hi})">Add to cart</button></div>`);
   document.querySelectorAll('[data-gca]').forEach(b => b.onclick = () => { document.getElementById('fd-gc-amt').value = b.dataset.gca; document.querySelectorAll('[data-gca]').forEach(x => x.classList.toggle('on', x === b)); });
   const c = document.getElementById('fd-gc-code'); setTimeout(() => c.focus(), 30);
-  c.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); const a = document.querySelector('[data-gca]'); if (a && !document.getElementById('fd-gc-amt').value) a.focus(); } });   // (a scanner ends with Enter)
+  c.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); const a = document.querySelector('[data-gca]'); if (a && !document.getElementById('fd-gc-amt').value) a.focus(); } });   // (Enter moves on to the amount)
 }
 function fdGiftPhysAdd(lo, hi) {
   const box = document.getElementById('fd-gc-msgbox'), say = t => { box.textContent = t; box.hidden = false; };
   const code = document.getElementById('fd-gc-code').value.replace(/[\s-]+/g, '').toUpperCase(), amount = Math.round(+document.getElementById('fd-gc-amt').value * 100) / 100;
   if (!(_fd.fam && !_fd.fam.walk_in && _fd.fam.email)) { say('Choose the buyer’s family first (or add a new family).'); return; }
-  if (!/^[A-Z0-9]{8,20}$/.test(code)) { say('Scan or type the code on the card (8 to 20 letters and numbers).'); return; }
+  if (!/^[A-Z0-9]{8,20}$/.test(code)) { say('Type the code printed on the card (8 to 20 letters and numbers).'); return; }
   if (_fd.cart.some(l => l.type === 'giftcard' && l.physical && l.code === code)) { say('That card is already in the cart.'); return; }
   if (!(amount >= lo && amount <= hi)) { say(`Choose an amount from $${lo} to $${hi}.`); return; }
   const fam = _fd.fam && !_fd.fam.walk_in ? _fd.fam : null, label = '$' + (amount % 1 ? amount.toFixed(2) : amount);
