@@ -417,8 +417,9 @@ function fdCampCalHtml(list) {
   if (!list.length) return '<p class="fd-sm">No camp days coming up at this studio.</p>';
   const progs = [...new Set(list.map(fdCampProg))];
   if (!F.campProg || !progs.includes(F.campProg)) F.campProg = progs[0];
-  let h = '<div class="fd-progs">' + progs.map(pn => { const ds = list.filter(x => fdCampProg(x) === pn), n = ds.filter(x => F.campPick[x.id]).length;
-    return `<button class="fd-prog${F.campProg === pn ? ' on' : ''}" onclick="_fd.campProg=${esc(JSON.stringify(pn))};_fd.campMonth=null;fdRender()"><b>${esc(pn)}</b><span>${fdDay(ds[0].session_date)} – ${fdDay(ds[ds.length - 1].session_date)}${n ? ' · ' + n + ' chosen' : ''}</span></button>`; }).join('') + '</div>';
+  F.campProgs = progs;   // (Nov 14 2026: each camp button picks its camp by its place in this list; its name in quotes broke the tap)
+  let h = '<div class="fd-progs">' + progs.map((pn, pi) => { const ds = list.filter(x => fdCampProg(x) === pn), n = ds.filter(x => F.campPick[x.id]).length;
+    return `<button class="fd-prog${F.campProg === pn ? ' on' : ''}" onclick="_fd.campProg=_fd.campProgs[${pi}];_fd.campMonth=null;fdRender()"><b>${esc(pn)}</b><span>${fdDay(ds[0].session_date)} – ${fdDay(ds[ds.length - 1].session_date)}${n ? ' · ' + n + ' chosen' : ''}</span></button>`; }).join('') + '</div>';
   const dates = list.filter(x => fdCampProg(x) === F.campProg);
   const months = [...new Set(dates.map(x => x.session_date.slice(0, 7)))].sort();
   if (!F.campMonth || !months.includes(F.campMonth)) { const open = dates.find(x => (x.spaces_left_cache ?? 0) > 0); F.campMonth = open ? open.session_date.slice(0, 7) : months[0]; }
