@@ -36,10 +36,11 @@
     return `<svg class="sh-spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true"><polyline points="${pts}" fill="none" stroke="${col(t)}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
       ${V.map((v, i) => v == null ? '' : `<circle cx="${sx(i)}" cy="${sy(v)}" r="2.5" fill="${col(t)}"/>`).join('')}</svg>`;
   }
-  function pairBars(rows) {   // this year vs last year, by month
-    const mx = Math.max(1, ...rows.flatMap(r => [+r.this || 0, +r.last || 0]));
-    return `<div class="sh-bars">${rows.map(r => `<div class="sh-bar"><div class="sh-bar-c"><i style="height:${Math.round((+r.last || 0) / mx * 100)}%" class="ly" title="Last year ${money(r.last)}"></i><i style="height:${Math.round((+r.this || 0) / mx * 100)}%" class="ty" title="This year ${money(r.this)}"></i></div><span>${mon(r.month)}</span></div>`).join('')}</div>
-      <div class="sh-legend"><span><i class="ty"></i>This year</span><span><i class="ly"></i>Last year</span></div>`;
+  function pctBars(rows) {   // each month as a % of the same month last year (no dollar amounts)
+    const L = rows.map(r => ({ m: r.month, p: +r.last > 0 && r.this != null ? Math.round(+r.this / +r.last * 100) : null }));
+    if (!L.some(x => x.p != null)) return '';
+    const mx = Math.max(120, ...L.map(x => x.p || 0));
+    return `<div class="sh-bars sh-pbars"><span class="sh-100" style="bottom:${Math.round(100 / mx * 50) + 14}px" title="100%: the same as last year"></span>${L.map(x => `<div class="sh-bar"><b>${x.p == null ? '—' : x.p + '%'}</b><div class="sh-bar-c"><i style="height:${x.p == null ? 0 : Math.max(3, Math.round(x.p / mx * 100))}%;background:${col(tone(x.p, 100, 90))}"></i></div><span>${mon(x.m)}</span></div>`).join('')}</div>`;
   }
   // every measure: { key, title, fill, t, big, line, good, extra }
   function measures(D) {
@@ -54,8 +55,8 @@
     const pc = D.pace || {}, pv = pc.month_pace_pct == null ? null : Math.round(+pc.month_pace_pct);
     M.pace = { title: '🏁 At this pace', fill: pv == null ? null : Math.min(100, pv), t: tone(pv, 100, 80), big: pv == null ? '—' : pv + '%', line: pc.month_goal_pct != null ? `${Math.round(+pc.month_goal_pct)}% of this month’s goal so far` : 'No goal set for this month', good: 'Green: 100%+ of the pace to hit the goal' };
     const ly = D.vs_last_year || {}, want = ly.ly_month ? +ly.ly_month * +ly.share : null, lyp = want ? Math.round(+ly.mtd / want * 100) : null;
-    M.vs_ly = { title: '📈 Vs last year', fill: lyp == null ? null : Math.min(100, lyp), t: tone(lyp, 100, 90), big: lyp == null ? '—' : lyp + '%', line: want ? `${money(ly.mtd)} this month so far · last year’s month: ${money(ly.ly_month)}` : 'No sales on file for this month last year', good: 'Green: 100%+ · yellow: 90–99%',
-      extra: (ly.months || []).length ? pairBars(ly.months) : '' };
+    M.vs_ly = { title: '📈 Vs last year', fill: lyp == null ? null : Math.min(100, lyp), t: tone(lyp, 100, 90), big: lyp == null ? '—' : lyp + '%', line: want ? `${lyp}% of last year’s sales for this point in the month` : 'No sales on file for this month last year', good: 'Green: 100%+ · yellow: 90–99% · the bars: each month vs last year',
+      extra: (ly.months || []).length ? pctBars(ly.months) : '' };
     const f = D.flash || {}, fp = pct(f.done, f.total);
     M.flash = { title: '⚡ Flash challenges', fill: fp, t: f.total ? tone(fp, 80, 50) : null, big: f.total ? fp + '%' : '—', line: f.total ? `${f.done} of ${f.total} this month` : 'None this month', good: 'Green: 80%+ done' };
     const fill = (L, k, ttl, icon) => { const cur = (L || [])[0], fp2 = cur ? pct(cur.booked, cur.offered) : null;
@@ -151,6 +152,8 @@
 .sh-months span { display: flex; flex-direction: column; font-size: 11px; color: #6b6890; padding: 0 6px; } .sh-months b { color: #2b2840; font-size: 13px; }
 .sh-bars { display: flex; gap: 6px; align-items: flex-end; height: 64px; margin-top: 4px; } .sh-bar { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 10px; color: #6b6890; }
 .sh-bar-c { display: flex; gap: 2px; align-items: flex-end; height: 50px; } .sh-bar-c i { width: 8px; border-radius: 3px 3px 0 0; display: block; min-height: 2px; }
+.sh-pbars { position: relative; height: 82px; gap: 10px; } .sh-pbars .sh-bar b { font-size: 10px; color: #3d3a52; } .sh-pbars .sh-bar-c i { width: 16px; }
+.sh-100 { position: absolute; left: 0; right: 0; border-top: 1.5px dashed #9a97ad; pointer-events: none; }
 i.ty { background: #4f3bd1; } i.ly { background: #cfc9f0; } .sh-legend { display: flex; gap: 10px; font-size: 10px; color: #6b6890; } .sh-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 3px; }`;
   document.head.appendChild(css);
 })();
